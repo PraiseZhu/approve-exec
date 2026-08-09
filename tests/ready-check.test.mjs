@@ -91,6 +91,19 @@ function buildEnv(t, repo, mutate) {
     writeFileSync(p, text);
   }
   if (mutate) mutate(parsed); // 就地修改（引用共享），随后全部写回
+  // 与 cwd 解耦：夹具 ledger.json 的 manifest_path / verify.evidence_ref 是相对 cwd 的
+  // （"tests/fixtures/ready-full/…"，从仓根跑才成立；cwd 一漂即 ENOENT 假红，已两轮
+  // 实测付费）。复制后重写为 envDir 内绝对路径——链尾 run-ledger validate 按台账
+  // manifest_path 解析，从此不再依赖调用方 cwd。断言不读这两字段的相对值（manifest
+  // 篡改基线的 manifest_path 本就是绝对写法），重写不影响任何断言语义。
+  parsed.ledger.manifest_path = join(envDir, files.manifest);
+  for (const w of parsed.ledger.waves ?? []) {
+    for (const g of w.groups ?? []) {
+      if (g.verify && typeof g.verify.evidence_ref === 'string') {
+        g.verify.evidence_ref = join(envDir, files.verdict);
+      }
+    }
+  }
   for (const [key, rel] of Object.entries(files)) {
     const p = join(envDir, rel);
     writeFileSync(p, `${JSON.stringify(parsed[key], null, 2)}\n`);
