@@ -28,7 +28,6 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const skillDoc = readFileSync(join(root, 'SKILL.md'), 'utf8');
-const ledgerSrc = readFileSync(join(root, 'scripts/run-ledger.mjs'), 'utf8');
 const defaultsKeys = Object.keys(defaults);
 
 // 十五段精确 marker（段标题与 SKILL.md 逐字一致；缺失/改名即红）
@@ -197,3 +196,4 @@ test('第⑭段：保证等级如实（T1 防疏忽/漂移，不防恶意伪造�
   assert.ok(s14.includes('独立 verify 席'), '兜底应含独立 verify 席');
   assert.ok(!s14.includes('防篡改'), '不得写「防篡改」类夸大措辞');
 });
+
