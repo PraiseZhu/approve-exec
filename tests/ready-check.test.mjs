@@ -14,7 +14,7 @@ import {
   mkdtempSync, mkdirSync, writeFileSync, readFileSync, cpSync, rmSync, symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve, dirname } from 'node:path';
+import { join, resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync, spawn } from 'node:child_process';
 // manifestCoreHash 直接 import（与 run-ledger 同一实现，manifest 篡改对照测试的 hash 基准）
@@ -37,16 +37,28 @@ function run(cmd, args, opts = {}) {
 
 // 建临时 git 候选仓：unborn HEAD 直接 symbolic-ref 到目标分支，避免依赖 init.defaultBranch
 // symlinkAnchorOut: 把 evidence/anchors/a.txt 提交为指向仓外文件的 symlink（F-L 逃逸夹具）
+// 每个 git 调用都断言 status===0（fail-fast）：fixture 构造失败必须显式红并点名失败步骤，
+// 绝不允许「构造失败但测试继续跑并通过」的静默降级——git add 静默失败曾让 symlink 未入库，
+// F-L 测试读到「无锚点」走另一条路径仍通过，导致变异④假绿（守卫看起来有效实则失效）。
 function makeRepo(t, { branch = 'feat/fixture-branch', detached = false, dirty = false, symlinkAnchorOut = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ready-repo-'));
-  run('git', ['init', '-q', dir]);
-  run('git', ['config', 'user.email', 'fixture@test.local'], { cwd: dir });
-  run('git', ['config', 'user.name', 'Fixture'], { cwd: dir });
-  run('git', ['symbolic-ref', 'HEAD', `refs/heads/${branch}`], { cwd: dir });
+  const gitRun = (args, label) => {
+    // buildChildEnv：裸跑（非权威入口）时 makeRepo 的 git commit 同样必须隔离——缺它会继承
+    // 机器全局 commit.gpgsign=true，负载下 gpg 失败让夹具 commit 红。同一份实现，不拷。
+    const r = run('git', args, { cwd: dir, env: buildChildEnv(process.env) });
+    assert.equal(r.status, 0, `fixture ${label} 失败: ${r.stderr}`);
+    return r;
+  };
+  gitRun(['init', '-q', dir], 'git init');
+  gitRun(['config', 'user.email', 'fixture@test.local'], 'git config user.email');
+  gitRun(['config', 'user.name', 'Fixture'], 'git config user.name');
+  gitRun(['symbolic-ref', 'HEAD', `refs/heads/${branch}`], 'git symbolic-ref');
   mkdirSync(join(dir, 'evidence/anchors'), { recursive: true });
   if (symlinkAnchorOut) {
-    // 仓外文件放在临时根（repo 目录之外），symlink 目标用绝对路径，git 按 120000 模式入库
-    const outside = join(dirname(dir), 'outside-anchor.txt');
+    // 仓外文件放在临时根（repo 目录之外），symlink 目标用绝对路径，git 按 120000 模式入库。
+    // 文件名派生自 mkdtemp 唯一 basename：并发 fixture 各持独立文件，t.after 只删自己的，
+    // 结构性排除共享固定路径竞态（旧版恒为 <tmp>/outside-anchor.txt，并发进程互删）。
+    const outside = join(dirname(dir), `outside-anchor-${basename(dir)}.txt`);
     writeFileSync(outside, 'outside anchor\n');
     symlinkSync(outside, join(dir, 'evidence/anchors/a.txt'));
     t.after(() => rmSync(outside, { force: true }));
@@ -56,15 +68,11 @@ function makeRepo(t, { branch = 'feat/fixture-branch', detached = false, dirty =
   writeFileSync(join(dir, 'evidence/anchors/b.txt'), 'anchor b\n');
   writeFileSync(join(dir, 'evidence/anchors/c.txt'), 'anchor c\n');
   writeFileSync(join(dir, 'src.ts'), 'export const fixture = 1;\n');
-  run('git', ['add', '-A'], { cwd: dir });
-  const commit = run('git', ['commit', '-q', '-m', 'fixture initial commit'], { cwd: dir });
-  assert.equal(commit.status, 0, `fixture repo 首提交失败: ${commit.stderr}`);
-  const sha = run('git', ['rev-parse', 'HEAD'], { cwd: dir }).stdout;
+  gitRun(['add', '-A'], 'git add -A');
+  gitRun(['commit', '-q', '-m', 'fixture initial commit'], 'git commit');
+  const sha = gitRun(['rev-parse', 'HEAD'], 'git rev-parse HEAD').stdout;
   assert.match(sha, /^[0-9a-f]{40}$/, 'fixture repo HEAD 应为 40 位十六进制');
-  if (detached) {
-    const detach = run('git', ['checkout', '-q', '--detach', 'HEAD'], { cwd: dir });
-    assert.equal(detach.status, 0, `detach 失败: ${detach.stderr}`);
-  }
+  if (detached) gitRun(['checkout', '-q', '--detach', 'HEAD'], 'detach');
   if (dirty) writeFileSync(join(dir, 'dirty.txt'), 'untracked\n');
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return { dir, sha };
