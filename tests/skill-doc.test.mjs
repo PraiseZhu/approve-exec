@@ -104,9 +104,10 @@ test('config 键名比对：SKILL.md 引用的 camelCase 键全部真实存在�
 test('第⑨段：批量派工 create_workers 字面量 + ≥2 worker 禁连续 create_worker', () => {
   const s9 = sectionBetween(MARKERS[8], MARKERS[9]);
   assert.ok(s9.includes('create_workers'), '批量派工段必须出现 create_workers 字面量（批量工具名）');
+  // 纪律链按序断言（防「只出现 create_worker 一词即过」的空转：把禁连续改成允许语也能过旧断言）
   assert.ok(
-    /create_worker\b(?![a-z])/.test(s9.replaceAll('create_workers', '')),
-    '批量派工段应含「禁连续 create_worker」单发纪律（create_workers 之外的单数出现应属禁止语境）'
+    /≥2 worker[\s\S]*?禁连续[\s\S]*?create_worker[\s\S]*?单发/.test(s9),
+    '批量派工段应含「≥2 worker 禁连续 create_worker 单发」纪律链（仅出现 create_worker 一词不通过）'
   );
 });
 
@@ -132,6 +133,7 @@ test('第②段：输入门三要素 + fail-closed 指路 task-priority', () => 
   }
   assert.ok(s2.includes('fail-closed'), '输入门段应声明 fail-closed');
   assert.ok(s2.includes('task-priority'), '输入门段应指路 task-priority');
+  assert.ok(s2.includes('不开跑'), '输入门段应声明缺要素时不开跑（fail-closed 行为，非仅标签）');
 });
 
 test('第③段：每边三动作——archive 非 idle（idle 不释放槽位）+ mem-probe 重算', () => {

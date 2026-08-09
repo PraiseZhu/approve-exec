@@ -29,7 +29,7 @@ trigger: 批准执行
 E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包) → READY
 ```
 
-- 阶段图真相源是 `graph.json`（席位表：E/R/V/T/P 五席，各自 route 档与 agent_pin，先例 = submit-pr Phase 2 席位表）；本段只描述编排行为，不承载席位数据。
+- 阶段图真相源是 `graph.json`（席位表：E/R/V/T/P 五席，各自 route 档，E/R 另钉 agent_pin，先例 = submit-pr Phase 2 席位表）；本段只描述编排行为，不承载席位数据。
 - **每边固定三动作**（任何阶段之间一律如此，不许跳过）：
   1. **收结构化交卷**：只认 `run-ledger` record-delivery 入账的 exact schema 交卷（exec / review / verify 三类，多余键或缺失键都拒）；lead 不做手工转录。
   2. **archive 该 worker**——明示：**不是 idle**。idle 只释放进程、**不释放槽位**；只有 archive 才释放并发槽位。
@@ -66,7 +66,7 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 
 ## ⑦ 模型现读纪律
 
-- **派工前现读 routing.json**（`routingPath` 指向，`orca-model-routing` 规则指定为真相源），禁凭记忆填模型；本 skill 的 `graph.json` 只引「路由档名 + agent_pin」，**永不内嵌具体模型 ID**。
+- **派工前现读 routing.json**（`routingPath` 指向，`orca-model-routing` 规则指定为真相源），禁凭记忆填模型；本 skill 的 `graph.json` 只引路由档名（E/R 另钉 agent_pin），**永不内嵌具体模型 ID**。
 - E/R 席（goal 场景 C + `/code-review`）要求 agent 家族 = claude-code：**routing fallback 链中非 claude-code 候选一律跳过**，只沿链找 claude-code 候选。
 - 候选耗尽（E/R 席无 claude-code 可派） = **A 类 fail-closed**：停，向用户报告（路由档、已试候选、错误原文），等指令；**禁止「内联等价契约给 codex」变通**（codex 加载不到 goal skill，等价契约不成立）。
 - 派工说明必须标注实际使用模型（如 `(model/effort)`），多 worker 贴紧凑台账但不阻塞流程。
