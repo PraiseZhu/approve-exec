@@ -118,12 +118,16 @@ function checkRouting(routingFile, items) {
     }
     const violations = [];
     for (const field of ['agent', 'model', 'effort']) {
-      if (typeof r[field] !== 'string' || r[field].length === 0) violations.push(`${field} 空/缺失`);
+      // 有效判据是「trim 后非空」：纯空白字符串（如 model:'   '）无法用于派工，
+      // 只检 length 会把它判「齐全」，最终把空值喂给 Orca 才失败——selfcheck 必须先点名
+      if (typeof r[field] !== 'string' || r[field].trim().length === 0) violations.push(`${field} 空/缺失`);
     }
-    if (typeof r.agent === 'string' && r.agent.length > 0 && !AGENTS.includes(r.agent)) {
+    // 枚举校验必须用未 trim 的原值：先 trim 再查枚举会把 ' codex ' 误判为合法 agent——
+    // 带空白前后缀的枚举外字符串同样不能用于派工（Orca 按整串匹配），selfcheck 必须按原值点名
+    if (typeof r.agent === 'string' && r.agent.trim().length > 0 && !AGENTS.includes(r.agent)) {
       violations.push(`agent=${r.agent} 不在 {${AGENTS.join(', ')}}`);
     }
-    if (typeof r.effort === 'string' && r.effort.length > 0 && !EFFORTS.includes(r.effort)) {
+    if (typeof r.effort === 'string' && r.effort.trim().length > 0 && !EFFORTS.includes(r.effort)) {
       violations.push(`effort=${r.effort} 不在 {${EFFORTS.join(', ')}}`);
     }
     if (violations.length > 0) {
