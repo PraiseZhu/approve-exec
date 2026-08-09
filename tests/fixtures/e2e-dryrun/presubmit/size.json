@@ -1,0 +1,6 @@
+{
+  "gate": "size",
+  "result": "PASS",
+  "candidate_sha": "__HEAD_SHA__",
+  "detail": "merge-base..HEAD diff 120 lines <= 800 threshold"
+}

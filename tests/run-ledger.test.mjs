@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
-  mkdtempSync, writeFileSync, readFileSync, copyFileSync, existsSync,
+  mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, existsSync, cpSync, rmSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
@@ -141,6 +141,36 @@ test('sc-p1c: 未列键注入 exit 2（exact 契约，schema 之外键出现即�
   r = cli('set-state', lp2, '--group', 'g4', '--to', 'failed', '--event', 'timeout_redispatch', '--now', T);
   assert.equal(r.status, 2, '组级未知键必须 exit 2');
   assert.match(r.stderr, /未列键/);
+});
+
+test('sc-p1c: detail 契约——字符串 detail / 缺 group_id 键 / 组事件 group_id 空 各 exit 2 点名（F1 修复守卫）', () => {
+  // 字符串 detail（旧形状）：ready-check 读 e.detail?.group_id 恒 undefined，分区对账形同虚设 → 拒
+  let dir = newTmpDir();
+  let { ledgerPath } = initLedgerFor(dir);
+  let l = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  l.events.push({ type: 'dispatch', at: T, detail: 'group=g4 worker_label=w1' });
+  writeFileSync(ledgerPath, JSON.stringify(l));
+  let r = cli('validate', ledgerPath);
+  assert.equal(r.status, 2, '字符串 detail 必须 exit 2（写入即拒的守卫）');
+  assert.match(r.stderr, /detail 必须是对象/);
+  // 对象但缺 group_id 键
+  dir = newTmpDir();
+  ({ ledgerPath } = initLedgerFor(dir));
+  l = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  l.events.push({ type: 'integrate', at: T, detail: { wave: 1, integrated_tip: SHA1 } });
+  writeFileSync(ledgerPath, JSON.stringify(l));
+  r = cli('validate', ledgerPath);
+  assert.equal(r.status, 2, 'detail 缺 group_id 键必须 exit 2');
+  assert.match(r.stderr, /缺 group_id 键/);
+  // 组上下文事件（delivery）group_id 为空 → ready-check ① 的 tip_sha 对账读不到组归属 → 拒
+  dir = newTmpDir();
+  ({ ledgerPath } = initLedgerFor(dir));
+  l = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  l.events.push({ type: 'delivery', at: T, detail: { group_id: null, tip_sha: SHA1 } });
+  writeFileSync(ledgerPath, JSON.stringify(l));
+  r = cli('validate', ledgerPath);
+  assert.equal(r.status, 2, '组事件 group_id 空必须 exit 2');
+  assert.match(r.stderr, /group_id 必须是非空字符串/);
 });
 
 test('sc-p1c: init 遇 manifest 组缺 sc_ids 数组 exit 2（禁止静默空组）', () => {
@@ -280,8 +310,8 @@ test('sc-p1d: unresolved>0 时 review_pass 拒', () => {
     const r = cli('set-state', ledgerPath, '--group', g, '--to', to, ...extra, '--now', T);
     assert.equal(r.status, 0, r.stderr);
   }
-  // unresolved 走唯一合法通道：record-delivery 审查交卷
-  const reviewDelivery = { rounds: 1, findings_total: 3, unresolved: 2, fix_commits: [] };
+  // unresolved 走唯一合法通道：record-delivery 审查交卷（candidate_sha 是 ready-check ③ 绑定必需键）
+  const reviewDelivery = { rounds: 1, findings_total: 3, unresolved: 2, fix_commits: [], candidate_sha: SHA1 };
   let r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify(reviewDelivery), '--now', T);
   assert.equal(r.status, 0, `审查交卷应 exit 0: ${r.stderr}`);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'review_pass', '--now', T);
@@ -351,7 +381,7 @@ test('sc-p1d: failed→pending 后 rounds==0 且 tip_sha/worker_label 清空（�
     assert.equal(r.status, 0, r.stderr);
   }
   let r = cli('record-delivery', ledgerPath, '--group', g, '--payload',
-    JSON.stringify({ rounds: 1, findings_total: 2, unresolved: 1, fix_commits: [] }), '--now', T);
+    JSON.stringify({ rounds: 1, findings_total: 2, unresolved: 1, fix_commits: [], candidate_sha: SHA1 }), '--now', T);
   assert.equal(r.status, 0, `审查交卷应 exit 0: ${r.stderr}`);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'failed', '--event', 'timeout_redispatch', '--now', T);
   assert.equal(r.status, 0, `→failed 应 exit 0: ${r.stderr}`);
@@ -415,10 +445,13 @@ test('sc-p1d: phase 跳步（executing→e2e）拒并点名缺失前置', () => 
   assert.match(r.stderr, /ILLEGAL_TRANSITION/);
   assert.match(r.stderr, /executing → e2e/);
   assert.match(r.stderr, /缺失前置|须依次经过/);
-  // 非法尝试落事件
+  // 非法尝试落事件（detail 结构化：相位级无组上下文 → group_id 显式 null）
   const ledger = readLedger(ledgerPath);
   assert.equal(ledger.phase, 'executing', '非法 phase 跳转不得改变 phase');
-  assert.ok(ledger.events.some((e) => e.type === 'illegal_transition' && /phase/.test(e.detail)));
+  const illegal = ledger.events.find((e) => e.type === 'illegal_transition');
+  assert.ok(illegal, '非法尝试必须落 illegal_transition 事件');
+  assert.ok(/phase/.test(illegal.detail.reason), '相位级拒绝的 reason 必须点名 phase 跳转');
+  assert.equal(illegal.detail.group_id, null, '相位级拒绝无组上下文 → group_id 显式 null');
 });
 
 test('sc-p1d: phase 单向前进合法链 + →validating 前置 + →ready 凭据', () => {
@@ -454,7 +487,9 @@ test('sc-p1d: phase 单向前进合法链 + →validating 前置 + →ready 凭�
   // →ready 带凭据通过
   r = cli('set-state', ledgerPath, '--phase', 'ready', '--ready-check-exit0', '1', '--now', T);
   assert.equal(r.status, 0, `→ready 带凭据应 exit 0: ${r.stderr}`);
-  assert.equal(readLedger(ledgerPath).phase, 'ready');
+  const readyLedger = readLedger(ledgerPath);
+  assert.equal(readyLedger.phase, 'ready');
+  assert.equal(readyLedger.phase_at, T, 'phase→ready 凭据路径必须写 phase_at（F2 契约：ready 时点唯一记录）');
   // ready 达成后台账冻结（只读）：任何写操作拒
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'failed', '--event', 'timeout_redispatch', '--now', T);
   assert.equal(r.status, 2, 'ready 相位达成后写操作必须 exit 2');
@@ -474,7 +509,10 @@ test('sc-p1d: wave 集成——非 40hex 拒、全组未 verified 拒、集成�
   assert.equal(r.status, 0, `集成应 exit 0: ${r.stderr}`);
   let ledger = readLedger(ledgerPath);
   assert.equal(ledger.waves[0].integrated_tip, SHA2);
-  assert.ok(ledger.events.some((e) => e.type === 'integrate' && e.detail.includes(SHA2)));
+  assert.ok(ledger.events.some((e) => e.type === 'integrate' && e.detail.integrated_tip === SHA2),
+    'integrate 事件 detail 必须结构化（integrated_tip 键）');
+  assert.ok(ledger.events.some((e) => e.type === 'integrate' && e.detail.group_id === null),
+    'wave 级事件无组上下文 → group_id 显式 null');
   // 重复集成拒（integrated_tip 集成后不再改）
   r = cli('set-state', ledgerPath, '--wave', '1', '--integrate', SHA1, '--now', T);
   assert.equal(r.status, 2, '重复集成必须 exit 2');
@@ -704,20 +742,33 @@ test('sc-p1h: 执行组合法交卷入账成功且台账对应字段逐项等于
   assert.equal(g4.tip_sha, SHA2, '台账 tip_sha 必须等于交卷值');
   const delivery = ledger.events.filter((e) => e.type === 'delivery');
   assert.equal(delivery.length, 1);
-  assert.match(delivery[0].detail, /status=done/);
-  assert.match(delivery[0].detail, new RegExp(SHA2));
-  assert.match(delivery[0].detail, /sc-p1c=pass/);
+  // F1 契约：delivery detail 必须是结构化对象（ready-check ① 读 detail.tip_sha 与台账对账）
+  assert.equal(delivery[0].detail.group_id, 'g4', 'delivery detail 必须含 group_id');
+  assert.equal(delivery[0].detail.status, 'done');
+  assert.equal(delivery[0].detail.tip_sha, SHA2);
+  assert.deepEqual(delivery[0].detail.scs, [
+    { sc_id: 'sc-p1c', status: 'pass' },
+    { sc_id: 'sc-p1d', status: 'pass' },
+    { sc_id: 'sc-p1e', status: 'pass' },
+    { sc_id: 'sc-p1h', status: 'pass' },
+  ], 'delivery detail.scs 必须结构化摘要交卷结果');
 });
 
 test('sc-p1h: 审查组合法交卷——unresolved 由此机器写入 review.unresolved（唯一入账通道）', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
-  const payload = { rounds: 2, findings_total: 5, unresolved: 3, fix_commits: ['abc'.repeat(13), 'def'.repeat(13)] };
+  const payload = { rounds: 2, findings_total: 5, unresolved: 3, fix_commits: ['abc'.repeat(13), 'def'.repeat(13)], candidate_sha: SHA1 };
   const r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
   assert.equal(r.status, 0, `审查组交卷应 exit 0: ${r.stderr}`);
   const g4 = readLedger(ledgerPath).waves[0].groups[0];
   assert.equal(g4.review.rounds, 2, 'review.rounds 必须等于交卷值');
   assert.equal(g4.review.unresolved, 3, 'review.unresolved 必须等于交卷值（唯一入账通道）');
+  // F1 契约：审查交卷 delivery detail 必须结构化且绑定 candidate_sha（ready-check ③ 读取点）
+  const reviewDelivery = readLedger(ledgerPath).events.filter((e) => e.type === 'delivery')[0];
+  assert.equal(reviewDelivery.detail.group_id, 'g4');
+  assert.equal(reviewDelivery.detail.rounds, 2);
+  assert.equal(reviewDelivery.detail.unresolved, 3);
+  assert.equal(reviewDelivery.detail.candidate_sha, SHA1, '审查交卷 detail 必须绑定被审 candidate_sha');
 });
 
 test('sc-p1h: 验收组合法交卷——verify.status/evidence_ref 入账', () => {
@@ -726,6 +777,7 @@ test('sc-p1h: 验收组合法交卷——verify.status/evidence_ref 入账', () 
   const payload = {
     scs: [{ sc_id: 'sc-v1a', status: 'pass', evidence: 'ready-check exit 0' }],
     integration_review: { status: 'pass', notes: 'squash diff 复查无越域' },
+    candidate_sha: SHA1,
   };
   const r = cli('record-delivery', ledgerPath, '--group', 'v1', '--payload', JSON.stringify(payload), '--now', T);
   assert.equal(r.status, 0, `验收组交卷应 exit 0: ${r.stderr}`);
@@ -746,6 +798,7 @@ test('sc-p1h: 验收组交卷 sc_id 与派工包不一致拒（多/少/改名全
     const payload = {
       scs: ids.map((id) => ({ sc_id: id, status: 'pass', evidence: `ev:${id}` })),
       integration_review: { status: 'pass', notes: 'ok' },
+      candidate_sha: SHA1,
     };
     const before = readFileSync(ledgerPath, 'utf8');
     const r = cli('record-delivery', ledgerPath, '--group', 'v1', '--payload', JSON.stringify(payload), '--now', T);
@@ -793,7 +846,7 @@ test('sc-p1h: unresolved 非数字拒', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
   for (const bad of ['abc', 2.5, true, null]) {
-    const payload = { rounds: 1, findings_total: 1, unresolved: bad, fix_commits: [] };
+    const payload = { rounds: 1, findings_total: 1, unresolved: bad, fix_commits: [], candidate_sha: SHA1 };
     const before = readFileSync(ledgerPath, 'utf8');
     const r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
     assert.equal(r.status, 2, `unresolved=${JSON.stringify(bad)} 必须 exit 2`);
@@ -830,3 +883,121 @@ test('sc-p1h: record-delivery 交卷文件路径（--payload @file）解析', ()
   assert.equal(r.status, 0, `@file 交卷应 exit 0: ${r.stderr}`);
   assert.equal(readLedger(ledgerPath).waves[0].groups[0].tip_sha, SHA1);
 });
+
+// =====================================================================
+// 变异反证（F1/F2 集成契约）：两组各自测试全绿 ≠ 串起来正确
+// =====================================================================
+// 机制同 ready-check.test.mjs 的 mutation-kill：把 scripts/tests/config/SKILL.md/graph.json 复制到
+// 临时目录，对 run-ledger.mjs 副本应用变异（精确字符串替换，锚点唯一），跑「跳过变异测试自身」
+// （RL_MUTATION_CHILD=1 + RC_MUTATION_CHILD=1）的完整 8 文件套件，断言失败集恰为预测集——
+// 挖红（失败集非空）+ 隔离（恰等于预测集，无多余无遗漏）。真实脚本永不被触碰，无需恢复。
+//
+// F1 变异：把 dispatch/delivery 事件 detail 写回字符串（旧行为，ready-check 读 e.detail?.group_id
+//   恒 undefined → 分区对账与 delivery 绑定形同虚设）。新 schema 拒字符串 → 所有经过 set-state
+//   派工/交付的断言红 + e2e 全链红；record-delivery 单侧（写路径未变异）、ready-check 单侧
+//   （夹具本就是对象 detail）与其余测试绿。
+// F2 变异：把 phase_at 从 LEDGER_TOP_KEYS 挖掉 → ready 台账成「未列键」形状，run-ledger
+//   readLedger/validate 即拒；预测红集 = 读 ready 台账的断言 + ready-check 链尾 validate + e2e 链尾 validate。
+const RL_MUTATION_PREDICTIONS = [
+  {
+    id: 'F1 变异',
+    label: 'dispatch/delivery detail 写回字符串（F1 修复点挖除）',
+    mutate: (src) => src
+      .replace(
+        "cur.events.push({ type: 'dispatch', at: now, detail: { group_id: group, worker_label: workerLabel } });",
+        "cur.events.push({ type: 'dispatch', at: now, detail: `group=${group} worker_label=${workerLabel}` });",
+      )
+      .replace(
+        "cur.events.push({ type: 'delivery', at: now, detail: { group_id: group, tip_sha: tipSha } });",
+        "cur.events.push({ type: 'delivery', at: now, detail: `group=${group} tip_sha=${tipSha}` });",
+      ),
+    red: [
+      'sc-p1d: 合法链全通（dispatched→delivered→自环两轮→review_pass→verified）',
+      'sc-p1d: rounds 超上限时 delivered→review_pass 拒（审查不收敛）',
+      'sc-p1d: unresolved>0 时 review_pass 拒',
+      'sc-p1d: 非法跳转矩阵（12 例）全部 exit 2 且落 illegal_transition 事件',
+      'sc-p1d: failed→pending 后 rounds==0 且 tip_sha/worker_label 清空（重派不继承旧计数）',
+      'sc-p1d: tip_sha 非 40hex 拒（任意字符串拒，格式校验）',
+      'sc-p1d: phase 单向前进合法链 + →validating 前置 + →ready 凭据',
+      'sc-p1d: wave 集成——非 40hex 拒、全组未 verified 拒、集成后可落账',
+      'sc-p1e: 验收组模板无 goal 触发行、含整合树复查项（integrated_tip 引用 + squash diff 复查指令）',
+      'sc-p1e: T 阶段包 verify_cmds 与夹具 manifest 尾波逐条一致',
+      'sc-p2d: 全链 dry-run——先红（缺 e2e 报告与 presubmit 三闸）后绿（READY_FOR_SUBMIT_PR + 台账 phase→ready + 链尾 validate exit 0）',
+      'sc-p2d: 双账本一致性——collected_tip 与 tip_sha 不一致时链路中断于 integrate 前',
+      'sc-p2d: 槽位对账——used_slots 与 dispatched 未归档组数一致无告警、不符出告警行',
+    ],
+  },
+  {
+    id: 'F2 变异',
+    label: 'phase_at 从 LEDGER_TOP_KEYS 挖除（F2 修复点挖除）',
+    mutate: (src) => src.replace(
+      "  'version', 'phase', 'phase_at', 'waves', 'events',",
+      "  'version', 'phase', 'waves', 'events',",
+    ),
+    red: [
+      'sc-p1d: phase 单向前进合法链 + →validating 前置 + →ready 凭据',
+      'full: 七项全齐 → READY_FOR_SUBMIT_PR 含分支与 SHA，台账 phase→ready 且 version+1',
+      'sc-p2d: 全链 dry-run——先红（缺 e2e 报告与 presubmit 三闸）后绿（READY_FOR_SUBMIT_PR + 台账 phase→ready + 链尾 validate exit 0）',
+    ],
+  },
+];
+
+// 变异子套件要跑的测试文件集（含 e2e-dryrun 与 ready-check，证明「其余绿」覆盖到消费侧单测，
+// 不只是生产侧）。不含 selfcheck.test.mjs：其组B-1/组B-3 的 --live 接线检查依赖「真实仓库」
+// （symlink 目标与 git common dir 同源），在变异复制树中天然 FAIL，与本三缺陷的变异无关。
+const RL_MUTATION_TEST_FILES = [
+  'tests/config.test.mjs', 'tests/e2e-dryrun.test.mjs', 'tests/graph.test.mjs',
+  'tests/mem-probe.test.mjs', 'tests/ready-check.test.mjs', 'tests/run-ledger.test.mjs',
+  'tests/skill-doc.test.mjs',
+];
+
+// 复制 scripts/tests/config/SKILL.md/graph.json 并对 run-ledger.mjs 副本应用变异；返回副本根目录。
+function copyTreeForRLMutation(t, mutateScript) {
+  const dir = mkdtempSync(join(tmpdir(), 'rl-mut-'));
+  mkdirSync(join(dir, 'scripts'), { recursive: true });
+  mkdirSync(join(dir, 'tests'), { recursive: true });
+  mkdirSync(join(dir, 'config'), { recursive: true });
+  cpSync(join(ROOT, 'scripts'), join(dir, 'scripts'), { recursive: true });
+  cpSync(join(ROOT, 'tests'), join(dir, 'tests'), { recursive: true });
+  cpSync(join(ROOT, 'config'), join(dir, 'config'), { recursive: true });
+  writeFileSync(join(dir, 'SKILL.md'), readFileSync(join(ROOT, 'SKILL.md'), 'utf8'));
+  writeFileSync(join(dir, 'graph.json'), readFileSync(join(ROOT, 'graph.json'), 'utf8'));
+  const scriptPath = join(dir, 'scripts/run-ledger.mjs');
+  const src = readFileSync(scriptPath, 'utf8');
+  const mutated = mutateScript(src);
+  assert.notEqual(mutated, src, '变异必须实际改变脚本内容（防替换静默空转）');
+  writeFileSync(scriptPath, mutated);
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+// 跑子套件（变异副本上），返回 exit code 与失败测试名集合；
+// 同时解析 spec('✖ name (ms)') 与 TAP('not ok N - name') 报告器。
+function runMutatedRLSuite(dir) {
+  // 剥掉 NODE_TEST_CONTEXT：本进程由 node --test 拉起时该标记会被子进程继承，
+  // node 检测到「test run 递归」会静默跳过全部测试并 exit 0（实际空跑），必须剥离才能让子套件真正执行。
+  const { NODE_TEST_CONTEXT: _drop, ...childEnv } = process.env;
+  const r = spawnSync(process.execPath, ['--test', ...RL_MUTATION_TEST_FILES],
+    { cwd: dir, encoding: 'utf8', env: { ...childEnv, RL_MUTATION_CHILD: '1', RC_MUTATION_CHILD: '1' } });
+  const failedNames = new Set();
+  for (const line of `${r.stdout}\n${r.stderr}`.split('\n')) {
+    if (line.startsWith('not ok ')) {
+      const m = line.match(/^not ok \d+ - (.+)$/);
+      if (m) failedNames.add(m[1].trim());
+    } else if (line.startsWith('✖ ') && !line.startsWith('✖ failing tests:')) {
+      failedNames.add(line.replace(/^✖ /, '').replace(/\s*\(\d+(?:\.\d+)?ms\)\s*$/, '').trim());
+    }
+  }
+  return { status: r.status, failedNames: [...failedNames] };
+}
+
+for (const m of RL_MUTATION_PREDICTIONS) {
+  test(`mutation-kill: ${m.id} ${m.label} 被挖 → 恰红预测用例，其余绿（跨组件串联契约反证）`, (t) => {
+    if (process.env.RL_MUTATION_CHILD === '1') { t.skip('子套件运行跳过变异测试（防递归）'); return; }
+    const dir = copyTreeForRLMutation(t, m.mutate);
+    const { status, failedNames } = runMutatedRLSuite(dir);
+    assert.equal(status, 1, `变异 ${m.id} 后套件必须红（exit 1），实际 ${status}`);
+    assert.deepEqual([...failedNames].sort(), [...m.red].sort(),
+      `变异 ${m.id} 的失败集必须恰为预测集（${m.red.length} 条，无多余无遗漏）\n实际失败:\n${failedNames.join('\n')}`);
+  });
+}

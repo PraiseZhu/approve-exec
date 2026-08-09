@@ -1,9 +1,9 @@
 {
-  "schema_version": 1,
+  "schema_version": "1",
   "run_id": "fixture-run",
   "slug": "approve-exec-fixture",
   "manifest_path": "tests/fixtures/ready-full/manifest.json",
-  "manifest_core_hash": "241ce9ebe37618db7e0079ab250d6bc8d38e5e08b1eb70026355e6d777552f5b",
+  "manifest_core_hash": "0dc94687c4c8a0613f678ff21bb87258547ebebb18955488d5e9e6f04e403c27",
   "version": 3,
   "phase": "validating",
   "waves": [
@@ -19,7 +19,10 @@
           "dispatched_at": "2026-08-09T00:00:00.000Z",
           "tip_sha": "__HEAD_SHA__",
           "review": { "rounds": 1, "unresolved": 0 },
-          "verify": { "status": "pass", "evidence_ref": "tests/fixtures/ready-full/verdict.json" }
+          "verify": { "status": "pass", "evidence_ref": "tests/fixtures/ready-full/verdict.json" },
+          "worktree": null,
+          "branch": null,
+          "base": null
         }
       ]
     },
@@ -35,7 +38,10 @@
           "dispatched_at": "2026-08-09T00:00:00.000Z",
           "tip_sha": "__HEAD_SHA__",
           "review": { "rounds": 2, "unresolved": 0 },
-          "verify": { "status": "pass", "evidence_ref": "tests/fixtures/ready-full/verdict.json" }
+          "verify": { "status": "pass", "evidence_ref": "tests/fixtures/ready-full/verdict.json" },
+          "worktree": null,
+          "branch": null,
+          "base": null
         }
       ]
     }

@@ -1,0 +1,6 @@
+{
+  "gate": "intent",
+  "result": "OK",
+  "candidate_sha": "__HEAD_SHA__",
+  "detail": "PR body marker matches .pr-intent.md digest"
+}

@@ -1,0 +1,140 @@
+{
+  "schema_version": "v1",
+  "slug": "approve-exec-e2e-dryrun-fixture",
+  "goal": "e2e dry-run 全链夹具：run-ledger init → render-packet → 合法链 → ready-check 先红后绿",
+  "priorities": [
+    {
+      "id": "p1",
+      "title": "dry-run",
+      "why": "夹具占位"
+    }
+  ],
+  "scs": [
+    {
+      "id": "sc-dry-1",
+      "priority_id": "p1",
+      "kind": "fix",
+      "granularity": "goal",
+      "change": "dry-run 执行组 SC：全链三要素断言",
+      "holds": "派工包首行「用 goal skill 执行。」+ --until-sc + 身份行",
+      "verify": {
+        "cmd": "node",
+        "args": [
+          "scripts/run-tests.mjs"
+        ]
+      },
+      "expect": "exit 0 且 fail 0"
+    },
+    {
+      "id": "sc-dry-2",
+      "priority_id": "p1",
+      "kind": "verify",
+      "granularity": "goal",
+      "change": "dry-run 验收组 SC：只跑验证命令出 verdict 不改代码",
+      "holds": "验收组交卷必须绑定 candidate_sha",
+      "verify": {
+        "cmd": "node",
+        "args": [
+          "scripts/run-tests.mjs"
+        ]
+      },
+      "expect": "exit 0 且 fail 0"
+    }
+  ],
+  "waves": [
+    {
+      "wave": 1,
+      "groups": [
+        {
+          "group_id": "g4",
+          "sc_ids": [
+            "sc-dry-1"
+          ],
+          "worker_count": 1
+        }
+      ]
+    },
+    {
+      "wave": 2,
+      "groups": [
+        {
+          "group_id": "v1",
+          "sc_ids": [
+            "sc-dry-2"
+          ],
+          "worker_count": 1
+        }
+      ]
+    }
+  ],
+  "dispatch": {
+    "capacity": 8,
+    "packets": [
+      {
+        "group_id": "g4",
+        "scs_inline": [
+          {
+            "id": "sc-dry-1",
+            "priority_id": "p1",
+            "kind": "fix",
+            "granularity": "goal",
+            "change": "dry-run 执行组 SC：全链三要素断言",
+            "holds": "派工包首行「用 goal skill 执行。」+ --until-sc + 身份行",
+            "verify": {
+              "cmd": "node",
+              "args": [
+                "scripts/run-tests.mjs"
+              ]
+            },
+            "expect": "exit 0 且 fail 0"
+          }
+        ],
+        "allowed_paths": [
+          "scripts/run-ledger.mjs"
+        ],
+        "forbidden": [
+          "本包 allowed_paths 之外的一切仓内文件"
+        ],
+        "verify_cmds": [
+          "node scripts/run-tests.mjs"
+        ],
+        "submit_format": "交付报告必含：status ∈ {done,partial,blocked}；scs 逐条 {sc_id, status, evidence}；tip SHA；git status 干净证明",
+        "instruction": "用 goal skill 执行。--until-sc",
+        "needs_three_review": false,
+        "manifest_core_hash": "bd3a0e77886a6a80c2f20f2a13b967fa6ca3539aaf76b88efe7e84fb027fa518"
+      },
+      {
+        "group_id": "v1",
+        "scs_inline": [
+          {
+            "id": "sc-dry-2",
+            "priority_id": "p1",
+            "kind": "verify",
+            "granularity": "goal",
+            "change": "dry-run 验收组 SC：只跑验证命令出 verdict 不改代码",
+            "holds": "验收组交卷必须绑定 candidate_sha",
+            "verify": {
+              "cmd": "node",
+              "args": [
+                "scripts/run-tests.mjs"
+              ]
+            },
+            "expect": "exit 0 且 fail 0"
+          }
+        ],
+        "allowed_paths": [],
+        "forbidden": [
+          "验收组不改代码"
+        ],
+        "verify_cmds": [
+          "node scripts/run-tests.mjs"
+        ],
+        "submit_format": "验收报告：scs 逐条 verdict + integration_review 结论",
+        "instruction": "只跑 verify 命令出 verdict 不改代码。",
+        "needs_three_review": false,
+        "manifest_core_hash": "bd3a0e77886a6a80c2f20f2a13b967fa6ca3539aaf76b88efe7e84fb027fa518"
+      }
+    ]
+  },
+  "manifest_core_hash": "bd3a0e77886a6a80c2f20f2a13b967fa6ca3539aaf76b88efe7e84fb027fa518"
+}

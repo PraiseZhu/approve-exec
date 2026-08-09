@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "workflow_id": "e2e-dryrun",
+  "repo_common_dir": "e2e-dryrun-fixture",
+  "allowed_root": "/wt",
+  "allocations": [
+    {
+      "allocation_id": "alloc-g4",
+      "wave": 1,
+      "group": "g4",
+      "worker_id": "w1",
+      "worktree_realpath": "/wt/g4",
+      "branch_ref": "refs/heads/feat/g4",
+      "base_sha": "__HEAD_SHA__",
+      "initial_head": "__HEAD_SHA__",
+      "collected_tip": "__HEAD_SHA__",
+      "lifecycle_state": "collected",
+      "reclaim_state": "none",
+      "integrated": true,
+      "wave_validate": "PASS",
+      "allowed_paths": [],
+      "verify_commands": [],
+      "tasks_summary": ""
+    },
+    {
+      "allocation_id": "alloc-v1",
+      "wave": 2,
+      "group": "v1",
+      "worker_id": "w2",
+      "worktree_realpath": "/wt/v1",
+      "branch_ref": "refs/heads/feat/v1",
+      "base_sha": "__HEAD_SHA__",
+      "initial_head": "__HEAD_SHA__",
+      "collected_tip": "__HEAD_SHA__",
+      "lifecycle_state": "collected",
+      "reclaim_state": "none",
+      "integrated": true,
+      "wave_validate": "PASS",
+      "allowed_paths": [],
+      "verify_commands": [],
+      "tasks_summary": ""
+    }
+  ]
+}

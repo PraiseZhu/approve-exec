@@ -17,6 +17,9 @@
 //     落盘 version+1；写入前重读发现 version 已变 → 冲突 exit 2，绝不静默覆盖）。
 //   - 时间戳由 --now 注入；无 --now 的写操作拒绝（确定性可测）。
 //   - events[].type 为 exact 枚举，未知 type 拒。
+//   - events[].detail 是结构化对象契约：必须含 group_id 键（组上下文事件非空字符串；
+//     ready-check 消费侧读取 detail.group_id/tip_sha/candidate_sha，字符串 detail 会让
+//     分区对账与 delivery 绑定形同虚设）。phase→ready 时写 phase_at（ready 时点唯一记录）。
 //   - manifest 绑定是内容绑定：manifest_core_hash（黑名单剔除 + 键排序 + sha256）。
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
@@ -61,6 +64,14 @@ export const PHASE_ORDER = Object.freeze([
   'executing', 'reviewing', 'validating', 'e2e', 'packaging', 'ready',
 ]);
 export const TIP_SHA_RE = /^[0-9a-f]{40}$/;
+
+// detail 契约的组上下文事件：ready-check 的分区对账与 delivery 绑定读取 detail.group_id 的
+// 事件类型（F1 修复点）。wave 级（integrate）与相位级（illegal_transition 的 group_id: null）
+// 事件无组上下文，不强制非空字符串，但 detail 必须显式含 group_id 键（无组归属写 null，不伪造）。
+const GROUP_SCOPED_EVENT_TYPES = new Set([
+  'dispatch', 'delivery', 'review_round', 'timeout_redispatch',
+  'overreach_rejected', 'overlap_replan', 'budget_note',
+]);
 const EXEC_DELIVERY_STATUS = Object.freeze(['done', 'partial', 'blocked']);
 const SC_RESULT_STATUS = Object.freeze(['pass', 'fail', 'not_run']);
 
@@ -88,9 +99,12 @@ export function manifestCoreHash(manifest) {
 }
 
 // ---------- 台账 exact schema（未列键拒） ----------
+// phase_at：ready 时点时间戳（F2 修复点）。ready-check 驱动 phase→ready 时写入；phase 跳转不落
+// 事件（setState phase 分支只改 phase），若无 phase_at，「何时达成 ready」无处可查，故它是 ready
+// 时点的唯一记录、有审计价值——进 exact 键白名单，而不是删掉 ready-check 的写入。
 const LEDGER_TOP_KEYS = Object.freeze([
   'schema_version', 'run_id', 'slug', 'manifest_path', 'manifest_core_hash',
-  'version', 'phase', 'waves', 'events',
+  'version', 'phase', 'phase_at', 'waves', 'events',
 ]);
 const WAVE_KEYS = Object.freeze(['wave', 'integrated_tip', 'groups']);
 // 身份三键（worktree/branch/base）属于台账 schema：由 lead 经 orca-fanout
@@ -122,8 +136,19 @@ export function assertEventSchema(ev) {
   if (typeof ev.at !== 'string' || ev.at.length === 0) {
     throw new LedgerError('SCHEMA', 'event.at 必须是非空字符串（--now 注入）');
   }
-  if (typeof ev.detail !== 'string') {
-    throw new LedgerError('SCHEMA', 'event.detail 必须是字符串');
+  // ---- detail 结构化契约（F1 修复点；ready-check 消费侧读取 detail.group_id/tip_sha/candidate_sha）----
+  // 字符串 detail 会让 ready-check 的 e.detail?.group_id 恒 undefined：分区对账与 delivery 绑定
+  // 形同虚设（该拒的拒不掉）。对象必须含 group_id 键；组上下文事件要求非空字符串；
+  // wave 级 integrate 与相位级 illegal_transition 无组上下文，显式 group_id: null。
+  if (ev.detail === null || typeof ev.detail !== 'object' || Array.isArray(ev.detail)) {
+    throw new LedgerError('SCHEMA', 'event.detail 必须是对象（ready-check 读 detail.group_id；字符串 detail 会让分区对账与 delivery 绑定形同虚设）');
+  }
+  if (!('group_id' in ev.detail)) {
+    throw new LedgerError('SCHEMA', 'event.detail 缺 group_id 键（无组上下文的事件显式写 group_id: null，不得缺键）');
+  }
+  if (GROUP_SCOPED_EVENT_TYPES.has(ev.type)
+    && (typeof ev.detail.group_id !== 'string' || ev.detail.group_id.length === 0)) {
+    throw new LedgerError('SCHEMA', 'event.type=' + ev.type + ' 的 detail.group_id 必须是非空字符串（ready-check 分区对账/delivery 绑定的读取点）');
   }
 }
 
@@ -139,6 +164,14 @@ export function assertLedgerSchema(ledger) {
   }
   if (!PHASE_ORDER.includes(ledger.phase)) {
     throw new LedgerError('SCHEMA', `台账 phase 非法: ${ledger.phase}`);
+  }
+  // F2 契约：phase_at 是 exact 键白名单成员；出现即必须是非空字符串；
+  // phase=ready 时必须存在（ready 时点唯一记录，ready-check / set-state 凭据路径都写它）
+  if (ledger.phase_at !== undefined && (typeof ledger.phase_at !== 'string' || ledger.phase_at.length === 0)) {
+    throw new LedgerError('SCHEMA', '台账 phase_at 必须是非空字符串（ready 时点时间戳）');
+  }
+  if (ledger.phase === 'ready' && typeof ledger.phase_at !== 'string') {
+    throw new LedgerError('SCHEMA', '台账 phase=ready 必须携带非空 phase_at（ready 时点唯一记录；ready-check / set-state 凭据路径写入）');
   }
   if (!Array.isArray(ledger.waves)) {
     throw new LedgerError('SCHEMA', '台账 waves 必须是数组');
@@ -418,9 +451,10 @@ function phaseTransitionAllowed(ledger, targetPhase) {
  * 「每次非法尝试都留 events 记录」+「exit 2 点名」两者都要——事件写盘发生在
  * throw 之前（writeLedgerAtomic 内 throw 会导致事件不落盘，故先写后抛）。
  */
-function rejectWithEvent({ ledgerPath, expected, now, group, detail, code, message }) {
+function rejectWithEvent({ ledgerPath, expected, now, group, reason, code, message }) {
   writeLedgerAtomic(ledgerPath, expected, (cur) => {
-    cur.events.push({ type: 'illegal_transition', at: now, detail });
+    // 组级拒绝带真实 group_id；相位级拒绝无组上下文 → group_id: null（不伪造组归属）
+    cur.events.push({ type: 'illegal_transition', at: now, detail: { group_id: group ?? null, reason } });
     return { ...cur, version: expected + 1 };
   });
   throw new LedgerError(code, message);
@@ -519,7 +553,8 @@ export function setState({
       cur.events.push({
         type: 'integrate',
         at: now,
-        detail: `wave=${wave} integrated_tip=${integrate}`,
+        // wave 级事件无组上下文：group_id 显式 null（schema 要求键存在，不伪造组归属）
+        detail: { group_id: null, wave, integrated_tip: integrate },
       });
       return { ...cur, version: expected + 1 };
     });
@@ -535,7 +570,7 @@ export function setState({
       // →ready 的唯一凭据是 ready-check exit 0；无凭据 = 非法尝试
       rejectWithEvent({
         ledgerPath, expected, now, group: null,
-        detail: `phase 非法跳转 ${ledger.phase} → ready：缺失前置（无 ready-check exit 0 凭据）`,
+        reason: `phase 非法跳转 ${ledger.phase} → ready：缺失前置（无 ready-check exit 0 凭据）`,
         code: 'PRECONDITION',
         message: '缺失前置：→ready 仅允许由 ready-check exit 0 凭据驱动（--ready-check-exit0 未携带）',
       });
@@ -543,13 +578,15 @@ export function setState({
     if (problem) {
       rejectWithEvent({
         ledgerPath, expected, now, group: null,
-        detail: `phase 非法跳转 ${ledger.phase} → ${phase}：${problem}`,
+        reason: `phase 非法跳转 ${ledger.phase} → ${phase}：${problem}`,
         code: 'ILLEGAL_TRANSITION',
         message: `phase 非法跳转 ${ledger.phase} → ${phase}：${problem}`,
       });
     }
     return writeLedgerAtomic(ledgerPath, expected, (cur) => {
       cur.phase = phase;
+      // F2 契约：phase→ready 必须写 phase_at（ready 时点唯一记录；phase 跳转不落事件）
+      if (phase === 'ready') cur.phase_at = now;
       return { ...cur, version: expected + 1 };
     });
   }
@@ -610,7 +647,7 @@ export function setState({
   if (!GROUP_TRANSITIONS[curGroup.state].includes(to)) {
     rejectWithEvent({
       ledgerPath, expected, now, group,
-      detail: `组状态非法跳转 ${curGroup.state} → ${to}（组 ${group}；白名单: ${GROUP_TRANSITIONS[curGroup.state].join('/') || '无，终态只读'}）`,
+      reason: `组状态非法跳转 ${curGroup.state} → ${to}（组 ${group}；白名单: ${GROUP_TRANSITIONS[curGroup.state].join('/') || '无，终态只读'}）`,
       code: 'ILLEGAL_TRANSITION',
       message: `组 ${group} 状态非法跳转 ${curGroup.state} → ${to}（白名单外，重放攻击拒）`,
     });
@@ -620,7 +657,7 @@ export function setState({
   if (problem) {
     rejectWithEvent({
       ledgerPath, expected, now, group,
-      detail: `组 ${group} ${curGroup.state} → ${to} 被拒：${problem}`,
+      reason: `组 ${group} ${curGroup.state} → ${to} 被拒：${problem}`,
       code: 'PRECONDITION',
       message: `组 ${group} 状态跳转 ${curGroup.state} → ${to} 被拒：${problem}`,
     });
@@ -633,18 +670,20 @@ export function setState({
       g.state = 'dispatched';
       g.worker_label = workerLabel;
       g.dispatched_at = now;
-      cur.events.push({ type: 'dispatch', at: now, detail: `group=${group} worker_label=${workerLabel}` });
+      // F1 修复：detail 统一结构化对象（ready-check 读 detail.group_id 做分区对账）
+      cur.events.push({ type: 'dispatch', at: now, detail: { group_id: group, worker_label: workerLabel } });
     } else if (to === 'delivered' && from === 'dispatched') {
       g.state = 'delivered';
       g.tip_sha = tipSha;
-      cur.events.push({ type: 'delivery', at: now, detail: `group=${group} tip_sha=${tipSha}` });
+      // F1 修复：detail.tip_sha 是 ready-check ① 与台账 tip_sha 对账的读取点
+      cur.events.push({ type: 'delivery', at: now, detail: { group_id: group, tip_sha: tipSha } });
     } else if (to === 'delivered' && from === 'delivered') {
       g.review.rounds += 1;
       // unresolved 不在此更新：唯一通道是 record-delivery 审查交卷（CLI --unresolved 已拒）
       cur.events.push({
         type: 'review_round',
         at: now,
-        detail: `group=${group} rounds=${g.review.rounds} unresolved=${g.review.unresolved}`,
+        detail: { group_id: group, rounds: g.review.rounds, unresolved: g.review.unresolved },
       });
     } else if (to === 'review_pass') {
       g.state = 'review_pass';
@@ -652,7 +691,7 @@ export function setState({
       g.state = 'verified';
     } else if (to === 'failed') {
       g.state = 'failed';
-      cur.events.push({ type: event, at: now, detail: `group=${group} → failed（${event}）` });
+      cur.events.push({ type: event, at: now, detail: { group_id: group, event } });
     } else if (to === 'pending' && from === 'failed') {
       g.state = 'pending';
       g.review.rounds = 0;
@@ -661,7 +700,7 @@ export function setState({
       g.worker_label = null;
       g.dispatched_at = null;
       g.verify = { status: null, evidence_ref: null };
-      cur.events.push({ type: 'timeout_redispatch', at: now, detail: `group=${group} 重派链重置（新 worktree 新一轮）` });
+      cur.events.push({ type: 'timeout_redispatch', at: now, detail: { group_id: group, reason: '重派链重置（新 worktree 新一轮）' } });
     }
     return { ...cur, version: expected + 1 };
   });
@@ -803,8 +842,11 @@ function renderVerifyPacket({ packet, group, wave, identity }) {
 // ---------- record-delivery：worker 交卷进台账的唯一通道 ----------
 const EXEC_DELIVERY_KEYS = Object.freeze(['status', 'tip_sha', 'scs']);
 const EXEC_SC_KEYS = Object.freeze(['sc_id', 'status', 'evidence']);
-const REVIEW_DELIVERY_KEYS = Object.freeze(['rounds', 'findings_total', 'unresolved', 'fix_commits']);
-const VERIFY_DELIVERY_KEYS = Object.freeze(['scs', 'integration_review']);
+// candidate_sha：审查/验收交卷必须绑定被审候选 HEAD（40hex）。ready-check ③ 的读取点是
+// 「每组最后一条 delivery 事件的 detail.candidate_sha == HEAD」——没有该键，绑定无法入账，
+// 出口门在该组上恒缺（F1 契约的一部分：detail 形状必须满足 ready-check 消费侧）。
+const REVIEW_DELIVERY_KEYS = Object.freeze(['rounds', 'findings_total', 'unresolved', 'fix_commits', 'candidate_sha']);
+const VERIFY_DELIVERY_KEYS = Object.freeze(['scs', 'integration_review', 'candidate_sha']);
 const INTEGRATION_REVIEW_KEYS = Object.freeze(['status', 'notes']);
 
 function classifyDelivery(data) {
@@ -882,6 +924,9 @@ function validateReviewDelivery(data) {
       throw new LedgerError('DELIVERY_SCHEMA', '审查组交卷 fix_commits 元素必须是字符串');
     }
   }
+  if (typeof data.candidate_sha !== 'string' || !TIP_SHA_RE.test(data.candidate_sha)) {
+    throw new LedgerError('DELIVERY_SCHEMA', `审查组交卷 candidate_sha 非 40 位十六进制（ready-check ③ 审查交卷绑定的读取点，当前: ${data.candidate_sha}）`);
+  }
 }
 
 function validateVerifyDelivery(data, packet) {
@@ -907,6 +952,10 @@ function validateVerifyDelivery(data, packet) {
   }
   if (typeof data.integration_review.notes !== 'string') {
     throw new LedgerError('DELIVERY_SCHEMA', '验收组交卷 integration_review.notes 必须是字符串');
+  }
+  // 验收交卷是验收组最后一条 delivery 事件：ready-check ③ 读它的 detail.candidate_sha 绑定 HEAD
+  if (typeof data.candidate_sha !== 'string' || !TIP_SHA_RE.test(data.candidate_sha)) {
+    throw new LedgerError('DELIVERY_SCHEMA', `验收组交卷 candidate_sha 非 40 位十六进制（ready-check ③ 最后一条 delivery 绑定的读取点，当前: ${data.candidate_sha}）`);
   }
 }
 
@@ -953,11 +1002,16 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
     const g = findGroup(cur, group);
     if (kind === 'exec') {
       g.tip_sha = data.tip_sha;
-      const scResults = data.scs.map((sc) => `${sc.sc_id}=${sc.status}`).join(', ');
       cur.events.push({
         type: 'delivery',
         at: now,
-        detail: `group=${group} status=${data.status} tip_sha=${data.tip_sha} scs: ${scResults}`,
+        // F1 修复：detail.tip_sha 是 ready-check ① 与台账 tip_sha 对账的读取点；scs 摘要结构化
+        detail: {
+          group_id: group,
+          status: data.status,
+          tip_sha: data.tip_sha,
+          scs: data.scs.map((s) => ({ sc_id: s.sc_id, status: s.status })),
+        },
       });
     } else if (kind === 'review') {
       g.review.rounds = data.rounds;
@@ -965,7 +1019,15 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
       cur.events.push({
         type: 'delivery',
         at: now,
-        detail: `group=${group} 审查交卷 rounds=${data.rounds} findings_total=${data.findings_total} unresolved=${data.unresolved} fix_commits=${data.fix_commits.length}`,
+        // F1 修复：detail.candidate_sha 是 ready-check ③ 审查交卷绑定的读取点
+        detail: {
+          group_id: group,
+          rounds: data.rounds,
+          findings_total: data.findings_total,
+          unresolved: data.unresolved,
+          fix_commits: data.fix_commits.length,
+          candidate_sha: data.candidate_sha,
+        },
       });
     } else {
       g.verify.status = data.integration_review.status;
@@ -973,7 +1035,13 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
       cur.events.push({
         type: 'delivery',
         at: now,
-        detail: `group=${group} 验收交卷 integration_review=${data.integration_review.status}: ${data.integration_review.notes}`,
+        // F1 修复：验收交卷通常是验收组最后一条 delivery——detail.candidate_sha 供 ready-check ③ 绑定
+        detail: {
+          group_id: group,
+          integration_review_status: data.integration_review.status,
+          notes: data.integration_review.notes,
+          candidate_sha: data.candidate_sha,
+        },
       });
     }
     return { ...cur, version: expected + 1 };
