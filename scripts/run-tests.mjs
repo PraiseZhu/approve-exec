@@ -46,6 +46,25 @@ export function checkEnumeration(testsDir, testFiles) {
   return { missing, unenumerated };
 }
 
+// 测试隔离：子进程树内禁止 git 签名（fixture 仓首提交）。
+// 本机全局 commit.gpgsign=true，多个 fixture git 仓同时 commit 时继承签名，高负载下
+// gpg-agent 瞬时内存分配失败（"gpg failed to sign the data ... Cannot allocate memory"）
+// → fixture 首提交失败 → 测试假红，且失败集在多轮间漂移（不同 gap 变体轮流红），
+// 曾把 flake 误判成真实缺陷。经 GIT_CONFIG_* 环境变量（git 官方进程级配置注入）仅关闭
+// 测试子进程树内的签名：不改任何 git 配置文件、不影响真实仓库的签名策略。
+// 调用方若已注入 GIT_CONFIG_*（含 COUNT），原样保留、我们的条目追加在既有索引之后
+// （git 按序应用，靠后者覆盖前者，保证签名必然关闭）。
+export function buildChildEnv(env) {
+  const childEnv = { ...env };
+  // 已有 COUNT 时必须追加而非覆盖，否则调用方的 git 配置注入会丢；
+  // 非数字 COUNT 在 git 侧本就是硬错误（invalid count），归 0 只保证我们的注入仍可用
+  const existing = /^\d+$/.test(env.GIT_CONFIG_COUNT ?? '') ? Number(env.GIT_CONFIG_COUNT) : 0;
+  childEnv.GIT_CONFIG_COUNT = String(existing + 1);
+  childEnv[`GIT_CONFIG_KEY_${existing}`] = 'commit.gpgsign';
+  childEnv[`GIT_CONFIG_VALUE_${existing}`] = 'false';
+  return childEnv;
+}
+
 function main() {
   const testsDir = process.env.RUN_TESTS_DIR ? resolve(process.env.RUN_TESTS_DIR) : join(root, 'tests');
 
@@ -67,7 +86,7 @@ function main() {
   const testFiles = TEST_FILES.map((f) => join(testsDir, f));
   console.log(`run-tests: 显式枚举 ${testFiles.length} 个测试文件\n`);
   for (const file of testFiles) {
-    const result = spawnSync(process.execPath, ['--test', file], { stdio: 'inherit' });
+    const result = spawnSync(process.execPath, ['--test', file], { stdio: 'inherit', env: buildChildEnv(process.env) });
     if (result.status === null) {
       // 子进程被信号杀死（异常），与"测试失败"区分：非 0 收束，不静默
       process.exitCode = 1;
