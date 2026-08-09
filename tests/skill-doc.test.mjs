@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const skillDoc = readFileSync(join(root, 'SKILL.md'), 'utf8');
+const defaults = JSON.parse(readFileSync(join(root, 'config/defaults.json'), 'utf8'));
 const defaultsKeys = Object.keys(defaults);
 
 // 十五段精确 marker（段标题与 SKILL.md 逐字一致；缺失/改名即红）
