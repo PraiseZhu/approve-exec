@@ -20,6 +20,7 @@ export const TEST_FILES = [
   'config.test.mjs',
   'graph.test.mjs',
   'mem-probe.test.mjs',
+  'ready-check.test.mjs',
   'run-tests.test.mjs',
   'selfcheck.test.mjs',
   'skill-doc.test.mjs',
