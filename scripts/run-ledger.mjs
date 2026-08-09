@@ -480,12 +480,92 @@ function requireNow(now, what) {
   return now;
 }
 
+// ---------- manifest 顶层与 packet 完整性判据（init 建台账前与 render-packet 出包前共用） ----------
+// SKILL.md ② 段：manifest 缺 waves/dispatch/receipts 任一、或 packet 缺五要素任一 → 不开跑。
+// 「不开跑」的机器语义 = init 就该拒（失败不写台账，连空台账都不留），不是「先开跑、出包时才炸」。
+// 同一份判据在 init 与 render-packet 共用：同一判据两份实现必然漂移（写盘锁、集合比对都栽过），
+// init 放行过的东西 render-packet 一定放行，反之亦然。
+const PACKET_REQUIRED_FIELDS = Object.freeze([
+  'scs_inline', 'allowed_paths', 'verify_cmds', 'forbidden', 'submit_format',
+]);
+
+/**
+ * packet 完整性判据（render-packet 出包前与 init 建台账前共用同一份实现）。包含：
+ *   ① PACKET_REQUIRED_FIELDS 五要素：存在性 + 类型。「空缺」= 键缺失/类型不符；空数组对
+ *      allowed_paths/forbidden 是合法表达（验收组不改代码 → 空可写范围），scs_inline/verify_cmds
+ *      空数组视为空缺；
+ *   ② scs_inline id 契约（非空字符串 + 无重复，F-J）；
+ *   ③ needs_three_review 布尔 exact 契约（pr-submit-gate 门禁透传：缺失/非布尔一律拒，
+ *      缺省即拒，禁止默认成 false——默认 false 会让功能 PR 悄悄绕过 submit-pr 三审门禁）。
+ * 任一条不过 → PACKET_INCOMPLETE（exit 2 点名）。
+ */
+function assertPacketComplete(packet, what) {
+  for (const field of PACKET_REQUIRED_FIELDS) {
+    const v = packet[field];
+    if (v === undefined || v === null) {
+      throw new LedgerError('PACKET_INCOMPLETE', `${what}：packet.${field} 空缺（fail-closed，缺一不开跑）`);
+    }
+    if (field === 'scs_inline' && (!Array.isArray(v) || v.length === 0)) {
+      throw new LedgerError('PACKET_INCOMPLETE', `${what}：packet.scs_inline 必须是非空数组`);
+    }
+    if (field === 'verify_cmds' && (!Array.isArray(v) || v.length === 0)) {
+      throw new LedgerError('PACKET_INCOMPLETE', `${what}：packet.verify_cmds 必须是非空数组`);
+    }
+    if ((field === 'allowed_paths' || field === 'forbidden') && !Array.isArray(v)) {
+      throw new LedgerError('PACKET_INCOMPLETE', `${what}：packet.${field} 必须是数组（空数组合法）`);
+    }
+    if (field === 'submit_format' && (typeof v !== 'string' || v.trim().length === 0)) {
+      throw new LedgerError('PACKET_INCOMPLETE', `${what}：packet.submit_format 必须是非空字符串`);
+    }
+  }
+  assertPacketScIds(packet, what); // F-J：id 契约（出包/交卷/init 三道关共用同一份实现）
+  if (typeof packet.needs_three_review !== 'boolean') {
+    const shown = packet.needs_three_review === undefined ? '缺失' : JSON.stringify(packet.needs_three_review);
+    throw new LedgerError(
+      'PACKET_INCOMPLETE',
+      `${what}：packet.needs_three_review 必须是布尔（true=功能 PR 交付后须走 submit-pr 三审 / false=非功能性免三审）；当前: ${shown}（fail-closed，禁止默认成 false）`
+    );
+  }
+}
+
+/**
+ * manifest 顶层 exact 在场契约（init 入口一次性校验，失败不写台账）：
+ *   dispatch 键必须在场且是含非空 packets 数组的对象；receipts 键必须在场（可空数组——
+ *   语义是「已考虑过这一项」，与 task-priority 侧 context_refs 同理；内容契约由 receipts
+ *   schema 断言另行把关，此处只管在场）；waves 的非空数组检查在 initLedger 内既有逻辑。
+ *   每个 dispatch.packets[] 过 assertPacketComplete（与 render-packet 同一份判据）。
+ */
+function assertManifestComplete(manifest) {
+  for (const key of ['dispatch', 'receipts']) {
+    if (!(key in manifest)) {
+      throw new LedgerError('MANIFEST', `manifest 缺 ${key} 键（顶层要素 exact 在场契约，fail-closed 不开跑）`);
+    }
+  }
+  const dispatch = manifest.dispatch;
+  if (dispatch === null || typeof dispatch !== 'object' || Array.isArray(dispatch)) {
+    throw new LedgerError('MANIFEST', 'manifest.dispatch 必须是对象');
+  }
+  if (!Array.isArray(dispatch.packets) || dispatch.packets.length === 0) {
+    throw new LedgerError('MANIFEST', 'manifest.dispatch.packets 必须是非空数组（禁止空派工计划，fail-closed 不开跑）');
+  }
+  for (const packet of dispatch.packets) {
+    if (packet === null || typeof packet !== 'object' || Array.isArray(packet)) {
+      throw new LedgerError('MANIFEST', 'manifest.dispatch.packets 元素必须是对象');
+    }
+    const gid = typeof packet.group_id === 'string' && packet.group_id.length > 0 ? packet.group_id : '<未命名>';
+    assertPacketComplete(packet, `packet(${gid}) init 校验`);
+  }
+}
+
 // ---------- init：从 task-manifest.json 派生台账 ----------
 export function initLedger({ ledgerPath, manifestPath, runId, now }) {
   requireNow(now, 'init');
   if (!manifestPath) throw new LedgerError('ARGS', 'init 缺 --manifest <path>');
   if (!runId) throw new LedgerError('ARGS', 'init 缺 --run-id <id>');
   const manifest = readManifest(manifestPath);
+  // 顶层三要素 + 逐 packet 完整性在 init 入口一次性校验（SKILL.md ② 段「缺任一 → 不开跑」）。
+  // 校验失败不写台账——连空台账都不留（不能「先开跑、出包时才炸」，中间态污染状态机）。
+  assertManifestComplete(manifest);
   if (!Array.isArray(manifest.waves) || manifest.waves.length === 0) {
     throw new LedgerError('MANIFEST', 'manifest.waves 必须是非空数组（禁止空波次计划，F-E fail-closed）');
   }
@@ -997,10 +1077,6 @@ export function setState({
 }
 
 // ---------- render-packet：五项 fail-closed + pr-submit-gate 门禁透传 + 执行/验收双模板 ----------
-const PACKET_REQUIRED_FIELDS = Object.freeze([
-  'scs_inline', 'allowed_paths', 'verify_cmds', 'forbidden', 'submit_format',
-]);
-
 export function renderPacket({ ledgerPath, group, manifestPath }) {
   const ledger = readLedger(ledgerPath);
   // F-D 内容绑定入口：消费 manifest 先校 core hash。--manifest 覆盖只接受 resolve 后
@@ -1012,41 +1088,9 @@ export function renderPacket({ ledgerPath, group, manifestPath }) {
   const wave = findGroupWave(ledger, group);
   const wg = wave.groups.find((g) => g.group_id === group);
 
-  // 五项 fail-closed（对齐 goal 场景 C 清单）：缺一不出包。
-  // 「空缺」= 键缺失/类型不符；空数组对 allowed_paths/forbidden 是合法表达
-  // （验收组不改代码 → 空可写范围），scs_inline/verify_cmds 空数组视为空缺。
-  for (const field of PACKET_REQUIRED_FIELDS) {
-    const v = packet[field];
-    if (v === undefined || v === null) {
-      throw new LedgerError('PACKET_INCOMPLETE', `出包前校验失败：packet.${field} 空缺（fail-closed，缺一不出包）`);
-    }
-    if (field === 'scs_inline' && (!Array.isArray(v) || v.length === 0)) {
-      throw new LedgerError('PACKET_INCOMPLETE', '出包前校验失败：packet.scs_inline 必须是非空数组');
-    }
-    if (field === 'verify_cmds' && (!Array.isArray(v) || v.length === 0)) {
-      throw new LedgerError('PACKET_INCOMPLETE', '出包前校验失败：packet.verify_cmds 必须是非空数组');
-    }
-    if ((field === 'allowed_paths' || field === 'forbidden') && !Array.isArray(v)) {
-      throw new LedgerError('PACKET_INCOMPLETE', `出包前校验失败：packet.${field} 必须是数组（空数组合法）`);
-    }
-    if (field === 'submit_format' && (typeof v !== 'string' || v.trim().length === 0)) {
-      throw new LedgerError('PACKET_INCOMPLETE', '出包前校验失败：packet.submit_format 必须是非空字符串');
-    }
-  }
-  // F-J：packet.scs_inline 的 id 契约（非空字符串 + 无重复）——出包也拒，
-  // 与 record-delivery 的 assertScIdSet 同一道关，双入口 fail-closed。
-  assertPacketScIds(packet, `组 ${group} 出包校验`);
-
-  // pr-submit-gate 传导（sc-p2b 原始设计预期，SKILL.md 第⑧段）：needs_three_review
-  // 判定结论从 manifest packet 透传进派工包。布尔 exact 契约：缺失/非布尔一律拒——
-  // 缺省即拒，禁止默认成 false（默认 false 会让功能 PR 悄悄绕过 submit-pr 三审门禁）。
-  if (typeof packet.needs_three_review !== 'boolean') {
-    const shown = packet.needs_three_review === undefined ? '缺失' : JSON.stringify(packet.needs_three_review);
-    throw new LedgerError(
-      'PACKET_INCOMPLETE',
-      `出包前校验失败：packet.needs_three_review 必须是布尔（true=功能 PR 交付后须走 submit-pr 三审 / false=非功能性免三审）；当前: ${shown}（fail-closed，禁止默认成 false）`
-    );
-  }
+  // 完整性判据与 init 建台账前共用同一份实现（assertPacketComplete，含五要素存在性+类型、
+  // scs_inline id 契约与 needs_three_review 布尔契约）：缺一不出包，与 init 同判据同拒绝。
+  assertPacketComplete(packet, `组 ${group} 出包校验`);
 
   // 身份字段单一来源是台账：只认台账值，不接受 CLI 覆盖（见 CLI 解析层）
   const { worktree, branch, base } = wg;
