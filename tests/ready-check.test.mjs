@@ -394,6 +394,18 @@ test('F-O: manifest+verdict 都删 → ledger-partition + verdict-anchors 双 ga
   expectGaps(runReady(repo, env), ['ledger-partition', 'verdict-anchors', 'verdict-anchors'], 'manifest 缺失不得短路后项');
 });
 
+// receipts 在场契约（缺陷 #2 出口门侧回归守卫）：receipts 被 core hash 黑名单剔除，删它 hash 不变——
+// 出口门不能只靠 hash 兜底。ready-check 消费 manifest 必须走与 run-ledger 同一份判据（readManifest），
+// 不合约的 manifest（含删 receipts）转 gap 点名，不得输出 READY。
+test('receipts 在场契约: 全量凭据下删 manifest.receipts 键 → exit 2 gap ledger-partition+verdict-anchors，gap 点名 receipts（出口门同判据）', (t) => {
+  if (process.env.RC_MUTATION_CHILD === '1') { t.skip('变异子套件运行跳过本用例（与 ready-check 既有变异无关，防污染其失败集契约）'); return; }
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, (p) => { delete p.manifest.receipts; });
+  const res = runReady(repo, env);
+  expectGaps(res, ['ledger-partition', 'verdict-anchors'], '删 receipts 键必须被拒（receipts 在场契约收口于 readManifest，ready-check 同判据）');
+  assert.match(res.stderr, /receipts/, 'gap 必须点名 receipts（可解析但不合约，不得笼统说「不可解析」）');
+});
+
 test('gap4: e2e 报告 status=fail → exit 2 gap e2e-report', (t) => {
   const repo = makeRepo(t);
   const env = buildEnv(t, repo, (p) => {
@@ -721,8 +733,8 @@ const MUTATION_PREDICTIONS = [
     to: '&& false) {',
     red: ['F-N: dispatch 事件 group_id 换成未知 gX（数量仍为 2）→ exit 2 gap ledger-partition',
           'F-N: manifest packet group_id 换成未知 gX → exit 2 gap ledger-partition'] },
-  { id: '变异⑦', label: 'F-O 不可解析输入不提前 exit', from: 'const manifest = readJsonOrNull(args.manifest);',
-    to: 'const manifest = readJsonOrNull(args.manifest); if (!ledger || !manifest) { console.error(\'GAP: ledger-partition: 前置输入不可解析（旧版提前 exit 行为）\'); process.exit(2); }',
+  { id: '变异⑦', label: 'F-O 不可解析输入不提前 exit', from: 'const ledger = readJsonOrNull(args.ledger);\n  // manifest 经 readManifest 统一收口（receipts 在场/形状契约与 run-ledger 全部消费入口同判据）：\n  // 不合约/不可解析 → 转 gap 占位（F-O：不提前 exit，后项照常运行），错误原文随 manifestError\n  // 进 gap detail——「可解析但不合约」不得被笼统说成「不可解析」。\n  let manifest = null;\n  let manifestError = null;\n  try { manifest = readManifest(args.manifest); } catch (err) { manifestError = err.message; }',
+    to: 'const ledger = readJsonOrNull(args.ledger);\n  const manifest = readJsonOrNull(args.manifest);\n  let manifestError = null;\n  if (!ledger || !manifest) { console.error(\'GAP: ledger-partition: 前置输入不可解析（旧版提前 exit 行为）\'); process.exit(2); }',
     red: ['F-O: ledger+e2e 都删 → 三项 gap 同时点名（不跳过后项）',
           'F-O: manifest+verdict 都删 → ledger-partition + verdict-anchors 双 gate 点名'] },
   { id: '变异⑨', label: '→ready receipt 写入（成功路径铸凭据）', from: 'const receiptError = writeReadyReceipt(args.receipt, { candidateSha: headSha, ledgerVersion: ledger.version, checkedAt: args.now });',
