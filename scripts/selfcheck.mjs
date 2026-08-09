@@ -10,7 +10,8 @@
 //   ⑤ --live 模式追加两处接线检查：
 //      a. skills/claude-active/approve-exec symlink 指向本仓 checkout 根（realpath 含 SKILL.md
 //         + git common dir 同源 + show-toplevel 严格等于 target 自身——嵌套子目录不能冒充仓根）；
-//      b. ~/.claude/rules/skill-trigger-scan.md 含「批准执行」触发行（整行逐字匹配）。
+//      b. config.skillTriggerScanPath 指向的文件含「批准执行」触发行（整行逐字匹配；
+//         路径来自 config 而非硬编码——改动触发词规则文件位置只改 config，不改脚本）。
 //
 // 输出与退出：逐项 PASS/FAIL 行；任一 FAIL → 汇总点名（exit 2）；全过 → exit 0。
 //
@@ -28,7 +29,7 @@ const AGENTS = ['codex', 'claude-code'];
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 const ROUTES = ['execute', 'review', 'e2e', 'pr_merge'];
 // sc-p2c change ② 的触发行原文（整行逐字匹配，防描述被改写后入口失效）
-const TRIGGER_LINE = '| 批准执行 | `approve-exec` | 直接执行不确认。只吃 task-priority final manifest，缺输入 fail-closed 指路 |';
+export const TRIGGER_LINE = '| 批准执行 | `approve-exec` | 直接执行不确认。只吃 task-priority final manifest，缺输入 fail-closed 指路 |';
 // LIVE_LINK 推导：从 config.goalSkillRoot 派生 —— dirname(goalSkillRoot) 即 skills/claude-active 目录，
 // approve-exec 与 goal 同处该目录（与 task-priority 同款：skills 目录内 symlink）。
 // 禁止按仓库在磁盘上的嵌套深度猜层级（'../..' 相对 root）：主 checkout（approve-exec-src）与 worktree
@@ -219,12 +220,15 @@ export function checkLiveSymlink(liveLink, mineRoot, items) {
   items.push({ id: 'live-symlink', ok: true, detail: `${liveLink} → ${target}（本仓 checkout 根）` });
 }
 
-function checkTriggerLine(items) {
+// 路径来自 config.skillTriggerScanPath（配置键化：触发词规则文件位置变更只改 config，
+// 脚本不写死用户主目录下的具体路径；~ 前缀经 expandHome 展开，与 runLedgerDir 同款处理）。
+// 导出以便测试注入任意路径（组B-6 用不存在路径/含触发行临时文件正反验证读取点）。
+export function checkTriggerLine(config, items) {
   if (!process.env.HOME) {
-    items.push({ id: 'live-trigger-line', ok: false, detail: 'HOME 未设置，无法定位 ~/.claude/rules/skill-trigger-scan.md' });
+    items.push({ id: 'live-trigger-line', ok: false, detail: 'HOME 未设置，无法展开 ~ 路径' });
     return;
   }
-  const file = expandHome('~/.claude/rules/skill-trigger-scan.md');
+  const file = expandHome(config.skillTriggerScanPath);
   let text;
   try {
     text = readFileSync(file, 'utf8');
@@ -252,7 +256,7 @@ function main() {
     console.error(`selfcheck: config 不可读或不可解析（${configPath}）: ${e.message}`);
     process.exit(2);
   }
-  const requiredKeys = ['routingPath', 'goalSkillRoot', 'orcaFanoutScriptsRoot', 'runLedgerDir'];
+  const requiredKeys = ['routingPath', 'goalSkillRoot', 'orcaFanoutScriptsRoot', 'runLedgerDir', 'skillTriggerScanPath'];
   const missingKeys = requiredKeys.filter((k) => typeof config[k] !== 'string' || config[k].length === 0);
   if (missingKeys.length > 0) {
     console.error(`selfcheck: config 缺必备路径键: ${missingKeys.join(', ')}`);
@@ -269,7 +273,7 @@ function main() {
   checkRunLedgerDir(config, items);
   if (args.live) {
     checkLiveSymlink(deriveLiveLink(config, root), root, items);
-    checkTriggerLine(items);
+    checkTriggerLine(config, items);
   }
 
   for (const item of items) {

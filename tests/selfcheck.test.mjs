@@ -20,7 +20,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { deriveLiveLink, checkLiveSymlink } from '../scripts/selfcheck.mjs';
+import { deriveLiveLink, checkLiveSymlink, checkTriggerLine, TRIGGER_LINE } from '../scripts/selfcheck.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const scriptPath = join(root, 'scripts/selfcheck.mjs');
@@ -144,6 +144,35 @@ test('组B-1: --live 接线两处（symlink 指向本仓 + 触发行）→ exit 
   const text = out(r);
   assert.ok(text.includes('PASS: live-symlink'), `live-symlink 应 PASS，实际:\n${text}`);
   assert.ok(text.includes('PASS: live-trigger-line'), `live-trigger-line 应 PASS，实际:\n${text}`);
+});
+
+// 回归锚点：live-trigger-line 读取的路径来自 config.skillTriggerScanPath（配置键化，非硬编码）。
+// 正向：注入指向含触发行临时文件的 config → PASS；负向：注入不存在路径 → FAIL 且点名该路径。
+// 变异反证：checkTriggerLine 改回硬编码 ~/.claude/rules/skill-trigger-scan.md（忽略 config）→
+// 负向用例读取真实文件（存在且含触发行）恒 PASS，`!it1.ok` 断言红——本用例恰红 1 条。
+// 子套件跳过（同组B-1/组B-3 模式）：F-K 变异子套件的失败集契约只针对 main guard，本用例与 F-K
+// 无关；不跳过会让「父树在途的其他变异（如 checkTriggerLine 硬编码）」被拷贝进子套件 → 污染预测红集。
+test('组B-6: checkTriggerLine 从 config.skillTriggerScanPath 读路径（非硬编码）', (t) => {
+  if (process.env.SC_MUTATION_CHILD === '1') { t.skip('子套件运行跳过本用例（与 F-K 变异无关，防污染其失败集契约）'); return; }
+  const missing = '/nonexistent/skill-trigger-scan.md';
+  const items1 = [];
+  checkTriggerLine({ skillTriggerScanPath: missing }, items1);
+  const it1 = items1.find((i) => i.id === 'live-trigger-line');
+  assert.ok(it1 && !it1.ok, '注入不存在路径必须 FAIL');
+  assert.ok(it1.detail.includes(missing), `必须点名注入的路径（证明从 config 读），实际: ${it1.detail}`);
+
+  const dir = mkdtempSync(join(tmpdir(), 'selfcheck-trigger-'));
+  try {
+    const good = join(dir, 'skill-trigger-scan.md');
+    writeFileSync(good, `${TRIGGER_LINE}\n`, 'utf8');
+    const items2 = [];
+    checkTriggerLine({ skillTriggerScanPath: good }, items2);
+    const it2 = items2.find((i) => i.id === 'live-trigger-line');
+    assert.ok(it2 && it2.ok, '注入含触发行文件必须 PASS');
+    assert.ok(it2.detail.includes(good), `PASS 详情应点名注入路径，实际: ${it2.detail}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // 回归锚点：LIVE_LINK 推导不依赖仓库在磁盘上的嵌套深度。
