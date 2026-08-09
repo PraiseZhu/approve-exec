@@ -1,0 +1,18 @@
+{
+  "_readme": "selfcheck 测试用缺档夹具：e2e 档缺失（其余三档齐全且枚举合法）。夹具注入仅测试用（--routing-file），预期 exit 2 且输出点名 e2e 档缺失。",
+  "execute": {
+    "agent": "claude-code",
+    "model": "test-model-execute",
+    "effort": "max"
+  },
+  "review": {
+    "agent": "codex",
+    "model": "test-model-review",
+    "effort": "xhigh"
+  },
+  "pr_merge": {
+    "agent": "claude-code",
+    "model": "test-model-merge",
+    "effort": "medium"
+  }
+}
