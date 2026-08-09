@@ -749,11 +749,10 @@ function rejectWithEvent({ ledgerPath, expected, now, group, reason, code, messa
 }
 
 /**
- * 组级可写性守卫（① 修复点）：所有非状态写入口（--identity / record-delivery）复用同一判据。
- * GROUP_TRANSITIONS.verified = [] 只挡「状态跳转」一条路径；身份写入与交卷入账不是跳转，
- * 旧实现完全绕过——终态组的 worktree/tip_sha/verify.status 等字段仍可被改写（重放攻击的
- * 第二种形态：不改状态改内容）。守卫补上这条漏网路径：verified 是组级终态（不可回退），
- * 任何字段写入都拒。
+ * 组级可写性守卫（① 修复点）：非状态写入口之一——身份写入（--identity）。
+ * GROUP_TRANSITIONS.verified = [] 只挡「状态跳转」一条路径；身份写入不是跳转，
+ * 旧实现完全绕过——终态组的 worktree/branch/base 仍可被改写（重放攻击的第二形态：
+ * 不改状态改内容）。verified 是组级终态（不可回退），任何身份写入都拒。
  * 与 rejectWithEvent 不同：拒写不落事件（纯 throw）——验收口径要求被拒后台账字节不变
  * （同 phase=ready 冻结的 FROZEN 路径：冻结后不落事件）。
  */
@@ -765,6 +764,23 @@ function assertGroupWritable(g, what) {
     );
   }
 }
+
+// ① 升级（方向 B）：交卷生命周期表——每类交卷只允许在其对应组阶段入账。
+// 与现有状态机核对结论（含 e2e-dryrun 真实验收链，逐条验证后修正）：
+//   exec  （写 tip_sha）   ：worker 在 dispatched 时交卷（lead 尚未标 delivered）；
+//                           重派链 failed→pending→dispatched 后同样要能重新交卷 → dispatched/delivered
+//   review（写 rounds/unresolved）：审查在组 delivered 后（tip_sha 已定，detail.tip_sha 才有绑定对象）→ 仅 delivered
+//   verify（写 status/evidence_ref）：执行组在 review_pass 时交卷（→verified 凭据时点）；
+//                           验收组（kind=verify）在 delivered 后立即出 verdict 是其交付物
+//                           （e2e-dryrun verifyGroupToVerified：delivered → verify 交卷 → review_pass → verified）→ delivered/review_pass
+// 方向 B 漏洞：pending 组可先提交合法 verify payload（evidence_ref 指向真实存在的 delivery 事件，
+// 存在性校验挡不住），随后状态机一路走绿——验收证据可在组派工前预写。
+// 故校验必须从「事件存在性」升级为「时序合法性」：类别 × 组状态矩阵，verified/failed 一律拒。
+const DELIVERY_LIFECYCLE = Object.freeze({
+  exec: ['dispatched', 'delivered'],
+  review: ['delivered'],
+  verify: ['delivered', 'review_pass'],
+});
 
 export function setState({
   ledgerPath, now, group, to, workerLabel, tipSha, event,
@@ -813,10 +829,13 @@ export function setState({
     if (!isAbsolute(parsed.worktree)) {
       throw new LedgerError('ARGS', `--identity.worktree 必须是绝对路径（当前: ${parsed.worktree}）`);
     }
-    // ① 修复点：verified 是组级终态，身份写入不得绕过状态机（终态组身份只读）
+    // ① 修复点：verified 是组级终态，身份写入不得绕过状态机（终态组身份只读）。
+    // 读侧先拒（早失败）；锁内复核兜底（读后写到锁内之间状态可能被并发改写，
+    // 同一判据同一函数，两份调用不漂移）。
     assertGroupWritable(findGroup(ledger, group), '身份写入（--identity）');
     return writeLedgerAtomic(ledgerPath, expected, (cur) => {
       const g = findGroup(cur, group);
+      assertGroupWritable(g, '身份写入（--identity）'); // 锁内复核当前状态
       g.worktree = parsed.worktree;
       g.branch = parsed.branch;
       g.base = parsed.base;
@@ -985,6 +1004,14 @@ export function setState({
       const refEvent = ledger.events[refIdx];
       if (!refEvent || refEvent.type !== 'delivery') {
         return `缺失前置：→verified 要求 evidence_ref ${g.verify.evidence_ref} 可解析到 delivery 事件（事件 ${refIdx} 不存在或非 delivery，凭据伪造拒）`;
+      }
+      // ① 升级加固：凭据必须绑定同组、同类的 verify delivery——存在性校验挡不住
+      // 「他组 delivery 事件 / 非验收类 delivery」被引用为凭据（方向 B 家族变体）。
+      if (refEvent.detail?.group_id !== group) {
+        return `缺失前置：→verified 要求 evidence_ref ${g.verify.evidence_ref} 指向本组（${group}）的 delivery 事件（当前指向组 ${refEvent.detail?.group_id ?? '?'}，凭据伪造拒）`;
+      }
+      if (typeof refEvent.detail?.integration_review_status !== 'string') {
+        return `缺失前置：→verified 要求 evidence_ref ${g.verify.evidence_ref} 指向验收（verify）类 delivery 事件（detail 缺 integration_review_status，凭据伪造拒）`;
       }
     }
     if (to === 'failed') {
@@ -1379,9 +1406,6 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
   const expected = ledger.version;
   const wave = findGroupWave(ledger, group);
   const wg = wave.groups.find((g) => g.group_id === group);
-  // ① 修复点：交卷入账是非状态写入口（exec/review/verify 三类都改写组字段），
-  // verified 终态组任何交卷都不得入账（绕过状态机的第二种形态，与 --identity 同一守卫）
-  assertGroupWritable(wg, '交卷入账（record-delivery）');
   // F-D 内容绑定入口：manifest 已变（相对台账记录）时交卷不得入账——禁止拿旧结论/旧 manifest 干活
   const manifest = readManifest(ledger.manifest_path);
   assertManifestBound(ledger, manifest, 'record-delivery');
@@ -1395,6 +1419,17 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
   // 校验全部通过才原子写盘；任何失败路径都不触碰原台账（坏交卷后台账字节不变）
   return writeLedgerAtomic(ledgerPath, expected, (cur) => {
     const g = findGroup(cur, group);
+    // ① 升级（方向 B）：生命周期门在锁内复核当前组状态（读后写到锁内之间状态可能被并发
+    // 改写——不能拿读侧 wg 一次判定）。payload schema 校验已在外层完成，此处只验时序：
+    // 类别 × 状态矩阵（DELIVERY_LIFECYCLE），verified/failed 一律拒。锁内 throw 不落盘
+    // （字节不变），与 ready 冻结 FROZEN 同风格。
+    const allowedStates = DELIVERY_LIFECYCLE[kind];
+    if (!allowedStates.includes(g.state)) {
+      throw new LedgerError(
+        'ILLEGAL_TRANSITION',
+        `组 ${group} 状态 ${g.state} 不允许 ${kind} 类交卷入账（生命周期门：${kind} 类只允许在 ${allowedStates.join('/')} 状态入账；交卷类别必须匹配组阶段，防验收凭据预写/终态改写）`
+      );
+    }
     if (kind === 'exec') {
       g.tip_sha = data.tip_sha;
       cur.events.push({
