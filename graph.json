@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "phases": {
+    "E": {
+      "route": "execute",
+      "agent_pin": "claude-code",
+      "dispatch": "goal-scenario-c"
+    },
+    "R": {
+      "route": "execute",
+      "agent_pin": "claude-code",
+      "command": "/code-review high --fix",
+      "max_rounds_key": "reviewMaxRounds"
+    },
+    "V": {
+      "route": "e2e",
+      "independence": "non-author"
+    },
+    "T": {
+      "route": "e2e"
+    },
+    "P": {
+      "route": "pr_merge"
+    }
+  }
+}
