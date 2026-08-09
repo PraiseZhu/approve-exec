@@ -10,9 +10,13 @@
 // 2. E/R 两席的 agent_pin 必为 claude-code：
 //    D0：goal skill 仅 claude-code 会话可加载（codex worker 加载不到 SKILL.md）；
 //    D3：/code-review high --fix 是 claude-code 内置命令。
+//    agent_pin 是 agent 家族钉：任何席位出现 agent_pin 都只允许 claude-code
+//    （全表唯一合法值），且必须与所在席位 route 档的 agent 一致 ——
+//    route=execute 的 E/R 席依赖 execute 档 agent=claude-code 的现状，
+//    若 routing.json 把 execute 档 agent 改成 codex，agent_pin 即失效，必须红。
 // 3. graph 内不出现任何具体模型 ID（deepseek/gpt-/claude- 之类字样，禁复述）。
-//    agent_pin 字段豁免：其值恰为 "claude-code"，且已被断言 2 锁死 ——
-//    agent_pin 只允许 claude-code，其它字段出现任何模型前缀即红。
+//    检测范围是 phases 全部席位（含未来新增席位），不是白名单五席 ——
+//    多余席位带模型 ID 同样违反「graph 内不出现模型 ID」的禁复述意图。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -44,22 +48,40 @@ function validateGraph(g) {
   if (!g.phases || typeof g.phases !== 'object' || Array.isArray(g.phases)) {
     return { ok: false, reason: '缺 phases 对象' };
   }
+  // 白名单五席必须全部存在（防删席/改名漂移）
   for (const seat of SEATS) {
-    const s = g.phases[seat];
-    if (!s || typeof s !== 'object') return { ok: false, reason: `缺席位 ${seat}` };
+    if (!g.phases[seat] || typeof g.phases[seat] !== 'object') {
+      return { ok: false, reason: `缺席位 ${seat}` };
+    }
+  }
+  // 全席位校验：遍历 phases 全部席位（含未来新增席位），不缩在白名单五席上 ——
+  // 任何席位带模型 ID 都违反禁复述，多余席位同样必须满足席位约束。
+  for (const [seat, s] of Object.entries(g.phases)) {
+    if (!s || typeof s !== 'object' || Array.isArray(s)) {
+      return { ok: false, reason: `席位 ${seat} 必须是对象` };
+    }
     if (typeof s.route !== 'string' || s.route.length === 0) {
       return { ok: false, reason: `${seat}.route 必须是非空字符串` };
     }
     if (!routingKeys.includes(s.route)) {
       return { ok: false, reason: `${seat}.route=${s.route} 不在 routing.json 顶层 key 集 ${routingKeys.join(',')} 内（subset 判定失败）` };
     }
+    if (s.agent_pin != null && s.agent_pin !== 'claude-code') {
+      return { ok: false, reason: `${seat}.agent_pin 必须为 claude-code（当前 ${s.agent_pin}）——agent_pin 是 agent 家族钉，全表唯一合法值` };
+    }
     if (seat === 'E' || seat === 'R') {
       if (s.agent_pin !== 'claude-code') {
         return { ok: false, reason: `${seat}.agent_pin 必须为 claude-code（当前 ${s.agent_pin}）——goal skill 仅 claude-code 可加载 / /code-review 为 claude-code 内置` };
       }
+      // agent_pin 钉的 agent 家族必须与 route 档的 agent 一致：
+      // E/R 席走 execute 档依赖 execute 档 agent=claude-code，档 agent 一变 agent_pin 即失效。
+      const routeAgent = routing[s.route]?.agent;
+      if (routeAgent !== 'claude-code') {
+        return { ok: false, reason: `${seat}.agent_pin=claude-code 与其 route=${s.route} 档的 agent=${routeAgent ?? '缺失'} 不一致——按档派工出的 agent 与 agent_pin 矛盾` };
+      }
     }
     for (const [field, value] of Object.entries(s)) {
-      if (field === 'agent_pin') continue; // 豁免：值恰为 claude-code，由上面的专门断言锁死
+      if (field === 'agent_pin') continue; // 已在上方锁死唯一合法值 claude-code，无需再过模型前缀
       if (typeof value === 'string' && MODEL_ID_PATTERN.test(value)) {
         return { ok: false, reason: `${seat}.${field} 出现模型 ID 字样 "${value}"（禁复述，模型派工时现读 routing）` };
       }
@@ -121,4 +143,33 @@ test('反证夹具：graph 内出现 "gpt-" 字样 → 断言红', () => {
   const result = validateGraph(bad);
   assert.equal(result.ok, false, '内嵌 gpt- 模型 ID 必须被拒');
   assert.ok(result.reason.includes('模型 ID'), `拒绝理由应指向禁复述，实际: ${result.reason}`);
+});
+
+test('反证夹具：非 E/R 席 agent_pin 出现坏值（codex）→ 断言红', () => {
+  // 曾盲区：agent_pin 字段无条件豁免 + 断言 2 只锁 E/R 两席，
+  // V 席 agent_pin="codex" 会同时绕过禁复述检测与专门断言。
+  const bad = structuredClone(graph);
+  bad.phases.V.agent_pin = 'codex';
+  const result = validateGraph(bad);
+  assert.equal(result.ok, false, '非 E/R 席 agent_pin=codex 必须被拒');
+  assert.ok(result.reason.includes('agent_pin'), `拒绝理由应指向 agent_pin，实际: ${result.reason}`);
+});
+
+test('反证夹具：phases 多余席位带模型 ID → 断言红', () => {
+  // 曾盲区：禁复述检测只遍历 SEATS 白名单，多余席位（X）带模型 ID 会静默通过。
+  const bad = structuredClone(graph);
+  bad.phases.X = { route: 'e2e', model: 'gpt-5.6-luna' };
+  const result = validateGraph(bad);
+  assert.equal(result.ok, false, '多余席位内嵌模型 ID 必须被拒');
+  assert.ok(result.reason.includes('模型 ID'), `拒绝理由应指向禁复述，实际: ${result.reason}`);
+});
+
+test('反证夹具：E 席 route 改到 agent=codex 的档（review）→ agent_pin 一致性红', () => {
+  // agent_pin=claude-code 与 route 档 agent=codex 矛盾：按档派工出的 agent 不是 claude-code，
+  // goal skill（E 席）根本加载不到。route 值本身在 subset 内，只有一致性断言能抓住。
+  const bad = structuredClone(graph);
+  bad.phases.E.route = 'review';
+  const result = validateGraph(bad);
+  assert.equal(result.ok, false, 'E 席 route=review（档 agent=codex）与 agent_pin=claude-code 矛盾，必须被拒');
+  assert.ok(result.reason.includes('不一致'), `拒绝理由应指向 agent_pin 与档 agent 不一致，实际: ${result.reason}`);
 });
