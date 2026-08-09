@@ -44,18 +44,21 @@ function fixtureCopy(dir) {
 }
 
 /**
- * 在 init 前篡改夹具 manifest 并重算 manifest_core_hash 后 init（F-D 门禁下，
- * init 后篡改会被 HASH_MISMATCH 先行拦截，测不到下游行为；改在 init 前使台账 hash 与改动一致）。
+ * 构造「台账与不完整 manifest hash 自洽」的环境（init 输入门收紧后，不完整 manifest 已无法
+ * 过 init——F-D 门禁下 init 后篡改又会被 HASH_MISMATCH 先行拦截，测不到下游行为）。
+ * 做法：先用完整夹具 init（exit 0），再篡改 manifest 副本并重算 hash、直接同步台账的
+ * manifest_core_hash——本组测试的意图是「render-packet/record-delivery 对不完整 packet 的
+ * PACKET_INCOMPLETE 拒绝」，不是测 F-D 内容绑定（F-D 由专属测试覆盖）。
  */
 function tamperManifestThenInit(dir, mutate) {
-  const manifestPath = fixtureCopy(dir);
+  const { ledgerPath, manifestPath } = initLedgerFor(dir);
   const m = JSON.parse(readFileSync(manifestPath, 'utf8'));
   mutate(m);
   m.manifest_core_hash = manifestCoreHash(m);
   writeFileSync(manifestPath, JSON.stringify(m));
-  const ledgerPath = join(dir, 'ledger.json');
-  const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'test-run', '--now', T);
-  assert.equal(r.status, 0, `init（篡改后）应 exit 0: ${r.stderr}`);
+  const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  ledger.manifest_core_hash = m.manifest_core_hash;
+  writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
   return { ledgerPath, manifestPath };
 }
 
@@ -134,6 +137,72 @@ function forgeG4Verified(ledgerPath) {
   g.branch = 'feat/run-ledger';
   g.base = SHA3;
   writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+}
+
+/** 把 g4 手工构造为任意组状态（生命周期矩阵测试用）。字段按状态补齐必要部分，
+ *  schema 允许其余为 null/初始值。不依赖 dispatch/delivery 写路径（与 F1 变异解耦）。 */
+function forgeG4State(ledgerPath, state) {
+  const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  const g = ledger.waves[0].groups[0];
+  g.state = state;
+  if (state === 'dispatched' || state === 'delivered' || state === 'failed') {
+    g.worker_label = 'w1';
+  }
+  if (state === 'delivered' || state === 'failed') {
+    g.tip_sha = SHA1;
+  }
+  if (state === 'review_pass') {
+    g.worker_label = 'w1';
+    g.tip_sha = SHA1;
+    g.review = { rounds: 1, unresolved: 0 };
+  }
+  if (state === 'verified') {
+    g.worker_label = 'w1';
+    g.tip_sha = SHA1;
+    g.review = { rounds: 2, unresolved: 0 };
+    g.verify = { status: 'pass', evidence_ref: null };
+    g.worktree = '/wt/g4';
+    g.branch = 'feat/run-ledger';
+    g.base = SHA3;
+  }
+  writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+}
+
+/** 完整合法链到 phase=packaging：两波全 verified + 集成 + 单向前进（→ready 测试的前置）。 */
+function runFullChainToPackaging(ledgerPath) {
+  runG4ToVerified(ledgerPath);
+  let r = cli('set-state', ledgerPath, '--wave', '1', '--integrate', SHA2, '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  assignIdentity(ledgerPath, 'v1', 'feat/verify');
+  for (const [to, extra] of [
+    ['dispatched', ['--worker-label', 'wv1']],
+    ['delivered', ['--tip-sha', SHA1]],
+    ['delivered', []],
+    ['review_pass', []],
+  ]) {
+    r = cli('set-state', ledgerPath, '--group', 'v1', '--to', to, ...extra, '--now', T);
+    assert.equal(r.status, 0, `v1 合法链 ${to} 应 exit 0: ${r.stderr}`);
+  }
+  grantVerifyPass(ledgerPath, 'v1');
+  r = cli('set-state', ledgerPath, '--group', 'v1', '--to', 'verified', '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--wave', '2', '--integrate', SHA1, '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  for (const ph of ['reviewing', 'validating', 'e2e', 'packaging']) {
+    r = cli('set-state', ledgerPath, '--phase', ph, '--now', T);
+    assert.equal(r.status, 0, `→${ph} 应 exit 0: ${r.stderr}`);
+  }
+}
+
+/** g4 的合法 verify payload（sc_ids 取 manifest 该组 packet 的 id）。 */
+function g4VerifyPayload() {
+  const manifest = JSON.parse(readFileSync(FIXTURE, 'utf8'));
+  const packet = manifest.dispatch.packets.find((p) => p.group_id === 'g4');
+  return {
+    scs: packet.scs_inline.map((s) => ({ sc_id: s.id, status: 'pass', evidence: `ev:${s.id}` })),
+    integration_review: { status: 'pass', notes: 'ok' },
+    candidate_sha: SHA1,
+  };
 }
 
 // =====================================================================
@@ -219,6 +288,58 @@ test('F-D: --manifest 指向异本且 hash 不符 → 拒；同 hash 异本 → 
   r = cli('render-packet', ledgerPath, '--group', 'g4', '--manifest', samePath);
   assert.equal(r.status, 0, `同 hash 异本应放行: ${r.stderr}`);
   assert.match(r.stdout, /用 goal skill 执行。/);
+});
+
+test('F-D: →ready 绑定 manifest 内容——最后一次 hash 绑定后篡改，receipt 驱动必须 exit 2 HASH_MISMATCH（台账 phase 不前进）', () => {
+  const dir = newTmpDir();
+  const { ledgerPath, manifestPath } = initLedgerFor(dir);
+  runFullChainToPackaging(ledgerPath);
+  // 篡改 manifest（改 goal，保留 scs/packets 结构；台账 manifest_core_hash 记录的还是原内容）。
+  // 时序 = 真实漏洞窗口：最后一次 hash 绑定写入（验收 record-delivery）之后、驱动 →ready 之前。
+  const m = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  m.goal = '篡改后的 goal——台账 manifest_core_hash 记录的是原内容';
+  writeFileSync(manifestPath, JSON.stringify(m));
+  // 合法 receipt（version 绑定当前台账 + candidate_sha=wave2 集成树 SHA1）——唯一不满足的是 manifest 内容
+  const curVer = readLedger(ledgerPath).version;
+  const receiptPath = join(dir, 'ready-receipt.json');
+  writeFileSync(receiptPath, JSON.stringify({ candidate_sha: SHA1, ledger_version: curVer, checked_at: T }));
+  const r = cli('set-state', ledgerPath, '--phase', 'ready', '--ready-receipt', receiptPath, '--now', T);
+  assert.equal(r.status, 2, '→ready 遇篡改 manifest 必须 exit 2（内容绑定拒，receipt 只绑 candidate_sha + ledger_version）');
+  assert.match(r.stderr, /HASH_MISMATCH/);
+  assert.match(r.stderr, /set-state →ready/);
+  const ledger = readLedger(ledgerPath);
+  assert.equal(ledger.phase, 'packaging', '被拒后台账 phase 必须仍为 packaging（ready 未达成，台账内可纠正）');
+  assert.equal(ledger.version, curVer, '被拒后 version 不得前进（hash 拒绝在锁外直接 throw，不落事件）');
+});
+
+test('F-D: →ready manifest 绑定不误伤合法链——三重校验（manifest 内容/ledger_version/candidate_sha）各自独立成立', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  runFullChainToPackaging(ledgerPath);
+  const writeReceipt = (content) => {
+    const p = join(dir, 'ready-receipt.json');
+    writeFileSync(p, JSON.stringify(content));
+    return p;
+  };
+  // ① manifest 对 + receipt version 错 → 版本不匹配拒（receipt 校验独立生效，manifest 绑定不干扰）
+  let r = cli('set-state', ledgerPath, '--phase', 'ready',
+    '--ready-receipt', writeReceipt({ candidate_sha: SHA1, ledger_version: 0, checked_at: T }), '--now', T);
+  assert.equal(r.status, 2, 'receipt ledger_version 不符必须 exit 2（防重放）');
+  assert.match(r.stderr, /版本不匹配|ledger_version/);
+  // ② manifest 对 + receipt candidate_sha 错 → 集成树不符拒（被拒尝试各落事件，version 已前进）
+  let curVer = readLedger(ledgerPath).version;
+  r = cli('set-state', ledgerPath, '--phase', 'ready',
+    '--ready-receipt', writeReceipt({ candidate_sha: SHA3, ledger_version: curVer, checked_at: T }), '--now', T);
+  assert.equal(r.status, 2, 'receipt candidate_sha 与集成树不符必须 exit 2（伪造拒）');
+  assert.match(r.stderr, /candidate_sha|集成树/);
+  // ③ 三者全对（manifest 未篡改 + 最新 version + candidate_sha=wave2 集成树）→ 放行
+  curVer = readLedger(ledgerPath).version;
+  r = cli('set-state', ledgerPath, '--phase', 'ready',
+    '--ready-receipt', writeReceipt({ candidate_sha: SHA1, ledger_version: curVer, checked_at: T }), '--now', T);
+  assert.equal(r.status, 0, `→ready 三重校验全对应 exit 0: ${r.stderr}`);
+  const readyLedger = readLedger(ledgerPath);
+  assert.equal(readyLedger.phase, 'ready');
+  assert.equal(readyLedger.phase_at, T, 'phase→ready 凭据路径必须写 phase_at（F2 契约）');
 });
 
 test('sc-p1c: 未列键注入 exit 2（exact 契约，schema 之外键出现即拒）', () => {
@@ -956,6 +1077,57 @@ test('sc-p1d: F-E 空结构 fail-closed——空 waves/groups/sc_ids 在 init �
   }
 });
 
+// =====================================================================
+// init 输入门：顶层三要素 exact 在场 + 逐 packet 完整性（SKILL.md ② 段「缺任一 → 不开跑」）
+// ——判据与 render-packet 出包前共用同一份实现（assertPacketComplete），init 就该拒，
+// 不是「先开跑、出包时才炸」；被拒的 init 不写台账（连空台账都不留）。
+// =====================================================================
+test('init 输入门: manifest 缺 receipts 键 exit 2 点名且不建台账（receipts 可空数组但键必须存在——「已考虑过这一项」）', () => {
+  const dir = newTmpDir();
+  const ledgerPath = join(dir, 'ledger.json');
+  const manifestPath = fixtureCopy(dir);
+  const m = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  delete m.receipts;
+  writeFileSync(manifestPath, JSON.stringify(m));
+  const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T);
+  assert.equal(r.status, 2, '缺 receipts 键必须 exit 2（fail-closed 不开跑）');
+  assert.match(r.stderr, /MANIFEST/, '必须走 MANIFEST 拒绝路径');
+  assert.match(r.stderr, /receipts/, '必须点名 receipts');
+  assert.equal(existsSync(ledgerPath), false, '被拒的 init 不得创建台账（连空台账都不留）');
+  assert.equal(existsSync(`${ledgerPath}.lock`), false, '被拒的 init 不得残留锁文件');
+});
+
+test('init 输入门: manifest 缺 dispatch 键 exit 2 点名且不建台账', () => {
+  const dir = newTmpDir();
+  const ledgerPath = join(dir, 'ledger.json');
+  const manifestPath = fixtureCopy(dir);
+  const m = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  delete m.dispatch;
+  writeFileSync(manifestPath, JSON.stringify(m));
+  const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T);
+  assert.equal(r.status, 2, '缺 dispatch 键必须 exit 2（fail-closed 不开跑）');
+  assert.match(r.stderr, /MANIFEST/, '必须走 MANIFEST 拒绝路径');
+  assert.match(r.stderr, /dispatch/, '必须点名 dispatch');
+  assert.equal(existsSync(ledgerPath), false, '被拒的 init 不得创建台账');
+  assert.equal(existsSync(`${ledgerPath}.lock`), false, '被拒的 init 不得残留锁文件');
+});
+
+test('init 输入门: packet 缺五要素任一 exit 2 点名是哪个 packet 缺哪一项且不建台账（与 render-packet 同判据）', () => {
+  const dir = newTmpDir();
+  const ledgerPath = join(dir, 'ledger.json');
+  const manifestPath = fixtureCopy(dir);
+  const m = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  delete m.dispatch.packets[0].allowed_paths;
+  writeFileSync(manifestPath, JSON.stringify(m));
+  const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T);
+  assert.equal(r.status, 2, 'packet 缺 allowed_paths 必须 exit 2（fail-closed 不开跑）');
+  assert.match(r.stderr, /PACKET_INCOMPLETE/, '必须走 PACKET_INCOMPLETE 拒绝路径');
+  assert.match(r.stderr, /g4/, '必须点名是哪个 packet（group_id）');
+  assert.match(r.stderr, /allowed_paths/, '必须点名缺哪一项');
+  assert.equal(existsSync(ledgerPath), false, '被拒的 init 不得创建台账');
+  assert.equal(existsSync(`${ledgerPath}.lock`), false, '被拒的 init 不得残留锁文件');
+});
+
 test('sc-p1d: wave 集成——非 40hex 拒、全组未 verified 拒、集成后可落账', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
@@ -987,8 +1159,9 @@ test('sc-p1d: wave 集成——非 40hex 拒、全组未 verified 拒、集成�
 test('sc-p1e: 五项逐项挖空各得 exit 2 点名（fail-closed 缺一不出包）', () => {
   for (const field of ['scs_inline', 'allowed_paths', 'verify_cmds', 'forbidden', 'submit_format']) {
     const dir = newTmpDir();
-    // manifest 在 init 前改好并重算 hash（台账 hash 与改动一致，才能命中 PACKET_INCOMPLETE
-    // 而非 F-D 门禁 HASH_MISMATCH——后者是另一个独立的拒因，由 F-D 专属测试覆盖）
+    // 完整夹具先 init，再篡改 + 同步台账 hash（init 输入门已拒不完整 manifest；hash 自洽
+    // 才能命中 PACKET_INCOMPLETE 而非 F-D 门禁 HASH_MISMATCH——后者是另一个独立的拒因，
+    // 由 F-D 专属测试覆盖）
     const { ledgerPath } = tamperManifestThenInit(dir, (m) => {
       const pkt = m.dispatch.packets.find((p) => p.group_id === 'g4');
       // 挖空该字段：「空缺」= 键缺失/空数组/空串（空数组对 allowed_paths/forbidden 是合法表达，
@@ -1014,7 +1187,8 @@ test('sc-p1e: pr-submit-gate 门禁结论透传——needs_three_review true/fal
     [false, 'needs_three_review=false：本包对应非功能性改动，免 submit-pr 三审，常规验证照常。'],
   ]) {
     const dir = newTmpDir();
-    // init 前改 needs_three_review 并重算 hash（init 后改会被 F-D 门禁 HASH_MISMATCH 拦截）
+    // 完整夹具先 init，再改 needs_three_review + 同步台账 hash（init 后改会撞 F-D 门禁
+    // HASH_MISMATCH，同步 hash 后渲染才命中目标判据）
     const { ledgerPath } = tamperManifestThenInit(dir, (m) => {
       m.dispatch.packets.find((p) => p.group_id === 'g4').needs_three_review = flag;
     });
@@ -1034,7 +1208,8 @@ test('sc-p1e: needs_three_review 缺失/非布尔 exit 2 点名（fail-closed，
     ['null', null],
   ]) {
     const dir = newTmpDir();
-    // init 前改 needs_three_review 并重算 hash（init 后改会被 F-D 门禁 HASH_MISMATCH 拦截）
+    // 完整夹具先 init，再改 needs_three_review + 同步台账 hash（init 输入门已拒不完整
+    // manifest；同步 hash 后渲染才命中目标判据而非 F-D 门禁）
     const { ledgerPath } = tamperManifestThenInit(dir, (m) => {
       const pkt = m.dispatch.packets.find((p) => p.group_id === 'g4');
       if (value === undefined) {
@@ -1227,8 +1402,11 @@ function execDeliveryPayload({ tipSha = SHA1, status = 'done', ids = ['sc-p1c', 
 test('sc-p1h: 执行组合法交卷入账成功且台账对应字段逐项等于交卷值', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
+  // 生命周期门（① 升级）：exec 交卷只允许 dispatched/delivered——先派工到 dispatched
+  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--now', T);
+  assert.equal(r.status, 0, r.stderr);
   const payload = execDeliveryPayload({ tipSha: SHA2 });
-  const r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
+  r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
   assert.equal(r.status, 0, `执行组交卷应 exit 0: ${r.stderr}`);
   const ledger = readLedger(ledgerPath);
   const g4 = ledger.waves[0].groups[0];
@@ -1251,20 +1429,27 @@ test('sc-p1h: 执行组合法交卷入账成功且台账对应字段逐项等于
 test('sc-p1h: 审查组合法交卷——unresolved 由此机器写入 review.unresolved（唯一入账通道）', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
+  // 生命周期门（① 升级）：review 交卷只允许 delivered——先派工交付到 delivered
+  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'delivered', '--tip-sha', SHA1, '--now', T);
+  assert.equal(r.status, 0, r.stderr);
   const payload = { rounds: 2, findings_total: 5, unresolved: 3, fix_commits: ['abc'.repeat(13), 'def'.repeat(13)], candidate_sha: SHA1 };
-  const r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
+  r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
   assert.equal(r.status, 0, `审查组交卷应 exit 0: ${r.stderr}`);
   const g4 = readLedger(ledgerPath).waves[0].groups[0];
   assert.equal(g4.review.rounds, 2, 'review.rounds 必须等于交卷值');
   assert.equal(g4.review.unresolved, 3, 'review.unresolved 必须等于交卷值（唯一入账通道）');
-  // F1 契约：审查交卷 delivery detail 必须结构化且绑定 candidate_sha（ready-check ③ 读取点）
-  const reviewDelivery = readLedger(ledgerPath).events.filter((e) => e.type === 'delivery')[0];
+  // F1 契约：审查交卷 delivery detail 必须结构化且绑定 candidate_sha（ready-check ③ 读取点）。
+  // 取最后一条 delivery（set-state delivered 也落 delivery 事件，filter[0] 会取到它）
+  const deliveries = readLedger(ledgerPath).events.filter((e) => e.type === 'delivery');
+  const reviewDelivery = deliveries[deliveries.length - 1];
   assert.equal(reviewDelivery.detail.group_id, 'g4');
   assert.equal(reviewDelivery.detail.rounds, 2);
   assert.equal(reviewDelivery.detail.unresolved, 3);
   assert.equal(reviewDelivery.detail.candidate_sha, SHA1, '审查交卷 detail 必须绑定被审 candidate_sha（非派生默认）');
-  // delivery detail 契约下限 {group_id, tip_sha, candidate_sha}：组未交付时 tip_sha 为 null（fail-closed，出口门 ① 对账会拒）
-  assert.equal(reviewDelivery.detail.tip_sha, null, '组未交付时审查交卷 detail.tip_sha 必须为 null（fail-closed）');
+  // delivery detail 契约下限 {group_id, tip_sha, candidate_sha}：组已交付时取台账当前 tip_sha
+  assert.equal(reviewDelivery.detail.tip_sha, SHA1, '组已 delivered 时审查交卷 detail.tip_sha 必须取台账当前值');
 });
 
 test('sc-p1h: 审查交卷缺 candidate_sha 拒（exact 契约，不许默认）', () => {
@@ -1300,10 +1485,16 @@ test('sc-p1h: 审查交卷 candidate_sha 非 40hex 拒并点名（39 位/任意�
 test('sc-p1h: 审查交卷 candidate_sha 合法入账——detail 携带审查方声明值（非派生默认）', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
+  // 生命周期门（① 升级）：review 交卷只允许 delivered——先派工交付
+  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'delivered', '--tip-sha', SHA1, '--now', T);
+  assert.equal(r.status, 0, r.stderr);
   const payload = { rounds: 1, findings_total: 1, unresolved: 0, fix_commits: [], candidate_sha: SHA2 };
-  const r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
+  r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
   assert.equal(r.status, 0, `审查交卷应 exit 0: ${r.stderr}`);
-  const delivery = readLedger(ledgerPath).events.find((e) => e.type === 'delivery');
+  const deliveries = readLedger(ledgerPath).events.filter((e) => e.type === 'delivery');
+  const delivery = deliveries[deliveries.length - 1]; // 最后一条 = 审查交卷（set-state delivered 在前）
   assert.equal(delivery.detail.candidate_sha, SHA2, 'candidate_sha 必须等于交卷 payload 值（审查方声明，非台账派生）');
   // delivery detail 契约下限：{group_id, tip_sha, candidate_sha} 三键齐备
   assert.equal(delivery.detail.group_id, 'g4');
@@ -1313,12 +1504,26 @@ test('sc-p1h: 审查交卷 candidate_sha 合法入账——detail 携带审查�
 test('sc-p1h: 验收组合法交卷——verify.status/evidence_ref 入账', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
+  // 生命周期门（① 升级）：verify 交卷允许 delivered/review_pass（验收组交付后即出 verdict）。
+  // v1 在 wave 2：先 g4 走完并集成 wave 1（波次顺序门），再派 v1 到 delivered 即交卷
+  runG4ToVerified(ledgerPath);
+  let r0 = cli('set-state', ledgerPath, '--wave', '1', '--integrate', SHA2, '--now', T);
+  assert.equal(r0.status, 0, r0.stderr);
+  const v = 'v1';
+  assignIdentity(ledgerPath, v, 'feat/verify');
+  for (const [to, extra] of [
+    ['dispatched', ['--worker-label', 'wv1']],
+    ['delivered', ['--tip-sha', SHA1]],
+  ]) {
+    r0 = cli('set-state', ledgerPath, '--group', v, '--to', to, ...extra, '--now', T);
+    assert.equal(r0.status, 0, r0.stderr);
+  }
   const payload = {
     scs: [{ sc_id: 'sc-v1a', status: 'pass', evidence: 'ready-check exit 0' }],
     integration_review: { status: 'pass', notes: 'squash diff 复查无越域' },
     candidate_sha: SHA1,
   };
-  const r = cli('record-delivery', ledgerPath, '--group', 'v1', '--payload', JSON.stringify(payload), '--now', T);
+  const r = cli('record-delivery', ledgerPath, '--group', v, '--payload', JSON.stringify(payload), '--now', T);
   assert.equal(r.status, 0, `验收组交卷应 exit 0: ${r.stderr}`);
   const v1 = readLedger(ledgerPath).waves[1].groups[0];
   assert.equal(v1.verify.status, 'pass', 'verify.status 必须等于 integration_review.status');
@@ -1389,7 +1594,7 @@ test('sc-p1h: unresolved 非数字拒', () => {
     const before = readFileSync(ledgerPath, 'utf8');
     const r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
     assert.equal(r.status, 2, `unresolved=${JSON.stringify(bad)} 必须 exit 2`);
-    assert.match(r.stderr, /unresolved 必须是非负整数/);
+    assert.match(r.stderr, /unresolved 必须是非负安全整数/);
     assert.equal(readFileSync(ledgerPath, 'utf8'), before, '坏交卷后台账字节必须不变');
   }
 });
@@ -1416,9 +1621,12 @@ test('sc-p1h: 坏交卷后台账字节不变（解析失败/schema 不符/未知
 test('sc-p1h: record-delivery 交卷文件路径（--payload @file）解析', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
+  // 生命周期门（① 升级）：exec 交卷只允许 dispatched/delivered——先派工
+  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--now', T);
+  assert.equal(r.status, 0, r.stderr);
   const payloadFile = join(dir, 'delivery.json');
   writeFileSync(payloadFile, JSON.stringify(execDeliveryPayload()));
-  const r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', `@${payloadFile}`, '--now', T);
+  r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', `@${payloadFile}`, '--now', T);
   assert.equal(r.status, 0, `@file 交卷应 exit 0: ${r.stderr}`);
   assert.equal(readLedger(ledgerPath).waves[0].groups[0].tip_sha, SHA1);
 });
@@ -1490,8 +1698,8 @@ test('F-J: packet.scs_inline 含重复 id → render-packet 与 record-delivery 
     ['空 id', ['sc-p1c', '', 'sc-p1e']],
   ]) {
     const dir = newTmpDir();
-    // init 前篡改 g4 packet.scs_inline 引入重复/空 id 并重算 hash（F-D 内容绑定下，
-    // init 后改会先撞 HASH_MISMATCH；hash 自洽后渲染/交卷才命中 PACKET_INCOMPLETE）
+    // 完整夹具先 init，再篡改 g4 packet.scs_inline 引入重复/空 id + 同步台账 hash
+    // （init 输入门已拒不完整 manifest；同步 hash 后渲染/交卷才命中 PACKET_INCOMPLETE）
     const { ledgerPath } = tamperManifestThenInit(dir, (m) => {
       const pkt = m.dispatch.packets.find((p) => p.group_id === 'g4');
       pkt.scs_inline = ids.map((id) => ({ id, kind: 'fix', change: `x ${id}` }));
@@ -1503,7 +1711,10 @@ test('F-J: packet.scs_inline 含重复 id → render-packet 与 record-delivery 
     assert.match(rp.stderr, /PACKET_INCOMPLETE/, `${label} 必须走 PACKET_INCOMPLETE`);
     assert.match(rp.stderr, /重复 id|非字符串\/空 id/, `${label} 必须点名 id 契约`);
     assert.equal(rp.stdout, '', `${label} 不得出包`);
-    // 交卷拒（即使交卷 scs 与去重后的 expected 一致，packet 自身契约先拒）
+    // 交卷拒（即使交卷 scs 与去重后的 expected 一致，packet 自身契约先拒）。
+    // 生命周期门（① 升级）：exec 交卷需 dispatched——先派工，确保命中的是 id 契约而非生命周期拒
+    const dr = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--now', T);
+    assert.equal(dr.status, 0, dr.stderr);
     const payload = execDeliveryPayload({ ids: ['sc-p1c', 'sc-p1d', 'sc-p1e', 'sc-p1h'] });
     const rd = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
     assert.equal(rd.status, 2, `${label} id 的 record-delivery 必须 exit 2`);
@@ -1514,8 +1725,11 @@ test('F-J: packet.scs_inline 含重复 id → render-packet 与 record-delivery 
 test('F-J: 对照——packet.scs_inline 无重复时，交卷缺一/多一/重复仍按计数比对拒（原有 exact 语义保留）', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
+  // 生命周期门（① 升级）：exec 交卷需 dispatched——先派工
+  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--now', T);
+  assert.equal(r.status, 0, r.stderr);
   // 缺一：只交 3 项
-  let r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload',
+  r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload',
     JSON.stringify(execDeliveryPayload({ ids: ['sc-p1c', 'sc-p1d', 'sc-p1e'] })), '--now', T);
   assert.equal(r.status, 2, '缺一必须 exit 2');
   assert.match(r.stderr, /SC_ID_MISMATCH/);
@@ -1531,6 +1745,175 @@ test('F-J: 对照——packet.scs_inline 无重复时，交卷缺一/多一/重�
 });
 
 // =====================================================================
+// P1（整数精度边界）：isInteger 放行 2^53，version+1 在该值上精度饱和不再递增
+// （9007199254740992+1 === 9007199254740992）→ CAS 的「读到的版本 ≠ 当前版本就拒」恒判等，
+// 乐观锁彻底失效、多陈旧写者同时成功静默覆盖。修法：整数入口一律 Number.isSafeInteger。
+// 
+const SAFE_MAX = Number.MAX_SAFE_INTEGER; // 9007199254740991（2^53−1，安全边界）
+const OVERFLOW = 9007199254740992;        // 2^53：+1 恒等自身，超出安全范围
+
+test('P1: version=2^53−1（安全最大）validate exit 0 正例；该值上的写操作 fail-closed（version 无法安全递增）', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  const l = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  l.version = SAFE_MAX;
+  writeFileSync(ledgerPath, `${JSON.stringify(l, null, 2)}\n`);
+  // 安全边界值本身合法：schema 通过、validate exit 0（正例）
+  const rv = cli('validate', ledgerPath);
+  assert.equal(rv.status, 0, `安全边界 version 应通过 validate: ${rv.stderr}`);
+  // 但此值上的写操作必须 fail-closed：expected+1 = 2^53 已越界，绝不静默饱和落盘
+  const rs = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'failed', '--event', 'timeout_redispatch', '--now', T);
+  assert.equal(rs.status, 2, '安全边界上的写操作必须 exit 2（version 不可安全递增，fail-closed）');
+  assert.match(rs.stderr, /非负安全整数/);
+  assert.equal(readLedger(ledgerPath).version, SAFE_MAX, '被拒的写操作不得改变 version');
+});
+
+test('P1: version=2^53 validate 与 set-state 均 exit 2 点名（isSafeInteger 拒，点名安全范围）', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  const l = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  l.version = OVERFLOW;
+  writeFileSync(ledgerPath, `${JSON.stringify(l, null, 2)}\n`);
+  let r = cli('validate', ledgerPath);
+  assert.equal(r.status, 2, '2^53 version 的 validate 必须 exit 2');
+  assert.match(r.stderr, /非负安全整数/);
+  assert.match(r.stderr, /9007199254740991/, '必须点名安全范围上限');
+  const before = readFileSync(ledgerPath, 'utf8');
+  r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'failed', '--event', 'timeout_redispatch', '--now', T);
+  assert.equal(r.status, 2, '2^53 version 的 set-state 必须 exit 2');
+  assert.match(r.stderr, /非负安全整数/);
+  assert.equal(readFileSync(ledgerPath, 'utf8'), before, '2^53 台账的写操作不得触碰字节');
+});
+
+test('P1: stale 双写反证——2^53 台账双 writer 双双 fail-closed（原状「双成功」被消灭）；安全版本下恰 1 成功 1 CAS_CONFLICT', async () => {
+  // 子进程：先 readLedger 取 expected（stale 窗口起点）→ buildNext 内停留（拉宽临界区
+  // 制造真实重叠）→ CAS 写。2^53 台账在 readLedger 处即被 isSafeInteger 拒（fail-closed
+  // exit 2，绝不进入 buildNext——修复前 isInteger 放行后两个写者都成功、落盘 version 不动）。
+  const childSrc = `
+    import { writeLedgerAtomic, readLedger, LedgerError } from ${JSON.stringify(`file://${SCRIPT}`)};
+    const ledgerPath = process.argv[2];
+    const marker = process.argv[3];
+    try {
+      const expected = readLedger(ledgerPath).version; // 写者先读
+      writeLedgerAtomic(ledgerPath, expected, (cur) => {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400);
+        return { ...cur, slug: marker, version: expected + 1 };
+      });
+      const disk = readLedger(ledgerPath);
+      console.log('OK ' + marker + ' version=' + disk.version);
+      process.exit(0);
+    } catch (err) {
+      if (err instanceof LedgerError && err.code === 'CAS_CONFLICT') {
+        console.log('CAS_CONFLICT ' + marker);
+        process.exit(2);
+      }
+      if (err instanceof LedgerError && err.code === 'SCHEMA') {
+        console.log('SCHEMA_REFUSED ' + marker + ' ' + (err.message || '').slice(0, 50));
+        process.exit(2);
+      }
+      console.error('UNEXPECTED ' + marker + ' code=' + (err.code || '') + ' msg=' + err.message);
+      process.exit(4);
+    }
+  `;
+  const childFile = join(newTmpDir(), 'stale-writer.mjs');
+  writeFileSync(childFile, childSrc);
+  const run = (ledgerPath, marker) => new Promise((res) => {
+    const p = spawn(process.execPath, [childFile, ledgerPath, marker], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    p.stdout.on('data', (d) => { out += d; });
+    p.stderr.on('data', (d) => { err += d; });
+    p.on('close', (code) => res({ marker, code, out: out.trim(), err: err.trim() }));
+  });
+
+  // 场景 1：磁盘 version=2^53 → 双 writer 均 readLedger 拒（SCHEMA_REFUSED），无成功、无冲突
+  const dir1 = newTmpDir();
+  const { ledgerPath: lp1 } = initLedgerFor(dir1);
+  const l1 = JSON.parse(readFileSync(lp1, 'utf8'));
+  l1.version = OVERFLOW;
+  writeFileSync(lp1, `${JSON.stringify(l1, null, 2)}\n`);
+  const before1 = readFileSync(lp1, 'utf8');
+  const r1 = await Promise.all([run(lp1, 'W-A'), run(lp1, 'W-B')]);
+  const oks1 = r1.filter((x) => x.code === 0 && x.out.startsWith('OK'));
+  const refusals1 = r1.filter((x) => x.code === 2 && x.out.startsWith('SCHEMA_REFUSED'));
+  assert.equal(oks1.length, 0, `2^53 场景绝不允许任何写者成功（原状双成功被消灭）：${JSON.stringify(r1)}`);
+  assert.equal(refusals1.length, 2, `2^53 场景双 writer 必须双双 fail-closed（SCHEMA 拒）：${JSON.stringify(r1)}`);
+  assert.equal(readFileSync(lp1, 'utf8'), before1, '2^53 场景下台账字节必须不变');
+
+  // 场景 2：安全版本（version=0）→ stale 双写恰 1 成功（version 0→1）、1 CAS_CONFLICT（CAS 机制完好对照）
+  const dir2 = newTmpDir();
+  const { ledgerPath: lp2 } = initLedgerForClean(dir2); // version=0
+  const r2 = await Promise.all([run(lp2, 'W-A'), run(lp2, 'W-B')]);
+  const oks2 = r2.filter((x) => x.code === 0 && x.out.startsWith('OK'));
+  const conflicts2 = r2.filter((x) => x.code === 2 && x.out.startsWith('CAS_CONFLICT'));
+  assert.equal(oks2.length, 1, `安全版本 stale 双写必须恰 1 成功：${JSON.stringify(r2)}`);
+  assert.equal(conflicts2.length, 1, `失败方必须以 CAS_CONFLICT 收场：${JSON.stringify(r2)}`);
+  assert.equal(readLedger(lp2).version, 1, '安全版本下 version 必须恰好 +1');
+});
+
+// =====================================================================
+// P2（failed 分支 --event 白名单）：delivery 类型事件只由 record-delivery / delivered 转移
+// 产生；set-state --to failed 只允许失败原因类事件（伪造 delivery 会污染 ready-check 的
+// 分区对账与「最后一次 delivery」candidate_sha 绑定，且无从分辨真伪）。
+// =====================================================================
+test('P2: --to failed --event delivery 拒（exit 2 点名白名单）——伪 delivery 不得落盘', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  const r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'failed', '--event', 'delivery', '--now', T);
+  assert.equal(r.status, 2, '伪造 delivery 必须 exit 2');
+  assert.match(r.stderr, /白名单/, '必须点名失败原因白名单');
+  assert.match(r.stderr, /delivery/, '必须点名被拒事件名');
+  const ledger = readLedger(ledgerPath);
+  assert.equal(ledger.waves[0].groups[0].state, 'pending', '伪造 delivery 后组状态不得变 failed');
+  assert.equal(ledger.events.filter((e) => e.type === 'delivery').length, 0, '不得产生任何 delivery 事件（对账污染源被堵死）');
+});
+
+test('P2: failed 白名单外事件全拒（dispatch/review_round/integrate/illegal_transition）且不落对应事件', () => {
+  for (const evt of ['dispatch', 'review_round', 'integrate', 'illegal_transition']) {
+    const dir = newTmpDir();
+    const { ledgerPath } = initLedgerFor(dir);
+    const r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'failed', '--event', evt, '--now', T);
+    assert.equal(r.status, 2, `${evt} 必须 exit 2`);
+    assert.match(r.stderr, /白名单/, `${evt} 必须点名失败原因白名单`);
+    const ledger = readLedger(ledgerPath);
+    assert.equal(ledger.waves[0].groups[0].state, 'pending', `${evt} 后组状态不得变 failed`);
+    // 注意：拒绝路径按设计落 illegal_transition 事件（reason 描述），但不得落「以 evt 为失败
+    // 原因」的伪造事件——detail.event === evt 的判定区分真伪（illegal_transition 的 detail 无 event 键）
+    assert.equal(ledger.events.filter((e) => e.type === evt && e.detail?.event === evt).length, 0, `${evt} 事件不得被伪造为失败原因落盘`);
+  }
+});
+
+test('P2: failed 白名单内失败原因事件仍正常落盘（正例，未挡死 failed 分支）', () => {
+  for (const evt of ['timeout_redispatch', 'overreach_rejected', 'overlap_replan', 'budget_note']) {
+    const dir = newTmpDir();
+    const { ledgerPath } = initLedgerFor(dir);
+    const r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'failed', '--event', evt, '--now', T);
+    assert.equal(r.status, 0, `${evt} 应 exit 0: ${r.stderr}`);
+    const g4 = readLedger(ledgerPath).waves[0].groups[0];
+    assert.equal(g4.state, 'failed', `${evt} 后组必须 failed`);
+    const ev = readLedger(ledgerPath).events.find((e) => e.type === evt);
+    assert.ok(ev, `${evt} 事件必须落盘`);
+    assert.equal(ev.detail.group_id, 'g4');
+    assert.equal(ev.detail.event, evt, 'detail.event 回显失败原因');
+  }
+});
+
+test('P2: 对照——delivery 事件合法通道仍工作（set-state delivered 转移 + record-delivery 交卷）', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'delivered', '--tip-sha', SHA1, '--now', T);
+  assert.equal(r.status, 0, `delivered 转移（真 delivery 通道）应 exit 0: ${r.stderr}`);
+  let deliveries = readLedger(ledgerPath).events.filter((e) => e.type === 'delivery');
+  assert.equal(deliveries.length, 1, 'delivered 转移必须写 delivery 事件');
+  assert.equal(deliveries[0].detail.tip_sha, SHA1);
+  assert.equal(deliveries[0].detail.candidate_sha, SHA1);
+  r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(execDeliveryPayload()), '--now', T);
+  assert.equal(r.status, 0, `record-delivery（真 delivery 通道）应 exit 0: ${r.stderr}`);
+  deliveries = readLedger(ledgerPath).events.filter((e) => e.type === 'delivery');
+  assert.equal(deliveries.length, 2, 'record-delivery 必须追加 delivery 事件');
+});
 // ①：verified 组非状态写入口守卫（--identity / record-delivery 绕过状态机修复）
 // =====================================================================
 // 背景：GROUP_TRANSITIONS.verified = [] 只挡「状态跳转」；身份写入与交卷入账不是跳转，
@@ -1558,20 +1941,141 @@ test('①: verified 组 record-delivery 拒（exec/review/verify 三类交卷全
   const payloads = [
     execDeliveryPayload(), // exec 类（改写 tip_sha）
     { rounds: 1, findings_total: 1, unresolved: 0, fix_commits: [], candidate_sha: SHA1 }, // review 类（改写 review.rounds）
-    { scs: [{ sc_id: 'sc-v1a', status: 'pass', evidence: 'ev' }],
-      integration_review: { status: 'pass', notes: 'n' }, candidate_sha: SHA1 }, // verify 类（改写 verify.status）
+    g4VerifyPayload(), // verify 类（改写 verify.status；sc_ids 取 g4 派工包，保证命中生命周期门而非 SC_ID_MISMATCH）
   ];
   for (const payload of payloads) {
     const before = readFileSync(ledgerPath, 'utf8');
     const r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
     assert.equal(r.status, 2, 'verified 组交卷必须 exit 2');
     assert.match(r.stderr, /verified/, '必须点名终态');
-    assert.match(r.stderr, /终态只读|只读|重放攻击/, '必须点名终态只读语义');
+    assert.match(r.stderr, /生命周期门/, '必须点名生命周期门（终态不在任何交卷类别允许集）');
     assert.equal(readFileSync(ledgerPath, 'utf8'), before, '拒写后台账字节必须不变（不落事件）');
   }
   const g = readLedger(ledgerPath).waves[0].groups[0];
   assert.equal(g.tip_sha, SHA1, 'exec 交卷不得改写 verified 组 tip_sha');
   assert.deepEqual(g.verify, { status: 'pass', evidence_ref: null }, 'verify 交卷不得改写 verified 组凭据');
+});
+
+test('①: 方向 B——pending 组提交合法 verify payload 拒（验收证据不可预写）+ 字节不变', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  const before = readFileSync(ledgerPath, 'utf8');
+  const r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(g4VerifyPayload()), '--now', T);
+  assert.equal(r.status, 2, 'pending 组 verify 交卷必须 exit 2（方向 B：验收凭据不可在派工前预写）');
+  assert.match(r.stderr, /生命周期门/, '必须点名生命周期门');
+  assert.match(r.stderr, /verify/, '必须点名交卷类别');
+  assert.equal(readFileSync(ledgerPath, 'utf8'), before, '拒写后台账字节必须不变（不落事件）');
+  const g = readLedger(ledgerPath).waves[0].groups[0];
+  assert.deepEqual(g.verify, { status: null, evidence_ref: null }, 'pending 拒写后 verify 凭据不得被写入');
+});
+
+test('①: 交卷生命周期矩阵——每类交卷在每个非法状态 exit 2 + 字节不变，合法状态放行', () => {
+  const ALL_STATES = ['pending', 'dispatched', 'delivered', 'review_pass', 'verified', 'failed'];
+  // 类别 → 合法状态集（与 DELIVERY_LIFECYCLE 一致；verify 含 delivered——验收组交付后即出 verdict）
+  const allowedByKind = {
+    exec: ['dispatched', 'delivered'],
+    review: ['delivered'],
+    verify: ['delivered', 'review_pass'],
+  };
+  const payloadByKind = {
+    exec: () => execDeliveryPayload(),
+    review: () => ({ rounds: 1, findings_total: 1, unresolved: 0, fix_commits: [], candidate_sha: SHA1 }),
+    verify: () => g4VerifyPayload(),
+  };
+  for (const [kind, allowed] of Object.entries(allowedByKind)) {
+    const illegal = ALL_STATES.filter((s) => !allowed.includes(s));
+    // 非法格全拒：每格 exit 2 点名生命周期门 + 字节不变
+    for (const state of illegal) {
+      const dir = newTmpDir();
+      const { ledgerPath } = initLedgerFor(dir);
+      forgeG4State(ledgerPath, state);
+      const before = readFileSync(ledgerPath, 'utf8');
+      const r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payloadByKind[kind]()), '--now', T);
+      assert.equal(r.status, 2, `${kind}@${state} 必须 exit 2（生命周期门）`);
+      assert.match(r.stderr, /生命周期门/, `${kind}@${state} 必须点名生命周期门`);
+      assert.equal(readFileSync(ledgerPath, 'utf8'), before, `${kind}@${state} 拒写后台账字节必须不变`);
+    }
+    // 合法格放行（每类取第一个合法态）
+    const dir = newTmpDir();
+    const { ledgerPath } = initLedgerFor(dir);
+    forgeG4State(ledgerPath, allowed[0]);
+    const r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payloadByKind[kind]()), '--now', T);
+    assert.equal(r.status, 0, `${kind}@${allowed[0]}（合法格）应 exit 0: ${r.stderr}`);
+  }
+});
+
+test('①: evidence_ref 同组同类加固——指向他组 delivery / 非验收类 delivery 的 →verified 拒', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  const g = 'g4';
+  // 纯手工构造（仿 F-H 伪造风格，绕过波次顺序门）：g4 与 v1 都置 review_pass；
+  // events 手工注入两类 delivery——g4 的非验收类（无 integration_review_status）
+  // 与 v1 的验收类（integration_review_status）。schema 层校验可通过（detail 对象 + group_id 键）。
+  const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  const setState = (gid, state) => {
+    const wg = ledger.waves.flatMap((w) => w.groups).find((x) => x.group_id === gid);
+    wg.state = state;
+    wg.worker_label = wg.worker_label ?? 'w';
+    wg.tip_sha = SHA1;
+    if (state === 'review_pass') wg.review = { rounds: 1, unresolved: 0 };
+  };
+  setState('g4', 'review_pass');
+  setState('v1', 'review_pass');
+  ledger.events.push(
+    { type: 'delivery', at: T, detail: { group_id: 'g4', tip_sha: SHA1, candidate_sha: SHA1 } }, // g4 非验收类（无 integration_review_status）
+    { type: 'delivery', at: T, detail: { group_id: 'v1', integration_review_status: 'pass', notes: 'ok', candidate_sha: SHA1 } }, // v1 验收类
+  );
+  writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+  const g4Group = () => readLedger(ledgerPath).waves[0].groups[0];
+  // 伪造①：指向本组非验收类 delivery（g4 的 delivery#1）→ 同类拒
+  let l = readLedger(ledgerPath);
+  l.waves[0].groups[0].verify = { status: 'pass', evidence_ref: 'delivery#1' };
+  writeFileSync(ledgerPath, `${JSON.stringify(l, null, 2)}\n`);
+  let r = cli('set-state', ledgerPath, '--group', g, '--to', 'verified', '--now', T);
+  assert.equal(r.status, 2, 'evidence_ref 指向非验收类 delivery 必须 exit 2（同类拒）');
+  assert.match(r.stderr, /验收（verify）类|integration_review_status/);
+  assert.equal(g4Group().state, 'review_pass', '同类拒不得改变组状态');
+  // 伪造②：指向他组 verify delivery（v1 的 delivery#2）→ 同组拒
+  l = readLedger(ledgerPath);
+  l.waves[0].groups[0].verify = { status: 'pass', evidence_ref: 'delivery#2' };
+  writeFileSync(ledgerPath, `${JSON.stringify(l, null, 2)}\n`);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'verified', '--now', T);
+  assert.equal(r.status, 2, 'evidence_ref 指向他组 delivery 必须 exit 2（同组拒）');
+  assert.match(r.stderr, /指向本组|本组（g4）/);
+  assert.equal(g4Group().state, 'review_pass', '同组拒不得改变组状态');
+  // 对照：同组同类凭据（g4 自己的验收类 delivery）→ 放行。
+  // 注意：前面两次被拒各落一条 illegal_transition 事件，新 push 的事件序号 = push 后 length
+  l = readLedger(ledgerPath);
+  l.events.push({ type: 'delivery', at: T, detail: { group_id: 'g4', integration_review_status: 'pass', notes: 'ok', candidate_sha: SHA1 } });
+  l.waves[0].groups[0].verify = { status: 'pass', evidence_ref: `delivery#${l.events.length}` };
+  writeFileSync(ledgerPath, `${JSON.stringify(l, null, 2)}\n`);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'verified', '--now', T);
+  assert.equal(r.status, 0, `同组同类凭据 →verified 应 exit 0: ${r.stderr}`);
+});
+
+test('①: 重派链 failed→pending 后 exec 重新交卷放行（生命周期门不挡重派正常链路）', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  const g = 'g4';
+  // 第一轮：派工 → 交 exec → delivered → failed
+  let r = cli('set-state', ledgerPath, '--group', g, '--to', 'dispatched', '--worker-label', 'w1', '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify(execDeliveryPayload()), '--now', T);
+  assert.equal(r.status, 0, `首轮 exec 交卷应 exit 0: ${r.stderr}`);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'delivered', '--tip-sha', SHA1, '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'failed', '--event', 'timeout_redispatch', '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  // 重派链：failed → pending（计数/身份清零）→ 重新分配身份 → 重新派工
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'pending', '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  assignIdentity(ledgerPath, g, 'feat/run-ledger-v2');
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'dispatched', '--worker-label', 'w2', '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  // 重派后 exec 重新交卷（生命周期门必须放行）
+  r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify(execDeliveryPayload({ tipSha: SHA2 })), '--now', T);
+  assert.equal(r.status, 0, `重派后 exec 重新交卷应 exit 0: ${r.stderr}`);
+  assert.equal(readLedger(ledgerPath).waves[0].groups[0].tip_sha, SHA2, '重派后交卷必须覆盖为新一轮 tip_sha');
 });
 
 // =====================================================================
@@ -1634,6 +2138,17 @@ test('③: 未知 flag 静默忽略修复——init/set-state typo flag exit 2 �
   assert.equal(g4.worker_label, null);
 });
 
+test('③: set-state 用法提示不得教用户已移除的 flag（--verify-status 等只出现在拒绝消息）', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  // 触发「set-state 需要 --group + --to」提示（缺参数组）
+  const r = cli('set-state', ledgerPath, '--now', T);
+  assert.equal(r.status, 2, '缺参数组必须 exit 2');
+  // 提示语不得再列举已移除 flag（--verify-status）——教用户用废掉的接口是 CLI 表面与实际不一致
+  assert.doesNotMatch(r.stderr, /--verify-status|--verify-evidence-ref|--ready-check-exit0/, '用法提示不得含已移除 flag');
+  assert.match(r.stderr, /--group \+ --to/, '提示语仍须点名当前真实可用接口');
+});
+
 test('③: 同一 flag 重复指定拒（后值静默覆盖前值掩盖意图，语义不明确即拒）', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
@@ -1642,6 +2157,24 @@ test('③: 同一 flag 重复指定拒（后值静默覆盖前值掩盖意图，
   assert.match(r.stderr, /重复指定/);
   const g4 = readLedger(ledgerPath).waves[0].groups[0];
   assert.equal(g4.state, 'pending', '重复 flag 的 set-state 不得执行');
+});
+
+test('③: 未知 flag 带值形态拒（--unrecognised value 此前 exit 0 且写入成功）+ read 子命令 validate 同样覆盖', () => {
+  // set-state：未知 flag 带值（审查席实测形态）——此前 exit 0 且写入 dispatched
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'audit-w', '--now', T, '--unrecognised', 'value');
+  assert.equal(r.status, 2, 'set-state 未知 flag 带值必须 exit 2');
+  assert.match(r.stderr, /未知 flag/);
+  assert.match(r.stderr, /--unrecognised/);
+  const g4 = readLedger(ledgerPath).waves[0].groups[0];
+  assert.equal(g4.state, 'pending', '未知 flag 带值的 set-state 不得执行');
+  assert.equal(g4.worker_label, null);
+  // read 子命令（validate）：未知 flag 同样拒（此前静默忽略）
+  r = cli('validate', ledgerPath, '--foo', 'bar');
+  assert.equal(r.status, 2, 'validate 未知 flag 必须 exit 2');
+  assert.match(r.stderr, /未知 flag/);
+  assert.match(r.stderr, /--foo/);
 });
 
 // =====================================================================
@@ -1665,6 +2198,7 @@ test('④: --identity.worktree 相对路径拒（强制绝对路径，exit 2 点
     JSON.stringify({ worktree: '/wt/g4', branch: 'feat/x', base: SHA3 }), '--now', T);
   assert.equal(r.status, 0, `绝对 worktree 应 exit 0: ${r.stderr}`);
 });
+
 
 // =====================================================================
 // 变异反证（F1/F2 集成契约）：两组各自测试全绿 ≠ 串起来正确
@@ -1710,6 +2244,21 @@ const RL_MUTATION_PREDICTIONS = [
       'sc-p2d: 双账本一致性——collected_tip 与 tip_sha 不一致时链路中断于 integrate 前',
       'sc-p2d: 槽位对账——used_slots 与 dispatched 未归档组数一致无告警、不符出告警行',
       'F-H: →verified 无 pass 凭据拒（verify.status=null 或手工伪造的 evidence_ref 均拒）',
+      'P2: 对照——delivery 事件合法通道仍工作（set-state delivered 转移 + record-delivery 交卷）',
+      // ① 升级后改造的测试含 set-state dispatch/delivered 步骤（走 dispatch/delivery 写路径）：
+      // F1 变异字符串化 detail → schema 拒 → 这些测试的 set-state 步骤红（确定性，语义合法扩展）
+      'F-J: packet.scs_inline 含重复 id → render-packet 与 record-delivery 均拒',
+      'F-J: 对照——packet.scs_inline 无重复时，交卷缺一/多一/重复仍按计数比对拒（原有 exact 语义保留）',
+      'sc-p1h: record-delivery 交卷文件路径（--payload @file）解析',
+      'sc-p1h: 审查交卷 candidate_sha 合法入账——detail 携带审查方声明值（非派生默认）',
+      'sc-p1h: 审查组合法交卷——unresolved 由此机器写入 review.unresolved（唯一入账通道）',
+      'sc-p1h: 执行组合法交卷入账成功且台账对应字段逐项等于交卷值',
+      'sc-p1h: 验收组合法交卷——verify.status/evidence_ref 入账',
+      '①: 重派链 failed→pending 后 exec 重新交卷放行（生命周期门不挡重派正常链路）',
+      // F-D →ready 绑定测试走完整链（set-state dispatch/delivery + record-delivery 写路径）：
+      // F1 变异字符串化 detail → 链上 set-state 步骤 schema 拒 → 红（语义合法扩展，与上组同因）
+      'F-D: →ready 绑定 manifest 内容——最后一次 hash 绑定后篡改，receipt 驱动必须 exit 2 HASH_MISMATCH（台账 phase 不前进）',
+      'F-D: →ready manifest 绑定不误伤合法链——三重校验（manifest 内容/ledger_version/candidate_sha）各自独立成立',
     ],
   },
   {
@@ -1719,22 +2268,39 @@ const RL_MUTATION_PREDICTIONS = [
       "  'version', 'phase', 'phase_at', 'waves', 'events',",
       "  'version', 'phase', 'waves', 'events',",
     ),
+    // phase_at 写入路径的消费侧测试：闭环（ready-check 铸 receipt → run-ledger 消费 → ready）、
+    // 并发（末轮 receipt 驱动）、sc-p1d / sc-p2d 都由 run-ledger 驱动 phase→ready，写 phase_at——
+    // 从 exact 键白名单挖除后在 assertLedgerSchema 处撞 schema 拒，是 F2 契约的真实红集。
+    // ready-check 的 full 测试不在此列：新架构下 ready-check 只写 receipt 不写台账
+    // （phase_at 由 run-ledger 驱动时写入），full 不再触碰 phase_at，挖除后应保持绿。
+    // 预测随测试名同步（机制耦合，防变异测试静默空转）。
     red: [
       'sc-p1d: phase 单向前进合法链 + 波次顺序门（F-E）+ →ready receipt 凭据（F-F）',
-      'full: 七项全齐 → READY_FOR_SUBMIT_PR 含分支与 SHA，台账 phase→ready 且 version+1',
+      '闭环: ready-check 写出 receipt → run-ledger set-state --ready-receipt 消费 → exit 0 成功到 ready',
+      '并发: 同台账双进程同时跑 ready-check → 双 READY、台账 version 全程不变，receipt 驱动恰 1 成功（30 轮）',
       'sc-p2d: 全链 dry-run——先红（缺 e2e 报告与 presubmit 三闸）后绿（READY_FOR_SUBMIT_PR + 台账 phase→ready + 链尾 validate exit 0）',
+      // F-D →ready 正例测试断言 phase=ready + phase_at（F2 契约的读取点）：
+      // 变异挖除 phase_at → ready 台账成未列键形状 → 读即拒 → 红（语义合法扩展）
+      'F-D: →ready manifest 绑定不误伤合法链——三重校验（manifest 内容/ledger_version/candidate_sha）各自独立成立',
     ],
   },
   {
     id: 'G1 变异',
-    label: '组可写性守卫条件挖除（if (g.state === "verified") → if (false)，① 修复点）',
-    mutate: (src) => src.replace(
-      "if (g.state === 'verified') {",
-      'if (false) {',
-    ),
+    label: '组可写性守卫挖除（identity 守卫 + 交卷生命周期门两锚点 → if (false)，① 修复点）',
+    mutate: (src) => src
+      .replace(
+        "if (g.state === 'verified') {",
+        'if (false) {',
+      )
+      .replace(
+        'if (!allowedStates.includes(g.state)) {',
+        'if (false) {',
+      ),
     red: [
       '①: verified 组 --identity 写入拒（exit 2 点名 + 台账字节不变，终态只读）',
       '①: verified 组 record-delivery 拒（exec/review/verify 三类交卷全拒 + 字节不变）',
+      '①: 方向 B——pending 组提交合法 verify payload 拒（验收证据不可预写）+ 字节不变',
+      '①: 交卷生命周期矩阵——每类交卷在每个非法状态 exit 2 + 字节不变，合法状态放行',
     ],
   },
   {
@@ -1746,6 +2312,7 @@ const RL_MUTATION_PREDICTIONS = [
     ),
     red: [
       '③: 未知 flag 静默忽略修复——init/set-state typo flag exit 2 点名未知 flag',
+      '③: 未知 flag 带值形态拒（--unrecognised value 此前 exit 0 且写入成功）+ read 子命令 validate 同样覆盖',
     ],
   },
 ];

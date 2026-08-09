@@ -62,6 +62,18 @@ export const EVENT_TYPES = Object.freeze([
   'overlap_replan',
   'budget_note',
 ]);
+// set-state --to failed 的 --event 白名单（窄事件集）：只允许「失败原因类」事件。
+// dispatch/delivery/review_round/integrate 是成功流事件——ready-check ①③ 消费它们做分区
+// 对账与「最后一次 delivery」判定（读 detail.tip_sha/candidate_sha），由 set-state 伪造的
+// delivery 缺 worker payload/tip_sha/candidate_sha，会让对账结果被污染且无从分辨真伪；
+// illegal_transition 是系统拒绝记录（rejectWithEvent 专用），不是组失败原因。
+// delivery 类型事件只能由 record-delivery / delivered 转移产生（唯一真写入口）。
+export const FAILED_EVENT_TYPES = Object.freeze([
+  'timeout_redispatch',  // 超时（worker 未交卷，lead 标记失败）
+  'overreach_rejected',  // 越权被拒
+  'overlap_replan',      // 重叠重排
+  'budget_note',         // 预算耗尽
+]);
 export const GROUP_STATES = Object.freeze([
   'pending', 'dispatched', 'delivered', 'review_pass', 'verified', 'failed',
 ]);
@@ -180,8 +192,10 @@ export function assertLedgerSchema(ledger) {
       throw new LedgerError('SCHEMA', `台账 ${k} 必须是非空字符串`);
     }
   }
-  if (!Number.isInteger(ledger.version) || ledger.version < 0) {
-    throw new LedgerError('SCHEMA', '台账 version 必须是非负整数（乐观锁计数）');
+  if (!Number.isSafeInteger(ledger.version) || ledger.version < 0) {
+    // isInteger 放行 2^53：version+1 在该值上精度饱和不再递增（9007199254740992+1 === 9007199254740992），
+    // CAS 的「读到的版本 ≠ 当前版本就拒」恒判等 → 乐观锁失效、多陈旧写者同时成功静默覆盖。
+    throw new LedgerError('SCHEMA', `台账 version 必须是非负安全整数（≤ ${Number.MAX_SAFE_INTEGER}，乐观锁计数；超出安全范围 +1 会精度饱和使 CAS 失效），当前: ${ledger.version}`);
   }
   if (!PHASE_ORDER.includes(ledger.phase)) {
     throw new LedgerError('SCHEMA', `台账 phase 非法: ${ledger.phase}`);
@@ -199,8 +213,8 @@ export function assertLedgerSchema(ledger) {
   }
   for (const wave of ledger.waves) {
     assertKeys(wave, WAVE_KEYS, 'wave');
-    if (!Number.isInteger(wave.wave) || wave.wave < 0) {
-      throw new LedgerError('SCHEMA', 'wave.wave 必须是非负整数');
+    if (!Number.isSafeInteger(wave.wave) || wave.wave < 0) {
+      throw new LedgerError('SCHEMA', `wave.wave 必须是非负安全整数（≤ ${Number.MAX_SAFE_INTEGER}），当前: ${wave.wave}`);
     }
     if (wave.integrated_tip !== null && typeof wave.integrated_tip === 'string'
       && !TIP_SHA_RE.test(wave.integrated_tip)) {
@@ -240,11 +254,11 @@ export function assertLedgerSchema(ledger) {
         throw new LedgerError('SCHEMA', `group ${g.group_id} 的 base 非 40 位十六进制`);
       }
       assertKeys(g.review, REVIEW_KEYS, `group ${g.group_id} 的 review`);
-      if (!Number.isInteger(g.review.rounds) || g.review.rounds < 0) {
-        throw new LedgerError('SCHEMA', `group ${g.group_id} 的 review.rounds 必须是非负整数`);
+      if (!Number.isSafeInteger(g.review.rounds) || g.review.rounds < 0) {
+        throw new LedgerError('SCHEMA', `group ${g.group_id} 的 review.rounds 必须是非负安全整数（≤ ${Number.MAX_SAFE_INTEGER}，审查自环会 +1），当前: ${g.review.rounds}`);
       }
-      if (!Number.isInteger(g.review.unresolved) || g.review.unresolved < 0) {
-        throw new LedgerError('SCHEMA', `group ${g.group_id} 的 review.unresolved 必须是非负整数`);
+      if (!Number.isSafeInteger(g.review.unresolved) || g.review.unresolved < 0) {
+        throw new LedgerError('SCHEMA', `group ${g.group_id} 的 review.unresolved 必须是非负安全整数（≤ ${Number.MAX_SAFE_INTEGER}），当前: ${g.review.unresolved}`);
       }
       assertKeys(g.verify, VERIFY_KEYS, `group ${g.group_id} 的 verify`);
       for (const nullable of ['status', 'evidence_ref']) {
@@ -372,8 +386,11 @@ export function writeLedgerAtomic(ledgerPath, expectedVersion, buildNext, lockTi
       );
     }
     const next = buildNext(current);
-    if (!Number.isInteger(next.version) || next.version !== expectedVersion + 1) {
-      throw new LedgerError('SCHEMA', 'buildNext 必须把 version 置为 expectedVersion + 1');
+    if (!Number.isSafeInteger(next.version) || next.version !== expectedVersion + 1) {
+      // isSafeInteger 连带锁死 expectedVersion+1 的精度：expectedVersion=2^53-1 时 +1 得 2^53，
+      // 已超出安全范围 → 拒（version 不能再安全递增，fail-closed）；isInteger 放行的 2^53 上
+      // +1 恒等自身，乐观锁在饱和值上彻底失效。
+      throw new LedgerError('SCHEMA', `buildNext 必须把 version 置为 expectedVersion + 1 且为非负安全整数（≤ ${Number.MAX_SAFE_INTEGER}；expected=${expectedVersion}，next=${next.version}）`);
     }
     assertLedgerSchema(next); // 写盘前自校验：坏台账永远不该落盘
     writeTmp(ledgerPath, `${JSON.stringify(next, null, 2)}\n`);
@@ -621,8 +638,8 @@ export function readReadyReceipt(receiptPath) {
   if (typeof parsed.candidate_sha !== 'string' || !TIP_SHA_RE.test(parsed.candidate_sha)) {
     throw new LedgerError('READY_RECEIPT', '→ready receipt.candidate_sha 非 40 位十六进制');
   }
-  if (!Number.isInteger(parsed.ledger_version) || parsed.ledger_version < 0) {
-    throw new LedgerError('READY_RECEIPT', '→ready receipt.ledger_version 必须是非负整数');
+  if (!Number.isSafeInteger(parsed.ledger_version) || parsed.ledger_version < 0) {
+    throw new LedgerError('READY_RECEIPT', `→ready receipt.ledger_version 必须是非负安全整数（≤ ${Number.MAX_SAFE_INTEGER}，与台账 version 的 == 比对在超出安全范围时无法区分版本），当前: ${parsed.ledger_version}`);
   }
   if (typeof parsed.checked_at !== 'string' || parsed.checked_at.length === 0) {
     throw new LedgerError('READY_RECEIPT', '→ready receipt.checked_at 必须是非空字符串');
@@ -891,8 +908,11 @@ export function setState({
       }
     }
     if (to === 'failed') {
-      if (!event || !EVENT_TYPES.includes(event)) {
-        return `缺失前置：→failed 必须携带 --event（枚举: ${EVENT_TYPES.join('/')}）`;
+      if (!event || !FAILED_EVENT_TYPES.includes(event)) {
+        // 只允许失败原因类事件：dispatch/delivery/review_round/integrate 等成功流事件若可
+        // 由 set-state 伪造，会污染 ready-check 的分区对账与 delivery 绑定（伪 delivery 缺
+        // tip_sha/candidate_sha 无从分辨）；illegal_transition 是系统拒绝记录，非失败原因。
+        return `缺失前置：→failed 必须携带失败原因 --event（白名单: ${FAILED_EVENT_TYPES.join('/')}；收到: ${event ?? '无'}；成功流事件不得伪造）`;
       }
     }
     if (to === 'pending' && from === 'failed') {
@@ -951,6 +971,10 @@ export function setState({
     } else if (to === 'verified') {
       g.state = 'verified';
     } else if (to === 'failed') {
+      // 纵深防御：写盘闭包内再断言白名单（前置机判已校验；防未来新增写入口绕过前置）
+      if (!event || !FAILED_EVENT_TYPES.includes(event)) {
+        throw new LedgerError('SCHEMA', `→failed 落盘事件非失败原因白名单（白名单: ${FAILED_EVENT_TYPES.join('/')}，收到: ${event ?? '无'}）`);
+      }
       g.state = 'failed';
       cur.events.push({ type: event, at: now, detail: { group_id: group, event } });
     } else if (to === 'pending' && from === 'failed') {
@@ -1229,8 +1253,8 @@ function validateReviewDelivery(data) {
   // rounds/findings_total/unresolved 都是整数语义字段（台账 review 层为整数契约），
   // 非负整数一把抓：字符串/小数/布尔/负值全部拒
   for (const k of ['rounds', 'findings_total', 'unresolved']) {
-    if (!Number.isInteger(data[k]) || data[k] < 0) {
-      throw new LedgerError('DELIVERY_SCHEMA', `审查组交卷 ${k} 必须是非负整数（当前: ${data[k]}）`);
+    if (!Number.isSafeInteger(data[k]) || data[k] < 0) {
+      throw new LedgerError('DELIVERY_SCHEMA', `审查组交卷 ${k} 必须是非负安全整数（≤ ${Number.MAX_SAFE_INTEGER}，当前: ${data[k]}）`);
     }
   }
   if (!Array.isArray(data.fix_commits)) {
