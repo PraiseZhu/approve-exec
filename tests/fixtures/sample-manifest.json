@@ -1,0 +1,237 @@
+{
+  "schema_version": "v1",
+  "slug": "approve-exec-skill-fixture",
+  "goal": "夹具 manifest：run-ledger 单元测试用小样本（照上游 task-manifest 顶层形状，两波：执行组 g4 + 验收组 v1）",
+  "priorities": [
+    {
+      "id": "p1",
+      "title": "run-ledger 台账",
+      "why": "夹具优先级占位"
+    }
+  ],
+  "scs": [
+    {
+      "id": "sc-p1c",
+      "priority_id": "p1",
+      "kind": "fix",
+      "granularity": "goal",
+      "change": "写 scripts/run-ledger.mjs 的 init/validate 子命令（夹具简化版）",
+      "holds": "台账与 manifest 的内容绑定",
+      "verify": {
+        "cmd": "node",
+        "args": [
+          "scripts/run-tests.mjs"
+        ]
+      },
+      "expect": "exit 0 且 fail 0"
+    },
+    {
+      "id": "sc-p1d",
+      "priority_id": "p1",
+      "kind": "fix",
+      "granularity": "goal",
+      "change": "写 run-ledger set-state 子命令（夹具简化版）",
+      "holds": "不可逆状态推进不可被重放/乱序清除",
+      "verify": {
+        "cmd": "node",
+        "args": [
+          "scripts/run-tests.mjs"
+        ]
+      },
+      "expect": "exit 0 且 fail 0"
+    },
+    {
+      "id": "sc-p1e",
+      "priority_id": "p1",
+      "kind": "fix",
+      "granularity": "goal",
+      "change": "写 run-ledger render-packet 子命令（夹具简化版）",
+      "holds": "凡 render-packet 出的包，goal 场景 C 五项 fail-closed 检查必然全过",
+      "verify": {
+        "cmd": "node",
+        "args": [
+          "scripts/run-tests.mjs"
+        ]
+      },
+      "expect": "exit 0 且 fail 0"
+    },
+    {
+      "id": "sc-p1h",
+      "priority_id": "p1",
+      "kind": "fix",
+      "granularity": "goal",
+      "change": "写 run-ledger record-delivery 子命令（夹具简化版）",
+      "holds": "worker 交卷进台账的唯一通道是 record-delivery",
+      "verify": {
+        "cmd": "node",
+        "args": [
+          "scripts/run-tests.mjs"
+        ]
+      },
+      "expect": "exit 0 且 fail 0"
+    },
+    {
+      "id": "sc-v1a",
+      "priority_id": "p1",
+      "kind": "verify",
+      "granularity": "goal",
+      "change": "验收组夹具 SC：只跑验证命令出 verdict 不改代码",
+      "holds": "验收包必含整合树复查项且验证命令恒来自 manifest",
+      "verify": {
+        "cmd": "node",
+        "args": [
+          "scripts/run-tests.mjs"
+        ]
+      },
+      "expect": "exit 0 且 fail 0"
+    }
+  ],
+  "waves": [
+    {
+      "wave": 1,
+      "groups": [
+        {
+          "group_id": "g4",
+          "sc_ids": [
+            "sc-p1c",
+            "sc-p1d",
+            "sc-p1e",
+            "sc-p1h"
+          ],
+          "worker_count": 1
+        }
+      ]
+    },
+    {
+      "wave": 2,
+      "groups": [
+        {
+          "group_id": "v1",
+          "sc_ids": [
+            "sc-v1a"
+          ],
+          "worker_count": 1
+        }
+      ]
+    }
+  ],
+  "dispatch": {
+    "capacity": 8,
+    "packets": [
+      {
+        "group_id": "g4",
+        "scs_inline": [
+          {
+            "id": "sc-p1c",
+            "priority_id": "p1",
+            "kind": "fix",
+            "granularity": "goal",
+            "change": "写 scripts/run-ledger.mjs 的 init/validate 子命令（夹具简化版）",
+            "holds": "台账与 manifest 的内容绑定",
+            "verify": {
+              "cmd": "node",
+              "args": [
+                "scripts/run-tests.mjs"
+              ]
+            },
+            "expect": "exit 0 且 fail 0"
+          },
+          {
+            "id": "sc-p1d",
+            "priority_id": "p1",
+            "kind": "fix",
+            "granularity": "goal",
+            "change": "写 run-ledger set-state 子命令（夹具简化版）",
+            "holds": "不可逆状态推进不可被重放/乱序清除",
+            "verify": {
+              "cmd": "node",
+              "args": [
+                "scripts/run-tests.mjs"
+              ]
+            },
+            "expect": "exit 0 且 fail 0"
+          },
+          {
+            "id": "sc-p1e",
+            "priority_id": "p1",
+            "kind": "fix",
+            "granularity": "goal",
+            "change": "写 run-ledger render-packet 子命令（夹具简化版）",
+            "holds": "凡 render-packet 出的包，goal 场景 C 五项 fail-closed 检查必然全过",
+            "verify": {
+              "cmd": "node",
+              "args": [
+                "scripts/run-tests.mjs"
+              ]
+            },
+            "expect": "exit 0 且 fail 0"
+          },
+          {
+            "id": "sc-p1h",
+            "priority_id": "p1",
+            "kind": "fix",
+            "granularity": "goal",
+            "change": "写 run-ledger record-delivery 子命令（夹具简化版）",
+            "holds": "worker 交卷进台账的唯一通道是 record-delivery",
+            "verify": {
+              "cmd": "node",
+              "args": [
+                "scripts/run-tests.mjs"
+              ]
+            },
+            "expect": "exit 0 且 fail 0"
+          }
+        ],
+        "allowed_paths": [
+          "scripts/run-ledger.mjs",
+          "tests/run-ledger.test.mjs",
+          "tests/fixtures/sample-manifest.json"
+        ],
+        "forbidden": [
+          "本包 allowed_paths 之外的一切仓内文件",
+          "直接 push main"
+        ],
+        "verify_cmds": [
+          "node scripts/run-tests.mjs"
+        ],
+        "submit_format": "交付报告必含：status ∈ {done,partial,blocked}；每条 SC 的 {sc_id, status, evidence}；分支 tip SHA；git status 干净证明",
+        "instruction": "用 goal skill 执行。--until-sc\nrun-ledger 组（夹具版）。\nSC 清单 = 本包 scs_inline（逐条原样使用）。",
+        "needs_three_review": false,
+        "manifest_core_hash": "e79653a3fa8e9228c637484999ccbcb28bd01a8a31f74272a051edb1a807c834"
+      },
+      {
+        "group_id": "v1",
+        "scs_inline": [
+          {
+            "id": "sc-v1a",
+            "priority_id": "p1",
+            "kind": "verify",
+            "granularity": "goal",
+            "change": "验收组夹具 SC：只跑验证命令出 verdict 不改代码",
+            "holds": "验收包必含整合树复查项且验证命令恒来自 manifest",
+            "verify": {
+              "cmd": "node",
+              "args": [
+                "scripts/run-tests.mjs"
+              ]
+            },
+            "expect": "exit 0 且 fail 0"
+          }
+        ],
+        "allowed_paths": [],
+        "forbidden": [
+          "验收组不改代码"
+        ],
+        "verify_cmds": [
+          "node scripts/run-tests.mjs",
+          "node scripts/ready-check.mjs"
+        ],
+        "submit_format": "验收报告：scs 逐条 verdict + integration_review 结论",
+        "instruction": "只跑 verify 命令出 verdict 不改代码。",
+        "needs_three_review": false,
+        "manifest_core_hash": "e79653a3fa8e9228c637484999ccbcb28bd01a8a31f74272a051edb1a807c834"
+      }
+    ]
+  },
+  "manifest_core_hash": "e79653a3fa8e9228c637484999ccbcb28bd01a8a31f74272a051edb1a807c834"
+}
