@@ -15,6 +15,10 @@ import {
   readLedger, writeLedgerAtomic, writeTmp, renameTmp, initLedger,
   tmpPath, acquireLedgerLock, releaseLedgerLock, manifestCoreHash, LedgerError,
 } from '../scripts/run-ledger.mjs';
+// buildChildEnv：变异子套件自起子进程，git 隔离必须同一份实现（run-tests.mjs 是唯一权威）。
+// 子套件在复制树里跑（含 ready-check/e2e-dryrun 的 git makeRepo），缺隔离会继承机器全局
+// commit.gpgsign=true，负载下 gpg 失败让夹具 commit 红——失败集比对随之漂移。
+import { buildChildEnv } from '../scripts/run-tests.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPT = join(ROOT, 'scripts', 'run-ledger.mjs');
@@ -2384,7 +2388,7 @@ function runMutatedRLSuite(dir) {
   // node 检测到「test run 递归」会静默跳过全部测试并 exit 0（实际空跑），必须剥离才能让子套件真正执行。
   const { NODE_TEST_CONTEXT: _drop, ...childEnv } = process.env;
   const r = spawnSync(process.execPath, ['--test', ...RL_MUTATION_TEST_FILES],
-    { cwd: dir, encoding: 'utf8', env: { ...childEnv, RL_MUTATION_CHILD: '1', RC_MUTATION_CHILD: '1' } });
+    { cwd: dir, encoding: 'utf8', env: { ...buildChildEnv(childEnv), RL_MUTATION_CHILD: '1', RC_MUTATION_CHILD: '1' } });
   const failedNames = new Set();
   for (const line of `${r.stdout}\n${r.stderr}`.split('\n')) {
     if (line.startsWith('not ok ')) {
