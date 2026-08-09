@@ -16,10 +16,13 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, spawn } from 'node:child_process';
+// manifestCoreHash 直接 import（与 run-ledger 同一实现，manifest 篡改对照测试的 hash 基准）
+import { manifestCoreHash } from '../scripts/run-ledger.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const READY_CHECK = join(root, 'scripts/ready-check.mjs');
+const RUN_LEDGER = join(root, 'scripts/run-ledger.mjs');
 const FULL_FIXTURE = join(root, 'tests/fixtures/ready-full');
 const FIXED_NOW = '2026-08-09T04:00:00.000Z';
 
@@ -100,11 +103,28 @@ function buildEnv(t, repo, mutate) {
   };
 }
 
-function runReady(repo, env, { withNow = true, now = FIXED_NOW } = {}) {
+function runReady(repo, env, { withNow = true, now = FIXED_NOW, withReceipt = true, receiptPath } = {}) {
   const args = [READY_CHECK, '--repo', repo.dir, '--ledger', env.ledgerPath, '--manifest', env.manifestPath,
     '--verdict', env.verdictPath, '--e2e-report', env.e2ePath, '--presubmit-dir', env.presubmitDir];
   if (withNow) args.push('--now', now);
+  if (withReceipt) args.push('--receipt', receiptPath || join(env.dir, 'ready-receipt.json'));
   return run(process.execPath, args);
+}
+
+// 并发场景辅助：同时 spawn 多份 ready-check（spawnSync 是串行的，跑不出竞态）
+function runReadyConcurrent(repo, env, count = 2) {
+  const receiptPath = join(env.dir, 'ready-receipt.json');
+  const args = [READY_CHECK, '--repo', repo.dir, '--ledger', env.ledgerPath, '--manifest', env.manifestPath,
+    '--verdict', env.verdictPath, '--e2e-report', env.e2ePath, '--presubmit-dir', env.presubmitDir,
+    '--now', FIXED_NOW, '--receipt', receiptPath];
+  return Promise.all(Array.from({ length: count }, () => new Promise((resolvePromise) => {
+    const p = spawn(process.execPath, [...args], { encoding: 'utf8' });
+    let stdout = '';
+    let stderr = '';
+    p.stdout.on('data', (d) => { stdout += d; });
+    p.stderr.on('data', (d) => { stderr += d; });
+    p.on('close', (code) => resolvePromise({ status: code, stdout: stdout.trim(), stderr: stderr.trim() }));
+  })));
 }
 
 function gapGates(stderr) {
@@ -120,16 +140,27 @@ function expectGaps(res, expected, msg = '') {
   assert.equal(res.stdout, '', `gap 态不应输出 READY 行（${msg}）: ${res.stdout}`);
 }
 
-test('full: 七项全齐 → READY_FOR_SUBMIT_PR 含分支与 SHA，台账 phase→ready 且 version+1', (t) => {
+test('full: 七项全齐 → READY_FOR_SUBMIT_PR 含分支与 SHA，receipt 原子落盘（ledger_version=检查时 version），台账不被驱动', (t) => {
   const repo = makeRepo(t);
   const env = buildEnv(t, repo, null);
   const res = runReady(repo, env);
   assert.equal(res.status, 0, `期望 exit 0\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
   assert.equal(res.stdout, `READY_FOR_SUBMIT_PR feat/fixture-branch ${repo.sha}`, 'READY 行必须单行含分支与 HEAD SHA');
+  // ready-check 只检查不写台账：台账必须原样（phase=validating、version=3、无 phase_at）
   const written = JSON.parse(readFileSync(env.ledgerPath, 'utf8'));
-  assert.equal(written.phase, 'ready', '台账 phase 应被驱动为 ready');
-  assert.equal(written.version, 4, '台账 version 应 +1（3→4，CAS 乐观锁）');
-  assert.equal(written.phase_at, FIXED_NOW, 'phase_at 应使用 --now 注入的时间戳');
+  assert.equal(written.phase, 'validating', 'ready-check 不得驱动台账 phase（写入权在 run-ledger set-state）');
+  assert.equal(written.version, 3, 'ready-check 不得递增台账 version');
+  assert.equal(written.phase_at, undefined, 'ready-check 不得写 phase_at（phase→ready 由 run-ledger 驱动时写入）');
+  // 台账仍是 run-ledger exact schema 合法形状
+  const v = run(process.execPath, [RUN_LEDGER, 'validate', env.ledgerPath]);
+  assert.equal(v.status, 0, `台账必须过 run-ledger validate: ${v.stderr}`);
+  // →ready receipt（READY_RECEIPT_KEYS 消费契约）：exact 三键、candidate_sha=HEAD、
+  // ledger_version=检查时读到的 version（非 +1）、checked_at=注入时间戳
+  const receipt = JSON.parse(readFileSync(join(env.dir, 'ready-receipt.json'), 'utf8'));
+  assert.deepEqual(Object.keys(receipt).sort(), ['candidate_sha', 'checked_at', 'ledger_version'], 'receipt 必须 exact 三键（未知键拒）');
+  assert.equal(receipt.candidate_sha, repo.sha, 'receipt.candidate_sha 必须 = 候选仓 HEAD');
+  assert.equal(receipt.ledger_version, 3, 'receipt.ledger_version 必须 = 检查时读到的台账 version（非 +1）');
+  assert.equal(receipt.checked_at, FIXED_NOW, 'receipt.checked_at 必须 = --now 注入的时间戳');
 });
 
 test('gap1: 台账缺组（组数 < manifest packets）→ exit 2 gap ledger-partition', (t) => {
@@ -406,14 +437,14 @@ test('组合缺口: e2e 缺失 + main 分支 → exit 2 且两项都点名（不
   expectGaps(runReady(repo, env), ['e2e-report', 'feature-branch'], '组合缺口逐项独立');
 });
 
-test('full 但未传 --now: 门全过但拒绝驱动台账 → exit 2 gap ledger-write-conflict', (t) => {
+test('full 但未传 --now: 门全过但拒绝写 receipt → exit 2 gap ready-receipt，台账不被驱动', (t) => {
   const repo = makeRepo(t);
   const env = buildEnv(t, repo, null);
   const res = runReady(repo, env, { withNow: false });
-  expectGaps(res, ['ledger-write-conflict'], '无 --now 拒绝写台账');
+  expectGaps(res, ['ready-receipt'], '无 --now 拒绝写 receipt（checked_at 需注入）');
   const written = JSON.parse(readFileSync(env.ledgerPath, 'utf8'));
-  assert.equal(written.phase, 'validating', '未驱动时台账 phase 必须保持原状');
-  assert.equal(written.version, 3, '未驱动时台账 version 必须保持原状');
+  assert.equal(written.phase, 'validating', '台账 phase 必须保持原状');
+  assert.equal(written.version, 3, '台账 version 必须保持原状');
 });
 
 test('bad-now: --now 非 ISO 时间戳 → exit 2，台账不被驱动（fail-closed 不写坏账）', (t) => {
@@ -426,6 +457,213 @@ test('bad-now: --now 非 ISO 时间戳 → exit 2，台账不被驱动（fail-cl
   const written = JSON.parse(readFileSync(env.ledgerPath, 'utf8'));
   assert.equal(written.phase, 'validating', '非法 --now 不得驱动台账 phase');
   assert.equal(written.version, 3, '非法 --now 不得递增台账 version');
+});
+
+test('full 但未传 --receipt: 门全过但拒绝输出 READY → exit 2 gap ready-receipt，台账不被驱动', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, null);
+  const res = runReady(repo, env, { withReceipt: false });
+  expectGaps(res, ['ready-receipt'], '无 --receipt 拒绝输出 READY（→ready 凭据需 ready-check 写入 receipt）');
+  const written = JSON.parse(readFileSync(env.ledgerPath, 'utf8'));
+  assert.equal(written.phase, 'validating', '无 --receipt 时台账 phase 必须保持原状（不驱动）');
+  assert.equal(written.version, 3, '无 --receipt 时台账 version 必须保持原状');
+});
+
+test('receipt 写盘失败: --receipt 指向不存在目录 → exit 2 gap ready-receipt，不输出 READY 行', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, null);
+  const res = runReady(repo, env, { receiptPath: join(env.dir, 'no-such-dir', 'ready-receipt.json') });
+  assert.equal(res.status, 2, `receipt 写失败必须 exit 2\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+  assert.match(res.stderr, /GAP: ready-receipt/, '写失败必须点名 ready-receipt');
+  assert.match(res.stderr, /receipt 写入失败/, '写失败必须点名具体原因');
+  assert.equal(res.stdout, '', 'receipt 未落盘时不得输出 READY 行');
+});
+
+// ---------- receipt 闭环（F-F 对端）：ready-check 铸 receipt → run-ledger set-state 消费 → ready ----------
+// 消费侧契约（run-ledger READY_RECEIPT_KEYS）：ledger_version 必须 == 消费时台账 version（检查后
+// 任何写操作使 receipt 失效，防重放）+ candidate_sha == 台账当前最新集成 tip。
+// ready-check 的 ready-full 夹具 phase=validating、无 integrated_tip，直接给它消费会撞
+// phaseTransitionAllowed（validating→ready 非法跳步）与「集成树=null」——闭环用「同款台账推进到
+// packaging 且全波集成」的副本消费：receipt.ledger_version=3（检查时读到的 version，非 +1）
+// 与副本 version=3 绑定，语义一致。phase_at 被显式剥掉：副本从未发生过 ready 转换，
+// 不应携带 ready 时点（消费成功时 run-ledger 会新写）。
+function buildConsumableLedger(env, repo) {
+  const base = JSON.parse(readFileSync(env.ledgerPath, 'utf8'));
+  const { phase_at: _drop, ...clean } = base;
+  return {
+    ...clean,
+    version: 3,
+    phase: 'packaging',
+    waves: base.waves.map((w) => ({ ...w, integrated_tip: repo.sha })),
+  };
+}
+
+test('闭环: ready-check 写出 receipt → run-ledger set-state --ready-receipt 消费 → exit 0 成功到 ready', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, null);
+  const receiptPath = join(env.dir, 'ready-receipt.json');
+  const res = runReady(repo, env, { receiptPath });
+  assert.equal(res.status, 0, `ready-check 必须 exit 0\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+  const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
+  assert.deepEqual(Object.keys(receipt).sort(), ['candidate_sha', 'checked_at', 'ledger_version'], 'receipt 必须 exact 三键');
+
+  // 消费：packaging 副本 + 同 version → 合法 receipt 驱动到 ready
+  const ledgerB = join(env.dir, 'ledger-consumable.json');
+  writeFileSync(ledgerB, `${JSON.stringify(buildConsumableLedger(env, repo), null, 2)}\n`);
+  const r = run(process.execPath, [RUN_LEDGER, 'set-state', ledgerB, '--phase', 'ready',
+    '--ready-receipt', receiptPath, '--now', FIXED_NOW]);
+  assert.equal(r.status, 0, `合法 receipt 消费必须 exit 0: ${r.stderr}`);
+  const consumed = JSON.parse(readFileSync(ledgerB, 'utf8'));
+  assert.equal(consumed.phase, 'ready', '消费成功后台账 phase 必须 = ready');
+  assert.equal(consumed.phase_at, FIXED_NOW, '消费成功必须写 phase_at（F2 契约）');
+});
+
+test('闭环反例 A: 铸 receipt 后对台账做一次写操作（version+1）→ run-ledger 拒并点名版本不匹配（防重放）', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, null);
+  const receiptPath = join(env.dir, 'ready-receipt.json');
+  const res = runReady(repo, env, { receiptPath });
+  assert.equal(res.status, 0, `ready-check 必须 exit 0\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+  const ledgerB = join(env.dir, 'ledger-consumable.json');
+  // 反例 A 专用副本：packaging + version=3（与 receipt 绑定），waves 保持未集成——
+  // 新 main 生命周期门下 verified 组身份写/record-delivery 全拒，wave 集成是该形状
+  // 唯一仍可执行的 version+1 合法写（全组 verified 前置满足）。版本检查先于候选树
+  // 检查触发，拒绝理由仍是版本不匹配（与闭环正例的集成树语义互不影响）。
+  const base = JSON.parse(readFileSync(env.ledgerPath, 'utf8'));
+  const { phase_at: _drop, ...clean } = base;
+  writeFileSync(ledgerB, `${JSON.stringify({ ...clean, version: 3, phase: 'packaging' }, null, 2)}\n`);
+  // 写 receipt 后对台账做一次写操作：wave 1 集成（receipt.ledger_version(3) ≠ 消费时 version(4) → 拒）
+  const bump = run(process.execPath, [RUN_LEDGER, 'set-state', ledgerB, '--wave', '1',
+    '--integrate', repo.sha, '--now', FIXED_NOW]);
+  assert.equal(bump.status, 0, `预置写操作必须成功: ${bump.stderr}`);
+  const r = run(process.execPath, [RUN_LEDGER, 'set-state', ledgerB, '--phase', 'ready',
+    '--ready-receipt', receiptPath, '--now', FIXED_NOW]);
+  assert.equal(r.status, 2, '过期 receipt（检查后发生过写操作）必须 exit 2');
+  assert.match(r.stderr, /版本不匹配|ledger_version/, '必须点名版本不匹配（防重放）');
+  const ledger = JSON.parse(readFileSync(ledgerB, 'utf8'));
+  assert.equal(ledger.phase, 'packaging', '被拒后 phase 必须保持原状');
+  assert.ok(ledger.events.some((e) => e.type === 'illegal_transition'), '非法尝试必须落 illegal_transition 事件');
+});
+
+test('闭环反例 B: receipt.candidate_sha 与台账集成树不符 → run-ledger 拒并点名（伪造拒）', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, null);
+  const receiptPath = join(env.dir, 'ready-receipt.json');
+  const res = runReady(repo, env, { receiptPath });
+  assert.equal(res.status, 0, `ready-check 必须 exit 0\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+  const ledgerB = join(env.dir, 'ledger-consumable.json');
+  writeFileSync(ledgerB, `${JSON.stringify(buildConsumableLedger(env, repo), null, 2)}\n`);
+  // 改 receipt 的 candidate_sha（形状仍合法 40hex）→ 与台账当前集成树不符 → 拒
+  const forged = join(env.dir, 'ready-receipt-forged.json');
+  const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
+  writeFileSync(forged, `${JSON.stringify({ ...receipt, candidate_sha: 'b'.repeat(40) }, null, 2)}\n`);
+  const r = run(process.execPath, [RUN_LEDGER, 'set-state', ledgerB, '--phase', 'ready',
+    '--ready-receipt', forged, '--now', FIXED_NOW]);
+  assert.equal(r.status, 2, 'candidate_sha 与集成树不符必须 exit 2（伪造拒）');
+  assert.match(r.stderr, /candidate_sha|集成树/, '必须点名 candidate_sha 与集成树不一致');
+});
+
+// ---------- 并发实证（缺陷①回归守卫）：ready-check 不写台账，并发双跑无写竞争 ----------
+// 每轮用全新夹具副本（version=3 起点），双进程经 spawn 并发启动（spawnSync 串行跑不出竞态）。
+// ready-check 只写 receipt（唯一 tmp + rename 原子，内容同源同值，无半写）不改台账——
+// 双进程都 exit 0 都输出 READY，台账 version 全程不变。phase→ready 的唯一写入者
+// run-ledger set-state 对 receipt 消费：同一 receipt 驱动恰 1 次成功（第二次必拒）。
+// 轮数：正常跑 30 轮（≥ 验收口径）；变异子套件（RC_MUTATION_CHILD=1）降至 8 轮——
+// 套件并发风暴下 30 轮 × 9 变异副本会让子套件重载失稳（实测全量并行跑时变异子套件输出被截断）。
+test('并发: 同台账双进程同时跑 ready-check → 双 READY、台账 version 全程不变，receipt 驱动恰 1 成功（30 轮）', async (t) => {
+  const repo = makeRepo(t);
+  const ROUNDS = process.env.RC_MUTATION_CHILD === '1' ? 8 : 30;
+  for (let i = 0; i < ROUNDS; i += 1) {
+    const env = buildEnv(t, repo, null); // 每轮独立夹具副本（version=3 起点）
+    const [a, b] = await runReadyConcurrent(repo, env);
+    for (const r of [a, b]) {
+      assert.equal(r.status, 0, `轮 ${i + 1}: ready-check 必须 exit 0（无写竞争）\n${r.stderr}`);
+      assert.match(r.stdout, new RegExp(`^READY_FOR_SUBMIT_PR feat/fixture-branch ${repo.sha}$`), 'READY 行必须含分支与 HEAD SHA');
+    }
+    const written = JSON.parse(readFileSync(env.ledgerPath, 'utf8'));
+    assert.equal(written.version, 3, `轮 ${i + 1}: 台账 version 必须全程不变（ready-check 不写台账）`);
+    assert.equal(written.phase, 'validating', `轮 ${i + 1}: 台账 phase 必须不被驱动`);
+    // 并发写同一 receipt 路径：唯一 tmp + rename 原子 → 落盘必为完整合法 JSON（无半写）
+    const receipt = JSON.parse(readFileSync(join(env.dir, 'ready-receipt.json'), 'utf8'));
+    assert.deepEqual(Object.keys(receipt).sort(), ['candidate_sha', 'checked_at', 'ledger_version'], 'receipt 必须 exact 三键');
+    assert.equal(receipt.ledger_version, 3, 'receipt.ledger_version 必须 = 检查时 version');
+    if (i === ROUNDS - 1) {
+      // 用最后一张 receipt 驱动 run-ledger：恰 1 成功（驱动后台账 ready，第二次驱动必拒）
+      const ledgerB = join(env.dir, 'ledger-consumable.json');
+      writeFileSync(ledgerB, `${JSON.stringify(buildConsumableLedger(env, repo), null, 2)}\n`);
+      const r1 = run(process.execPath, [RUN_LEDGER, 'set-state', ledgerB, '--phase', 'ready',
+        '--ready-receipt', join(env.dir, 'ready-receipt.json'), '--now', FIXED_NOW]);
+      assert.equal(r1.status, 0, `receipt 驱动必须恰 1 成功: ${r1.stderr}`);
+      const r2 = run(process.execPath, [RUN_LEDGER, 'set-state', ledgerB, '--phase', 'ready',
+        '--ready-receipt', join(env.dir, 'ready-receipt.json'), '--now', FIXED_NOW]);
+      assert.equal(r2.status, 2, '同一 receipt 第二次驱动必须 exit 2（恰 1 成功）');
+    }
+  }
+  t.diagnostic(`并发 ${ROUNDS} 轮全过：每轮双 READY + 台账 version 3 不变，receipt 驱动恰 1 成功`);
+});
+
+// ---------- 状态机绕过（缺陷③回归守卫）：ready-check 只检查，run-ledger 驱动时执行状态机 ----------
+// 旧实现 drivePhaseReady 直接 {...current, phase:'ready'}，不查当前 phase、不要求全波集成——
+// phase=validating、integrated_tip=null 也被放行。新架构下 ready-check 对此无感（职责分工），
+// 但 run-ledger set-state --phase ready 必须拒：集成树为空（candidate_sha 无绑定对象）或
+// phase 跳步（validating→ready 须依次经过 e2e → packaging）各拒并点名。
+test('状态机绕过: 台账 phase=validating 且 integrated_tip=null → ready-check 放行（只检查），run-ledger 驱动必拒并点名', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, null);
+  const receiptPath = join(env.dir, 'ready-receipt.json');
+  // ready-check 对 phase/集成状态不做状态机前置（那不是它的职责）——仍 exit 0 + 写 receipt
+  const res = runReady(repo, env, { receiptPath });
+  assert.equal(res.status, 0, `ready-check 应 exit 0（只检查）: ${res.stderr}`);
+  assert.match(res.stdout, new RegExp(`^READY_FOR_SUBMIT_PR feat/fixture-branch ${repo.sha}$`));
+  // (a) 集成树为空：receipt.candidate_sha != latestIntegratedTip(null) → 拒并点名
+  const rA = run(process.execPath, [RUN_LEDGER, 'set-state', env.ledgerPath, '--phase', 'ready',
+    '--ready-receipt', receiptPath, '--now', FIXED_NOW]);
+  assert.equal(rA.status, 2, '集成树为空时驱动必须 exit 2');
+  assert.match(rA.stderr, /candidate_sha|集成树/, '必须点名 candidate_sha 与集成树不一致');
+  // (b) phase 跳步：phase=validating 但全波已集成（version 与 receipt 匹配）→ 状态机拒并点名
+  const ledgerB = join(env.dir, 'ledger-jump.json');
+  const base = JSON.parse(readFileSync(env.ledgerPath, 'utf8'));
+  writeFileSync(ledgerB, `${JSON.stringify({ ...base, version: 3, phase: 'validating',
+    waves: base.waves.map((w) => ({ ...w, integrated_tip: repo.sha })) }, null, 2)}\n`);
+  const rB = run(process.execPath, [RUN_LEDGER, 'set-state', ledgerB, '--phase', 'ready',
+    '--ready-receipt', receiptPath, '--now', FIXED_NOW]);
+  assert.equal(rB.status, 2, 'phase 跳步必须 exit 2');
+  assert.match(rB.stderr, /非法跳转|须依次经过/, '必须点名 phase 单步前置（validating → ready 须经过 e2e → packaging）');
+});
+
+// ---------- manifest 篡改（缺陷②回归守卫）：hash 绑定在 run-ledger 侧 ----------
+// 旧实现 ready-check 直接消费 --manifest，只对 group/sc 集合，不校 core hash——
+// 改 manifest.goal（保留 scs/packets）仍被放行。新架构下 ready-check 不校 hash
+// （它的职责是候选树 + 台账状态 + 三闸检查，不是内容绑定）；manifest 内容绑定由
+// run-ledger 的 assertManifestBound 在所有消费 manifest 的命令入口执行（validate/
+// render-packet/record-delivery）——篡改 manifest 后 validate 实读实算 → HASH_MISMATCH 拒。
+// 对照设计：先证明「未篡改 env manifest 绑定自身 hash → validate 过」（隔离基线），
+// 再仅改 goal 一字段 → 同 hash 台账 validate 拒。差异唯一 = goal 篡改。
+test('manifest 篡改: 改 manifest.goal（scs/packets 原样）→ ready-check 放行（不校 hash 是分工），run-ledger validate 拒 HASH_MISMATCH', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, null);
+  // ready-check：仅 goal 变化的 manifest 仍过七门（hash 不属其职责）→ exit 0 + READY + receipt
+  const res = runReady(repo, env);
+  assert.equal(res.status, 0, `ready-check 应 exit 0（hash 绑定不在它这边）: ${res.stderr}`);
+  assert.match(res.stdout, new RegExp(`^READY_FOR_SUBMIT_PR feat/fixture-branch ${repo.sha}$`));
+  assert.equal(JSON.parse(readFileSync(join(env.dir, 'ready-receipt.json'), 'utf8')).candidate_sha, repo.sha, 'receipt 已落盘');
+  // 基线：env manifest（未篡改）绑定自身 hash → validate 必须过（隔离对照，证明差异唯一 = goal）
+  const boundHash = manifestCoreHash(JSON.parse(readFileSync(env.manifestPath, 'utf8')));
+  const ledgerBase = JSON.parse(readFileSync(env.ledgerPath, 'utf8'));
+  const baselinePath = join(env.dir, 'ledger-baseline.json');
+  writeFileSync(baselinePath, `${JSON.stringify({ ...ledgerBase, manifest_path: env.manifestPath, manifest_core_hash: boundHash }, null, 2)}\n`);
+  const baseline = run(process.execPath, [RUN_LEDGER, 'validate', baselinePath]);
+  assert.equal(baseline.status, 0, `未篡改 manifest 必须过 validate（隔离对照）: ${baseline.stderr}`);
+  // 篡改：goal 一字段（scs/packets 与基线逐字相同）→ 同 hash 台账 validate 拒
+  const tampered = JSON.parse(readFileSync(env.manifestPath, 'utf8'));
+  tampered.goal = '被篡改的 goal（scs/packets 原样）';
+  const tamperedPath = join(env.dir, 'manifest-tampered.json');
+  writeFileSync(tamperedPath, `${JSON.stringify(tampered, null, 2)}\n`);
+  const tamperedLedgerPath = join(env.dir, 'ledger-tampered.json');
+  writeFileSync(tamperedLedgerPath, `${JSON.stringify({ ...ledgerBase, manifest_path: tamperedPath, manifest_core_hash: boundHash }, null, 2)}\n`);
+  const v = run(process.execPath, [RUN_LEDGER, 'validate', tamperedLedgerPath]);
+  assert.equal(v.status, 2, '篡改 manifest 后 validate 必须 exit 2');
+  assert.match(v.stderr, /HASH_MISMATCH/, '必须点名 manifest core hash 不匹配');
 });
 
 // ---------- 变异反证（sc-p1g）：三组反向变异各自挖红且失败模式互相隔离 ----------
@@ -462,9 +700,25 @@ const MUTATION_PREDICTIONS = [
     to: 'const manifest = readJsonOrNull(args.manifest); if (!ledger || !manifest) { console.error(\'GAP: ledger-partition: 前置输入不可解析（旧版提前 exit 行为）\'); process.exit(2); }',
     red: ['F-O: ledger+e2e 都删 → 三项 gap 同时点名（不跳过后项）',
           'F-O: manifest+verdict 都删 → ledger-partition + verdict-anchors 双 gate 点名'] },
+  { id: '变异⑨', label: '→ready receipt 写入（成功路径铸凭据）', from: 'const receiptError = writeReadyReceipt(args.receipt, { candidateSha: headSha, ledgerVersion: ledger.version, checkedAt: args.now });',
+    to: 'const receiptError = null; // 变异⑨：receipt 写盘被挖掉',
+    red: ['full: 七项全齐 → READY_FOR_SUBMIT_PR 含分支与 SHA，receipt 原子落盘（ledger_version=检查时 version），台账不被驱动',
+          'receipt 写盘失败: --receipt 指向不存在目录 → exit 2 gap ready-receipt，不输出 READY 行',
+          '闭环: ready-check 写出 receipt → run-ledger set-state --ready-receipt 消费 → exit 0 成功到 ready',
+          '闭环反例 A: 铸 receipt 后对台账做一次写操作（version+1）→ run-ledger 拒并点名版本不匹配（防重放）',
+          '闭环反例 B: receipt.candidate_sha 与台账集成树不符 → run-ledger 拒并点名（伪造拒）',
+          'manifest 篡改: 改 manifest.goal（scs/packets 原样）→ ready-check 放行（不校 hash 是分工），run-ledger validate 拒 HASH_MISMATCH',
+          '状态机绕过: 台账 phase=validating 且 integrated_tip=null → ready-check 放行（只检查），run-ledger 驱动必拒并点名',
+          '并发: 同台账双进程同时跑 ready-check → 双 READY、台账 version 全程不变，receipt 驱动恰 1 成功（30 轮）'] },
+  { id: '变异⑩', label: 'receipt 未落盘不得输出 READY 的守卫（写失败 exit 2）', from: 'if (receiptError !== null) {',
+    to: 'if (false) {',
+    red: ['receipt 写盘失败: --receipt 指向不存在目录 → exit 2 gap ready-receipt，不输出 READY 行'] },
 ];
 
-// 复制 scripts/tests/config 到临时目录并对脚本副本应用变异；返回副本测试文件路径。
+// 复制 scripts/tests/config 到临时目录并对脚本副本应用变异；返回 { file, dir }——
+// dir 是复制树根（子套件进程的 cwd 必须是根：full 测试的链尾 run-ledger validate 会按
+// cwd 解析夹具 ledger 里的相对 manifest_path；此前 cwd 误传 dirname(testFile)=根/tests，
+// 相对路径全解析错位，直到 F2 回归锚点首次暴露）。
 function copyTreeForMutation(t, mutateScript) {
   const dir = mkdtempSync(join(tmpdir(), 'ready-mut-'));
   mkdirSync(join(dir, 'scripts'), { recursive: true });
@@ -474,11 +728,13 @@ function copyTreeForMutation(t, mutateScript) {
   const scriptMutated = mutateScript(scriptSrc);
   assert.notEqual(scriptMutated, scriptSrc, '变异必须实际改变脚本内容（防替换静默空转）');
   writeFileSync(join(dir, 'scripts/ready-check.mjs'), scriptMutated);
+  // full 测试的链尾 run-ledger validate（F2 回归锚点）需要真实 run-ledger.mjs 副本
+  writeFileSync(join(dir, 'scripts/run-ledger.mjs'), readFileSync(join(root, 'scripts/run-ledger.mjs'), 'utf8'));
   writeFileSync(join(dir, 'tests/ready-check.test.mjs'), readFileSync(join(root, 'tests/ready-check.test.mjs'), 'utf8'));
   cpSync(join(root, 'tests/fixtures'), join(dir, 'tests/fixtures'), { recursive: true });
   writeFileSync(join(dir, 'config/defaults.json'), readFileSync(join(root, 'config/defaults.json'), 'utf8'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  return join(dir, 'tests/ready-check.test.mjs');
+  return { file: join(dir, 'tests/ready-check.test.mjs'), dir };
 }
 
 // 跑子套件（变异副本上），返回 exit code 与失败测试名集合；同时解析 spec('✖ name (ms)') 与 TAP('not ok N - name') 报告器
@@ -503,8 +759,8 @@ function runMutatedSuite(testFile, dir) {
 for (const m of MUTATION_PREDICTIONS) {
   test(`mutation-kill: ${m.id} ${m.label} 被挖 → 恰红预测用例，失败模式隔离`, (t) => {
     if (process.env.RC_MUTATION_CHILD === '1') { t.skip('子套件运行跳过变异测试（防递归）'); return; }
-    const testFile = copyTreeForMutation(t, (src) => src.replace(m.from, m.to));
-    const { status, failedNames } = runMutatedSuite(testFile, dirname(testFile));
+    const { file: testFile, dir } = copyTreeForMutation(t, (src) => src.replace(m.from, m.to));
+    const { status, failedNames } = runMutatedSuite(testFile, dir);
     assert.equal(status, 1, `变异 ${m.id} 后套件必须红（exit 1），实际 ${status}`);
     assert.deepEqual([...failedNames].sort(), [...m.red].sort(),
       `变异 ${m.id} 的失败集必须恰为预测集（${m.red.length} 条，无多余无遗漏）`);

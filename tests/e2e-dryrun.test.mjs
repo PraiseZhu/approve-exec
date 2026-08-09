@@ -235,7 +235,57 @@ function runReadyCheck(env, repo, { withNow = true } = {}) {
 // =====================================================================
 // 全链 dry-run：先红后绿
 // =====================================================================
+test('sc-p2d: 全链 dry-run——先红（缺 e2e 报告与 presubmit 三闸）后绿（READY_FOR_SUBMIT_PR + 台账 phase→ready + 链尾 validate exit 0）', (t) => {
+  const repo = makeRepo(t);
+  const env = makeEnv(t, repo);
+  const log = [];
+  runChainToPackaging(env, log);
+  assert.ok(log.every((l) => !l.startsWith('WARN:')), '正常链不得出现槽位对账告警行');
 
+  // ---- 红态：缺 e2e 报告与 presubmit 三闸 ----
+  assert.equal(existsSync(env.e2ePath), false, '红态前置：e2e 报告必须缺失');
+  assert.equal(existsSync(env.presubmitDir), false, '红态前置：presubmit 目录必须缺失');
+  const red = runReadyCheck(env, repo);
+  assert.equal(red.status, 2, `缺 e2e/presubmit 必须 exit 2\nstderr: ${red.stderr}`);
+  const gapLines = red.stderr.split('\n').filter((l) => l.startsWith('GAP: '));
+  const gapGates = gapLines.map((l) => l.replace(/^GAP: /, '').split(':')[0]);
+  assert.deepEqual([...new Set(gapGates)].sort(), ['e2e-report', 'presubmit-gates'],
+    `gap 列表必须恰含这两项 gate（红态非空转的反证——其余五项全过）\nstderr:\n${red.stderr}`);
+  assert.deepEqual(gapLines.length, 4, `gap 行数 = 1（e2e-report）+ 3（presubmit 三闸各一）`);
+  assert.equal(red.stdout, '', '红态不得输出 READY 行');
+  let ledger = JSON.parse(readFileSync(env.ledgerPath, 'utf8'));
+  const versionBefore = ledger.version;
+  assert.equal(ledger.phase, 'packaging', '红态不得驱动台账 phase');
+
+  // ---- 绿态：补齐夹具 ----
+  fillGreenFixtures(env, repo);
+  const green = runReadyCheck(env, repo);
+  assert.equal(green.status, 0, `全齐应 exit 0\nstdout: ${green.stdout}\nstderr: ${green.stderr}`);
+  assert.equal(green.stdout, `READY_FOR_SUBMIT_PR ${BRANCH} ${repo.sha}`, 'READY 行必须单行含夹具分支名与 HEAD SHA');
+  // ready-check 只写 receipt 不驱动台账（写入权在 run-ledger）——台账此刻仍未被驱动
+  ledger = JSON.parse(readFileSync(env.ledgerPath, 'utf8'));
+  assert.equal(ledger.phase, 'packaging', 'ready-check 不得驱动台账 phase（只检查）');
+  assert.equal(ledger.version, versionBefore, 'ready-check 不得递增台账 version');
+  // phase→ready 由 run-ledger set-state --phase ready --ready-receipt 驱动（锁/CAS/状态机）
+  const receiptPath = join(env.dir, 'ready-receipt.json');
+  const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
+  assert.equal(receipt.ledger_version, versionBefore, 'receipt.ledger_version 必须 = 检查时读到的台账 version');
+  const drv = cliLedger('set-state', env.ledgerPath, '--phase', 'ready',
+    '--ready-receipt', receiptPath, '--now', FIXED_NOW);
+  assert.equal(drv.status, 0, `receipt 驱动 phase→ready 应 exit 0: ${drv.stderr}`);
+  ledger = JSON.parse(readFileSync(env.ledgerPath, 'utf8'));
+  assert.equal(ledger.phase, 'ready', '台账 phase 应被驱动为 ready');
+  assert.equal(ledger.version, versionBefore + 1, '台账 version 应 +1（CAS 乐观锁）');
+  assert.equal(ledger.phase_at, FIXED_NOW, 'phase_at 应使用 --now 注入的时间戳（F2 契约）');
+
+  // ---- 链尾：run-ledger validate 必须接受 ready 台账（F2 回归：phase_at 是 exact 键白名单成员）----
+  const v = cliLedger('validate', env.ledgerPath);
+  assert.equal(v.status, 0, `ready 台账必须过 run-ledger validate（F2 回归）: ${v.stderr}`);
+});
+
+// =====================================================================
+// 交叉断言 a：双账本一致性
+// =====================================================================
 test('sc-p2d: 双账本一致性——collected_tip 与 tip_sha 不一致时链路中断于 integrate 前', (t) => {
   const repo = makeRepo(t);
   const env = makeEnv(t, repo);
