@@ -16,11 +16,10 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync, spawn } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const READY_CHECK = join(root, 'scripts/ready-check.mjs');
-const RUN_LEDGER = join(root, 'scripts/run-ledger.mjs');
 const FULL_FIXTURE = join(root, 'tests/fixtures/ready-full');
 const FIXED_NOW = '2026-08-09T04:00:00.000Z';
 
@@ -101,28 +100,11 @@ function buildEnv(t, repo, mutate) {
   };
 }
 
-function runReady(repo, env, { withNow = true, now = FIXED_NOW, withReceipt = true, receiptPath } = {}) {
+function runReady(repo, env, { withNow = true, now = FIXED_NOW } = {}) {
   const args = [READY_CHECK, '--repo', repo.dir, '--ledger', env.ledgerPath, '--manifest', env.manifestPath,
     '--verdict', env.verdictPath, '--e2e-report', env.e2ePath, '--presubmit-dir', env.presubmitDir];
   if (withNow) args.push('--now', now);
-  if (withReceipt) args.push('--receipt', receiptPath || join(env.dir, 'ready-receipt.json'));
   return run(process.execPath, args);
-}
-
-// 并发场景辅助：同时 spawn 多份 ready-check（spawnSync 是串行的，跑不出竞态）
-function runReadyConcurrent(repo, env, count = 2) {
-  const receiptPath = join(env.dir, 'ready-receipt.json');
-  const args = [READY_CHECK, '--repo', repo.dir, '--ledger', env.ledgerPath, '--manifest', env.manifestPath,
-    '--verdict', env.verdictPath, '--e2e-report', env.e2ePath, '--presubmit-dir', env.presubmitDir,
-    '--now', FIXED_NOW, '--receipt', receiptPath];
-  return Promise.all(Array.from({ length: count }, () => new Promise((resolvePromise) => {
-    const p = spawn(process.execPath, [...args], { encoding: 'utf8' });
-    let stdout = '';
-    let stderr = '';
-    p.stdout.on('data', (d) => { stdout += d; });
-    p.stderr.on('data', (d) => { stderr += d; });
-    p.on('close', (code) => resolvePromise({ status: code, stdout: stdout.trim(), stderr: stderr.trim() }));
-  })));
 }
 
 function gapGates(stderr) {
@@ -138,6 +120,17 @@ function expectGaps(res, expected, msg = '') {
   assert.equal(res.stdout, '', `gap 态不应输出 READY 行（${msg}）: ${res.stdout}`);
 }
 
+test('full: 七项全齐 → READY_FOR_SUBMIT_PR 含分支与 SHA，台账 phase→ready 且 version+1', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, null);
+  const res = runReady(repo, env);
+  assert.equal(res.status, 0, `期望 exit 0\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+  assert.equal(res.stdout, `READY_FOR_SUBMIT_PR feat/fixture-branch ${repo.sha}`, 'READY 行必须单行含分支与 HEAD SHA');
+  const written = JSON.parse(readFileSync(env.ledgerPath, 'utf8'));
+  assert.equal(written.phase, 'ready', '台账 phase 应被驱动为 ready');
+  assert.equal(written.version, 4, '台账 version 应 +1（3→4，CAS 乐观锁）');
+  assert.equal(written.phase_at, FIXED_NOW, 'phase_at 应使用 --now 注入的时间戳');
+});
 
 test('gap1: 台账缺组（组数 < manifest packets）→ exit 2 gap ledger-partition', (t) => {
   const repo = makeRepo(t);
@@ -413,14 +406,14 @@ test('组合缺口: e2e 缺失 + main 分支 → exit 2 且两项都点名（不
   expectGaps(runReady(repo, env), ['e2e-report', 'feature-branch'], '组合缺口逐项独立');
 });
 
-test('full 但未传 --now: 门全过但拒绝写 receipt → exit 2 gap ready-receipt，台账不被驱动', (t) => {
+test('full 但未传 --now: 门全过但拒绝驱动台账 → exit 2 gap ledger-write-conflict', (t) => {
   const repo = makeRepo(t);
   const env = buildEnv(t, repo, null);
   const res = runReady(repo, env, { withNow: false });
-  expectGaps(res, ['ready-receipt'], '无 --now 拒绝写 receipt（checked_at 需注入）');
+  expectGaps(res, ['ledger-write-conflict'], '无 --now 拒绝写台账');
   const written = JSON.parse(readFileSync(env.ledgerPath, 'utf8'));
-  assert.equal(written.phase, 'validating', '台账 phase 必须保持原状');
-  assert.equal(written.version, 3, '台账 version 必须保持原状');
+  assert.equal(written.phase, 'validating', '未驱动时台账 phase 必须保持原状');
+  assert.equal(written.version, 3, '未驱动时台账 version 必须保持原状');
 });
 
 test('bad-now: --now 非 ISO 时间戳 → exit 2，台账不被驱动（fail-closed 不写坏账）', (t) => {
@@ -435,30 +428,85 @@ test('bad-now: --now 非 ISO 时间戳 → exit 2，台账不被驱动（fail-cl
   assert.equal(written.version, 3, '非法 --now 不得递增台账 version');
 });
 
-test('full 但未传 --receipt: 门全过但拒绝输出 READY → exit 2 gap ready-receipt，台账不被驱动', (t) => {
-  const repo = makeRepo(t);
-  const env = buildEnv(t, repo, null);
-  const res = runReady(repo, env, { withReceipt: false });
-  expectGaps(res, ['ready-receipt'], '无 --receipt 拒绝输出 READY（→ready 凭据需 ready-check 写入 receipt）');
-  const written = JSON.parse(readFileSync(env.ledgerPath, 'utf8'));
-  assert.equal(written.phase, 'validating', '无 --receipt 时台账 phase 必须保持原状（不驱动）');
-  assert.equal(written.version, 3, '无 --receipt 时台账 version 必须保持原状');
-});
+// ---------- 变异反证（sc-p1g）：三组反向变异各自挖红且失败模式互相隔离 ----------
+// 与 ready-check.mjs 内变异点注释一一对应：变异① = ⑤ presubmit SHA 绑定、
+// 变异② = ① 组数对账、变异③ = ② 锚点内容校验（文件存在性）。
+// 机制：把 scripts/tests/config 复制到临时目录，对副本应用变异（字符串替换，锚点唯一），
+// 再跑「跳过变异测试自身」（RC_MUTATION_CHILD=1）的完整套件，断言失败集恰为预测集——
+// 挖红（失败集非空）+ 隔离（恰等于预测集，无多余无遗漏）。真实脚本永不被触碰，无需恢复。
+// 若 gap 测试改名，预测集字符串会随之失配并响亮失败——这是刻意的耦合，防止变异测试静默空转。
+const MUTATION_PREDICTIONS = [
+  { id: '变异①', label: '⑤ presubmit SHA 绑定', from: 'result.candidate_sha !== headSha', to: 'false',
+    red: ['gap5: presubmit 三闸各自绑定 SHA 过期 → exit 2 gap presubmit-gates'] },
+  { id: '变异②', label: '① 组数对账', from: 'groups.length !== packets.length', to: 'false',
+    red: ['gap1: 台账缺组（组数 < manifest packets）→ exit 2 gap ledger-partition'] },
+  { id: '变异③', label: '② 锚点内容校验（文件存在性）', from: '!anchorFileExists', to: 'false',
+    red: ['gap2: 证据锚点指向不存在文件 → exit 2 gap verdict-anchors',
+          'F-L: 证据锚点以 symlink 指向仓外 → exit 2 gap verdict-anchors'] },
+  { id: '变异④', label: 'F-L 锚点 realpath 仓内校验', from: 'return anchorReal === repoReal || anchorReal.startsWith(repoReal + sep);',
+    to: 'return resolved.startsWith(repoRoot + sep) || resolved === repoRoot;',
+    red: ['F-L: 证据锚点以 symlink 指向仓外 → exit 2 gap verdict-anchors'] },
+  { id: '变异⑤', label: 'F-M manifest.scs fail-closed（空/重复/对账）', from: 'if (!scv.ok) {',
+    to: 'if (false) {',
+    red: ['F-M: manifest.scs 为空数组（其余凭据全有效）→ exit 2 gap verdict-anchors',
+          'F-M: manifest.scs 含重复 id → exit 2 gap verdict-anchors',
+          'F-M: dispatch packets scs_inline 与 manifest.scs 不一致 → exit 2 gap verdict-anchors',
+          'F-M: 台账组 sc_ids 与 manifest.scs 不一致 → exit 2 gap verdict-anchors',
+          'gap1: 零工作运行（台账/manifest 全空）→ exit 2 gap ledger-partition（拒绝空洞 READY）',
+          'gap1: 台账缺组（组数 < manifest packets）→ exit 2 gap ledger-partition'] },
+  { id: '变异⑥', label: 'F-N 三方 group_id 集合严格相等', from: '&& (!setsEqual(ledgerGroupIds, packetGroupIds) || !setsEqual(ledgerGroupIds, dispatchGroupIds))) {',
+    to: '&& false) {',
+    red: ['F-N: dispatch 事件 group_id 换成未知 gX（数量仍为 2）→ exit 2 gap ledger-partition',
+          'F-N: manifest packet group_id 换成未知 gX → exit 2 gap ledger-partition'] },
+  { id: '变异⑦', label: 'F-O 不可解析输入不提前 exit', from: 'const manifest = readJsonOrNull(args.manifest);',
+    to: 'const manifest = readJsonOrNull(args.manifest); if (!ledger || !manifest) { console.error(\'GAP: ledger-partition: 前置输入不可解析（旧版提前 exit 行为）\'); process.exit(2); }',
+    red: ['F-O: ledger+e2e 都删 → 三项 gap 同时点名（不跳过后项）',
+          'F-O: manifest+verdict 都删 → ledger-partition + verdict-anchors 双 gate 点名'] },
+];
 
-test('receipt 写盘失败: --receipt 指向不存在目录 → exit 2 gap ready-receipt，不输出 READY 行', (t) => {
-  const repo = makeRepo(t);
-  const env = buildEnv(t, repo, null);
-  const res = runReady(repo, env, { receiptPath: join(env.dir, 'no-such-dir', 'ready-receipt.json') });
-  assert.equal(res.status, 2, `receipt 写失败必须 exit 2\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
-  assert.match(res.stderr, /GAP: ready-receipt/, '写失败必须点名 ready-receipt');
-  assert.match(res.stderr, /receipt 写入失败/, '写失败必须点名具体原因');
-  assert.equal(res.stdout, '', 'receipt 未落盘时不得输出 READY 行');
-});
+// 复制 scripts/tests/config 到临时目录并对脚本副本应用变异；返回副本测试文件路径。
+function copyTreeForMutation(t, mutateScript) {
+  const dir = mkdtempSync(join(tmpdir(), 'ready-mut-'));
+  mkdirSync(join(dir, 'scripts'), { recursive: true });
+  mkdirSync(join(dir, 'tests'), { recursive: true });
+  mkdirSync(join(dir, 'config'), { recursive: true });
+  const scriptSrc = readFileSync(join(root, 'scripts/ready-check.mjs'), 'utf8');
+  const scriptMutated = mutateScript(scriptSrc);
+  assert.notEqual(scriptMutated, scriptSrc, '变异必须实际改变脚本内容（防替换静默空转）');
+  writeFileSync(join(dir, 'scripts/ready-check.mjs'), scriptMutated);
+  writeFileSync(join(dir, 'tests/ready-check.test.mjs'), readFileSync(join(root, 'tests/ready-check.test.mjs'), 'utf8'));
+  cpSync(join(root, 'tests/fixtures'), join(dir, 'tests/fixtures'), { recursive: true });
+  writeFileSync(join(dir, 'config/defaults.json'), readFileSync(join(root, 'config/defaults.json'), 'utf8'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return join(dir, 'tests/ready-check.test.mjs');
+}
 
-// ---------- receipt 闭环（F-F 对端）：ready-check 铸 receipt → run-ledger set-state 消费 → ready ----------
-// 消费侧契约（run-ledger READY_RECEIPT_KEYS）：ledger_version 必须 == 消费时台账 version（检查后
-// 任何写操作使 receipt 失效，防重放）+ candidate_sha == 台账当前最新集成 tip。
-// ready-check 的 ready-full 夹具 phase=validating、无 integrated_tip，直接给它消费会撞
-// phaseTransitionAllowed（validating→ready 非法跳步）与「集成树=null」——闭环用「同款台账推进到
-// packaging 且全波集成」的副本消费：receipt.ledger_version=3（检查时读到的 version，非 +1）
-// 与副本 version=3 绑定，语义一致。phase_at 被显式剥掉：副本从未发生过 ready 转换，
+// 跑子套件（变异副本上），返回 exit code 与失败测试名集合；同时解析 spec('✖ name (ms)') 与 TAP('not ok N - name') 报告器
+function runMutatedSuite(testFile, dir) {
+  // 剥掉 NODE_TEST_CONTEXT：本进程由 node --test 拉起时该标记会被子进程继承，
+  // node 检测到「test run 递归」会静默跳过全部测试并 exit 0（实际空跑），必须剥离才能让子套件真正执行
+  const { NODE_TEST_CONTEXT: _drop, ...childEnv } = process.env;
+  const r = spawnSync(process.execPath, ['--test', testFile],
+    { cwd: dir, encoding: 'utf8', env: { ...childEnv, RC_MUTATION_CHILD: '1' } });
+  const failedNames = new Set();
+  for (const line of `${r.stdout}\n${r.stderr}`.split('\n')) {
+    if (line.startsWith('not ok ')) {
+      const m = line.match(/^not ok \d+ - (.+)$/);
+      if (m) failedNames.add(m[1].trim());
+    } else if (line.startsWith('✖ ') && !line.startsWith('✖ failing tests:')) {
+      failedNames.add(line.replace(/^✖ /, '').replace(/\s*\(\d+(?:\.\d+)?ms\)\s*$/, '').trim());
+    }
+  }
+  return { status: r.status, failedNames: [...failedNames] };
+}
+
+for (const m of MUTATION_PREDICTIONS) {
+  test(`mutation-kill: ${m.id} ${m.label} 被挖 → 恰红预测用例，失败模式隔离`, (t) => {
+    if (process.env.RC_MUTATION_CHILD === '1') { t.skip('子套件运行跳过变异测试（防递归）'); return; }
+    const testFile = copyTreeForMutation(t, (src) => src.replace(m.from, m.to));
+    const { status, failedNames } = runMutatedSuite(testFile, dirname(testFile));
+    assert.equal(status, 1, `变异 ${m.id} 后套件必须红（exit 1），实际 ${status}`);
+    assert.deepEqual([...failedNames].sort(), [...m.red].sort(),
+      `变异 ${m.id} 的失败集必须恰为预测集（${m.red.length} 条，无多余无遗漏）`);
+  });
+}

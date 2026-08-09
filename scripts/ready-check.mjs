@@ -30,16 +30,12 @@
 //   ⑦ feature-branch    HEAD 在具名 feature 分支（非 main/master、非 detached）
 //
 // 输出与退出：
-//   全过（且 --now/--receipt 已传）→ 原子写入 →ready receipt（exact schema 见 run-ledger.mjs
-//   READY_RECEIPT_KEYS 契约；ledger_version = 检查时读到的台账 version，非 +1），随后 stdout 单行
-//   `READY_FOR_SUBMIT_PR <branch> <HEAD_SHA>`。receipt 未落盘时不得输出 READY 行（写失败 → exit 2 点名）。
-//   ready-check 只检查不写台账：phase→ready 的唯一写入者是 run-ledger set-state --phase ready
-//   --ready-receipt <path>（锁/CAS/phase 单步/全波集成/manifest hash 绑定都在它那边，本脚本不复制）。
+//   全过（且 --now 已传）→ stdout 单行 `READY_FOR_SUBMIT_PR <branch> <HEAD_SHA>`，驱动台账 phase→ready
+//   （CAS：写前重读比对 version；tmp+rename 原子替换；写失败/无 --now → GAP: ledger-write-conflict + exit 2）
 //   任一缺 → exit 2，每行 `GAP: <gate>: <detail>`（全部 gap 列出）
 //
 // CLI: node scripts/ready-check.mjs --repo <R> --ledger <L> --manifest <M> --verdict <V>
-//      --e2e-report <E> --presubmit-dir <D> [--now <ISO时间戳>] [--receipt <receipt 路径>]
-//      [--config <C 默认 config/defaults.json>]
+//      --e2e-report <E> --presubmit-dir <D> [--now <ISO时间戳>] [--config <C 默认 config/defaults.json>]
 //
 // 输入容错：ledger/manifest/verdict/e2e-report 任一不可解析 → 转对应 gate 的 gap 占位，
 // 不依赖其内容的 gate 照常运行（前项失败不跳过后项），全部收束后再 exit 2。
@@ -48,17 +44,12 @@ import { readFileSync, writeFileSync, renameSync, statSync, realpathSync } from 
 import { join, resolve, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-// tmpPath 复用 run-ledger.mjs（同仓同语义，不另写一套）——receipt 原子写盘用唯一 tmp
-// 名 <path>.tmp.<pid>.<随机nonce>（固定 tmp 会让并发写者互相覆盖）。
-// ready-check 只检查不写台账：phase→ready 的唯一写入者是 run-ledger set-state
-// --phase ready --ready-receipt（锁/CAS/phase 单步/全波集成/manifest hash 绑定都在它那边）。
-import { tmpPath } from './run-ledger.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 // ---------- CLI 解析 ----------
 function parseArgs(argv) {
-  const args = { repo: null, ledger: null, manifest: null, verdict: null, e2eReport: null, presubmitDir: null, now: null, receipt: null, config: join(root, 'config/defaults.json') };
+  const args = { repo: null, ledger: null, manifest: null, verdict: null, e2eReport: null, presubmitDir: null, now: null, config: join(root, 'config/defaults.json') };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--repo') args.repo = argv[++i];
@@ -68,7 +59,6 @@ function parseArgs(argv) {
     else if (a === '--e2e-report') args.e2eReport = argv[++i];
     else if (a === '--presubmit-dir') args.presubmitDir = argv[++i];
     else if (a === '--now') args.now = argv[++i];
-    else if (a === '--receipt') args.receipt = argv[++i];
     else if (a === '--config') args.config = argv[++i];
     else { console.error(`ready-check: 未知参数 ${a}`); process.exit(2); }
   }
@@ -310,20 +300,20 @@ function checkFeatureBranch(repoRoot, gaps) {
   if (branch === 'main' || branch === 'master') { gaps.push({ gate: 'feature-branch', detail: `HEAD 在 ${branch}（非 feature 分支）` }); }
 }
 
-// ---------- →ready receipt 写入（run-ledger READY_RECEIPT_KEYS 消费契约的对端） ----------
-// exact schema：{candidate_sha: <40hex>, ledger_version: <非负整数>, checked_at: <非空字符串>}，
-// 未知键拒。原子写盘：同目录唯一 tmp（pid + 随机 nonce）+ renameSync。
-// ledger_version = 检查时读到的台账 version（不是 +1——ready-check 不驱动台账）；
-// run-ledger 消费时要求 receipt.ledger_version == 当前台账 version，检查后任何写操作
-// 都会使 receipt 失效（防重放）。返回 null = 成功；字符串 = 失败原因。
-function writeReadyReceipt(receiptPath, { candidateSha, ledgerVersion, checkedAt }) {
-  const receipt = { candidate_sha: candidateSha, ledger_version: ledgerVersion, checked_at: checkedAt };
-  const tmp = tmpPath(receiptPath);
+// ---------- 驱动台账 phase→ready（CAS + tmp+rename 原子写） ----------
+function drivePhaseReady(ledgerPath, ledger, now) {
+  const current = readJsonOrNull(ledgerPath);
+  if (!current) return '台账文件写前重读失败（不可解析）';
+  if (current.version !== ledger.version) {
+    return `CAS 冲突: 读时 version=${ledger.version}，写前重读 version=${current.version}，拒绝覆盖`;
+  }
+  const next = { ...current, version: current.version + 1, phase: 'ready', phase_at: now };
+  const tmp = `${ledgerPath}.tmp-${process.pid}`;
   try {
-    writeFileSync(tmp, `${JSON.stringify(receipt, null, 2)}\n`);
-    renameSync(tmp, resolve(receiptPath));
+    writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`);
+    renameSync(tmp, ledgerPath);
   } catch (e) {
-    return `receipt 写入失败: ${e.message}`;
+    return `台账写入失败: ${e.message}`;
   }
   return null;
 }
@@ -378,23 +368,12 @@ function main() {
   }
 
   if (args.now === null) {
-    console.error('GAP: ready-receipt: 七项全过但未传 --now，拒绝写 receipt（checked_at 需时间戳注入）');
+    console.error('GAP: ledger-write-conflict: 七项全过但未传 --now，拒绝驱动台账 phase→ready（写操作需时间戳注入）');
     process.exit(2);
   }
-  if (args.receipt === null) {
-    // →ready 的消费侧（run-ledger set-state --phase ready）只认 receipt 凭据；不写 receipt
-    // 会让 →ready 走不通——fail-closed：无 --receipt 直接拒，与缺 --now 同一档
-    console.error('GAP: ready-receipt: 七项全过但未传 --receipt <path>，拒绝输出 READY（→ready 凭据需 ready-check 原子写入 receipt）');
-    process.exit(2);
-  }
-  // 打印 READY 之前写 receipt：内容三项在此处全部可得（candidate_sha=headSha、
-  // ledger_version=检查时读到的台账 version、checked_at=注入的 ISO 时间戳）。
-  // ready-check 不写台账——phase→ready 由 run-ledger set-state --phase ready
-  // --ready-receipt 驱动（锁/CAS/phase 单步/全波集成校验都在它那边）。
-  // receipt 未落盘时不得输出 READY 行（写失败 → exit 2 点名）。
-  const receiptError = writeReadyReceipt(args.receipt, { candidateSha: headSha, ledgerVersion: ledger.version, checkedAt: args.now });
-  if (receiptError !== null) {
-    console.error(`GAP: ready-receipt: ${receiptError}`);
+  const writeError = drivePhaseReady(args.ledger, ledger, args.now);
+  if (writeError !== null) {
+    console.error(`GAP: ledger-write-conflict: ${writeError}`);
     process.exit(2);
   }
 
