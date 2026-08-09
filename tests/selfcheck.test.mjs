@@ -291,9 +291,3 @@ test('组C-1: 未知参数 → exit 2', () => {
   assert.ok(out(r).includes('未知参数'), `输出应点名未知参数，实际:\n${out(r)}`);
 });
 
-// ---------- 组 F（F-K 回归）：main-module guard 的 realpath 归一 ----------
-// 前提：import.meta.url 已被 ESM loader 规范化（realpath 后的真实路径），而 process.argv[1] 是调用方
-// 原样路径。macOS 上 os.tmpdir() 落在 /var/folders/...（/var → /private/var symlink），以逻辑 /var 路径
-// 调用时两者恒不相等——旧 guard 会让 main 静默不执行（exit 0 + 零输出，与全 PASS 同形）。
-// 本用例断言：非规范化路径调用必须真的输出检查项（PASS/FAIL 行），只断言 exit code 会被「零输出」骗过。
-// 若运行平台 tmpdir 恰好已规范化（realpath == 原路径），用 symlink 强制制造非规范化入口，防止用例空转。
