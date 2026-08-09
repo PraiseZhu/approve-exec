@@ -19,6 +19,10 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync, spawn } from 'node:child_process';
 // manifestCoreHash 直接 import（与 run-ledger 同一实现，manifest 篡改对照测试的 hash 基准）
 import { manifestCoreHash } from '../scripts/run-ledger.mjs';
+// buildChildEnv：变异子套件自起子进程，git 隔离必须同一份实现（run-tests.mjs 是唯一权威）。
+// 子套件在复制树里跑（makeRepo 的 git commit），缺隔离会继承机器全局 commit.gpgsign=true，
+// 负载下 gpg 失败让夹具 commit 红——失败集比对随之漂移。
+import { buildChildEnv } from '../scripts/run-tests.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const READY_CHECK = join(root, 'scripts/ready-check.mjs');
@@ -730,6 +734,9 @@ function copyTreeForMutation(t, mutateScript) {
   writeFileSync(join(dir, 'scripts/ready-check.mjs'), scriptMutated);
   // full 测试的链尾 run-ledger validate（F2 回归锚点）需要真实 run-ledger.mjs 副本
   writeFileSync(join(dir, 'scripts/run-ledger.mjs'), readFileSync(join(root, 'scripts/run-ledger.mjs'), 'utf8'));
+  // ready-check.test.mjs import 了 run-tests.mjs 的 buildChildEnv（变异子套件 git 隔离唯一实现）：
+  // 复制树必须带上该文件，否则子套件加载失败（失败集解析成文件路径，恰红契约被破坏）
+  writeFileSync(join(dir, 'scripts/run-tests.mjs'), readFileSync(join(root, 'scripts/run-tests.mjs'), 'utf8'));
   writeFileSync(join(dir, 'tests/ready-check.test.mjs'), readFileSync(join(root, 'tests/ready-check.test.mjs'), 'utf8'));
   cpSync(join(root, 'tests/fixtures'), join(dir, 'tests/fixtures'), { recursive: true });
   writeFileSync(join(dir, 'config/defaults.json'), readFileSync(join(root, 'config/defaults.json'), 'utf8'));
@@ -743,7 +750,7 @@ function runMutatedSuite(testFile, dir) {
   // node 检测到「test run 递归」会静默跳过全部测试并 exit 0（实际空跑），必须剥离才能让子套件真正执行
   const { NODE_TEST_CONTEXT: _drop, ...childEnv } = process.env;
   const r = spawnSync(process.execPath, ['--test', testFile],
-    { cwd: dir, encoding: 'utf8', env: { ...childEnv, RC_MUTATION_CHILD: '1' } });
+    { cwd: dir, encoding: 'utf8', env: { ...buildChildEnv(childEnv), RC_MUTATION_CHILD: '1' } });
   const failedNames = new Set();
   for (const line of `${r.stdout}\n${r.stderr}`.split('\n')) {
     if (line.startsWith('not ok ')) {
