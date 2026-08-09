@@ -18,6 +18,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // 显式枚举：冻结测试集（字母序）。sc-p0a 契约——只读顶层、不递归、不自动发现。
 export const TEST_FILES = [
   'config.test.mjs',
+  'e2e-dryrun.test.mjs',
   'graph.test.mjs',
   'mem-probe.test.mjs',
   'ready-check.test.mjs',
