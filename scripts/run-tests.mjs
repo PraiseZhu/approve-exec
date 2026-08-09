@@ -19,7 +19,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const TEST_FILES = [
   'config.test.mjs',
   'graph.test.mjs',
+  'mem-probe.test.mjs',
   'run-tests.test.mjs',
+  'selfcheck.test.mjs',
   'skill-doc.test.mjs',
 ];
 
