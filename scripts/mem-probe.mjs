@@ -18,22 +18,29 @@
 //   node scripts/mem-probe.mjs --json --used-slots <N> --pending <N> [--vm-stat-file <path>]
 //   --vm-stat-file 注入夹具文本供确定性测试；缺省时现场执行 `vm_stat`。
 //   total_bytes 现场读取 `sysctl -n hw.memsize`（本机 68719476736）。
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { join, resolve, dirname } from 'node:path';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const config = JSON.parse(readFileSync(join(root, 'config/defaults.json'), 'utf8'));
 
 // —— 纯提取：不校验，任何输入都返回数值（缺失字段为 NaN）。校验在 parseVmStat 分支内。 ——
+// 数字字段正则必须整行锚定（真实 vm_stat 输出：`Pages free:   <数字>.`，数字后带句点，行尾无多余内容）：
+//   ^ 行首 + label + : + 空白 + (\d+) + 句点 + 行尾。
+// 尾界由「句点 + 行尾」双重承担——千分位 `1,000.`（数字中间 `,` 截断点后不是句点）、
+// 单位后缀 `100 pages.`（截断点后是空格）、数字中间字母 `10a0.`、负数 `-100.`、行尾垃圾
+// `100. trailing` 都会使整行匹配失败 → NaN → parseVmStat 校验分支点名 throw，绝不把截断值当正常数据。
+// page size 同样整行锚定：`Mach Virtual Memory Statistics: (page size of <数字> bytes)`。
+const PAGE_SIZE_RE = /^Mach Virtual Memory Statistics: \(page size of (\d+) bytes\)\s*$/;
 function extractVmStatNumbers(text) {
   const lines = String(text).split('\n');
   const firstLine = lines[0] ?? '';
-  const pageSizeMatch = firstLine.match(/page size of (\d+) bytes/);
+  const pageSizeMatch = firstLine.match(PAGE_SIZE_RE);
   const pageSize = Number(pageSizeMatch?.[1]);
   const grab = (label) => {
-    const m = text.match(new RegExp(`^Pages ${label}:\\s+(\\d+)`, 'm'));
+    const m = text.match(new RegExp(`^Pages ${label}:\\s+(\\d+)\\.\\s*$`, 'm'));
     return Number(m?.[1]);
   };
   return {
@@ -52,7 +59,7 @@ export function parseVmStat(text) {
   }
   const n = extractVmStatNumbers(text);
   const firstLine = String(text).split('\n')[0] ?? '';
-  const pageSizeMatch = firstLine.match(/page size of (\d+) bytes/);
+  const pageSizeMatch = firstLine.match(PAGE_SIZE_RE);
   if (!pageSizeMatch) {
     throw new Error(
       `vm_stat 首行缺少 page size（形如 "Mach Virtual Memory Statistics: (page size of 16384 bytes)"），收到: ${JSON.stringify(firstLine)}`,
@@ -80,6 +87,14 @@ function assertNonNegInt(v, name) {
   }
 }
 
+// platformCap 必须为正整数：0 是「配置损坏」不是「合法空槽位」。若放行，坏配置会让派工永久无槽位
+// （concurrency 恒 0）却没有 fail-closed 信号——lead 会以为「内存不够等一会」，实际等多久都不会好。
+function assertPositiveInt(v, name) {
+  if (typeof v !== 'number' || !Number.isInteger(v) || v <= 0) {
+    throw new TypeError(`${name} 必须为正整数，收到 ${JSON.stringify(v)}`);
+  }
+}
+
 // computeConcurrency() 纯函数：CLI 与函数入口同等校验入参（不存在 in-process 绕过）。
 export function computeConcurrency({
   availableBytes,
@@ -91,7 +106,7 @@ export function computeConcurrency({
 }) {
   assertNonNegInt(usedSlots, 'usedSlots');
   assertNonNegInt(pendingGroups, 'pendingGroups');
-  assertNonNegInt(platformCap, 'platformCap');
+  assertPositiveInt(platformCap, 'platformCap');
   if (typeof availableBytes !== 'number' || !Number.isFinite(availableBytes) || availableBytes < 0) {
     throw new TypeError(`availableBytes 必须为非负有限数，收到 ${JSON.stringify(availableBytes)}`);
   }
@@ -260,8 +275,22 @@ function main(argv) {
   process.exit(0);
 }
 
-// main-guard：被 import（测试）时不执行 CLI 入口
-const isMain = process.argv[1] && import.meta.url === new URL(`file://${resolve(process.argv[1])}`).href;
-if (isMain) {
-  main(process.argv.slice(2));
+// main-module guard：作为 CLI 入口才执行主流程；被 import（测试）时静默返回。
+// import.meta.url 已被 ESM loader 规范化（symlink/逻辑路径解析后的真实路径），而 process.argv[1]
+// 是调用方原样路径——macOS 上 /var → /private/var 这类 symlink 会让两者恒不相等，guard 静默不执行
+// （exit 0 + 零输出，与正常完成长得一模一样，探针直接变假）。必须先 realpathSync 归一 argv[1] 再比较。
+// 分叉语义：argv[1] 缺失（node --input-type=module --eval 'import ...' 纯 import，无入口文件）→ 不可能是
+// CLI 调用，静默返回——mem-probe 必须支持被 import（测试文件即如此），库被加载不得杀死宿主进程；
+// argv[1] 存在但 realpath 失败 → fail-closed exit 2 点名（本该是 CLI 却无法验证，不静默假绿）。
+if (process.argv[1] !== undefined) {
+  let entryReal;
+  try {
+    entryReal = realpathSync(process.argv[1]);
+  } catch (e) {
+    console.error(`mem-probe: 无法解析脚本真实路径 ${process.argv[1]}（${e.message}）`);
+    process.exit(2);
+  }
+  if (import.meta.url === pathToFileURL(entryReal).href) {
+    main(process.argv.slice(2));
+  }
 }
