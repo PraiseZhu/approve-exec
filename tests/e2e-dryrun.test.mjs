@@ -17,6 +17,9 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, cpSync, rmSync, ex
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+// buildChildEnv：git 隔离唯一实现（run-tests.mjs 是权威）。裸跑 makeRepo 的 git commit
+// 同样必须走它——缺隔离会继承机器全局 commit.gpgsign=true，负载下 gpg 失败让夹具红。
+import { buildChildEnv } from '../scripts/run-tests.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const RUN_LEDGER = join(ROOT, 'scripts/run-ledger.mjs');
@@ -42,10 +45,17 @@ function cliLedger(...args) {
 // 建临时候选仓：evidence 锚点 + 干净工作树 + 具名 feature 分支（ready-check ⑥⑦ 的真实来源）
 function makeRepo(t) {
   const dir = mkdtempSync(join(tmpdir(), 'e2e-dryrun-repo-'));
-  run('git', ['init', '-q', dir]);
-  run('git', ['config', 'user.email', 'dryrun@test.local'], { cwd: dir });
-  run('git', ['config', 'user.name', 'DryRun'], { cwd: dir });
-  run('git', ['symbolic-ref', 'HEAD', `refs/heads/${BRANCH}`], { cwd: dir });
+  const gitRun = (args, label) => {
+    // buildChildEnv：裸跑（非权威入口）时 makeRepo 的 git commit 同样必须隔离——缺它会继承
+    // 机器全局 commit.gpgsign=true，负载下 gpg 失败让夹具 commit 红。同一份实现，不拷。
+    const r = run('git', args, { cwd: dir, env: buildChildEnv(process.env) });
+    assert.equal(r.status, 0, `fixture ${label} 失败: ${r.stderr}`);
+    return r;
+  };
+  gitRun(['init', '-q', dir], 'git init');
+  gitRun(['config', 'user.email', 'dryrun@test.local'], 'git config user.email');
+  gitRun(['config', 'user.name', 'DryRun'], 'git config user.name');
+  gitRun(['symbolic-ref', 'HEAD', `refs/heads/${BRANCH}`], 'git symbolic-ref');
   mkdirSync(join(dir, 'evidence/anchors'), { recursive: true });
   writeFileSync(join(dir, 'evidence/anchors/a.txt'), 'anchor a\n');
   writeFileSync(join(dir, 'evidence/anchors/b.txt'), 'anchor b\n');
