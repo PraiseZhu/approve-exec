@@ -18,7 +18,7 @@
 // 只依赖 node 内置模块；路径一律来自 config，不写死。
 import { readFileSync, lstatSync, realpathSync, mkdirSync, writeFileSync, unlinkSync, statSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -28,8 +28,17 @@ const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 const ROUTES = ['execute', 'review', 'e2e', 'pr_merge'];
 // sc-p2c change ② 的触发行原文（整行逐字匹配，防描述被改写后入口失效）
 const TRIGGER_LINE = '| 批准执行 | `approve-exec` | 直接执行不确认。只吃 task-priority final manifest，缺输入 fail-closed 指路 |';
-// selfcheck 所在仓相对于 skills/claude-active 的接线位置（与 task-priority 同款：skills 目录内 symlink）
-const LIVE_LINK = resolve(root, '../../skills/claude-active/approve-exec');
+// LIVE_LINK 推导：从 config.goalSkillRoot 派生 —— dirname(goalSkillRoot) 即 skills/claude-active 目录，
+// approve-exec 与 goal 同处该目录（与 task-priority 同款：skills 目录内 symlink）。
+// 禁止按仓库在磁盘上的嵌套深度猜层级（'../..' 相对 root）：主 checkout（approve-exec-src）与 worktree
+// （approve-exec-worktrees/g2）深度不同，相对层级推导必然在其中一个 checkout 上拼错路径
+// （V 阶段集成暴露：g2 上恰好绿、主 checkout 上 live-symlink FAIL）。
+// 选 config 派生而非新增显式配置键：① 锚点 goalSkillRoot 已被检查③（goal-skill-md）独立验证，
+//   锚点错时③会先红——显式新键反而无人验证其自身；② 不加键即零配置漂移面，claude-active 整体迁移时自动跟随。
+// root 参数仅作测试注入（组B-2 用不同嵌套深度的 root 反证推导与仓库深度无关），正式实现不读它。
+export function deriveLiveLink(config, root) {
+  return join(dirname(config.goalSkillRoot), 'approve-exec');
+}
 
 // ---------- CLI 解析 ----------
 function parseArgs(argv) {
@@ -157,23 +166,23 @@ function checkRunLedgerDir(config, items) {
 }
 
 // ---------- ⑤ --live：接线两处 ----------
-function checkLiveSymlink(items) {
+function checkLiveSymlink(liveLink, items) {
   let st;
   try {
-    st = lstatSync(LIVE_LINK);
+    st = lstatSync(liveLink);
   } catch {
-    items.push({ id: 'live-symlink', ok: false, detail: `symlink 不存在: ${LIVE_LINK}` });
+    items.push({ id: 'live-symlink', ok: false, detail: `symlink 不存在: ${liveLink}` });
     return;
   }
   if (!st.isSymbolicLink()) {
-    items.push({ id: 'live-symlink', ok: false, detail: `${LIVE_LINK} 不是 symlink` });
+    items.push({ id: 'live-symlink', ok: false, detail: `${liveLink} 不是 symlink` });
     return;
   }
   let target;
   try {
-    target = realpathSync(LIVE_LINK);
+    target = realpathSync(liveLink);
   } catch (e) {
-    items.push({ id: 'live-symlink', ok: false, detail: `symlink 解析失败: ${LIVE_LINK}（${e.message}）` });
+    items.push({ id: 'live-symlink', ok: false, detail: `symlink 解析失败: ${liveLink}（${e.message}）` });
     return;
   }
   if (!isFile(join(target, 'SKILL.md'))) {
@@ -186,7 +195,7 @@ function checkLiveSymlink(items) {
     items.push({ id: 'live-symlink', ok: false, detail: `symlink 目标 ${target} 不是 approve-exec 本仓 checkout（git common dir 不一致）` });
     return;
   }
-  items.push({ id: 'live-symlink', ok: true, detail: `${LIVE_LINK} → ${target}（本仓 checkout）` });
+  items.push({ id: 'live-symlink', ok: true, detail: `${liveLink} → ${target}（本仓 checkout）` });
 }
 
 function checkTriggerLine(items) {
@@ -238,7 +247,7 @@ function main() {
   checkGoalSkill(config, items);
   checkRunLedgerDir(config, items);
   if (args.live) {
-    checkLiveSymlink(items);
+    checkLiveSymlink(deriveLiveLink(config, root), items);
     checkTriggerLine(items);
   }
 
@@ -253,4 +262,7 @@ function main() {
   console.log('selfcheck: 全部检查通过（exit 0）');
 }
 
-main();
+// main-module guard：作为 CLI 入口才执行主流程；被测试 import（组B-2 注入 root 调 deriveLiveLink）时静默返回
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+}
