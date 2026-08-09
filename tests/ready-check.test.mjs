@@ -17,8 +17,6 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync, spawn } from 'node:child_process';
-// manifestCoreHash 直接 import（与 run-ledger 同一实现，manifest 篡改对照测试的 hash 基准）
-import { manifestCoreHash } from '../scripts/run-ledger.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const READY_CHECK = join(root, 'scripts/ready-check.mjs');
