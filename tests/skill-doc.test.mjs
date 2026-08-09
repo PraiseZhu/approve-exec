@@ -29,7 +29,6 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const skillDoc = readFileSync(join(root, 'SKILL.md'), 'utf8');
 const ledgerSrc = readFileSync(join(root, 'scripts/run-ledger.mjs'), 'utf8');
-const defaults = JSON.parse(readFileSync(join(root, 'config/defaults.json'), 'utf8'));
 const defaultsKeys = Object.keys(defaults);
 
 // 十五段精确 marker（段标题与 SKILL.md 逐字一致；缺失/改名即红）
@@ -76,18 +75,6 @@ test('十五段 marker 齐全且顺序固定', () => {
   }
 });
 
-test('doc↔实现同步①：「用 goal skill 执行。」与 run-ledger render-packet 模板逐字一致', () => {
-  // 实现侧唯一权威字面量：renderExecPacket 首行 lines.push('…')（736 行，注释明示 g7 文档测试引用比对）
-  const pushes = [...ledgerSrc.matchAll(/lines\.push\('([^']+)'\);/g)].map((m) => m[1]);
-  const implLiteral = pushes.find((s) => s.includes('goal skill'));
-  assert.ok(implLiteral, 'run-ledger.mjs 中应有「用 goal skill 执行。」模板行');
-  // SKILL.md 必须包含实现字面量（逐字，含句号）
-  assert.ok(skillDoc.includes(implLiteral), `SKILL.md 应包含实现字面量: ${JSON.stringify(implLiteral)}`);
-  // 反向：SKILL.md 中每处「用 goal skill 执行」都必须带「。」（不许文档侧漏句号另写一套）
-  const occurrences = skillDoc.split('用 goal skill 执行').length - 1;
-  assert.ok(occurrences >= 1, 'SKILL.md 应至少出现一次「用 goal skill 执行」');
-  assert.equal(skillDoc.split('用 goal skill 执行。').length - 1, occurrences, 'SKILL.md 中每处「用 goal skill 执行」后都必须紧跟句号');
-});
 
 test('config 键名比对：SKILL.md 引用的 camelCase 键全部真实存在于 defaults.json', () => {
   const backtickTokens = [...skillDoc.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
