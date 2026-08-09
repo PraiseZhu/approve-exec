@@ -927,6 +927,14 @@ export function setState({
           message: `缺失前置：→ready receipt candidate_sha 与台账当前集成树不一致（receipt=${readyReceipt.candidate_sha}，台账=${tip ?? 'null'}）`,
         });
       }
+      // F-D 收口：→ready 前重读 manifest 校 core hash（ready 是终态、冻结后台账内无法纠正；
+      // receipt 只绑 candidate_sha + ledger_version，不绑 manifest 内容——最后一次 hash 绑定写入
+      // 之后篡改 manifest，receipt 驱动仍会成功，篡改只在链尾 validate 才暴露，而那时台账已冻结。
+      // 与 validate/render-packet/record-delivery 同一入口闸：manifest 变了就不能拿旧结论进 ready。
+      // manifest 来源 = 台账 manifest_path（init 时 resolve 为绝对路径，cwd 无关；调用方无需传，
+      // 也就不会「忘记传」——与既有三个消费入口同源同判据）。
+      const manifest = readManifest(ledger.manifest_path);
+      assertManifestBound(ledger, manifest, 'set-state →ready');
     }
     if (problem) {
       rejectWithEvent({
