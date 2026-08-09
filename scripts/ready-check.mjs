@@ -14,12 +14,14 @@
 //   --repo 候选仓（git status / HEAD 分支 / SHA 的真实来源）
 //
 // 七项判据（逐项独立报告，不因前项失败跳过后项）：
-//   ① ledger-partition  全部组 ∈ {verified}；组数 == manifest dispatch.packets 数 == 派出记录数
-//                        （dispatch 事件去重）；各组 tip_sha 与台账 delivery 事件对账；
+//   ① ledger-partition  全部组 ∈ {verified}；组数 == manifest dispatch.packets 数 == 派出记录数；
+//                        ledger groups / manifest packets / dispatch 事件三方的 group_id 集合严格相等
+//                        （只比数量会被「换成未知 gX 数量仍相同」蒙混）；各组 tip_sha 与台账 delivery 事件对账；
 //                        零组（零工作运行）直接拒绝——空集全分区恒真，不能当 READY 放行
-//   ② verdict-anchors   每条 SC（manifest.scs 全集）在 verdict 中 status=pass；verdict.candidate_sha == HEAD；
-//                        证据锚点强校验：evidence.file 真实存在（resolve 后在 repo 内）+ summary 与
-//                        output_records 内嵌记录逐字一致（不是字符串非空就过）
+//   ② verdict-anchors   manifest.scs fail-closed（非空数组、SC id 唯一）且与 dispatch packets scs_inline /
+//                        ledger groups sc_ids 三集合对账一致后才遍历；每条 SC 在 verdict 中 status=pass；
+//                        verdict.candidate_sha == HEAD；证据锚点强校验：evidence.file realpath 后在 repo 内
+//                        （防仓内 symlink 指向仓外文件冒充锚点）+ summary 与 output_records 内嵌记录逐字一致
 //   ③ review-clean      每组 review.rounds ≤ config.reviewMaxRounds 且 unresolved==0；
 //                        每组最后一条 delivery 事件的 detail.candidate_sha == HEAD（审查交卷绑定）
 //   ④ e2e-report        报告存在、status=pass、candidate_sha == HEAD
@@ -34,8 +36,11 @@
 //
 // CLI: node scripts/ready-check.mjs --repo <R> --ledger <L> --manifest <M> --verdict <V>
 //      --e2e-report <E> --presubmit-dir <D> [--now <ISO时间戳>] [--config <C 默认 config/defaults.json>]
+//
+// 输入容错：ledger/manifest/verdict/e2e-report 任一不可解析 → 转对应 gate 的 gap 占位，
+// 不依赖其内容的 gate 照常运行（前项失败不跳过后项），全部收束后再 exit 2。
 
-import { readFileSync, writeFileSync, renameSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, statSync, realpathSync } from 'node:fs';
 import { join, resolve, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -75,15 +80,37 @@ function runGit(repoDir, gitArgs) {
   return { status: r.status, stdout: (r.stdout || '').trim(), stderr: (r.stderr || '').trim() };
 }
 
+// 集合工具（F-N / F-M 的三方集合严格相等对账）
+function setsEqual(a, b) {
+  return a.size === b.size && [...a].every((x) => b.has(x));
+}
+function diffIds(a, b) {
+  return [...a].filter((x) => !b.has(x)).map(String).join(',') || '无';
+}
+
+// F-L: 证据锚点仓内校验必须 realpath 双侧归一后再判前缀。
+// 旧实现只做词法 resolve：仓内以 symlink 提交的锚点指向仓外文件时，existsSync 跟随链接返回 true，
+// 而真实文件在 repo 外——锚点「存在」成了假。realpath 失败（文件不存在/断链）一律视为越界（fail-closed）。
 function isInsideRepo(repoRoot, relPath) {
   const resolved = resolve(repoRoot, relPath);
-  return resolved.startsWith(repoRoot + sep) || resolved === repoRoot;
+  let repoReal;
+  let anchorReal;
+  try {
+    repoReal = realpathSync(repoRoot);
+    anchorReal = realpathSync(resolved);
+  } catch {
+    return false;
+  }
+  return anchorReal === repoReal || anchorReal.startsWith(repoReal + sep);
 }
 
 // ---------- 七项判据（每项独立函数，变异点字符串唯一） ----------
 
 // ① 台账互斥全分区对账
 function checkLedgerPartition(ledger, manifest, gaps) {
+  // F-O: 输入不可解析转 gap 占位而非提前 exit——不依赖其内容的后项（④⑤⑥⑦）照常运行
+  if (!ledger) { gaps.push({ gate: 'ledger-partition', detail: '台账文件不存在或不可解析' }); return; }
+  if (!manifest) { gaps.push({ gate: 'ledger-partition', detail: 'manifest 文件不存在或不可解析' }); return; }
   const groups = (ledger.waves || []).flatMap((w) => w.groups || []);
   const packets = manifest.dispatch?.packets || [];
   const events = ledger.events || [];
@@ -104,10 +131,20 @@ function checkLedgerPartition(ledger, manifest, gaps) {
     gaps.push({ gate: 'ledger-partition', detail: `组数对账: 台账 ${groups.length} 组 != manifest dispatch.packets ${packets.length} 组` });
   }
 
-  // 派出记录数：dispatch 事件去重数 == 组数（sc-p1g 变异②挖掉点）
-  const dispatchedGroupIds = new Set(events.filter((e) => e.type === 'dispatch').map((e) => e.detail?.group_id).filter(Boolean));
-  if (dispatchedGroupIds.size !== groups.length) {
-    gaps.push({ gate: 'ledger-partition', detail: `派出记录数对账: dispatch 去重 ${dispatchedGroupIds.size} != 台账组数 ${groups.length}` });
+  // 派出记录数：dispatch 事件去重数 == 组数（sc-p1g 变异②挖掉点）；
+  // 不 filter(Boolean)：缺 group_id 的 dispatch 事件以 undefined 参与计数与集合比较，被如实点名
+  const dispatchGroupIds = new Set(events.filter((e) => e.type === 'dispatch').map((e) => e.detail?.group_id));
+  if (dispatchGroupIds.size !== groups.length) {
+    gaps.push({ gate: 'ledger-partition', detail: `派出记录数对账: dispatch 去重 ${dispatchGroupIds.size} != 台账组数 ${groups.length}` });
+  }
+
+  // F-N: 数量对账通过后仍须三方 group_id 集合严格相等——把 g2 的 dispatch 事件换成未知 gX 时去重数量
+  // 仍为 2，旧实现只看数量会放行「g2 从未被派出」。数量已不等时根因已由上方数量对账点名，不重复报。
+  const ledgerGroupIds = new Set(groups.map((g) => g.group_id));
+  const packetGroupIds = new Set(packets.map((p) => p.group_id));
+  if (groups.length === packets.length && dispatchGroupIds.size === groups.length
+      && (!setsEqual(ledgerGroupIds, packetGroupIds) || !setsEqual(ledgerGroupIds, dispatchGroupIds))) {
+    gaps.push({ gate: 'ledger-partition', detail: `组集合对账: manifest packets 缺 ${diffIds(ledgerGroupIds, packetGroupIds)} / 多 ${diffIds(packetGroupIds, ledgerGroupIds)}; dispatch 事件缺 ${diffIds(ledgerGroupIds, dispatchGroupIds)} / 多 ${diffIds(dispatchGroupIds, ledgerGroupIds)}` });
   }
 
   // 各组 tip_sha 与台账 delivery 事件对账
@@ -122,15 +159,56 @@ function checkLedgerPartition(ledger, manifest, gaps) {
   }
 }
 
+// F-M: manifest.scs fail-closed 校验 + 与 dispatch packets scs_inline / ledger groups sc_ids 对账。
+// 「manifest.scs 空全集」会让 ② 的遍历零次执行、空洞放行（与 ① 零组守卫同一类，那条已修、这条漏了）；
+// 对账要求三处 SC 集合严格一致，缺一或多一都拒绝遍历 verdict。
+// ledger 不可用（F-O 占位）时跳过台账侧对账——其不可用已由 ①③ 各自点名，不在此重复。
+function validateScs(manifest, ledger) {
+  const scs = manifest.scs;
+  if (!Array.isArray(scs) || scs.length === 0) {
+    return { ok: false, detail: 'manifest.scs 为空或非数组（无任何 SC，拒绝 READY）' };
+  }
+  const ids = new Set();
+  for (const s of scs) {
+    if (!s || typeof s.id !== 'string' || s.id.length === 0) {
+      return { ok: false, detail: 'manifest.scs 含缺 id 或 id 非字符串的条目' };
+    }
+    if (ids.has(s.id)) {
+      return { ok: false, detail: `manifest.scs SC id 重复: ${s.id}` };
+    }
+    ids.add(s.id);
+  }
+  const packetScIds = new Set((manifest.dispatch?.packets || []).flatMap((p) => (p.scs_inline || []).map((s) => s && s.id)).filter((id) => typeof id === 'string' && id.length > 0));
+  const ledgerScIds = new Set((ledger?.waves || []).flatMap((w) => (w.groups || []).flatMap((g) => (g.sc_ids || []))).filter((id) => typeof id === 'string' && id.length > 0));
+  const mismatches = [];
+  if (ledger && !setsEqual(ids, ledgerScIds)) {
+    mismatches.push(`台账组 sc_ids 缺 ${diffIds(ids, ledgerScIds)} / 多 ${diffIds(ledgerScIds, ids)}`);
+  }
+  if (!setsEqual(ids, packetScIds)) {
+    mismatches.push(`dispatch packets scs_inline 缺 ${diffIds(ids, packetScIds)} / 多 ${diffIds(packetScIds, ids)}`);
+  }
+  if (mismatches.length > 0) {
+    return { ok: false, detail: `SC 集合对账失败: ${mismatches.join('; ')}` };
+  }
+  return { ok: true, ids };
+}
+
 // ② 每条 SC 验收 verdict + 证据锚点强校验
-function checkVerdictAnchors(verdict, manifest, repoRoot, headSha, gaps) {
-  if (!verdict) { gaps.push({ gate: 'verdict-anchors', detail: 'verdict 文件不存在或不可解析' }); return; }
+function checkVerdictAnchors(verdict, manifest, ledger, repoRoot, headSha, gaps) {
+  if (!verdict) { gaps.push({ gate: 'verdict-anchors', detail: 'verdict 文件不存在或不可解析' }); }
+  if (!manifest) { gaps.push({ gate: 'verdict-anchors', detail: 'manifest 文件不存在或不可解析' }); }
+  if (!verdict || !manifest) return;
+  const scv = validateScs(manifest, ledger);
+  if (!scv.ok) {
+    gaps.push({ gate: 'verdict-anchors', detail: scv.detail });
+    return;
+  }
   if (verdict.candidate_sha !== headSha) {
     gaps.push({ gate: 'verdict-anchors', detail: `verdict.candidate_sha ${verdict.candidate_sha} != 候选仓 HEAD ${headSha}` });
   }
 
   const verdictScs = verdict.scs || [];
-  const manifestScIds = (manifest.scs || []).map((s) => s.id);
+  const manifestScIds = scv.ids;
   for (const scId of manifestScIds) {
     const entry = verdictScs.find((s) => s.sc_id === scId);
     if (!entry) { gaps.push({ gate: 'verdict-anchors', detail: `SC ${scId} 在 verdict 中缺失` }); continue; }
@@ -138,9 +216,9 @@ function checkVerdictAnchors(verdict, manifest, repoRoot, headSha, gaps) {
     const evidence = entry.evidence || [];
     if (evidence.length === 0) { gaps.push({ gate: 'verdict-anchors', detail: `SC ${scId} 无证据锚点` }); continue; }
     for (const ev of evidence) {
-      const anchorFileExists = typeof ev.file === 'string' && ev.file.length > 0
-        && isInsideRepo(repoRoot, ev.file) && existsSync(join(repoRoot, ev.file));
-      if (!anchorFileExists) {  // sc-p1g 变异③挖掉点（回退为字符串非空）
+      // sc-p1g 变异③挖掉点（回退为字符串非空）；F-L: isInsideRepo 已做 realpath 双侧仓内校验（防 symlink 逃逸）
+      const anchorFileExists = typeof ev.file === 'string' && ev.file.length > 0 && isInsideRepo(repoRoot, ev.file);
+      if (!anchorFileExists) {
         gaps.push({ gate: 'verdict-anchors', detail: `SC ${scId} 证据锚点文件不存在或越出候选仓: ${ev.file}` });
         continue;
       }
@@ -156,6 +234,8 @@ function checkVerdictAnchors(verdict, manifest, repoRoot, headSha, gaps) {
 
 // ③ 每组审查收敛 + 审查交卷 candidate 绑定
 function checkReviewClean(ledger, headSha, reviewMaxRounds, gaps) {
+  // F-O: 台账不可解析时本 gate 自身点名不可用，不拖垮不依赖台账的后项
+  if (!ledger) { gaps.push({ gate: 'review-clean', detail: '台账不可用（文件不存在或不可解析）' }); return; }
   const groups = (ledger.waves || []).flatMap((w) => w.groups || []);
   const events = ledger.events || [];
   for (const g of groups) {
@@ -253,9 +333,9 @@ function main() {
   const reviewMaxRounds = config.reviewMaxRounds;
 
   const ledger = readJsonOrNull(args.ledger);
-  if (!ledger) { console.error('GAP: ledger-partition: 台账文件不存在或不可解析'); process.exit(2); }
   const manifest = readJsonOrNull(args.manifest);
-  if (!manifest) { console.error('GAP: ledger-partition: manifest 文件不存在或不可解析'); process.exit(2); }
+  // F-O: ledger/manifest 不可解析不再提前 exit——由依赖它们的子检查各自转 gap 占位点名
+  // （①③ 依赖 ledger、② 依赖 manifest+verdict），不依赖其内容的后项（④⑤⑥⑦）照常运行。
 
   const headResult = runGit(args.repo, ['rev-parse', 'HEAD']);
   if (headResult.status !== 0) {
@@ -274,7 +354,7 @@ function main() {
   // 七项逐项独立检查，全部跑完再收束（不因前项失败跳过后项）
   const gaps = [];
   checkLedgerPartition(ledger, manifest, gaps);
-  checkVerdictAnchors(verdict, manifest, args.repo, headSha, gaps);
+  checkVerdictAnchors(verdict, manifest, ledger, args.repo, headSha, gaps);
   checkReviewClean(ledger, headSha, reviewMaxRounds, gaps);
   checkE2eReport(e2eReport, headSha, gaps);
   checkPresubmitGates(args.presubmitDir, headSha, gaps);

@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  mkdtempSync, mkdirSync, writeFileSync, readFileSync, cpSync, rmSync,
+  mkdtempSync, mkdirSync, writeFileSync, readFileSync, cpSync, rmSync, symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
@@ -29,14 +29,23 @@ function run(cmd, args, opts = {}) {
 }
 
 // 建临时 git 候选仓：unborn HEAD 直接 symbolic-ref 到目标分支，避免依赖 init.defaultBranch
-function makeRepo(t, { branch = 'feat/fixture-branch', detached = false, dirty = false } = {}) {
+// symlinkAnchorOut: 把 evidence/anchors/a.txt 提交为指向仓外文件的 symlink（F-L 逃逸夹具）
+function makeRepo(t, { branch = 'feat/fixture-branch', detached = false, dirty = false, symlinkAnchorOut = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ready-repo-'));
   run('git', ['init', '-q', dir]);
   run('git', ['config', 'user.email', 'fixture@test.local'], { cwd: dir });
   run('git', ['config', 'user.name', 'Fixture'], { cwd: dir });
   run('git', ['symbolic-ref', 'HEAD', `refs/heads/${branch}`], { cwd: dir });
   mkdirSync(join(dir, 'evidence/anchors'), { recursive: true });
-  writeFileSync(join(dir, 'evidence/anchors/a.txt'), 'anchor a\n');
+  if (symlinkAnchorOut) {
+    // 仓外文件放在临时根（repo 目录之外），symlink 目标用绝对路径，git 按 120000 模式入库
+    const outside = join(dirname(dir), 'outside-anchor.txt');
+    writeFileSync(outside, 'outside anchor\n');
+    symlinkSync(outside, join(dir, 'evidence/anchors/a.txt'));
+    t.after(() => rmSync(outside, { force: true }));
+  } else {
+    writeFileSync(join(dir, 'evidence/anchors/a.txt'), 'anchor a\n');
+  }
   writeFileSync(join(dir, 'evidence/anchors/b.txt'), 'anchor b\n');
   writeFileSync(join(dir, 'evidence/anchors/c.txt'), 'anchor c\n');
   writeFileSync(join(dir, 'src.ts'), 'export const fixture = 1;\n');
@@ -130,7 +139,9 @@ test('gap1: 台账缺组（组数 < manifest packets）→ exit 2 gap ledger-par
     p.ledger.events = p.ledger.events.filter((e) => e.detail?.group_id !== 'g2');
     return p;
   });
-  expectGaps(runReady(repo, env), ['ledger-partition'], '台账缺组');
+  // ① 组数对账点名 ledger-partition；F-M 台账侧对账（组 sc_ids 不再覆盖全部 SC）追加 verdict-anchors——
+  // 同一破损状态的两个真实缺口，都点名
+  expectGaps(runReady(repo, env), ['ledger-partition', 'verdict-anchors'], '台账缺组');
 });
 
 test('gap1: 组非 verified → exit 2 gap ledger-partition', (t) => {
@@ -162,7 +173,28 @@ test('gap1: 零工作运行（台账/manifest 全空）→ exit 2 gap ledger-par
     p.manifest.dispatch.packets = [];
     return p;
   });
-  expectGaps(runReady(repo, env), ['ledger-partition'], '零工作运行，三条对账空洞通过，必须被零组守卫拦下');
+  // F-M 后 manifest.scs=[] 也会被 ② 的 fail-closed 校验点名（与 ① 零组守卫同一类的第二条防线）
+  expectGaps(runReady(repo, env), ['ledger-partition', 'verdict-anchors'], '零工作运行，三条对账空洞通过，必须被零组守卫 + scs 空集校验拦下');
+});
+
+test('F-N: dispatch 事件 group_id 换成未知 gX（数量仍为 2）→ exit 2 gap ledger-partition', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, (p) => {
+    // gpt 审查席实测：只改 dispatch 事件组名，两侧去重数量不变——旧实现只看数量会放行「g2 从未被派出」
+    const ev = p.ledger.events.find((e) => e.type === 'dispatch' && e.detail?.group_id === 'g2');
+    ev.detail.group_id = 'gX';
+    return p;
+  });
+  expectGaps(runReady(repo, env), ['ledger-partition'], 'dispatch 组名与台账不符必须点名');
+});
+
+test('F-N: manifest packet group_id 换成未知 gX → exit 2 gap ledger-partition', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, (p) => {
+    p.manifest.dispatch.packets[1].group_id = 'gX';
+    return p;
+  });
+  expectGaps(runReady(repo, env), ['ledger-partition'], 'packet 组名与台账不符必须点名');
 });
 
 test('gap2: verdict candidate_sha 过期 → exit 2 gap verdict-anchors', (t) => {
@@ -204,6 +236,55 @@ test('gap2: evidence 输出摘要与 verdict 内嵌 output_records 不一致 →
   expectGaps(runReady(repo, env), ['verdict-anchors'], 'summary 与内嵌记录不一致');
 });
 
+test('F-L: 证据锚点以 symlink 指向仓外 → exit 2 gap verdict-anchors', (t) => {
+  const repo = makeRepo(t, { symlinkAnchorOut: true });
+  const env = buildEnv(t, repo, null);
+  // 词法 resolve 只看路径字符串会放行（existsSync 跟随链接返回 true），realpath 后才能发现真实文件在仓外
+  expectGaps(runReady(repo, env), ['verdict-anchors'], '锚点 symlink 越出候选仓必须点名');
+});
+
+test('F-M: manifest.scs 为空数组（其余凭据全有效）→ exit 2 gap verdict-anchors', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, (p) => {
+    p.manifest.scs = [];
+    return p;
+  });
+  expectGaps(runReady(repo, env), ['verdict-anchors'], 'scs 空全集会让 ② 遍历零次、空洞放行');
+});
+
+test('F-M: manifest.scs 含重复 id → exit 2 gap verdict-anchors', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, (p) => {
+    // sc-p0a 重复出现一次，但集合覆盖全部三个原 id——重复校验必须独立拦下（对账看不出来）
+    p.manifest.scs = [
+      { id: 'sc-p0a', kind: 'fix', priority_id: 'p0' },
+      { id: 'sc-p0a', kind: 'fix', priority_id: 'p0' },
+      { id: 'sc-p1f', kind: 'fix', priority_id: 'p1' },
+      { id: 'sc-p1g', kind: 'fix', priority_id: 'p1' },
+    ];
+    return p;
+  });
+  expectGaps(runReady(repo, env), ['verdict-anchors'], 'scs 重复 id 必须点名');
+});
+
+test('F-M: dispatch packets scs_inline 与 manifest.scs 不一致 → exit 2 gap verdict-anchors', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, (p) => {
+    p.manifest.dispatch.packets[1].scs_inline = [{ id: 'sc-p1f' }, { id: 'sc-ghost' }];
+    return p;
+  });
+  expectGaps(runReady(repo, env), ['verdict-anchors'], 'packet scs 集合与 manifest.scs 不一致必须点名');
+});
+
+test('F-M: 台账组 sc_ids 与 manifest.scs 不一致 → exit 2 gap verdict-anchors', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, (p) => {
+    p.ledger.waves[1].groups[0].sc_ids = ['sc-p1f', 'sc-ghost'];
+    return p;
+  });
+  expectGaps(runReady(repo, env), ['verdict-anchors'], '台账组 sc_ids 与 manifest.scs 不一致必须点名');
+});
+
 test('gap3: review.rounds 超上限（4 > reviewMaxRounds）→ exit 2 gap review-clean', (t) => {
   const repo = makeRepo(t);
   const env = buildEnv(t, repo, (p) => {
@@ -237,6 +318,24 @@ test('gap4: e2e 报告缺失 → exit 2 gap e2e-report', (t) => {
   const env = buildEnv(t, repo, null);
   rmSync(env.e2ePath, { force: true });
   expectGaps(runReady(repo, env), ['e2e-report'], 'e2e 报告缺失');
+});
+
+test('F-O: ledger+e2e 都删 → 三项 gap 同时点名（不跳过后项）', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, null);
+  rmSync(env.ledgerPath, { force: true });
+  rmSync(env.e2ePath, { force: true });
+  // gpt 审查席实测：旧实现 ledger 不可解析提前 exit，e2e-report/presubmit/git/branch 全没检查
+  expectGaps(runReady(repo, env), ['ledger-partition', 'review-clean', 'e2e-report'], 'ledger 缺失不得短路后项');
+});
+
+test('F-O: manifest+verdict 都删 → ledger-partition + verdict-anchors 双 gate 点名', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, null);
+  rmSync(env.manifestPath, { force: true });
+  rmSync(env.verdictPath, { force: true });
+  // ① 依赖 manifest 点名 ledger-partition；② 依赖 manifest+verdict 各点名一次 verdict-anchors
+  expectGaps(runReady(repo, env), ['ledger-partition', 'verdict-anchors', 'verdict-anchors'], 'manifest 缺失不得短路后项');
 });
 
 test('gap4: e2e 报告 status=fail → exit 2 gap e2e-report', (t) => {
@@ -342,7 +441,27 @@ const MUTATION_PREDICTIONS = [
   { id: '变异②', label: '① 组数对账', from: 'groups.length !== packets.length', to: 'false',
     red: ['gap1: 台账缺组（组数 < manifest packets）→ exit 2 gap ledger-partition'] },
   { id: '变异③', label: '② 锚点内容校验（文件存在性）', from: '!anchorFileExists', to: 'false',
-    red: ['gap2: 证据锚点指向不存在文件 → exit 2 gap verdict-anchors'] },
+    red: ['gap2: 证据锚点指向不存在文件 → exit 2 gap verdict-anchors',
+          'F-L: 证据锚点以 symlink 指向仓外 → exit 2 gap verdict-anchors'] },
+  { id: '变异④', label: 'F-L 锚点 realpath 仓内校验', from: 'return anchorReal === repoReal || anchorReal.startsWith(repoReal + sep);',
+    to: 'return resolved.startsWith(repoRoot + sep) || resolved === repoRoot;',
+    red: ['F-L: 证据锚点以 symlink 指向仓外 → exit 2 gap verdict-anchors'] },
+  { id: '变异⑤', label: 'F-M manifest.scs fail-closed（空/重复/对账）', from: 'if (!scv.ok) {',
+    to: 'if (false) {',
+    red: ['F-M: manifest.scs 为空数组（其余凭据全有效）→ exit 2 gap verdict-anchors',
+          'F-M: manifest.scs 含重复 id → exit 2 gap verdict-anchors',
+          'F-M: dispatch packets scs_inline 与 manifest.scs 不一致 → exit 2 gap verdict-anchors',
+          'F-M: 台账组 sc_ids 与 manifest.scs 不一致 → exit 2 gap verdict-anchors',
+          'gap1: 零工作运行（台账/manifest 全空）→ exit 2 gap ledger-partition（拒绝空洞 READY）',
+          'gap1: 台账缺组（组数 < manifest packets）→ exit 2 gap ledger-partition'] },
+  { id: '变异⑥', label: 'F-N 三方 group_id 集合严格相等', from: '&& (!setsEqual(ledgerGroupIds, packetGroupIds) || !setsEqual(ledgerGroupIds, dispatchGroupIds))) {',
+    to: '&& false) {',
+    red: ['F-N: dispatch 事件 group_id 换成未知 gX（数量仍为 2）→ exit 2 gap ledger-partition',
+          'F-N: manifest packet group_id 换成未知 gX → exit 2 gap ledger-partition'] },
+  { id: '变异⑦', label: 'F-O 不可解析输入不提前 exit', from: 'const manifest = readJsonOrNull(args.manifest);',
+    to: 'const manifest = readJsonOrNull(args.manifest); if (!ledger || !manifest) { console.error(\'GAP: ledger-partition: 前置输入不可解析（旧版提前 exit 行为）\'); process.exit(2); }',
+    red: ['F-O: ledger+e2e 都删 → 三项 gap 同时点名（不跳过后项）',
+          'F-O: manifest+verdict 都删 → ledger-partition + verdict-anchors 双 gate 点名'] },
 ];
 
 // 复制 scripts/tests/config 到临时目录并对脚本副本应用变异；返回副本测试文件路径。
