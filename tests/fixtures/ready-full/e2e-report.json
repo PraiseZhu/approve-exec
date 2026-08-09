@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "status": "pass",
+  "candidate_sha": "__HEAD_SHA__",
+  "summary": "e2e smoke: 12 passed, 0 failed",
+  "passed": 12,
+  "failed": 0
+}
