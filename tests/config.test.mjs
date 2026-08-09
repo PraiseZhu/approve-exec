@@ -21,6 +21,7 @@ const REQUIRED_KEYS = [
   'goalSkillRoot',
   'orcaFanoutScriptsRoot',
   'runLedgerDir',
+  'skillTriggerScanPath',
 ];
 
 test('defaults.json 可解析且为对象', () => {
@@ -28,14 +29,14 @@ test('defaults.json 可解析且为对象', () => {
     'config/defaults.json 顶层必须是 JSON 对象');
 });
 
-test('必备键齐全（10 键无缺漏）', () => {
+test('必备键齐全（11 键无缺漏）', () => {
   for (const key of REQUIRED_KEYS) {
     assert.ok(Object.hasOwn(defaults, key), `config/defaults.json 缺少必备键: ${key}`);
   }
 });
 
 test('路径类键为非空字符串', () => {
-  for (const key of ['routingPath', 'goalSkillRoot', 'orcaFanoutScriptsRoot', 'runLedgerDir']) {
+  for (const key of ['routingPath', 'goalSkillRoot', 'orcaFanoutScriptsRoot', 'runLedgerDir', 'skillTriggerScanPath']) {
     assert.equal(typeof defaults[key], 'string', `${key} 必须是字符串`);
     assert.ok(defaults[key].length > 0, `${key} 不能为空`);
   }
@@ -44,6 +45,13 @@ test('路径类键为非空字符串', () => {
 test('runLedgerDir 以 ~ 开头（HOME 由消费脚本展开，不写死用户主目录）', () => {
   assert.ok(defaults.runLedgerDir.startsWith('~/'), 'runLedgerDir 必须以 ~/ 开头，禁止硬编码绝对主目录');
   assert.ok(!defaults.runLedgerDir.includes('/Users/'), 'runLedgerDir 不得内嵌 /Users/<name> 具体路径');
+});
+
+test('skillTriggerScanPath 以 ~ 开头（HOME 由消费脚本展开，不写死用户主目录）', () => {
+  assert.ok(defaults.skillTriggerScanPath.startsWith('~/'), 'skillTriggerScanPath 必须以 ~/ 开头，禁止硬编码绝对主目录');
+  assert.ok(!defaults.skillTriggerScanPath.includes('/Users/'), 'skillTriggerScanPath 不得内嵌 /Users/<name> 具体路径');
+  assert.ok(defaults.skillTriggerScanPath.endsWith('skill-trigger-scan.md'),
+    `skillTriggerScanPath 应指向触发词规则文件，当前: ${defaults.skillTriggerScanPath}`);
 });
 
 test('数值域合法：0 < memReserveRatio < 1', () => {
