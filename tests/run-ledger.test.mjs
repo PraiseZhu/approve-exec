@@ -255,6 +255,41 @@ test('sc-p1c: detail 契约——字符串 detail / 缺 group_id 键 / 组事件
   assert.match(r.stderr, /group_id 必须是非空字符串/);
 });
 
+test('CLI 参数错误统一 fail-closed：已移除 flag 点名 + 缺 ledger exit 2 + 无裸栈', () => {
+  // F-F：--ready-check-exit0（布尔凭据已移除）——无 ledger 时 flag 顶位成位置参数，
+  // 旧行为把值 `1` 当独立 token 报「非法参数: 1」裸栈 exit 1；现在必须点名 flag 名 + exit 2
+  let r = cli('set-state', '--ready-check-exit0', '1');
+  assert.equal(r.status, 2, '--ready-check-exit0 必须 exit 2（fail-closed 用码）');
+  assert.match(r.stderr, /已移除/, '必须点名「已移除」语义');
+  assert.match(r.stderr, /ready-check-exit0/, '必须点名 flag 名（而非其值）');
+  assert.doesNotMatch(r.stderr, /at parseFlags|at runCli|\.mjs:\d+:\d+/, '不得含栈帧特征（受控拒绝，非崩溃）');
+  // F-F：带 ledger 的完整命令同样点名
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  r = cli('set-state', ledgerPath, '--ready-check-exit0', '1', '--now', T);
+  assert.equal(r.status, 2, '带 ledger 的 --ready-check-exit0 必须 exit 2');
+  assert.match(r.stderr, /已移除/);
+  // F-H：--verify-status / --verify-evidence-ref（手工写入口已移除）
+  r = cli('set-state', '--verify-status', 'pass');
+  assert.equal(r.status, 2, '--verify-status 必须 exit 2');
+  assert.match(r.stderr, /已移除/, '必须点名「已移除」语义');
+  assert.match(r.stderr, /verify-status/, '必须点名 flag 名');
+  assert.doesNotMatch(r.stderr, /at parseFlags|at runCli|\.mjs:\d+:\d+/, '不得含栈帧特征');
+  r = cli('set-state', '--verify-evidence-ref', 'delivery#1');
+  assert.equal(r.status, 2, '--verify-evidence-ref 必须 exit 2');
+  assert.match(r.stderr, /已移除/);
+  // 缺 <ledger> 路径（validate 无参）：参数错误统一 exit 2 点名，不裸栈
+  r = cli('validate');
+  assert.equal(r.status, 2, 'validate 无参必须 exit 2（缺 ledger 是参数错误）');
+  assert.match(r.stderr, /缺 <ledger>/);
+  assert.doesNotMatch(r.stderr, /at parseFlags|at runCli|\.mjs:\d+:\d+/, '不得含栈帧特征');
+  // 非 flag token（多余位置参数）受控拒：exit 2 点名，不裸栈
+  r = cli('validate', 'L.json', 'extra');
+  assert.equal(r.status, 2, '多余位置参数必须 exit 2');
+  assert.match(r.stderr, /非法参数: extra/);
+  assert.doesNotMatch(r.stderr, /at parseFlags|at runCli|\.mjs:\d+:\d+/, '不得含栈帧特征');
+});
+
 test('sc-p1c: init 遇 manifest 组缺 sc_ids 数组 exit 2（禁止静默空组）', () => {
   const dir = newTmpDir();
   const ledgerPath = join(dir, 'ledger.json');

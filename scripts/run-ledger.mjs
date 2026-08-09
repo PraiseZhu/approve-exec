@@ -5,7 +5,7 @@
 //   init <ledger> --manifest <path> --run-id <id> --now <ts>
 //   validate <ledger>
 //   set-state <ledger> --group <gid> --to <state> --now <ts> [..]
-//   set-state <ledger> --phase <phase> --now <ts> [--ready-check-exit0]
+//   set-state <ledger> --phase <phase> --now <ts> [--ready-receipt <path>]
 //   set-state <ledger> --wave <n> --integrate <sha> --now <ts>
 //   set-state <ledger> --group <gid> --identity <json> --now <ts>
 //   render-packet <ledger> --group <gid> [--manifest <path>]
@@ -1343,20 +1343,38 @@ function parseFlags(args) {
 // render-packet 的身份字段单一来源是台账：CLI 一律拒（防覆盖）
 const IDENTITY_CLI_FLAGS = Object.freeze(['worktree', 'branch', 'base', 'identity']);
 
+// F-F/F-H 已移除 flag：前置扫描统一点名（flag 出现在位置参数位/值位都命中）。
+// 旧行为 `set-state --ready-check-exit0 1`（无 ledger）会把 flag 顶位成 ledgerArg、
+// 把值 `1` 当独立 token 报「非法参数: 1」连参数名都没报对；扫描保证点名 flag 名与
+// 已移除语义。等号形式（--ready-check-exit0=1）由 set-state 分支内拒收兜底（双保险）。
+const REMOVED_CLI_FLAGS = Object.freeze(['--ready-check-exit0', '--verify-status', '--verify-evidence-ref']);
+
+function removedFlagMessage(flag) {
+  if (flag === '--ready-check-exit0') {
+    return '--ready-check-exit0 布尔凭据已移除：→ready 只能由 ready-check 写入的 receipt 驱动（--ready-receipt <path>）';
+  }
+  return '--verify-status/--verify-evidence-ref 手工写入口已移除：verified 的 pass 凭据只能由验收组 record-delivery 写入';
+}
+
 export function runCli(argv) {
   if (argv.length === 0) {
     console.error(usage());
     return 1;
   }
-  const [sub, ledgerArg, ...rest] = argv;
-  const flags = parseFlags(rest);
-  if (!ledgerArg) {
-    console.error(`run-ledger: ${sub} 缺 <ledger> 路径\n${usage()}`);
-    return 1;
-  }
-  const ledgerPath = resolve(ledgerArg);
-
   try {
+    // 已移除 flag 前置扫描：parseFlags 之前，位置参数位/值位都命中（点名 flag 名而非其值）
+    for (const removed of REMOVED_CLI_FLAGS) {
+      if (argv.includes(removed)) {
+        throw new LedgerError('ARGS', removedFlagMessage(removed));
+      }
+    }
+    const [sub, ledgerArg, ...rest] = argv;
+    if (!ledgerArg || ledgerArg.startsWith('--')) {
+      // 缺 <ledger> 路径（flag 顶位也算缺）：参数错误统一 exit 2 点名（fail-closed，不裸栈）
+      throw new LedgerError('ARGS', `${sub} 缺 <ledger> 路径（位置参数必须是台账路径）`);
+    }
+    const flags = parseFlags(rest);
+    const ledgerPath = resolve(ledgerArg);
     switch (sub) {
       case 'init': {
         initLedger({
