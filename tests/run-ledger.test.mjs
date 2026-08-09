@@ -509,6 +509,51 @@ test('sc-p1e: 五项逐项挖空各得 exit 2 点名（fail-closed 缺一不出�
   }
 });
 
+test('sc-p1e: pr-submit-gate 门禁结论透传——needs_three_review true/false 各渲染对应说明区', () => {
+  for (const [flag, expected] of [
+    [true, 'needs_three_review=true：本包对应功能改动（功能 PR），交付后须走 submit-pr 三审收口。'],
+    [false, 'needs_three_review=false：本包对应非功能性改动，免 submit-pr 三审，常规验证照常。'],
+  ]) {
+    const dir = newTmpDir();
+    const { ledgerPath } = initLedgerFor(dir);
+    assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+    const m = JSON.parse(readFileSync(join(dir, 'sample-manifest.json'), 'utf8'));
+    m.dispatch.packets.find((p) => p.group_id === 'g4').needs_three_review = flag;
+    writeFileSync(join(dir, 'sample-manifest.json'), JSON.stringify(m));
+    const r = cli('render-packet', ledgerPath, '--group', 'g4', '--manifest', join(dir, 'sample-manifest.json'));
+    assert.equal(r.status, 0, `needs_three_review=${flag} 应 exit 0: ${r.stderr}`);
+    assert.match(r.stdout, /## pr-submit-gate 门禁/, `needs_three_review=${flag} 必须渲染门禁说明区`);
+    assert.ok(r.stdout.includes(expected), `needs_three_review=${flag} 必须渲染对应结论（当前输出无「${expected}」）`);
+  }
+});
+
+test('sc-p1e: needs_three_review 缺失/非布尔 exit 2 点名（fail-closed，禁止默认成 false）', () => {
+  for (const [label, value] of [
+    ['缺失', undefined],
+    ['字符串', 'false'],
+    ['数字', 0],
+    ['null', null],
+  ]) {
+    const dir = newTmpDir();
+    const { ledgerPath } = initLedgerFor(dir);
+    assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+    const m = JSON.parse(readFileSync(join(dir, 'sample-manifest.json'), 'utf8'));
+    const pkt = m.dispatch.packets.find((p) => p.group_id === 'g4');
+    if (value === undefined) {
+      delete pkt.needs_three_review;
+    } else {
+      pkt.needs_three_review = value;
+    }
+    writeFileSync(join(dir, 'sample-manifest.json'), JSON.stringify(m));
+    const r = cli('render-packet', ledgerPath, '--group', 'g4', '--manifest', join(dir, 'sample-manifest.json'));
+    assert.equal(r.status, 2, `${label} needs_three_review 必须 exit 2（禁止默认成 false 放行）`);
+    assert.match(r.stderr, /PACKET_INCOMPLETE/, `${label} 必须走 PACKET_INCOMPLETE 拒绝路径`);
+    assert.match(r.stderr, /needs_three_review/, `${label} 必须点名 needs_three_review`);
+    assert.match(r.stderr, /禁止默认成 false/, `${label} 必须点名 fail-closed 语义（禁止默认成 false）`);
+    assert.equal(r.stdout, '', `${label} 不得出包（无正文输出）`);
+  }
+});
+
 test('sc-p1e: 完整包包含三要素——首行逐字「用 goal skill 执行。」、--until-sc 独占一行、身份行只认台账值', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
@@ -593,6 +638,8 @@ test('sc-p1e: 验收组模板无 goal 触发行、含整合树复查项（integr
   assert.ok(!out.startsWith('用 goal skill 执行。'), '验收组模板不得带 goal 触发行');
   assert.ok(!out.includes('--until-sc'), '验收组模板不得带 --until-sc');
   assert.match(out, /只跑 verify 命令出 verdict，不改代码/);
+  assert.match(out, /## pr-submit-gate 门禁/, '验收组模板必须同样渲染 pr-submit-gate 门禁说明区');
+  assert.match(out, /needs_three_review=false/, '验收组模板必须渲染门禁结论（夹具 v1 packet=false）');
   assert.match(out, new RegExp(`integrated_tip=${SHA1}`), '整合树复查项必须引用台账 integrated_tip');
   assert.match(out, /squash diff/, '整合树复查项必须含 squash diff 复查指令');
   assert.match(out, new RegExp(`integrated_tip=${SHA1}（wave 2 集成 squash SHA）`));

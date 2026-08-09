@@ -667,7 +667,7 @@ export function setState({
   });
 }
 
-// ---------- render-packet：五项 fail-closed + 执行/验收双模板 ----------
+// ---------- render-packet：五项 fail-closed + pr-submit-gate 门禁透传 + 执行/验收双模板 ----------
 const PACKET_REQUIRED_FIELDS = Object.freeze([
   'scs_inline', 'allowed_paths', 'verify_cmds', 'forbidden', 'submit_format',
 ]);
@@ -701,6 +701,17 @@ export function renderPacket({ ledgerPath, group, manifestPath }) {
     }
   }
 
+  // pr-submit-gate 传导（sc-p2b 原始设计预期，SKILL.md 第⑧段）：needs_three_review
+  // 判定结论从 manifest packet 透传进派工包。布尔 exact 契约：缺失/非布尔一律拒——
+  // 缺省即拒，禁止默认成 false（默认 false 会让功能 PR 悄悄绕过 submit-pr 三审门禁）。
+  if (typeof packet.needs_three_review !== 'boolean') {
+    const shown = packet.needs_three_review === undefined ? '缺失' : JSON.stringify(packet.needs_three_review);
+    throw new LedgerError(
+      'PACKET_INCOMPLETE',
+      `出包前校验失败：packet.needs_three_review 必须是布尔（true=功能 PR 交付后须走 submit-pr 三审 / false=非功能性免三审）；当前: ${shown}（fail-closed，禁止默认成 false）`
+    );
+  }
+
   // 身份字段单一来源是台账：只认台账值，不接受 CLI 覆盖（见 CLI 解析层）
   const { worktree, branch, base } = wg;
   if (!worktree || !branch || !base) {
@@ -730,6 +741,13 @@ export function renderPacket({ ledgerPath, group, manifestPath }) {
   return renderExecPacket({ packet, group, wg, wave, identity: { worktree, branch, base } });
 }
 
+/** pr-submit-gate 门禁说明（needs_three_review 判定结论；renderPacket 已校验为布尔，双模板共用）。 */
+function renderGateNote(packet) {
+  return packet.needs_three_review
+    ? 'needs_three_review=true：本包对应功能改动（功能 PR），交付后须走 submit-pr 三审收口。'
+    : 'needs_three_review=false：本包对应非功能性改动，免 submit-pr 三审，常规验证照常。';
+}
+
 function renderExecPacket({ packet, group, wave, identity }) {
   const lines = [];
   // 固定头三要素（首行逐字；g7 文档测试会引用比对，一个字不能变）
@@ -738,6 +756,9 @@ function renderExecPacket({ packet, group, wave, identity }) {
   lines.push(`worktree=${identity.worktree} branch=${identity.branch} base=${identity.base}`);
   lines.push('');
   lines.push(`run-ledger 派工包：组 ${group}（wave ${wave.wave}，执行组）`);
+  lines.push('');
+  lines.push('## pr-submit-gate 门禁');
+  lines.push(renderGateNote(packet));
   lines.push('');
   lines.push('## SC 清单');
   for (const sc of packet.scs_inline) {
@@ -766,6 +787,9 @@ function renderVerifyPacket({ packet, group, wave, identity }) {
   lines.push('');
   lines.push('## 职责');
   lines.push('只跑 verify 命令出 verdict，不改代码。');
+  lines.push('');
+  lines.push('## pr-submit-gate 门禁');
+  lines.push(renderGateNote(packet));
   lines.push('');
   lines.push('## 验证命令');
   for (const c of packet.verify_cmds) lines.push(c);
