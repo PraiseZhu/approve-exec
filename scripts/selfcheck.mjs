@@ -16,7 +16,7 @@
 // CLI: node scripts/selfcheck.mjs [--live] [--routing-file <path>]
 //   --routing-file 仅测试注入（夹具）；缺省读 config.defaults.json 的 routingPath。
 // 只依赖 node 内置模块；路径一律来自 config，不写死。
-import { readFileSync, existsSync, lstatSync, realpathSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
+import { readFileSync, lstatSync, realpathSync, mkdirSync, writeFileSync, unlinkSync, statSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -54,6 +54,11 @@ function expandHome(p) {
   return p.startsWith('~/') ? join(process.env.HOME, p.slice(2)) : p;
 }
 
+// 必须是常规文件：existsSync 对同名目录也返回 true，会放行"目录冒充脚本/SKILL.md"。
+function isFile(p) {
+  try { return statSync(p).isFile(); } catch { return false; }
+}
+
 // git 仓库同一性：--git-common-dir 解析到绝对路径（worktree 与主 checkout 共享同一 common dir）。
 // 输出可能是相对路径（如 .git），先按运行目录 resolve 再 realpath 归一。
 function gitCommonDir(dir) {
@@ -77,6 +82,11 @@ function checkRouting(routingFile, items) {
     routing = JSON.parse(text);
   } catch (e) {
     items.push({ id: 'routing-parse', ok: false, detail: `JSON 解析失败: ${routingFile}（${e.message}）` });
+    return;
+  }
+  // 合法 JSON 但非对象（null/标量/数组）：直接取档会 TypeError 崩溃，必须先 fail-closed 点名
+  if (routing === null || typeof routing !== 'object' || Array.isArray(routing)) {
+    items.push({ id: 'routing-parse', ok: false, detail: `结构非法（顶层非对象）: ${routingFile}` });
     return;
   }
   items.push({ id: 'routing-file', ok: true, detail: routingFile });
@@ -108,16 +118,16 @@ function checkRouting(routingFile, items) {
 function checkOrcaFanoutScripts(config, items) {
   for (const f of ['worktree-ledger.mjs', 'worktree-reclaim.mjs']) {
     const p = join(config.orcaFanoutScriptsRoot, f);
-    const ok = existsSync(p);
-    items.push({ id: `orca-fanout-${f.replace(/\.mjs$/, '')}`, ok, detail: ok ? p : `不存在: ${p}` });
+    const ok = isFile(p);
+    items.push({ id: `orca-fanout-${f.replace(/\.mjs$/, '')}`, ok, detail: ok ? p : `不存在或非文件: ${p}` });
   }
 }
 
 // ---------- ③ goal skill ----------
 function checkGoalSkill(config, items) {
   const p = join(config.goalSkillRoot, 'SKILL.md');
-  const ok = existsSync(p);
-  items.push({ id: 'goal-skill-md', ok, detail: ok ? p : `不存在: ${p}` });
+  const ok = isFile(p);
+  items.push({ id: 'goal-skill-md', ok, detail: ok ? p : `不存在或非文件: ${p}` });
 }
 
 // ---------- ④ runLedgerDir 可创建可写 ----------
@@ -136,11 +146,13 @@ function checkRunLedgerDir(config, items) {
   const probe = join(dir, `.selfcheck-probe-${process.pid}`);
   try {
     writeFileSync(probe, 'probe');
-    readFileSync(probe, 'utf8');
+    if (readFileSync(probe, 'utf8') !== 'probe') throw new Error('读回内容不一致');
     unlinkSync(probe);
     items.push({ id: 'run-ledger-dir', ok: true, detail: `${dir} 可创建可写（探针已清理）` });
   } catch (e) {
-    items.push({ id: 'run-ledger-dir', ok: false, detail: `不可写: ${dir}（${e.message}）` });
+    // 失败路径也尽力清理探针，不向台账目录留垃圾文件；失败原因如实点名，不吞
+    try { unlinkSync(probe); } catch { /* 清理失败不再追加判定，原失败已点名 */ }
+    items.push({ id: 'run-ledger-dir', ok: false, detail: `探针失败: ${dir}（${e.message}）` });
   }
 }
 
@@ -164,8 +176,8 @@ function checkLiveSymlink(items) {
     items.push({ id: 'live-symlink', ok: false, detail: `symlink 解析失败: ${LIVE_LINK}（${e.message}）` });
     return;
   }
-  if (!existsSync(join(target, 'SKILL.md'))) {
-    items.push({ id: 'live-symlink', ok: false, detail: `symlink 目标 ${target} 不含 SKILL.md（不是 approve-exec 本仓）` });
+  if (!isFile(join(target, 'SKILL.md'))) {
+    items.push({ id: 'live-symlink', ok: false, detail: `symlink 目标 ${target} 不含 SKILL.md 文件（不是 approve-exec 本仓）` });
     return;
   }
   const mine = gitCommonDir(root);
@@ -190,7 +202,8 @@ function checkTriggerLine(items) {
     items.push({ id: 'live-trigger-line', ok: false, detail: `不可读: ${file}（${e.message}）` });
     return;
   }
-  if (text.includes(TRIGGER_LINE)) {
+  // 整行逐字匹配：includes 子串匹配会被"改写过但仍含原文前缀"的行蒙混通过
+  if (text.split(/\r?\n/).includes(TRIGGER_LINE)) {
     items.push({ id: 'live-trigger-line', ok: true, detail: `${file} 含「批准执行」触发行` });
   } else {
     items.push({ id: 'live-trigger-line', ok: false, detail: `${file} 缺「批准执行」触发行` });
@@ -216,7 +229,8 @@ function main() {
     process.exit(2);
   }
 
-  const routingFile = args.routingFile !== null ? resolve(args.routingFile) : config.routingPath;
+  // config 相对路径一律按本仓 root 解析（绝对路径 resolve 为恒等），不随调用 cwd 漂移
+  const routingFile = args.routingFile !== null ? resolve(args.routingFile) : resolve(root, config.routingPath);
 
   const items = [];
   checkRouting(routingFile, items);

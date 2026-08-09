@@ -3,7 +3,7 @@
 //   组 A「routing 域」——缺档夹具 exit 2 点名 e2e 且其余三档 PASS（枚举精确性）、
 //                       合法夹具 exit 0、无 --routing-file 读 config routingPath、
 //                       文件缺失 exit 2 点名路径、JSON 不可解析 exit 2 点名、
-//                       agent/effort 越枚举 exit 2 点名
+//                       agent/effort 越枚举 exit 2 点名、合法 JSON null（非对象）exit 2 点名而非 TypeError 崩溃
 //   组 B「live 域」——--live 两处接线（symlink 指向本仓 + 触发行）输出 PASS
 //   组 C「CLI 拒绝」——未知参数 exit 2
 // 预测红集：挖掉「档缺失」分支 → 组 A 缺档用例红；挖掉 agent/effort 枚举校验 → 组 A 越枚举两用例红；
@@ -95,6 +95,15 @@ test('组A-6: agent 越枚举（不在 {codex, claude-code}）→ exit 2 且点�
     const r = runSelfcheck(['--routing-file', file]);
     assert.equal(r.status, 2, `期望 exit 2，实际 ${r.status}\n${out(r)}`);
     assert.ok(out(r).includes('agent=cobol'), `输出应点名非法 agent 值，实际:\n${out(r)}`);
+  });
+});
+
+test('组A-8: routing JSON 为合法 null（顶层非对象）→ exit 2 点名结构非法，不崩溃成 TypeError', () => {
+  withTempRouting('null', (file) => {
+    const r = runSelfcheck(['--routing-file', file]);
+    assert.equal(r.status, 2, `期望 exit 2，实际 ${r.status}\n${out(r)}`);
+    assert.ok(out(r).includes('结构非法'), `输出应点名结构非法，实际:\n${out(r)}`);
+    assert.ok(!out(r).includes('TypeError'), `不应以 TypeError 崩溃，实际:\n${out(r)}`);
   });
 });
 
