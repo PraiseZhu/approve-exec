@@ -5,20 +5,22 @@
 //                       文件缺失 exit 2 点名路径、JSON 不可解析 exit 2 点名、
 //                       agent/effort 越枚举 exit 2 点名、合法 JSON null（非对象）exit 2 点名而非 TypeError 崩溃
 //   组 B「live 域」——--live 两处接线（symlink 指向本仓 + 触发行）输出 PASS；
-//                       回归锚点：LIVE_LINK 推导与仓库嵌套深度无关（注入浅/深 root 恒同值）+ 与 cwd 无关（异 cwd 黑盒跑）
+//                       回归锚点：LIVE_LINK 推导与仓库嵌套深度无关（注入浅/深 root 恒同值）+ 与 cwd 无关（异 cwd 黑盒跑）；
+//                       F-B 锚点：target 必须是仓根本身（嵌套子目录冒充 → FAIL 点名）
 //   组 C「CLI 拒绝」——未知参数 exit 2
 // 预测红集：挖掉「档缺失」分支 → 组 A 缺档用例红；挖掉 agent/effort 枚举校验 → 组 A 越枚举两用例红；
 //           挖掉解析 try/catch 或文件读取 try/catch → 对应组 A 用例红（崩溃 exit≠2）；
 //           挖掉 live-symlink / live-trigger-line 检查 → 组 B 对应断言红；
 //           LIVE_LINK 改回 '../..' 猜层级 → 组B-1（主 checkout 上拼错路径）+ 组B-2（浅深 root 结果分叉）+ 组B-3（异 cwd 下仍按 repo 深度猜）红。组 C 恒绿。
+//           F-B 变异（挖掉 show-toplevel 仓根校验）→ 恰好组B-4 负向用例红（冒充误 PASS）；组B-1/3（真实仓根）/组B-5（正向夹具）恒绿。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, symlinkSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { deriveLiveLink } from '../scripts/selfcheck.mjs';
+import { deriveLiveLink, checkLiveSymlink } from '../scripts/selfcheck.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const scriptPath = join(root, 'scripts/selfcheck.mjs');
@@ -39,6 +41,18 @@ function withTempRouting(content, fn) {
   try {
     writeFileSync(file, content, 'utf8');
     return fn(file);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// F-B 临时 git 仓夹具（嵌套子目录冒充 / 仓根正向对照）——全部构造在 tmpdir，不碰真实接线位点
+function withTempRepo(fn) {
+  const dir = mkdtempSync(join(tmpdir(), 'selfcheck-live-'));
+  try {
+    const init = spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' });
+    if (init.status !== 0) throw new Error(`git init 失败: ${init.stderr}`);
+    return fn(dir);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -165,6 +179,39 @@ test('组B-3: --live 在无关 cwd（tmpdir）下跑 → exit 0 且 live-symlink
   const text = `${r.stdout || ''}${r.stderr || ''}`;
   assert.equal(r.status, 0, `期望 exit 0，实际 ${r.status}\n${text}`);
   assert.ok(text.includes('PASS: live-symlink'), `异 cwd 下 live-symlink 应 PASS，实际:\n${text}`);
+});
+
+// F-B 回归锚点（gpt 审查席 F-B：--live symlink 校验可被嵌套子目录冒充——旧逻辑只查
+// ①SKILL.md ②git common dir 同源，仓内任意带 SKILL.md 的子目录都能与 root 共享 common dir）。
+// 反证：临时 git 仓里把 live link 指向 src/wrong-nested（子目录只复制 SKILL.md，show-toplevel 实为仓根 ≠ target）。
+// 预测红集：挖掉 show-toplevel 仓根校验 → 本用例红（live-symlink 误 PASS）；其余用例恒绿。
+test('组B-4(F-B): live link 指向仓内嵌套子目录（仅含 SKILL.md）→ FAIL 点名非仓根', () => {
+  withTempRepo((repo) => {
+    const nested = join(repo, 'src', 'wrong-nested');
+    mkdirSync(nested, { recursive: true });
+    writeFileSync(join(nested, 'SKILL.md'), '# wrong-nested 假 SKILL.md\n');
+    const liveLink = join(repo, 'live-approve-exec');
+    symlinkSync(nested, liveLink);
+    const items = [];
+    checkLiveSymlink(liveLink, repo, items);
+    const it = items.find((i) => i.id === 'live-symlink');
+    assert.ok(it, '必须产出 live-symlink 判定');
+    assert.equal(it.ok, false, `嵌套子目录冒充必须 FAIL，实际 detail: ${it.detail}`);
+    assert.match(it.detail, /根目录/, `必须点名「不是…根目录」，实际: ${it.detail}`);
+  });
+});
+
+test('组B-5(F-B): live link 指向仓根（含 SKILL.md）→ PASS（正向对照）', () => {
+  withTempRepo((repo) => {
+    writeFileSync(join(repo, 'SKILL.md'), '# 真 SKILL.md\n');
+    const liveLink = join(repo, 'live-approve-exec');
+    symlinkSync(repo, liveLink);
+    const items = [];
+    checkLiveSymlink(liveLink, repo, items);
+    const it = items.find((i) => i.id === 'live-symlink');
+    assert.ok(it, '必须产出 live-symlink 判定');
+    assert.equal(it.ok, true, `仓根本身必须 PASS，实际 detail: ${it?.detail}`);
+  });
 });
 
 test('组C-1: 未知参数 → exit 2', () => {

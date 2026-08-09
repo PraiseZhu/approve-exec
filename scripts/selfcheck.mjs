@@ -8,7 +8,8 @@
 //   ③ goal skill：SKILL.md 存在（config.goalSkillRoot）。
 //   ④ runLedgerDir：可创建可写（mkdir -p + 探针文件写入/读回/清理；~ 经 HOME 展开）。
 //   ⑤ --live 模式追加两处接线检查：
-//      a. skills/claude-active/approve-exec symlink 指向本仓（realpath 含 SKILL.md + git common dir 同源）；
+//      a. skills/claude-active/approve-exec symlink 指向本仓 checkout 根（realpath 含 SKILL.md
+//         + git common dir 同源 + show-toplevel 严格等于 target 自身——嵌套子目录不能冒充仓根）；
 //      b. ~/.claude/rules/skill-trigger-scan.md 含「批准执行」触发行（整行逐字匹配）。
 //
 // 输出与退出：逐项 PASS/FAIL 行；任一 FAIL → 汇总点名（exit 2）；全过 → exit 0。
@@ -75,6 +76,15 @@ function gitCommonDir(dir) {
   if (r.status !== 0 || !r.stdout || !r.stdout.trim()) return null;
   const resolved = resolve(dir, r.stdout.trim());
   try { return realpathSync(resolved); } catch { return resolved; }
+}
+
+// git 仓库根：--show-toplevel 解析为 realpath。common-dir 只证明「同一仓库」，
+// 证明不了 target 本身是仓根——仓内任意带 SKILL.md 的嵌套子目录都能与 root 共享 common dir。
+// target 必须是仓根本身（接线位点 exact 前置），否则「检查不到却当通过」。
+function gitTopLevel(dir) {
+  const r = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd: dir, encoding: 'utf8' });
+  if (r.status !== 0 || !r.stdout || !r.stdout.trim()) return null;
+  try { return realpathSync(r.stdout.trim()); } catch { return null; }
 }
 
 // ---------- ① routing ----------
@@ -166,7 +176,13 @@ function checkRunLedgerDir(config, items) {
 }
 
 // ---------- ⑤ --live：接线两处 ----------
-function checkLiveSymlink(liveLink, items) {
+// 导出以便测试注入（组B-4 负向/正向夹具）：liveLink 是待验 symlink 路径，mineRoot 是「本仓」一侧。
+// 三段判据（加强不是替换，任一段 FAIL 即拒）：
+//   ① target 含 SKILL.md 文件（目标确实是 skill 目录）；
+//   ② target 与 mineRoot 的 git common dir 同源（同一仓库的 checkout）；
+//   ③ target 自身就是仓根——realpath(--show-toplevel) 严格等于 target 自身 realpath
+//     （防「仓内任意带 SKILL.md 的嵌套子目录冒充本仓 checkout」：common dir 同源拦不住它）。
+export function checkLiveSymlink(liveLink, mineRoot, items) {
   let st;
   try {
     st = lstatSync(liveLink);
@@ -189,13 +205,18 @@ function checkLiveSymlink(liveLink, items) {
     items.push({ id: 'live-symlink', ok: false, detail: `symlink 目标 ${target} 不含 SKILL.md 文件（不是 approve-exec 本仓）` });
     return;
   }
-  const mine = gitCommonDir(root);
+  const mine = gitCommonDir(mineRoot);
   const theirs = gitCommonDir(target);
   if (!mine || !theirs || mine !== theirs) {
     items.push({ id: 'live-symlink', ok: false, detail: `symlink 目标 ${target} 不是 approve-exec 本仓 checkout（git common dir 不一致）` });
     return;
   }
-  items.push({ id: 'live-symlink', ok: true, detail: `${liveLink} → ${target}（本仓 checkout）` });
+  const top = gitTopLevel(target);
+  if (!top || top !== target) {
+    items.push({ id: 'live-symlink', ok: false, detail: `symlink 目标 ${target} 不是本仓 checkout 根目录（git top-level 为 ${top ?? '不可解析'}）` });
+    return;
+  }
+  items.push({ id: 'live-symlink', ok: true, detail: `${liveLink} → ${target}（本仓 checkout 根）` });
 }
 
 function checkTriggerLine(items) {
@@ -247,7 +268,7 @@ function main() {
   checkGoalSkill(config, items);
   checkRunLedgerDir(config, items);
   if (args.live) {
-    checkLiveSymlink(deriveLiveLink(config, root), items);
+    checkLiveSymlink(deriveLiveLink(config, root), root, items);
     checkTriggerLine(items);
   }
 

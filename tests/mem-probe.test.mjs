@@ -144,8 +144,10 @@ test('函数域: computeConcurrency 拒绝非法入参（与 CLI 同等拒绝，
     { ...valid, usedSlots: 1.5 },
     { ...valid, usedSlots: '3' },
     { ...valid, usedSlots: NaN },
+    { ...valid, usedSlots: Infinity },
     { ...valid, pendingGroups: -1 },
     { ...valid, pendingGroups: 2.5 },
+    { ...valid, pendingGroups: Infinity },
     { ...valid, platformCap: -1 },
     { ...valid, perWorkerBytes: 0 },
     { ...valid, perWorkerBytes: -100 },
@@ -218,6 +220,25 @@ test('CLI 帮助: --help / -h 单独调用 exit 0 并打印用法（不被必填
 });
 
 // ============ 组 B：CLI 参数拒绝（预测：变异下仍绿） ============
+
+// F-A 回归锚点（gpt 审查席 F-A：CLI 与导出函数拒绝契约不等价——400 位数字串 Number() 得 Infinity，
+// 旧实现未捕获 TypeError、exit 1 裸栈崩溃，且 JSON.stringify(Infinity) 把消息显示成 null）。
+// 预测红集：挖掉 parseArgs 的 Number.isSafeInteger 校验 → 本用例 /安全整数/ 断言红；
+//           再挖掉 main 的 computeConcurrency try/catch → status 断言红（exit 1 崩溃）。
+test('CLI 参数拒绝(F-A): --used-slots 400 位数字 → exit 2 点名安全整数范围，不落 exit 1 裸栈', () => {
+  const huge = '9'.repeat(400);
+  const r = runCli(['--json', '--used-slots', huge, '--pending', '1', '--vm-stat-file', FIX['64g']]);
+  assert.equal(r.status, 2, `400 位数字必须受控 exit 2（而非 exit 1 崩溃），stderr: ${r.stderr}`);
+  assert.match(r.stderr, /安全整数/, `stderr 必须点名安全整数范围，实际: ${r.stderr}`);
+  assert.doesNotMatch(r.stderr, /TypeError/, `不得以 TypeError 裸栈崩溃，实际: ${r.stderr}`);
+});
+
+test('CLI 参数拒绝(F-A): --pending 400 位数字 → exit 2 点名安全整数范围', () => {
+  const huge = '9'.repeat(400);
+  const r = runCli(['--json', '--used-slots', '0', '--pending', huge, '--vm-stat-file', FIX['64g']]);
+  assert.equal(r.status, 2, `stderr: ${r.stderr}`);
+  assert.match(r.stderr, /安全整数/, `stderr 必须点名安全整数范围，实际: ${r.stderr}`);
+});
 
 test('CLI 参数拒绝: --used-slots 负数 / 非数字 / 小数 → exit 2', () => {
   for (const bad of ['-1', 'abc', '1.5']) {

@@ -142,12 +142,22 @@ function parseArgs(argv) {
       if (i + 1 >= argv.length) usageError('--used-slots 缺少数值参数');
       const v = argv[++i];
       if (!/^\d+$/.test(v)) usageError(`--used-slots 必须为非负整数，收到 ${JSON.stringify(v)}`);
-      args.usedSlots = Number(v);
+      const n = Number(v);
+      // 超出安全整数范围（超长数字串 → Number() 得 Infinity）必须以受控 exit 2 点名拒绝，
+      // 与导出函数 computeConcurrency 的非法入参拒绝契约等价——不落成 exit 1 裸栈崩溃。
+      if (!Number.isSafeInteger(n)) {
+        usageError(`--used-slots 必须为非负安全整数（≤ ${Number.MAX_SAFE_INTEGER}），收到 ${v.length} 位数字 ${v.slice(0, 12)}…`);
+      }
+      args.usedSlots = n;
     } else if (a === '--pending') {
       if (i + 1 >= argv.length) usageError('--pending 缺少数值参数');
       const v = argv[++i];
       if (!/^\d+$/.test(v)) usageError(`--pending 必须为非负整数，收到 ${JSON.stringify(v)}`);
-      args.pending = Number(v);
+      const n = Number(v);
+      if (!Number.isSafeInteger(n)) {
+        usageError(`--pending 必须为非负安全整数（≤ ${Number.MAX_SAFE_INTEGER}），收到 ${v.length} 位数字 ${v.slice(0, 12)}…`);
+      }
+      args.pending = n;
     } else {
       usageError(`未知参数: ${a}`);
     }
@@ -209,14 +219,22 @@ function main(argv) {
 
   const availableBytes =
     (parsed.freePages + parsed.inactivePages + parsed.speculativePages) * parsed.pageSize;
-  const concurrency = computeConcurrency({
-    availableBytes,
-    usedSlots: args.usedSlots,
-    pendingGroups: args.pending,
-    platformCap: config.orcaPlatformCap,
-    perWorkerBytes: config.perWorkerBytes,
-    reserveRatio: config.memReserveRatio,
-  });
+  // computeConcurrency 校验异常（如 config 侧配置被破坏导致 platformCap/perWorkerBytes/reserveRatio 非法）
+  // 一律转受控 exit 2 点名，不落成 exit 1 裸栈崩溃——与 parseArgs 的 CLI 拒绝契约同一语义。
+  let concurrency;
+  try {
+    concurrency = computeConcurrency({
+      availableBytes,
+      usedSlots: args.usedSlots,
+      pendingGroups: args.pending,
+      platformCap: config.orcaPlatformCap,
+      perWorkerBytes: config.perWorkerBytes,
+      reserveRatio: config.memReserveRatio,
+    });
+  } catch (err) {
+    console.error(`mem-probe: ${err.message}`);
+    process.exit(2);
+  }
 
   const result = {
     page_size: parsed.pageSize,
