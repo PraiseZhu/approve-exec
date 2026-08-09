@@ -13,16 +13,21 @@
 //
 // 硬约束：
 //   - 台账 schema 是 exact 契约：未列键出现即拒（LedgerError SCHEMA）。
-//   - 所有写路径 tmp+rename 原子替换 + 乐观锁 CAS（读时 version 为 expected，
-//     落盘 version+1；写入前重读发现 version 已变 → 冲突 exit 2，绝不静默覆盖）。
+//   - 所有写路径 独占锁 + 唯一 tmp + rename 原子替换 + 乐观锁 CAS（读时 version 为 expected，
+//     落盘 version+1；锁内重读发现 version 已变 → 冲突 exit 2，绝不静默覆盖）。
+//   - 消费 manifest 的命令（validate/render-packet/record-delivery）入口统一校
+//     manifestCoreHash(实读文件) == ledger.manifest_core_hash，不符 exit 2（内容绑定，F-D）。
 //   - 时间戳由 --now 注入；无 --now 的写操作拒绝（确定性可测）。
 //   - events[].type 为 exact 枚举，未知 type 拒。
 //   - events[].detail 是结构化对象契约：必须含 group_id 键（组上下文事件非空字符串；
 //     ready-check 消费侧读取 detail.group_id/tip_sha/candidate_sha，字符串 detail 会让
 //     分区对账与 delivery 绑定形同虚设）。phase→ready 时写 phase_at（ready 时点唯一记录）。
 //   - manifest 绑定是内容绑定：manifest_core_hash（黑名单剔除 + 键排序 + sha256）。
-import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import {
+  readFileSync, writeFileSync, renameSync, existsSync,
+  openSync, writeSync, closeSync, unlinkSync,
+} from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -96,6 +101,22 @@ export function manifestCoreHash(manifest) {
     throw new LedgerError('MANIFEST', 'manifestCoreHash: manifest 必须是非数组对象');
   }
   return createHash('sha256').update(JSON.stringify(stripExcluded(manifest)), 'utf8').digest('hex');
+}
+
+/**
+ * 内容绑定入口闸（F-D）：任何消费 manifest 的命令（validate/render-packet/record-delivery）
+ * 先校 manifestCoreHash(实读文件) == ledger.manifest_core_hash。manifest 变了就不能再拿
+ * 旧结论干活——绑定不能只存在于「你可以不调」的 validate 里。不符抛 HASH_MISMATCH（exit 2 点名）。
+ */
+export function assertManifestBound(ledger, manifest, what) {
+  const computed = manifestCoreHash(manifest);
+  if (computed !== ledger.manifest_core_hash) {
+    throw new LedgerError(
+      'HASH_MISMATCH',
+      `${what}: manifest core hash 不匹配：台账=${ledger.manifest_core_hash}，现算=${computed}（manifest 内容已变/异本，内容绑定拒：禁止拿旧 manifest 干活）`
+    );
+  }
+  return computed;
 }
 
 // ---------- 台账 exact schema（未列键拒） ----------
@@ -241,19 +262,80 @@ export function assertLedgerSchema(ledger) {
   }
 }
 
-// ---------- 读写：tmp+rename 原子替换 + 乐观锁 CAS ----------
+// ---------- 读写：独占锁 + 唯一 tmp + rename 原子替换 + 乐观锁 CAS ----------
+const LOCK_RETRY_MS = 10;
+const LOCK_TIMEOUT_MS = 1000;
+
+/** 同步睡眠（Atomics.wait 在 Node 主线程合法；仅用于锁重试退避）。 */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * 独占写锁：<ledger>.lock 以 O_EXCL 原子创建。拿不到 = 他写者正在临界区，
+ * 重试至超时抛 LOCK_TIMEOUT（fail-closed，exit 2 点名）。
+ * 持锁进程崩溃会留下锁文件：故意不做自动抢占——抢占（先读旧 pid → unlink → 重开）自身有
+ * ABA 竞态，会重蹈本文件 F-C 的覆辙；超时错误信息点名人工删除路径。
+ */
+export function acquireLedgerLock(ledgerPath, timeoutMs = LOCK_TIMEOUT_MS) {
+  const lockPath = `${ledgerPath}.lock`;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const fd = openSync(lockPath, 'wx');
+      writeSync(fd, `${process.pid}\n`, null, 'utf8');
+      closeSync(fd);
+      return lockPath;
+    } catch (err) {
+      if (err.code !== 'EEXIST') {
+        throw new LedgerError('LOCK_ERROR', `台账锁获取失败（${lockPath}）: ${err.message}`);
+      }
+      if (Date.now() >= deadline) {
+        throw new LedgerError(
+          'LOCK_TIMEOUT',
+          `台账锁等待超时（${lockPath}，${timeoutMs}ms）：他写者持锁中，拒绝写入（fail-closed）；若持锁进程已死，人工删除锁文件后重试`
+        );
+      }
+      sleepSync(LOCK_RETRY_MS);
+    }
+  }
+}
+
+/** 释放写锁（幂等：文件已不在时忽略）。 */
+export function releaseLedgerLock(lockPath) {
+  try {
+    unlinkSync(lockPath);
+  } catch (err) {
+    // 锁文件已不存在（幂等释放），忽略
+  }
+}
+
+/**
+ * 唯一 tmp 名：pid + 随机 nonce。并发写者绝不共享同一路径——
+ * 固定 <ledger>.tmp 会让「A 写 → B 覆盖 → A rename」落盘 B 的值而 A 报成功（F-C 根因②）。
+ */
 export function tmpPath(ledgerPath) {
-  return `${ledgerPath}.tmp`;
+  return `${ledgerPath}.tmp.${process.pid}.${randomBytes(6).toString('hex')}`;
 }
 
-/** 只写 tmp（不 rename）——暴露分步是为了可测「写盘中断不污染原台账」。 */
+/** 本进程最近一次为该台账写入的 tmp 路径（writeTmp/renameTmp 分步契约用）。 */
+const _lastTmp = new Map();
+
+/** 只写唯一 tmp（不 rename）——暴露分步是为了可测「写盘中断不污染原台账」。 */
 export function writeTmp(ledgerPath, content) {
-  writeFileSync(tmpPath(ledgerPath), content, 'utf8');
+  const p = tmpPath(ledgerPath);
+  writeFileSync(p, content, 'utf8');
+  _lastTmp.set(ledgerPath, p);
 }
 
-/** 把 tmp rename 到目标（原子替换）。 */
+/** 把最近一次写入的 tmp rename 到目标（原子替换）。 */
 export function renameTmp(ledgerPath) {
-  renameSync(tmpPath(ledgerPath), ledgerPath);
+  const p = _lastTmp.get(ledgerPath);
+  if (p === undefined) {
+    throw new LedgerError('TMP_MISSING', `无可 rename 的 tmp（${ledgerPath}）：须先 writeTmp 且未被 rename`);
+  }
+  renameSync(p, ledgerPath);
+  _lastTmp.delete(ledgerPath);
 }
 
 export function readLedger(ledgerPath) {
@@ -274,23 +356,32 @@ export function readLedger(ledgerPath) {
  * 乐观锁 CAS 写盘：expectedVersion = 读时 version；写入前重读现有文件，
  * version 必须仍 == expectedVersion（否则他写者插入），冲突 exit 2 绝不静默覆盖。
  * buildNext(current) 返回下一版台账对象（须把 version 置为 expectedVersion + 1）。
+ *
+ * 独占锁包住「重读版本 → 写唯一 tmp → rename」整段（F-C）：仅比对 version 不构成 CAS——
+ * 重读通过后到 rename 之间他写者仍可插入并覆盖共享 tmp；锁内临界区串行化后，
+ * 冲突方一定在锁内重读处撞上 version 变化抛 CAS_CONFLICT，而非「报成功却落盘他者的值」。
  */
-export function writeLedgerAtomic(ledgerPath, expectedVersion, buildNext) {
-  const current = readLedger(ledgerPath);
-  if (current.version !== expectedVersion) {
-    throw new LedgerError(
-      'CAS_CONFLICT',
-      `乐观锁冲突：expected version=${expectedVersion}，磁盘 version=${current.version}（他写者插入），拒绝覆盖`
-    );
+export function writeLedgerAtomic(ledgerPath, expectedVersion, buildNext, lockTimeoutMs = LOCK_TIMEOUT_MS) {
+  const lockPath = acquireLedgerLock(ledgerPath, lockTimeoutMs);
+  try {
+    const current = readLedger(ledgerPath);
+    if (current.version !== expectedVersion) {
+      throw new LedgerError(
+        'CAS_CONFLICT',
+        `乐观锁冲突：expected version=${expectedVersion}，磁盘 version=${current.version}（他写者插入），拒绝覆盖`
+      );
+    }
+    const next = buildNext(current);
+    if (!Number.isInteger(next.version) || next.version !== expectedVersion + 1) {
+      throw new LedgerError('SCHEMA', 'buildNext 必须把 version 置为 expectedVersion + 1');
+    }
+    assertLedgerSchema(next); // 写盘前自校验：坏台账永远不该落盘
+    writeTmp(ledgerPath, `${JSON.stringify(next, null, 2)}\n`);
+    renameTmp(ledgerPath);
+    return next;
+  } finally {
+    releaseLedgerLock(lockPath);
   }
-  const next = buildNext(current);
-  if (!Number.isInteger(next.version) || next.version !== expectedVersion + 1) {
-    throw new LedgerError('SCHEMA', 'buildNext 必须把 version 置为 expectedVersion + 1');
-  }
-  assertLedgerSchema(next); // 写盘前自校验：坏台账永远不该落盘
-  writeTmp(ledgerPath, `${JSON.stringify(next, null, 2)}\n`);
-  renameTmp(ledgerPath);
-  return next;
 }
 
 // ---------- manifest 读取 ----------
@@ -345,9 +436,6 @@ export function initLedger({ ledgerPath, manifestPath, runId, now }) {
   requireNow(now, 'init');
   if (!manifestPath) throw new LedgerError('ARGS', 'init 缺 --manifest <path>');
   if (!runId) throw new LedgerError('ARGS', 'init 缺 --run-id <id>');
-  if (existsSync(ledgerPath)) {
-    throw new LedgerError('ALREADY_EXISTS', `台账已存在，拒绝覆盖（${ledgerPath}）；如需重建先移走旧台账`);
-  }
   const manifest = readManifest(manifestPath);
   if (!Array.isArray(manifest.waves)) {
     throw new LedgerError('MANIFEST', 'manifest 缺少 waves 数组');
@@ -393,9 +481,19 @@ export function initLedger({ ledgerPath, manifestPath, runId, now }) {
     events: [],
   };
   assertLedgerSchema(ledger);
-  // 新台账直接原子落盘（无旧内容可比，无 CAS 对手）；写盘中断 → 只有 tmp 残留，主文件不出现
-  writeTmp(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
-  renameTmp(ledgerPath);
+  // 新台账直接原子落盘（无旧内容可比，无 CAS 对手）；写盘中断 → 只有 tmp 残留，主文件不出现。
+  // 存在性复查 + 写盘放锁内（F-C 同源竞态：两个并发 init 若都过了外部 existsSync，
+  // 后 rename 者会静默覆盖先者——锁内复查把并发 init 串行化）
+  const lockPath = acquireLedgerLock(ledgerPath);
+  try {
+    if (existsSync(ledgerPath)) {
+      throw new LedgerError('ALREADY_EXISTS', `台账已存在，拒绝覆盖（${ledgerPath}）；如需重建先移走旧台账`);
+    }
+    writeTmp(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+    renameTmp(ledgerPath);
+  } finally {
+    releaseLedgerLock(lockPath);
+  }
   return ledger;
 }
 
@@ -403,13 +501,7 @@ export function initLedger({ ledgerPath, manifestPath, runId, now }) {
 export function validateLedger({ ledgerPath }) {
   const ledger = readLedger(ledgerPath);
   const manifest = readManifest(ledger.manifest_path);
-  const computed = manifestCoreHash(manifest);
-  if (computed !== ledger.manifest_core_hash) {
-    throw new LedgerError(
-      'HASH_MISMATCH',
-      `manifest core hash 不匹配：台账=${ledger.manifest_core_hash}，现算=${computed}（旧台账配新 manifest 必拒，内容绑定）`
-    );
-  }
+  const computed = assertManifestBound(ledger, manifest, 'validate');
   return { ledger, computed };
 }
 
@@ -675,8 +767,9 @@ export function setState({
     } else if (to === 'delivered' && from === 'dispatched') {
       g.state = 'delivered';
       g.tip_sha = tipSha;
-      // F1 修复：detail.tip_sha 是 ready-check ① 与台账 tip_sha 对账的读取点
-      cur.events.push({ type: 'delivery', at: now, detail: { group_id: group, tip_sha: tipSha } });
+      // F1 修复：detail.tip_sha 是 ready-check ① 与台账 tip_sha 对账的读取点。
+      // delivery detail 契约 {group_id, tip_sha, candidate_sha}：派发时刻候选即所交 tip，candidate_sha 与 tip_sha 同值
+      cur.events.push({ type: 'delivery', at: now, detail: { group_id: group, tip_sha: tipSha, candidate_sha: tipSha } });
     } else if (to === 'delivered' && from === 'delivered') {
       g.review.rounds += 1;
       // unresolved 不在此更新：唯一通道是 record-delivery 审查交卷（CLI --unresolved 已拒）
@@ -713,7 +806,11 @@ const PACKET_REQUIRED_FIELDS = Object.freeze([
 
 export function renderPacket({ ledgerPath, group, manifestPath }) {
   const ledger = readLedger(ledgerPath);
-  const manifest = readManifest(manifestPath || ledger.manifest_path);
+  // F-D 内容绑定入口：消费 manifest 先校 core hash。--manifest 覆盖只接受 resolve 后
+  // 等于台账 manifest_path（此时 hash 校验 = 验原文件未被篡改）或通过同一 hash 校验的异本文件。
+  const manifestResolved = manifestPath ? resolve(manifestPath) : ledger.manifest_path;
+  const manifest = readManifest(manifestResolved);
+  assertManifestBound(ledger, manifest, 'render-packet');
   const packet = findPacket(manifest, group);
   const wave = findGroupWave(ledger, group);
   const wg = wave.groups.find((g) => g.group_id === group);
@@ -856,9 +953,9 @@ function renderVerifyPacket({ packet, group, wave, integratedWave, identity }) {
 // ---------- record-delivery：worker 交卷进台账的唯一通道 ----------
 const EXEC_DELIVERY_KEYS = Object.freeze(['status', 'tip_sha', 'scs']);
 const EXEC_SC_KEYS = Object.freeze(['sc_id', 'status', 'evidence']);
-// candidate_sha：审查/验收交卷必须绑定被审候选 HEAD（40hex）。ready-check ③ 的读取点是
-// 「每组最后一条 delivery 事件的 detail.candidate_sha == HEAD」——没有该键，绑定无法入账，
-// 出口门在该组上恒缺（F1 契约的一部分：detail 形状必须满足 ready-check 消费侧）。
+// candidate_sha 是审查交卷的必填契约字段：ready-check ③ 消费每组最后一条 delivery
+// 事件的 detail.candidate_sha 绑定候选 HEAD——缺它则绑定形同虚设（F1 跨组断链补充），
+// 缺失/非 40hex 一律拒，禁止从台账派生默认（被审查对象由审查方在交卷里显式声明）。
 const REVIEW_DELIVERY_KEYS = Object.freeze(['rounds', 'findings_total', 'unresolved', 'fix_commits', 'candidate_sha']);
 const VERIFY_DELIVERY_KEYS = Object.freeze(['scs', 'integration_review', 'candidate_sha']);
 const INTEGRATION_REVIEW_KEYS = Object.freeze(['status', 'notes']);
@@ -938,8 +1035,13 @@ function validateReviewDelivery(data) {
       throw new LedgerError('DELIVERY_SCHEMA', '审查组交卷 fix_commits 元素必须是字符串');
     }
   }
+  // candidate_sha 必填（exact 契约，不许默认）：ready-check ③ 消费最后一条 delivery 的
+  // detail.candidate_sha 绑定 HEAD，审查方必须在交卷里显式声明所审查候选
   if (typeof data.candidate_sha !== 'string' || !TIP_SHA_RE.test(data.candidate_sha)) {
-    throw new LedgerError('DELIVERY_SCHEMA', `审查组交卷 candidate_sha 非 40 位十六进制（ready-check ③ 审查交卷绑定的读取点，当前: ${data.candidate_sha}）`);
+    throw new LedgerError(
+      'DELIVERY_SCHEMA',
+      `审查组交卷 candidate_sha 非 40 位十六进制（当前: ${data.candidate_sha ?? '缺失'}）——审查交卷必须绑定所审查候选 SHA，禁止默认`
+    );
   }
 }
 
@@ -1003,7 +1105,9 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
   const expected = ledger.version;
   const wave = findGroupWave(ledger, group);
   const wg = wave.groups.find((g) => g.group_id === group);
+  // F-D 内容绑定入口：manifest 已变（相对台账记录）时交卷不得入账——禁止拿旧结论/旧 manifest 干活
   const manifest = readManifest(ledger.manifest_path);
+  assertManifestBound(ledger, manifest, 'record-delivery');
   const packet = findPacket(manifest, group);
 
   const kind = classifyDelivery(data);
@@ -1019,11 +1123,13 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
       cur.events.push({
         type: 'delivery',
         at: now,
-        // F1 修复：detail.tip_sha 是 ready-check ① 与台账 tip_sha 对账的读取点；scs 摘要结构化
+        // F1 修复：detail.tip_sha 是 ready-check ① 与台账 tip_sha 对账的读取点；scs 摘要结构化。
+        // exec 交卷侧 candidate_sha = 所交 tip_sha（身份同一：候选即所交 tip，与 set-state 派发时刻同值）
         detail: {
           group_id: group,
           status: data.status,
           tip_sha: data.tip_sha,
+          candidate_sha: data.tip_sha,
           scs: data.scs.map((s) => ({ sc_id: s.sc_id, status: s.status })),
         },
       });
@@ -1033,14 +1139,16 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
       cur.events.push({
         type: 'delivery',
         at: now,
-        // F1 修复：detail.candidate_sha 是 ready-check ③ 审查交卷绑定的读取点
+        // F1 修复：detail.candidate_sha 是 ready-check ③ 审查交卷绑定的读取点；tip_sha 取台账当前值
+        // （组已交付 tip，未交付即 null——fail-closed，出口门 ① 对账/③ 绑定会拒绝）
         detail: {
           group_id: group,
+          tip_sha: g.tip_sha,
+          candidate_sha: data.candidate_sha,
           rounds: data.rounds,
           findings_total: data.findings_total,
           unresolved: data.unresolved,
           fix_commits: data.fix_commits.length,
-          candidate_sha: data.candidate_sha,
         },
       });
     } else {
