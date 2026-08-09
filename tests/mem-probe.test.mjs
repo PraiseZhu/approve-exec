@@ -2,9 +2,10 @@
 // 组结构（sc-p1b 变异红集预测依据）：
 //   组 A「换算/函数域」——有效夹具换算、三个 min 分支约束主体、floor 语义、无负数、
 //                       computeConcurrency 入参拒绝、parseVmStat 输入类型守卫、CLI 端到端、
-//                       同夹具两次输出逐字相同、非 JSON 摘要输出
+//                       同夹具两次输出逐字相同、非 JSON 摘要输出、CLI 帮助出口（--help/-h exit 0）
 //   组 B「CLI 参数拒绝」——CLI 侧 --used-slots/--pending/未知参数/缺失参数/文件缺失
-//   组 C「fail-closed 解析拒绝」——乱码/缺 Pages free/inactive/speculative/首行无 page size：
+//   组 C「fail-closed 解析拒绝」——乱码/缺 Pages free/inactive/speculative/首行无 page size/
+//                       page size 非法(0)：
 //                       parseVmStat 点名 throw；CLI exit 2 并点名缺失字段，绝不回退默认换算
 // 预测红集（挖掉 parseVmStat 内容字段校验分支后）= 恰好组 C 全部测试；组 A/B 必须仍绿。
 import { test } from 'node:test';
@@ -208,6 +209,14 @@ test('CLI 摘要: 不带 --json 输出单行摘要并 exit 0', () => {
   assert.match(r.stdout, /concurrency=5/);
 });
 
+test('CLI 帮助: --help / -h 单独调用 exit 0 并打印用法（不被必填参数校验拦截）', () => {
+  for (const flag of ['--help', '-h']) {
+    const r = runCli([flag]);
+    assert.equal(r.status, 0, `${flag} 必须 exit 0，stderr: ${r.stderr}`);
+    assert.match(r.stderr, /用法:/, `${flag} 必须打印用法`);
+  }
+});
+
 // ============ 组 B：CLI 参数拒绝（预测：变异下仍绿） ============
 
 test('CLI 参数拒绝: --used-slots 负数 / 非数字 / 小数 → exit 2', () => {
@@ -218,8 +227,8 @@ test('CLI 参数拒绝: --used-slots 负数 / 非数字 / 小数 → exit 2', ()
   }
 });
 
-test('CLI 参数拒绝: --pending 负数 / 非数字 → exit 2', () => {
-  for (const bad of ['-1', 'xyz']) {
+test('CLI 参数拒绝: --pending 负数 / 非数字 / 小数 → exit 2', () => {
+  for (const bad of ['-1', 'xyz', '1.5']) {
     const r = runCli(['--json', '--used-slots', '0', '--pending', bad, '--vm-stat-file', FIX['64g']]);
     assert.equal(r.status, 2, `--pending ${bad} 必须 exit 2`);
     assert.match(r.stderr, /非负整数/);
@@ -248,6 +257,11 @@ test('fail-closed: parseVmStat 乱码输入 → throw 并点名 page size', () =
 
 test('fail-closed: parseVmStat 首行无 page size → throw 并点名 page size', () => {
   assert.throws(() => parseVmStat('Mach Virtual Memory Statistics: (page size of )\nPages free: 100.\n'), /page size/);
+});
+
+test('fail-closed: parseVmStat page size 为 0（正则命中但非法）→ throw 并点名 page size', () => {
+  const text = 'Mach Virtual Memory Statistics: (page size of 0 bytes)\nPages free: 100.\nPages inactive: 50.\nPages speculative: 10.\n';
+  assert.throws(() => parseVmStat(text), /page size/);
 });
 
 test('fail-closed: parseVmStat 缺 Pages free 行 → throw 并点名 Pages free', () => {
@@ -285,6 +299,15 @@ test('fail-closed: CLI 对缺 Pages free 行文本 exit 2 并点名 Pages free',
     const r = runCli(['--json', '--used-slots', '0', '--pending', '1', '--vm-stat-file', p]);
     assert.equal(r.status, 2);
     assert.match(r.stderr, /Pages free/);
+  });
+});
+
+test('fail-closed: CLI 对 page size 为 0 的文本 exit 2 并点名 page size', () => {
+  const text = 'Mach Virtual Memory Statistics: (page size of 0 bytes)\nPages free: 100.\nPages inactive: 50.\nPages speculative: 10.\n';
+  withTempVmStat(text, (p) => {
+    const r = runCli(['--json', '--used-slots', '0', '--pending', '1', '--vm-stat-file', p]);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /page size/);
   });
 });
 

@@ -152,14 +152,23 @@ function parseArgs(argv) {
       usageError(`未知参数: ${a}`);
     }
   }
-  if (args.usedSlots === null) usageError('缺少 --used-slots <N>（调用方声明全部活跃 worker 数）');
-  if (args.pending === null) usageError('缺少 --pending <N>（调用方声明待派组数）');
+  // 帮助出口优先：--help/-h 单独调用必须能打印帮助并 exit 0，不被必填参数校验拦截。
+  if (!args.help) {
+    if (args.usedSlots === null) usageError('缺少 --used-slots <N>（调用方声明全部活跃 worker 数）');
+    if (args.pending === null) usageError('缺少 --pending <N>（调用方声明待派组数）');
+  }
   return args;
 }
 
 function readTotalBytes() {
   try {
-    return Number(execFileSync('sysctl', ['-n', 'hw.memsize'], { encoding: 'utf8' }).trim());
+    const v = Number(execFileSync('sysctl', ['-n', 'hw.memsize'], { encoding: 'utf8' }).trim());
+    // fail-closed：sysctl 输出异常时不得把 NaN 静默写进 JSON（JSON.stringify(NaN) = null），点名后 exit 2。
+    if (!Number.isSafeInteger(v) || v <= 0) {
+      console.error(`mem-probe: sysctl -n hw.memsize 输出非法: ${JSON.stringify(v)}`);
+      process.exit(2);
+    }
+    return v;
   } catch (err) {
     console.error(`mem-probe: 无法读取 sysctl -n hw.memsize: ${err.message}`);
     process.exit(2);
