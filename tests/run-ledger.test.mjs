@@ -304,6 +304,68 @@ test('sc-p1c: init 遇 manifest 组缺 sc_ids 数组 exit 2（禁止静默空组
   assert.equal(existsSync(ledgerPath), false, 'init 失败不得创建台账');
 });
 
+// r-g7 F6：receipts 无机器校验——形状随便写都能过。
+// 契约（与 task-priority final-gate 产出逐字对齐）：存在时必须是非空数组，每条
+// exact 键 { slug, manifest_core_hash, plan_hash, recorded_at }，双 hash 为 64 位十六进制（sha256）。
+// 缺键允许（早期/中间产物无 receipts）；readManifest 统一拒坏形状（init/validate/render-packet/record-delivery 全入口）。
+// 变异反证：挖掉 readManifest 里的 assertReceiptsSchema 调用 → ①②③ 全红（init 放行坏形状），恰红本用例。
+// 子套件跳过（机制同 ready-check 的 RC_MUTATION_CHILD）：F1/F2 变异子套件的失败集契约与 receipts 无关；
+// 不跳过会让「父树在途的其他变异（如挖掉 receipts 校验）」被拷贝进子套件 → 污染预测红集。
+test('sc-receipts: manifest.receipts 形状校验——坏形状 init 拒、合法/缺键通过', (t) => {
+  if (process.env.RL_MUTATION_CHILD === '1') { t.skip('变异子套件运行跳过本用例（与 F1/F2 变异无关，防污染其失败集契约）'); return; }
+  const SHA64 = 'e'.repeat(64);
+  // ① 非数组 receipts → exit 2 点名
+  {
+    const dir = newTmpDir();
+    const ledgerPath = join(dir, 'ledger.json');
+    const manifestPath = fixtureCopy(dir);
+    const m = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    m.receipts = 'not-an-array';
+    writeFileSync(manifestPath, JSON.stringify(m));
+    const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T);
+    assert.equal(r.status, 2, 'receipts 非数组必须 exit 2');
+    assert.match(r.stderr, /receipts 必须是数组/, `应点名 receipts 必须是数组: ${r.stderr}`);
+  }
+  // ② 条目未知键 → 拒（exact 契约）
+  {
+    const dir = newTmpDir();
+    const ledgerPath = join(dir, 'ledger.json');
+    const manifestPath = fixtureCopy(dir);
+    const m = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    m.receipts = [{ slug: 's', manifest_core_hash: SHA64, plan_hash: SHA64, recorded_at: T, extra: 1 }];
+    writeFileSync(manifestPath, JSON.stringify(m));
+    const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T);
+    assert.equal(r.status, 2, 'receipt 未知键必须 exit 2');
+    assert.match(r.stderr, /未列键: extra/, `应点名未知键 extra: ${r.stderr}`);
+  }
+  // ③ 条目 hash 非 64 位十六进制 → 拒
+  {
+    const dir = newTmpDir();
+    const ledgerPath = join(dir, 'ledger.json');
+    const manifestPath = fixtureCopy(dir);
+    const m = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    m.receipts = [{ slug: 's', manifest_core_hash: 'short', plan_hash: SHA64, recorded_at: T }];
+    writeFileSync(manifestPath, JSON.stringify(m));
+    const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T);
+    assert.equal(r.status, 2, 'receipt hash 非 64hex 必须 exit 2');
+    assert.match(r.stderr, /manifest_core_hash 必须是 64 位十六进制/);
+  }
+  // ④ 合法形状 → exit 0（append-only 多条同样合法；缺键 = 早期产物同样放行，基线夹具覆盖）
+  {
+    const dir = newTmpDir();
+    const ledgerPath = join(dir, 'ledger.json');
+    const manifestPath = fixtureCopy(dir);
+    const m = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    m.receipts = [
+      { slug: 'run-a', manifest_core_hash: SHA64, plan_hash: SHA64, recorded_at: T },
+      { slug: 'run-b', manifest_core_hash: SHA64, plan_hash: SHA64, recorded_at: T },
+    ];
+    writeFileSync(manifestPath, JSON.stringify(m));
+    const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T);
+    assert.equal(r.status, 0, `合法 receipts 应 exit 0: ${r.stderr}`);
+  }
+});
+
 test('sc-p1c: 写盘中断模拟（写 tmp 后不 rename）不污染原台账', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerForClean(dir);

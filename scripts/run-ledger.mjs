@@ -384,6 +384,37 @@ export function writeLedgerAtomic(ledgerPath, expectedVersion, buildNext, lockTi
   }
 }
 
+// ---------- manifest receipts schema（r-g7 F6：此前无机器校验，形状随便写都能过） ----------
+// receipts 是 manifest 顶层元素（SKILL.md 输入门三要素之一），由 task-priority final-gate 全过时
+// 追加写入（append-only 数组，每条 { slug, manifest_core_hash, plan_hash, recorded_at }，
+// 双 hash 均为 sha256 hex）。本仓把它从 manifest core hash 黑名单剔除（不动点：追加 receipts
+// 不破坏 hash 绑定），因此形状错误不会触碰 hash——形状校验必须独立存在。
+// 缺键允许（早期/中间产物无 receipts）：存在时必须形状正确，未知键/类型错一律拒。
+const RECEIPT_ENTRY_KEYS = Object.freeze(['slug', 'manifest_core_hash', 'plan_hash', 'recorded_at']);
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+
+export function assertReceiptsSchema(manifest) {
+  if (manifest.receipts === undefined) return;
+  if (!Array.isArray(manifest.receipts)) {
+    throw new LedgerError('SCHEMA', 'manifest.receipts 必须是数组（task-priority final-gate 追加写入的收据列表）');
+  }
+  for (const [i, rec] of manifest.receipts.entries()) {
+    assertKeys(rec, RECEIPT_ENTRY_KEYS, `manifest.receipts[${i}]`);
+    if (typeof rec.slug !== 'string' || rec.slug.length === 0) {
+      throw new LedgerError('SCHEMA', `manifest.receipts[${i}].slug 必须是非空字符串`);
+    }
+    if (!SHA256_HEX_RE.test(rec.manifest_core_hash)) {
+      throw new LedgerError('SCHEMA', `manifest.receipts[${i}].manifest_core_hash 必须是 64 位十六进制（sha256）`);
+    }
+    if (!SHA256_HEX_RE.test(rec.plan_hash)) {
+      throw new LedgerError('SCHEMA', `manifest.receipts[${i}].plan_hash 必须是 64 位十六进制（sha256）`);
+    }
+    if (typeof rec.recorded_at !== 'string' || rec.recorded_at.length === 0) {
+      throw new LedgerError('SCHEMA', `manifest.receipts[${i}].recorded_at 必须是非空字符串`);
+    }
+  }
+}
+
 // ---------- manifest 读取 ----------
 export function readManifest(manifestPath) {
   let parsed;
@@ -395,6 +426,7 @@ export function readManifest(manifestPath) {
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new LedgerError('MANIFEST', 'manifest 必须是非数组对象');
   }
+  assertReceiptsSchema(parsed); // 每个 manifest 消费入口（init/validate/render-packet/record-delivery）统一拒坏 receipts
   return parsed;
 }
 
