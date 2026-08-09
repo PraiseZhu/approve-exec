@@ -176,8 +176,15 @@ function execGroupToVerified(env) {
   assert.equal(rr.status, 0, `g4 审查交卷应 exit 0: ${rr.stderr}`);
   rr = cliLedger('set-state', env.ledgerPath, '--group', 'g4', '--to', 'review_pass', '--now', FIXED_NOW);
   assert.equal(rr.status, 0, rr.stderr);
-  rr = cliLedger('set-state', env.ledgerPath, '--group', 'g4', '--verify-status', 'pass', '--now', FIXED_NOW);
-  assert.equal(rr.status, 0, rr.stderr);
+  // F-H：pass 凭据唯一通道 = 验收 record-delivery（--verify-status 手工入口已移除）
+  const manifest = JSON.parse(readFileSync(env.manifestPath, 'utf8'));
+  const g4Pkt = manifest.dispatch.packets.find((p) => p.group_id === 'g4');
+  rr = cliLedger('record-delivery', env.ledgerPath, '--group', 'g4', '--payload', JSON.stringify({
+    scs: g4Pkt.scs_inline.map((s) => ({ sc_id: s.id, status: 'pass', evidence: `verify 通过：${s.id}` })),
+    integration_review: { status: 'pass', notes: 'dry-run 验收通过' },
+    candidate_sha: env.headSha,
+  }), '--now', FIXED_NOW);
+  assert.equal(rr.status, 0, `g4 验收交卷应 exit 0: ${rr.stderr}`);
   rr = cliLedger('set-state', env.ledgerPath, '--group', 'g4', '--to', 'verified', '--now', FIXED_NOW);
   assert.equal(rr.status, 0, `g4 →verified 应 exit 0: ${rr.stderr}`);
 }
