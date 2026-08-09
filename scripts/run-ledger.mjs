@@ -766,13 +766,26 @@ export function renderPacket({ ledgerPath, group, manifestPath }) {
   const isVerifyGroup = kinds.every((k) => k === 'verify');
 
   if (isVerifyGroup) {
-    if (!wave.integrated_tip) {
+    // D1 修复：验收组复查的是「严格早于本组所在 wave 的最新已集成 wave」的整合树，
+    // 不是本组所在 wave 自己的树——本波要等本组 verified 后才集成，而 render-packet
+    // 必须发生在派工之前（包是派工输入），读本波 integrated_tip 必然为 null，
+    // 三者互相等待 = off-by-one-wave 死锁（实测：wave 1 集成后 render wave 2 的 v1 仍拒）。
+    const integratedBefore = ledger.waves
+      .filter((w) => w.wave < wave.wave && w.integrated_tip !== null);
+    const prevIntegrated = integratedBefore[integratedBefore.length - 1] ?? null;
+    if (!prevIntegrated) {
+      // D2：fail-closed 且点名。严格更早的已集成 wave 不存在（验收组被排进首波 /
+      // 前波未集成）时不许回落 null/空串/当前 tip 静默继续——消息带组名、所在 wave、
+      // 以及「实际已集成的最新 wave」是什么（无则明说无）。
+      const latestIntegratedWave = ledger.waves.filter((w) => w.integrated_tip !== null);
+      const latest = latestIntegratedWave[latestIntegratedWave.length - 1] ?? null;
       throw new LedgerError(
         'NO_INTEGRATED',
-        `验收组 ${group} 所在 wave ${wave.wave} 尚未集成（integrated_tip=null），无法渲染整合树复查项`
+        `验收组 ${group} 所在 wave ${wave.wave} 之前没有已集成 wave（严格更早的 integrated_tip 不存在；` +
+        `实际已集成的最新 wave: ${latest ? `wave ${latest.wave}（integrated_tip=${latest.integrated_tip}）` : '无'}），无法渲染整合树复查项`
       );
     }
-    return renderVerifyPacket({ packet, group, wg, wave, identity: { worktree, branch, base } });
+    return renderVerifyPacket({ packet, group, wg, wave, integratedWave: prevIntegrated, identity: { worktree, branch, base } });
   }
   if (!isExecGroup) {
     throw new LedgerError('PACKET_INCOMPLETE', `组 ${group} 的 scs_inline kind 既无 fix 也无全 verify，无法选模板`);
@@ -818,7 +831,7 @@ function renderExecPacket({ packet, group, wave, identity }) {
   return `${lines.join('\n')}\n`;
 }
 
-function renderVerifyPacket({ packet, group, wave, identity }) {
+function renderVerifyPacket({ packet, group, wave, integratedWave, identity }) {
   const lines = [];
   // 验收组：不带 goal 触发行，明确只跑 verify 命令出 verdict 不改代码
   lines.push(`run-ledger 验收包：组 ${group}（wave ${wave.wave}，验收组）`);
@@ -834,7 +847,8 @@ function renderVerifyPacket({ packet, group, wave, identity }) {
   for (const c of packet.verify_cmds) lines.push(c);
   lines.push('');
   lines.push('## 整合树复查');
-  lines.push(`integrated_tip=${wave.integrated_tip}（wave ${wave.wave} 集成 squash SHA）`);
+  // D1：复查对象是严格早于本组 wave 的已集成波（integratedWave），header 的 wave 仍指本组所在波
+  lines.push(`integrated_tip=${integratedWave.integrated_tip}（wave ${integratedWave.wave} 集成 squash SHA）`);
   lines.push('对 integrated_tip 相对上一集成点的 squash diff 执行复查指令：核对改动物与台账断言一致、无越域写入、验证命令与 manifest 逐条一致。');
   return `${lines.join('\n')}\n`;
 }

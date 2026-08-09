@@ -644,15 +644,27 @@ test('sc-p1e: CLI 传身份字段被拒（身份单一来源是台账，不接�
 test('sc-p1e: 验收组模板无 goal 触发行、含整合树复查项（integrated_tip 引用 + squash diff 复查指令）', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
-  // v1 所在 wave 2 未集成 → 拒
   assignIdentity(ledgerPath, 'v1', 'feat/verify');
-  let r = cli('render-packet', ledgerPath, '--group', 'v1');
-  assert.equal(r.status, 2, '验收组所在波未集成必须 exit 2');
-  assert.match(r.stderr, /NO_INTEGRATED/);
-  // 集成 wave 1（g4 全 verified）+ wave 2（v1 全 verified）
+  // 真实编排顺序（D1 修复语义）：包是派工输入，render 必须先于派工。
+  // wave 1 集成后立刻出 v1 的包——验收组复查的是上一波集成出来的树，
+  // 不是它自己所在 wave 的树（读本波 integrated_tip 必然为 null，off-by-one-wave 死锁）。
   runG4ToVerified(ledgerPath);
-  r = cli('set-state', ledgerPath, '--wave', '1', '--integrate', SHA2, '--now', T);
+  let r = cli('set-state', ledgerPath, '--wave', '1', '--integrate', SHA2, '--now', T);
   assert.equal(r.status, 0, r.stderr);
+  r = cli('render-packet', ledgerPath, '--group', 'v1');
+  assert.equal(r.status, 0, `验收组在上一波集成后立刻 render 应 exit 0: ${r.stderr}`);
+  const out = r.stdout;
+  assert.ok(!out.startsWith('用 goal skill 执行。'), '验收组模板不得带 goal 触发行');
+  assert.ok(!out.includes('--until-sc'), '验收组模板不得带 --until-sc');
+  assert.match(out, /只跑 verify 命令出 verdict，不改代码/);
+  assert.match(out, /## pr-submit-gate 门禁/, '验收组模板必须同样渲染 pr-submit-gate 门禁说明区');
+  assert.match(out, /needs_three_review=false/, '验收组模板必须渲染门禁结论（夹具 v1 packet=false）');
+  assert.match(out, new RegExp(`integrated_tip=${SHA2}`),
+    '整合树复查项必须引用严格早于本组的 wave 1 集成 tip（SHA2），而非本组所在 wave 2 的 integrated_tip');
+  assert.match(out, /squash diff/, '整合树复查项必须含 squash diff 复查指令');
+  assert.match(out, new RegExp(`integrated_tip=${SHA2}（wave 1 集成 squash SHA）`),
+    '整合树复查项必须点名 tip 来自 wave 1 集成');
+  // 出包之后才派工 v1 到 verified，然后集成 wave 2（真实顺序的剩余半程）
   const v = 'v1';
   for (const [to, extra] of [
     ['dispatched', ['--worker-label', 'wv1']],
@@ -669,18 +681,40 @@ test('sc-p1e: 验收组模板无 goal 触发行、含整合树复查项（integr
   assert.equal(r.status, 0, r.stderr);
   r = cli('set-state', ledgerPath, '--wave', '2', '--integrate', SHA1, '--now', T);
   assert.equal(r.status, 0, r.stderr);
-  // 渲染验收包
-  r = cli('render-packet', ledgerPath, '--group', 'v1');
-  assert.equal(r.status, 0, `验收组 render 应 exit 0: ${r.stderr}`);
-  const out = r.stdout;
-  assert.ok(!out.startsWith('用 goal skill 执行。'), '验收组模板不得带 goal 触发行');
-  assert.ok(!out.includes('--until-sc'), '验收组模板不得带 --until-sc');
-  assert.match(out, /只跑 verify 命令出 verdict，不改代码/);
-  assert.match(out, /## pr-submit-gate 门禁/, '验收组模板必须同样渲染 pr-submit-gate 门禁说明区');
-  assert.match(out, /needs_three_review=false/, '验收组模板必须渲染门禁结论（夹具 v1 packet=false）');
-  assert.match(out, new RegExp(`integrated_tip=${SHA1}`), '整合树复查项必须引用台账 integrated_tip');
-  assert.match(out, /squash diff/, '整合树复查项必须含 squash diff 复查指令');
-  assert.match(out, new RegExp(`integrated_tip=${SHA1}（wave 2 集成 squash SHA）`));
+});
+
+test('sc-p1e: 验收组无更早已集成 wave 时出包被点名拒（D2 fail-closed：组名/所在 wave/实际已集成最新 wave 三要素齐备）', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  assignIdentity(ledgerPath, 'v1', 'feat/verify');
+  // 可达实例①（正常夹具）：v1 在 wave 2，但 wave 1 尚未集成 → 严格更早的已集成 wave 不存在
+  let r = cli('render-packet', ledgerPath, '--group', 'v1');
+  assert.equal(r.status, 2, '严格更早的已集成 wave 不存在必须 exit 2');
+  assert.match(r.stderr, /NO_INTEGRATED/);
+  assert.match(r.stderr, /组 v1/, '拒绝消息必须点名组名');
+  assert.match(r.stderr, /wave 2/, '拒绝消息必须点名组所在 wave');
+  assert.match(r.stderr, /实际已集成的最新 wave: 无/, '拒绝消息必须如实报告已集成最新 wave 为无（不许回落 null/空串静默继续）');
+
+  // 可达实例②：verify 组被放进 wave 1（D3 实测：消费侧 initLedger 无 kind/波次位置校验，
+  // 手写 manifest 可把验收组排进首波，init 照常放行）→ 无严格更早集成波 → 同一点名拒
+  const dir2 = newTmpDir();
+  const m = JSON.parse(readFileSync(FIXTURE, 'utf8'));
+  m.waves = [{ wave: 1, groups: [{ group_id: 'v1', sc_ids: ['sc-v1a'], worker_count: 1 }] }];
+  m.manifest_core_hash = manifestCoreHash(m);
+  const manifestPath2 = join(dir2, 'sample-manifest.json');
+  writeFileSync(manifestPath2, JSON.stringify(m));
+  const ledgerPath2 = join(dir2, 'ledger.json');
+  let r2 = cli('init', ledgerPath2, '--manifest', manifestPath2, '--run-id', 'test-run2', '--now', T);
+  assert.equal(r2.status, 0, `verify 进首波的 manifest init 应放行（消费侧无尾波保证，D3 确认）: ${r2.stderr}`);
+  r2 = cli('set-state', ledgerPath2, '--group', 'v1', '--identity',
+    JSON.stringify({ worktree: '/wt/v1', branch: 'feat/verify', base: SHA3 }), '--now', T);
+  assert.equal(r2.status, 0, r2.stderr);
+  r2 = cli('render-packet', ledgerPath2, '--group', 'v1');
+  assert.equal(r2.status, 2, '验收组在首波、无更早集成波必须 exit 2');
+  assert.match(r2.stderr, /NO_INTEGRATED/);
+  assert.match(r2.stderr, /组 v1/, '拒绝消息必须点名组名');
+  assert.match(r2.stderr, /wave 1/, '拒绝消息必须点名组所在 wave');
+  assert.match(r2.stderr, /实际已集成的最新 wave: 无/, '拒绝消息必须如实报告已集成最新 wave 为无');
 });
 
 test('sc-p1e: T 阶段包 verify_cmds 与夹具 manifest 尾波逐条一致', () => {
