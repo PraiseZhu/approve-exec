@@ -52,7 +52,10 @@ import { spawnSync } from 'node:child_process';
 // 名 <path>.tmp.<pid>.<随机nonce>（固定 tmp 会让并发写者互相覆盖）。
 // ready-check 只检查不写台账：phase→ready 的唯一写入者是 run-ledger set-state
 // --phase ready --ready-receipt（锁/CAS/phase 单步/全波集成/manifest hash 绑定都在它那边）。
-import { tmpPath } from './run-ledger.mjs';
+// readManifest 一并复用：manifest 在场/形状契约与 run-ledger 全部消费入口同判据（同一份实现，
+// 不在 ready-check 另写一套存在性检查——receipts 在 core hash 黑名单之外，删它 hash 不变，
+// 出口门不能只靠 hash 兜底）。
+import { tmpPath, readManifest } from './run-ledger.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -117,10 +120,13 @@ function isInsideRepo(repoRoot, relPath) {
 // ---------- 七项判据（每项独立函数，变异点字符串唯一） ----------
 
 // ① 台账互斥全分区对账
-function checkLedgerPartition(ledger, manifest, gaps) {
+function checkLedgerPartition(ledger, manifest, manifestError, gaps) {
   // F-O: 输入不可解析转 gap 占位而非提前 exit——不依赖其内容的后项（④⑤⑥⑦）照常运行
   if (!ledger) { gaps.push({ gate: 'ledger-partition', detail: '台账文件不存在或不可解析' }); return; }
-  if (!manifest) { gaps.push({ gate: 'ledger-partition', detail: 'manifest 文件不存在或不可解析' }); return; }
+  if (!manifest) {
+    gaps.push({ gate: 'ledger-partition', detail: manifestError ? `manifest 不合约: ${manifestError}` : 'manifest 文件不存在或不可解析' });
+    return;
+  }
   const groups = (ledger.waves || []).flatMap((w) => w.groups || []);
   const packets = manifest.dispatch?.packets || [];
   const events = ledger.events || [];
@@ -204,9 +210,11 @@ function validateScs(manifest, ledger) {
 }
 
 // ② 每条 SC 验收 verdict + 证据锚点强校验
-function checkVerdictAnchors(verdict, manifest, ledger, repoRoot, headSha, gaps) {
+function checkVerdictAnchors(verdict, manifest, manifestError, ledger, repoRoot, headSha, gaps) {
   if (!verdict) { gaps.push({ gate: 'verdict-anchors', detail: 'verdict 文件不存在或不可解析' }); }
-  if (!manifest) { gaps.push({ gate: 'verdict-anchors', detail: 'manifest 文件不存在或不可解析' }); }
+  if (!manifest) {
+    gaps.push({ gate: 'verdict-anchors', detail: manifestError ? `manifest 不合约: ${manifestError}` : 'manifest 文件不存在或不可解析' });
+  }
   if (!verdict || !manifest) return;
   const scv = validateScs(manifest, ledger);
   if (!scv.ok) {
@@ -343,9 +351,12 @@ function main() {
   const reviewMaxRounds = config.reviewMaxRounds;
 
   const ledger = readJsonOrNull(args.ledger);
-  const manifest = readJsonOrNull(args.manifest);
-  // F-O: ledger/manifest 不可解析不再提前 exit——由依赖它们的子检查各自转 gap 占位点名
-  // （①③ 依赖 ledger、② 依赖 manifest+verdict），不依赖其内容的后项（④⑤⑥⑦）照常运行。
+  // manifest 经 readManifest 统一收口（receipts 在场/形状契约与 run-ledger 全部消费入口同判据）：
+  // 不合约/不可解析 → 转 gap 占位（F-O：不提前 exit，后项照常运行），错误原文随 manifestError
+  // 进 gap detail——「可解析但不合约」不得被笼统说成「不可解析」。
+  let manifest = null;
+  let manifestError = null;
+  try { manifest = readManifest(args.manifest); } catch (err) { manifestError = err.message; }
 
   const headResult = runGit(args.repo, ['rev-parse', 'HEAD']);
   if (headResult.status !== 0) {
@@ -363,8 +374,8 @@ function main() {
 
   // 七项逐项独立检查，全部跑完再收束（不因前项失败跳过后项）
   const gaps = [];
-  checkLedgerPartition(ledger, manifest, gaps);
-  checkVerdictAnchors(verdict, manifest, ledger, args.repo, headSha, gaps);
+  checkLedgerPartition(ledger, manifest, manifestError, gaps);
+  checkVerdictAnchors(verdict, manifest, manifestError, ledger, args.repo, headSha, gaps);
   checkReviewClean(ledger, headSha, reviewMaxRounds, gaps);
   checkE2eReport(e2eReport, headSha, gaps);
   checkPresubmitGates(args.presubmitDir, headSha, gaps);

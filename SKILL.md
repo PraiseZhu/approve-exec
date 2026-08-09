@@ -21,7 +21,7 @@ trigger: 批准执行
 ## ② 输入门：只消费 task-priority final manifest
 
 - 唯一输入：task-priority **final 阶段释放**的 manifest——顶层含 `waves` / `dispatch` / `receipts` 三要素，packets 每包含 `scs_inline` / `allowed_paths` / `verify_cmds` / `forbidden` / `submit_format` 五要素（与 `run-ledger` render-packet 出包前五项校验逐字对齐）。
-- **fail-closed**：manifest 缺 `waves`/`dispatch`/`receipts` 任一、或文件不存在、或 packet 缺五要素任一 → 视为 draft/缺 manifest，**不开跑**，停下指路 task-priority（先回上游产出 final manifest）。不得拿「差不多能跑」的中间产物开跑。**机器闸如实标注**：文件不存在/非对象（readManifest）、`waves` 非空数组与组 `sc_ids` 非空（init，`scripts/run-ledger.mjs` initLedger）、`dispatch.packets` 存在且组有对应 packet、packet 五要素齐全（render-packet，PACKET_INCOMPLETE）——这些都有机器校验；**`receipts` 顶层键无机器校验**（实测 init 缺 receipts 仍 exit 0），「receipts 缺失不开跑」依赖 lead 检查。
+- **fail-closed**：manifest 缺 `waves`/`dispatch`/`receipts` 任一、或文件不存在、或 packet 缺五要素任一 → 视为 draft/缺 manifest，**不开跑**，停下指路 task-priority（先回上游产出 final manifest）。不得拿「差不多能跑」的中间产物开跑。**机器闸如实标注（全部有机器校验，无依赖 lead 手工检查的项）**：文件不存在/非对象与 `receipts` 键在场（readManifest，`scripts/run-ledger.mjs`；在场契约收口于唯一入口，init/validate/render-packet/record-delivery/set-state→ready 全部消费命令同判据，可空数组）、`receipts` 形状（readManifest 内 assertReceiptsSchema，未知键/类型错拒）、`waves` 非空数组与组 `sc_ids` 非空（init，initLedger）、`dispatch.packets` 存在且组有对应 packet、packet 五要素齐全（render-packet，PACKET_INCOMPLETE）。
 
 ## ③ 五阶段状态机与每边三动作
 

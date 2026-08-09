@@ -342,6 +342,33 @@ test('F-D: →ready manifest 绑定不误伤合法链——三重校验（manife
   assert.equal(readyLedger.phase_at, T, 'phase→ready 凭据路径必须写 phase_at（F2 契约）');
 });
 
+// receipts 在场契约（缺陷 #2 回归守卫）：receipts 在 core hash 黑名单之外（append-only 追加不破坏
+// 绑定），删它 hash 字节不变——init 后删除的通道只有「在场契约」能拦。判据收口于 readManifest
+// （唯一入口），全部消费命令（init/validate/render-packet/record-delivery/set-state→ready）
+// 自动继承，任何消费方不得另写一份存在性检查。
+test('receipts 在场契约: →ready 前删 manifest.receipts 键（其余合法）→ 被点名拒绝，不得 phase=ready（在场契约非仅 init 校验）', (t) => {
+  if (process.env.RL_MUTATION_CHILD === '1') { t.skip('变异子套件运行跳过本用例（与 F1/F2 变异无关，防污染其失败集契约）'); return; }
+  const dir = newTmpDir();
+  const { ledgerPath, manifestPath } = initLedgerFor(dir);
+  runFullChainToPackaging(ledgerPath);
+  // 变异 = 删 receipts 键（替代 F-D →ready 测试的 goal 篡改）：receipts 被 core hash 黑名单剔除，
+  // 删它 hash 一个字节都不变——这是缺陷机理里唯一能蒙混 →ready 的通道，必须由在场契约拦截。
+  const m = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  delete m.receipts;
+  writeFileSync(manifestPath, JSON.stringify(m));
+  // 合法 receipt（version 绑定当前台账 + candidate_sha=wave2 集成树 SHA1）——唯一不满足的是 receipts 在场
+  const curVer = readLedger(ledgerPath).version;
+  const receiptPath = join(dir, 'ready-receipt.json');
+  writeFileSync(receiptPath, JSON.stringify({ candidate_sha: SHA1, ledger_version: curVer, checked_at: T }));
+  const r = cli('set-state', ledgerPath, '--phase', 'ready', '--ready-receipt', receiptPath, '--now', T);
+  assert.equal(r.status, 2, '→ready 遇删 receipts 的 manifest 必须 exit 2（在场契约在 readManifest 收口，全部消费入口同判据）');
+  assert.match(r.stderr, /MANIFEST/, '必须走 MANIFEST 拒绝路径（点名，不是下游 TypeError 兜底）');
+  assert.match(r.stderr, /receipts/, '必须点名 receipts');
+  const ledger = readLedger(ledgerPath);
+  assert.equal(ledger.phase, 'packaging', '被拒后台账 phase 必须仍为 packaging（ready 未达成，台账内可纠正）');
+  assert.equal(ledger.version, curVer, '被拒后 version 不得前进（在场拒绝在锁外直接 throw，不落事件）');
+});
+
 test('sc-p1c: 未列键注入 exit 2（exact 契约，schema 之外键出现即拒）', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
@@ -442,14 +469,16 @@ test('sc-p1c: init 遇 manifest 组缺 sc_ids 数组 exit 2（禁止静默空组
   assert.equal(existsSync(ledgerPath), false, 'init 失败不得创建台账');
 });
 
-// r-g7 F6：receipts 无机器校验——形状随便写都能过。
+// r-g7 F6：receipts 形状契约（形状随便写都能过是 F6 落地前的历史状态，本组用例冻结形状校验）。
 // 契约（与 task-priority final-gate 产出逐字对齐）：存在时必须是非空数组，每条
 // exact 键 { slug, manifest_core_hash, plan_hash, recorded_at }，双 hash 为 64 位十六进制（sha256）。
-// 缺键允许（早期/中间产物无 receipts）；readManifest 统一拒坏形状（init/validate/render-packet/record-delivery 全入口）。
+// 在场契约另行收口于 readManifest（同一判据唯一入口：init 与全部后继消费命令统一要求 receipts 键在场，
+// 可空数组；init 后删除由「receipts 在场契约」用例冻结）；readManifest 统一拒坏形状
+// （init/validate/render-packet/record-delivery/set-state→ready 全入口）。
 // 变异反证：挖掉 readManifest 里的 assertReceiptsSchema 调用 → ①②③ 全红（init 放行坏形状），恰红本用例。
 // 子套件跳过（机制同 ready-check 的 RC_MUTATION_CHILD）：F1/F2 变异子套件的失败集契约与 receipts 无关；
 // 不跳过会让「父树在途的其他变异（如挖掉 receipts 校验）」被拷贝进子套件 → 污染预测红集。
-test('sc-receipts: manifest.receipts 形状校验——坏形状 init 拒、合法/缺键通过', (t) => {
+test('sc-receipts: manifest.receipts 形状校验——坏形状 init 拒、合法形状通过（在场契约另行收口于 readManifest）', (t) => {
   if (process.env.RL_MUTATION_CHILD === '1') { t.skip('变异子套件运行跳过本用例（与 F1/F2 变异无关，防污染其失败集契约）'); return; }
   const SHA64 = 'e'.repeat(64);
   // ① 非数组 receipts → exit 2 点名
@@ -488,7 +517,8 @@ test('sc-receipts: manifest.receipts 形状校验——坏形状 init 拒、合�
     assert.equal(r.status, 2, 'receipt hash 非 64hex 必须 exit 2');
     assert.match(r.stderr, /manifest_core_hash 必须是 64 位十六进制/);
   }
-  // ④ 合法形状 → exit 0（append-only 多条同样合法；缺键 = 早期产物同样放行，基线夹具覆盖）
+  // ④ 合法形状 → exit 0（append-only 多条同样合法；键在场要求由 readManifest 在场契约把关，
+  // 基线夹具本就含 receipts 键）
   {
     const dir = newTmpDir();
     const ledgerPath = join(dir, 'ledger.json');
@@ -1082,7 +1112,8 @@ test('sc-p1d: F-E 空结构 fail-closed——空 waves/groups/sc_ids 在 init �
 // ——判据与 render-packet 出包前共用同一份实现（assertPacketComplete），init 就该拒，
 // 不是「先开跑、出包时才炸」；被拒的 init 不写台账（连空台账都不留）。
 // =====================================================================
-test('init 输入门: manifest 缺 receipts 键 exit 2 点名且不建台账（receipts 可空数组但键必须存在——「已考虑过这一项」）', () => {
+test('init 输入门: manifest 缺 receipts 键 exit 2 点名且不建台账（receipts 可空数组但键必须存在——「已考虑过这一项」）', (t) => {
+  if (process.env.RL_MUTATION_CHILD === '1') { t.skip('变异子套件运行跳过本用例（与 F1/F2/G1/G2 变异无关，防污染其失败集契约）'); return; }
   const dir = newTmpDir();
   const ledgerPath = join(dir, 'ledger.json');
   const manifestPath = fixtureCopy(dir);

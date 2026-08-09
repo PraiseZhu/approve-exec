@@ -401,12 +401,13 @@ export function writeLedgerAtomic(ledgerPath, expectedVersion, buildNext, lockTi
   }
 }
 
-// ---------- manifest receipts schema（r-g7 F6：此前无机器校验，形状随便写都能过） ----------
+// ---------- manifest receipts schema（r-g7 F6：形状契约；在场契约收口于 readManifest） ----------
 // receipts 是 manifest 顶层元素（SKILL.md 输入门三要素之一），由 task-priority final-gate 全过时
 // 追加写入（append-only 数组，每条 { slug, manifest_core_hash, plan_hash, recorded_at }，
 // 双 hash 均为 sha256 hex）。本仓把它从 manifest core hash 黑名单剔除（不动点：追加 receipts
 // 不破坏 hash 绑定），因此形状错误不会触碰 hash——形状校验必须独立存在。
-// 缺键允许（早期/中间产物无 receipts）：存在时必须形状正确，未知键/类型错一律拒。
+// 在场由 readManifest 统一把关（init 与全部后继消费入口同判据，fail-closed）；本函数只管形状，
+// 数组条目必须 exact 四键，未知键/类型错一律拒。
 const RECEIPT_ENTRY_KEYS = Object.freeze(['slug', 'manifest_core_hash', 'plan_hash', 'recorded_at']);
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 
@@ -433,6 +434,11 @@ export function assertReceiptsSchema(manifest) {
 }
 
 // ---------- manifest 读取 ----------
+// receipts 在场契约的唯一收口（D1：修在 readManifest，不在任何调用点——同一判据只允许存在一份，
+// 防多份拷贝漂移）。receipts 在 core hash 黑名单之外（append-only 追加不破坏绑定），删它 hash
+// 一个字节都不变——存在性不能靠 hash 兜底，必须在唯一入口要求在场（可空数组；形状由
+// assertReceiptsSchema 把关）。init/validate/render-packet/record-delivery/set-state→ready
+// 全部消费命令经此继承，任何消费方不得另写一份存在性检查。
 export function readManifest(manifestPath) {
   let parsed;
   try {
@@ -443,7 +449,10 @@ export function readManifest(manifestPath) {
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new LedgerError('MANIFEST', 'manifest 必须是非数组对象');
   }
-  assertReceiptsSchema(parsed); // 每个 manifest 消费入口（init/validate/render-packet/record-delivery）统一拒坏 receipts
+  if (!('receipts' in parsed)) {
+    throw new LedgerError('MANIFEST', 'manifest 缺 receipts 键（顶层要素 exact 在场契约，fail-closed：init 与全部后继消费入口统一要求在场，可空数组）');
+  }
+  assertReceiptsSchema(parsed); // 形状契约：存在必须形状正确（presence 由上行在场检查把关）
   return parsed;
 }
 
@@ -530,16 +539,14 @@ function assertPacketComplete(packet, what) {
 
 /**
  * manifest 顶层 exact 在场契约（init 入口一次性校验，失败不写台账）：
- *   dispatch 键必须在场且是含非空 packets 数组的对象；receipts 键必须在场（可空数组——
- *   语义是「已考虑过这一项」，与 task-priority 侧 context_refs 同理；内容契约由 receipts
- *   schema 断言另行把关，此处只管在场）；waves 的非空数组检查在 initLedger 内既有逻辑。
+ *   dispatch 键必须在场且是含非空 packets 数组的对象；receipts 的在场契约已收口到 readManifest
+ *   （唯一判据唯一入口，init 与全部后继消费命令统一要求——本函数不重复校验，防多份拷贝漂移）；
+ *   waves 的非空数组检查在 initLedger 内既有逻辑。
  *   每个 dispatch.packets[] 过 assertPacketComplete（与 render-packet 同一份判据）。
  */
 function assertManifestComplete(manifest) {
-  for (const key of ['dispatch', 'receipts']) {
-    if (!(key in manifest)) {
-      throw new LedgerError('MANIFEST', `manifest 缺 ${key} 键（顶层要素 exact 在场契约，fail-closed 不开跑）`);
-    }
+  if (!('dispatch' in manifest)) {
+    throw new LedgerError('MANIFEST', 'manifest 缺 dispatch 键（顶层要素 exact 在场契约，fail-closed 不开跑）');
   }
   const dispatch = manifest.dispatch;
   if (dispatch === null || typeof dispatch !== 'object' || Array.isArray(dispatch)) {

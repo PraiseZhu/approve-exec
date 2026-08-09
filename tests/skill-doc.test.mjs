@@ -122,7 +122,8 @@ test('第②段：输入门三要素 + fail-closed 指路 task-priority', () => 
   assert.ok(s2.includes('fail-closed'), '输入门段应声明 fail-closed');
   assert.ok(s2.includes('task-priority'), '输入门段应指路 task-priority');
   assert.ok(s2.includes('不开跑'), '输入门段应声明缺要素时不开跑（fail-closed 行为，非仅标签）');
-  assert.ok(s2.includes('无机器校验'), '输入门段应如实标注 receipts 顶层键无机器校验（诚实标注优先于假装有强制）');
+  assert.ok(s2.includes('readManifest'), '输入门段应点名 receipts 在场契约收口于 readManifest（机器闸唯一入口）');
+  assert.ok(s2.includes('全部有机器校验'), '输入门段应如实标注 receipts 校验已机器化（不再依赖 lead 手工检查）');
 });
 
 test('第⑥段：--resume 是触发词参数而非 run-ledger CLI 子命令（两审查席误读点）', () => {
