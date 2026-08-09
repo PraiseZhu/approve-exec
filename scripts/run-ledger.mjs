@@ -946,7 +946,7 @@ export function setState({
 
   // ---- 组状态机 ----
   if (group === undefined || to === undefined) {
-    throw new LedgerError('ARGS', 'set-state 需要 --group + --to（或 --phase / --wave+--integrate / --identity / --verify-status）');
+    throw new LedgerError('ARGS', 'set-state 需要 --group + --to（或 --phase / --wave+--integrate / --identity）');
   }
   if (!GROUP_STATES.includes(to)) {
     throw new LedgerError('ARGS', `非法目标状态: ${to}（枚举: ${GROUP_STATES.join('/')}）`);
