@@ -28,7 +28,7 @@ import {
   readFileSync, writeFileSync, renameSync, existsSync,
   openSync, writeSync, closeSync, unlinkSync,
 } from 'node:fs';
-import { resolve, dirname, join } from 'node:path';
+import { resolve, dirname, join, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -651,6 +651,24 @@ function rejectWithEvent({ ledgerPath, expected, now, group, reason, code, messa
   throw new LedgerError(code, message);
 }
 
+/**
+ * 组级可写性守卫（① 修复点）：所有非状态写入口（--identity / record-delivery）复用同一判据。
+ * GROUP_TRANSITIONS.verified = [] 只挡「状态跳转」一条路径；身份写入与交卷入账不是跳转，
+ * 旧实现完全绕过——终态组的 worktree/tip_sha/verify.status 等字段仍可被改写（重放攻击的
+ * 第二种形态：不改状态改内容）。守卫补上这条漏网路径：verified 是组级终态（不可回退），
+ * 任何字段写入都拒。
+ * 与 rejectWithEvent 不同：拒写不落事件（纯 throw）——验收口径要求被拒后台账字节不变
+ * （同 phase=ready 冻结的 FROZEN 路径：冻结后不落事件）。
+ */
+function assertGroupWritable(g, what) {
+  if (g.state === 'verified') {
+    throw new LedgerError(
+      'ILLEGAL_TRANSITION',
+      `组 ${g.group_id} 已 verified（组级终态，不可回退），拒绝${what}（终态只读，重放攻击拒）`
+    );
+  }
+}
+
 export function setState({
   ledgerPath, now, group, to, workerLabel, tipSha, event,
   identity, phase, wave, integrate, readyReceipt,
@@ -693,6 +711,13 @@ export function setState({
     if (!TIP_SHA_RE.test(parsed.base)) {
       throw new LedgerError('ARGS', `--identity.base 非 40 位十六进制: ${parsed.base}`);
     }
+    // ④ 修复点：worktree 会原样渲染进派工包身份行（worktree=.. 被 goal 当作实际工作目录），
+    // 相对路径会把执行带到解析者 cwd 下的意外位置——强制绝对路径。
+    if (!isAbsolute(parsed.worktree)) {
+      throw new LedgerError('ARGS', `--identity.worktree 必须是绝对路径（当前: ${parsed.worktree}）`);
+    }
+    // ① 修复点：verified 是组级终态，身份写入不得绕过状态机（终态组身份只读）
+    assertGroupWritable(findGroup(ledger, group), '身份写入（--identity）');
     return writeLedgerAtomic(ledgerPath, expected, (cur) => {
       const g = findGroup(cur, group);
       g.worktree = parsed.worktree;
@@ -714,21 +739,33 @@ export function setState({
     if (typeof integrate !== 'string' || !TIP_SHA_RE.test(integrate)) {
       throw new LedgerError('ARGS', `integrated_tip 非 40 位十六进制: ${integrate}`);
     }
+    // ② 修复点：已知拒绝前置从 writeLedgerAtomic 回调内移出，转 rejectWithEvent——
+    // 此前在回调内 throw 只 exit 2，事件不落盘、版本不前进（违背「每次非法尝试都留
+    // events 记录」契约）。wave 级拒绝无组上下文 → group_id: null。NO_WAVE（wave 号
+    // 根本不在台账里）是参数级错误，不属于状态机非法尝试，保持不落事件。
+    const w = ledger.waves.find((x) => x.wave === wave);
+    if (!w) throw new LedgerError('NO_WAVE', `台账中无 wave ${wave}`);
+    if (w.integrated_tip !== null) {
+      rejectWithEvent({
+        ledgerPath, expected, now, group: null,
+        reason: `wave ${wave} 已集成（integrated_tip=${w.integrated_tip}），不可重复集成（重放攻击拒）`,
+        code: 'ILLEGAL_TRANSITION',
+        message: `wave ${wave} 已集成（integrated_tip=${w.integrated_tip}），不可重复集成`,
+      });
+    }
+    const allVerified = w.groups.every((g) => g.state === 'verified');
+    if (!allVerified) {
+      const pending = w.groups.filter((g) => g.state !== 'verified').map((g) => g.group_id);
+      rejectWithEvent({
+        ledgerPath, expected, now, group: null,
+        reason: `缺失前置：wave ${wave} 集成要求全组 verified，未 verified: ${pending.join(', ')}`,
+        code: 'PRECONDITION',
+        message: `缺失前置：wave ${wave} 集成要求全组 verified，未 verified: ${pending.join(', ')}`,
+      });
+    }
     return writeLedgerAtomic(ledgerPath, expected, (cur) => {
-      const w = cur.waves.find((x) => x.wave === wave);
-      if (!w) throw new LedgerError('NO_WAVE', `台账中无 wave ${wave}`);
-      if (w.integrated_tip !== null) {
-        throw new LedgerError('ILLEGAL_TRANSITION', `wave ${wave} 已集成（integrated_tip=${w.integrated_tip}），不可重复集成`);
-      }
-      const allVerified = w.groups.every((g) => g.state === 'verified');
-      if (!allVerified) {
-        const pending = w.groups.filter((g) => g.state !== 'verified').map((g) => g.group_id);
-        throw new LedgerError(
-          'PRECONDITION',
-          `缺失前置：wave ${wave} 集成要求全组 verified，未 verified: ${pending.join(', ')}`
-        );
-      }
-      w.integrated_tip = integrate;
+      const ww = cur.waves.find((x) => x.wave === wave);
+      ww.integrated_tip = integrate;
       cur.events.push({
         type: 'integrate',
         at: now,
@@ -1274,6 +1311,9 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
   const expected = ledger.version;
   const wave = findGroupWave(ledger, group);
   const wg = wave.groups.find((g) => g.group_id === group);
+  // ① 修复点：交卷入账是非状态写入口（exec/review/verify 三类都改写组字段），
+  // verified 终态组任何交卷都不得入账（绕过状态机的第二种形态，与 --identity 同一守卫）
+  assertGroupWritable(wg, '交卷入账（record-delivery）');
   // F-D 内容绑定入口：manifest 已变（相对台账记录）时交卷不得入账——禁止拿旧结论/旧 manifest 干活
   const manifest = readManifest(ledger.manifest_path);
   assertManifestBound(ledger, manifest, 'record-delivery');
@@ -1366,6 +1406,11 @@ function parseFlags(args) {
     if (eq === -1 && (value === undefined || value.startsWith('--'))) {
       throw new LedgerError('ARGS', `参数 --${key} 缺值`);
     }
+    // ③ 修复点：单值 flag 重复传 = 语义不明确（后值静默覆盖前值会掩盖真实意图），拒。
+    // 用 hasOwnProperty 而非 `key in flags`（后者会被 Object 原型链上的键误判为重复）。
+    if (Object.prototype.hasOwnProperty.call(flags, key)) {
+      throw new LedgerError('ARGS', `参数 --${key} 重复指定（单值 flag，静默覆盖会掩盖真实意图）`);
+    }
     if (eq === -1) i += 1;
     flags[key] = value;
   }
@@ -1386,6 +1431,29 @@ function removedFlagMessage(flag) {
     return '--ready-check-exit0 布尔凭据已移除：→ready 只能由 ready-check 写入的 receipt 驱动（--ready-receipt <path>）';
   }
   return '--verify-status/--verify-evidence-ref 手工写入口已移除：verified 的 pass 凭据只能由验收组 record-delivery 写入';
+}
+
+// ③ 修复点：子命令 exact flag allowlist——未知 flag 先拒再执行业务分支（此前静默忽略，
+// typo 一个 flag 命令照常成功但语义不是使用者要的）。只列业务实际消费的 flag；
+// 已移除/已拒 flag（--ready-check-exit0/--verify-status/--verify-evidence-ref/--unresolved/
+// 身份独立键）由各分支专门点名拒绝，不在此表（防 allowlist 通用报错顶掉语义更明确的点名）。
+const SUBCOMMAND_FLAGS = Object.freeze({
+  init: ['manifest', 'run-id', 'now'],
+  validate: [],
+  'set-state': ['group', 'to', 'now', 'worker-label', 'tip-sha', 'event', 'identity', 'phase', 'wave', 'integrate', 'ready-receipt'],
+  'render-packet': ['group', 'manifest'],
+  'record-delivery': ['group', 'payload', 'now'],
+});
+
+function assertKnownFlags(sub, flags) {
+  const allowed = SUBCOMMAND_FLAGS[sub];
+  const unknown = Object.keys(flags).filter((k) => !allowed.includes(k));
+  if (unknown.length > 0) {
+    throw new LedgerError(
+      'ARGS',
+      `未知 flag: ${unknown.map((k) => `--${k}`).join('、')}（${sub} 允许: ${allowed.map((k) => `--${k}`).join('、')}）`
+    );
+  }
 }
 
 export function runCli(argv) {
@@ -1409,6 +1477,7 @@ export function runCli(argv) {
     const ledgerPath = resolve(ledgerArg);
     switch (sub) {
       case 'init': {
+        assertKnownFlags('init', flags); // ③：未知 flag 先拒，不得创建台账
         initLedger({
           ledgerPath,
           manifestPath: flags.manifest,
@@ -1419,6 +1488,7 @@ export function runCli(argv) {
         return 0;
       }
       case 'validate': {
+        assertKnownFlags('validate', flags); // ③：validate 不接受任何 flag
         const { computed } = validateLedger({ ledgerPath });
         console.log(`validate: OK（core hash 匹配 ${computed}）`);
         return 0;
@@ -1443,6 +1513,9 @@ export function runCli(argv) {
         if (flags['verify-status'] !== undefined || flags['verify-evidence-ref'] !== undefined) {
           throw new LedgerError('ARGS', '--verify-status/--verify-evidence-ref 手工写入口已移除：verified 的 pass 凭据只能由验收组 record-delivery 写入');
         }
+        // ③：未知 flag 先拒再执行业务（放已移除/已拒 flag 点名之后——那些 flag 有更明确的
+        // 语义点名，不允许被通用「未知 flag」顶掉）
+        assertKnownFlags('set-state', flags);
         const usedIdentity = flags.identity !== undefined;
         // F-F：receipt 由 CLI 读文件 → 解析对象（文件级错误 → READY_RECEIPT，等同参数错误不落事件）
         let readyReceipt;
@@ -1481,6 +1554,7 @@ export function runCli(argv) {
             'render-packet 身份字段（worktree/branch/base）单一来源是台账，不接受 CLI 覆盖'
           );
         }
+        assertKnownFlags('render-packet', flags); // ③：未知 flag 先拒（放身份字段点名之后）
         const out = renderPacket({
           ledgerPath,
           group: flags.group,
@@ -1490,6 +1564,7 @@ export function runCli(argv) {
         return 0;
       }
       case 'record-delivery': {
+        assertKnownFlags('record-delivery', flags); // ③：未知 flag 先拒
         recordDelivery({
           ledgerPath,
           group: flags.group,
