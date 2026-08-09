@@ -16,10 +16,14 @@ import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdtempSync, rmSync, cpSync, mkdirSync, realpathSync, symlinkSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join, resolve, dirname } from 'node:path';
+import { join, resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { parseVmStat, computeConcurrency } from '../scripts/mem-probe.mjs';
+// buildChildEnv：变异子套件自起子进程，git 隔离必须同一份实现（run-tests.mjs 是唯一权威）。
+// 子套件在复制树里跑（含 ready-check/e2e-dryrun 的 git makeRepo），缺隔离会继承机器全局
+// commit.gpgsign=true，负载下 gpg 失败让夹具 commit 红——失败集比对随之漂移。
+import { buildChildEnv } from '../scripts/run-tests.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const defaults = JSON.parse(readFileSync(join(root, 'config/defaults.json'), 'utf8'));
@@ -436,7 +440,10 @@ test('组F-1: 非规范化路径调用必须实际执行并打印 JSON（main gu
   mkdirSync(join(dir, 'config'), { recursive: true });
   cpSync(join(root, 'scripts/mem-probe.mjs'), join(dir, 'scripts/mem-probe.mjs'));
   writeFileSync(join(dir, 'config/defaults.json'), readFileSync(join(root, 'config/defaults.json'), 'utf8'));
-  const link = join(realpathSync(tmpdir()), `mem-probe-norm-link-${process.pid}`);
+  // link 名必须唯一：历史用 PID，进程被杀时 t.after 未注册 → link-<PID> 残留；
+  // 宿主并发下 PID 复用即撞名 EEXIST（实测 tmpdir 积上千残留，多次假红根因）。
+  // dir 名来自 mkdtemp 唯一，用它派生 link 名——残留永不撞名，非规范化语义不变。
+  const link = join(realpathSync(tmpdir()), `mem-probe-norm-link-${basename(dir)}`);
   symlinkSync(dir, link);
   t.after(() => rmSync(link, { force: true }));
   assert.notEqual(realpathSync(link), link, '前置条件: 调用路径必须非规范化（否则本用例空转）');
@@ -527,6 +534,9 @@ function copyTreeForMutation(t, mutateScript) {
   const mutated = mutateScript(src);
   assert.notEqual(mutated, src, '变异必须实际改变脚本内容（防替换静默空转）');
   writeFileSync(join(dir, 'scripts/mem-probe.mjs'), mutated);
+  // mem-probe.test.mjs import 了 run-tests.mjs 的 buildChildEnv（变异子套件 git 隔离唯一实现）：
+  // 复制树必须带上该文件，否则子套件加载失败（失败集解析成文件路径，恰红契约被破坏）
+  writeFileSync(join(dir, 'scripts/run-tests.mjs'), readFileSync(join(root, 'scripts/run-tests.mjs'), 'utf8'));
   writeFileSync(join(dir, 'tests/mem-probe.test.mjs'), readFileSync(join(root, 'tests/mem-probe.test.mjs'), 'utf8'));
   writeFileSync(join(dir, 'tests/fixtures/vm-stat-64g.txt'), readFileSync(FIX['64g'], 'utf8'));
   writeFileSync(join(dir, 'tests/fixtures/vm-stat-4k-page.txt'), readFileSync(FIX['4k'], 'utf8'));
@@ -539,7 +549,7 @@ function copyTreeForMutation(t, mutateScript) {
 function runMutatedSuite(testFile, dir) {
   const { NODE_TEST_CONTEXT: _drop, ...childEnv } = process.env;
   const r = spawnSync(process.execPath, ['--test', testFile],
-    { cwd: dir, encoding: 'utf8', env: { ...childEnv, MP_MUTATION_CHILD: '1' } });
+    { cwd: dir, encoding: 'utf8', env: { ...buildChildEnv(childEnv), MP_MUTATION_CHILD: '1' } });
   const failedNames = new Set();
   for (const line of `${r.stdout}\n${r.stderr}`.split('\n')) {
     if (line.startsWith('not ok ')) {
