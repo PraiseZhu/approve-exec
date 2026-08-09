@@ -210,6 +210,8 @@ function runReadyCheck(env, repo, { withNow = true } = {}) {
   const args = [READY_CHECK, '--repo', repo.dir, '--ledger', env.ledgerPath, '--manifest', env.manifestPath,
     '--verdict', env.verdictPath, '--e2e-report', env.e2ePath, '--presubmit-dir', env.presubmitDir];
   if (withNow) args.push('--now', FIXED_NOW);
+  // F-F：→ready 凭据 = ready-check 原子写入的 receipt（缺 --receipt 时 ready-check fail-closed 拒）
+  args.push('--receipt', join(env.dir, 'ready-receipt.json'));
   return run(process.execPath, args);
 }
 
@@ -243,6 +245,17 @@ test('sc-p2d: 全链 dry-run——先红（缺 e2e 报告与 presubmit 三闸）
   const green = runReadyCheck(env, repo);
   assert.equal(green.status, 0, `全齐应 exit 0\nstdout: ${green.stdout}\nstderr: ${green.stderr}`);
   assert.equal(green.stdout, `READY_FOR_SUBMIT_PR ${BRANCH} ${repo.sha}`, 'READY 行必须单行含夹具分支名与 HEAD SHA');
+  // ready-check 只写 receipt 不驱动台账（写入权在 run-ledger）——台账此刻仍未被驱动
+  ledger = JSON.parse(readFileSync(env.ledgerPath, 'utf8'));
+  assert.equal(ledger.phase, 'packaging', 'ready-check 不得驱动台账 phase（只检查）');
+  assert.equal(ledger.version, versionBefore, 'ready-check 不得递增台账 version');
+  // phase→ready 由 run-ledger set-state --phase ready --ready-receipt 驱动（锁/CAS/状态机）
+  const receiptPath = join(env.dir, 'ready-receipt.json');
+  const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
+  assert.equal(receipt.ledger_version, versionBefore, 'receipt.ledger_version 必须 = 检查时读到的台账 version');
+  const drv = cliLedger('set-state', env.ledgerPath, '--phase', 'ready',
+    '--ready-receipt', receiptPath, '--now', FIXED_NOW);
+  assert.equal(drv.status, 0, `receipt 驱动 phase→ready 应 exit 0: ${drv.stderr}`);
   ledger = JSON.parse(readFileSync(env.ledgerPath, 'utf8'));
   assert.equal(ledger.phase, 'ready', '台账 phase 应被驱动为 ready');
   assert.equal(ledger.version, versionBefore + 1, '台账 version 应 +1（CAS 乐观锁）');
