@@ -10,6 +10,8 @@ ready-gaps 不存放完整 JSON 副本：所有 gap 夹具 = **ready-full 复制
 | 缺组 | 台账 waves 删除 g2 组 | ledger-partition |
 | 组非 verified | g2.state = "delivered" | ledger-partition |
 | tip_sha 对账失败 | g1 delivery 事件 detail.tip_sha 改 `a`×40 | ledger-partition |
+| 零工作运行 | 台账 waves/events 清空 + manifest scs/waves/packets 清空（三条对账空洞通过） | ledger-partition（零组守卫） |
+| --now 非 ISO | `--now not-an-iso`（七项全过也不驱动台账） | exit 2，不写台账 |
 | verdict SHA 过期 | verdict.candidate_sha 改 `a`×40 | verdict-anchors |
 | verdict 缺 SC | verdict.scs 删 sc-p1f | verdict-anchors |
 | 锚点文件不存在 | evidence[1].file 改 `evidence/anchors/missing.txt` | verdict-anchors |
@@ -27,6 +29,21 @@ ready-gaps 不存放完整 JSON 副本：所有 gap 夹具 = **ready-full 复制
 | detached HEAD | repo `git checkout --detach` | feature-branch |
 | main 分支 | repo 分支名 = "main" | feature-branch |
 | 组合缺口 | e2e 缺失 + main 分支 | e2e-report + feature-branch（逐项独立，不短路） |
+
+## 变异反证（sc-p1g）——mutation-kill 测试
+
+ready-check.test.mjs 末尾的 mutation-kill 测试把三组反向变异编码为可复跑断言
+（每轮 `node scripts/run-tests.mjs` 都会验证）：
+
+| 变异点 | 挖掉什么 | 恰红预测用例（隔离证明） |
+|---|---|---|
+| `result.candidate_sha !== headSha` → `false` | ⑤ presubmit SHA 绑定 | gap5: presubmit 三闸各自绑定 SHA 过期 |
+| `groups.length !== packets.length` → `false` | ① 组数对账 | gap1: 台账缺组（组数 < manifest packets） |
+| `!anchorFileExists` → `false` | ② 锚点内容校验（文件存在性） | gap2: 证据锚点指向不存在文件 |
+
+机制：把 scripts/tests/config 复制到临时目录，对副本应用变异（字符串替换，锚点唯一），
+跑「跳过变异测试自身」的完整套件，断言失败集恰等于预测集——挖红 + 隔离一次验证。
+真实脚本永不被触碰，无需恢复。
 
 ## ready-check 消费契约（与 ready-full 同构）
 

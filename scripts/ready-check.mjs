@@ -15,7 +15,8 @@
 //
 // 七项判据（逐项独立报告，不因前项失败跳过后项）：
 //   ① ledger-partition  全部组 ∈ {verified}；组数 == manifest dispatch.packets 数 == 派出记录数
-//                        （dispatch 事件去重）；各组 tip_sha 与台账 delivery 事件对账
+//                        （dispatch 事件去重）；各组 tip_sha 与台账 delivery 事件对账；
+//                        零组（零工作运行）直接拒绝——空集全分区恒真，不能当 READY 放行
 //   ② verdict-anchors   每条 SC（manifest.scs 全集）在 verdict 中 status=pass；verdict.candidate_sha == HEAD；
 //                        证据锚点强校验：evidence.file 真实存在（resolve 后在 repo 内）+ summary 与
 //                        output_records 内嵌记录逐字一致（不是字符串非空就过）
@@ -86,6 +87,12 @@ function checkLedgerPartition(ledger, manifest, gaps) {
   const groups = (ledger.waves || []).flatMap((w) => w.groups || []);
   const packets = manifest.dispatch?.packets || [];
   const events = ledger.events || [];
+
+  // 零工作守卫：空台账 + 空 packets + 空 dispatch 会让三条对账全部空洞通过（0==0==0），
+  // 拒绝「什么都没验收」的候选被判 READY（空集的全分区恒真，但作为出口门必须非空）
+  if (groups.length === 0) {
+    gaps.push({ gate: 'ledger-partition', detail: '台账无任何组（零工作运行，拒绝 READY）' });
+  }
 
   const notVerified = groups.filter((g) => g.state !== 'verified');
   if (notVerified.length > 0) {
@@ -234,6 +241,10 @@ function drivePhaseReady(ledgerPath, ledger, now) {
 // ---------- main ----------
 function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.now !== null && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(args.now)) {
+    console.error(`ready-check: --now 必须是 ISO 时间戳（形如 2026-08-09T04:00:00.000Z）: ${args.now}`);
+    process.exit(2);
+  }
   const config = readJsonOrNull(args.config);
   if (!config || typeof config.reviewMaxRounds !== 'number') {
     console.error('ready-check: config 缺失或 reviewMaxRounds 非数字（fail-closed，拒绝猜测默认值）');
