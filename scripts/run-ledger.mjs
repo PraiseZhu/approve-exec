@@ -1,17 +1,23 @@
 #!/usr/bin/env node
-// run-ledger.mjs — approve-exec run 状态机台账（sc-p1c/p1d，core 段；render-packet/record-delivery 归 packet 段）。
+// run-ledger.mjs — approve-exec run 状态机台账（sc-p1c/p1d/p1e/p1h）。
 //
-// 子命令：
+// 五个子命令：
 //   init <ledger> --manifest <path> --run-id <id> --now <ts>
 //   validate <ledger>
-//   set-state <ledger> --group <gid> --to <state> --now <ts> [--worker-label <l>] [--tip-sha <hex40>] [--event <type>] [--verify-status <s>]
-//   set-state <ledger> --identity <json> --group <gid> --now <ts>
+//   set-state <ledger> --group <gid> --to <state> --now <ts> [..]
 //   set-state <ledger> --phase <phase> --now <ts> [--ready-check-exit0]
-//   set-state <ledger> --wave <n> --integrate <hex40> --now <ts>
+//   set-state <ledger> --wave <n> --integrate <sha> --now <ts>
+//   set-state <ledger> --group <gid> --identity <json> --now <ts>
+//   render-packet <ledger> --group <gid> [--manifest <path>]
+//   record-delivery <ledger> --group <gid> --payload <json|@file> --now <ts>
 //
-// 硬约束：schema 是 exact 契约（未列键即拒）；写路径 tmp+rename 原子替换 + 乐观锁 CAS
-// （version 冲突 exit 2 绝不静默覆盖）；--now 注入确定性可测；events[].type exact 枚举；
-// manifest 绑定是内容绑定（manifest_core_hash：黑名单剔除 + 键排序 + sha256）。
+// 硬约束：
+//   - 台账 schema 是 exact 契约：未列键出现即拒（LedgerError SCHEMA）。
+//   - 所有写路径 tmp+rename 原子替换 + 乐观锁 CAS（读时 version 为 expected，
+//     落盘 version+1；写入前重读发现 version 已变 → 冲突 exit 2，绝不静默覆盖）。
+//   - 时间戳由 --now 注入；无 --now 的写操作拒绝（确定性可测）。
+//   - events[].type 为 exact 枚举，未知 type 拒。
+//   - manifest 绑定是内容绑定：manifest_core_hash（黑名单剔除 + 键排序 + sha256）。
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
@@ -660,6 +666,296 @@ export function setState({
     return { ...cur, version: expected + 1 };
   });
 }
+
+// ---------- render-packet：五项 fail-closed + 执行/验收双模板 ----------
+const PACKET_REQUIRED_FIELDS = Object.freeze([
+  'scs_inline', 'allowed_paths', 'verify_cmds', 'forbidden', 'submit_format',
+]);
+
+export function renderPacket({ ledgerPath, group, manifestPath }) {
+  const ledger = readLedger(ledgerPath);
+  const manifest = readManifest(manifestPath || ledger.manifest_path);
+  const packet = findPacket(manifest, group);
+  const wave = findGroupWave(ledger, group);
+  const wg = wave.groups.find((g) => g.group_id === group);
+
+  // 五项 fail-closed（对齐 goal 场景 C 清单）：缺一不出包。
+  // 「空缺」= 键缺失/类型不符；空数组对 allowed_paths/forbidden 是合法表达
+  // （验收组不改代码 → 空可写范围），scs_inline/verify_cmds 空数组视为空缺。
+  for (const field of PACKET_REQUIRED_FIELDS) {
+    const v = packet[field];
+    if (v === undefined || v === null) {
+      throw new LedgerError('PACKET_INCOMPLETE', `出包前校验失败：packet.${field} 空缺（fail-closed，缺一不出包）`);
+    }
+    if (field === 'scs_inline' && (!Array.isArray(v) || v.length === 0)) {
+      throw new LedgerError('PACKET_INCOMPLETE', '出包前校验失败：packet.scs_inline 必须是非空数组');
+    }
+    if (field === 'verify_cmds' && (!Array.isArray(v) || v.length === 0)) {
+      throw new LedgerError('PACKET_INCOMPLETE', '出包前校验失败：packet.verify_cmds 必须是非空数组');
+    }
+    if ((field === 'allowed_paths' || field === 'forbidden') && !Array.isArray(v)) {
+      throw new LedgerError('PACKET_INCOMPLETE', `出包前校验失败：packet.${field} 必须是数组（空数组合法）`);
+    }
+    if (field === 'submit_format' && (typeof v !== 'string' || v.trim().length === 0)) {
+      throw new LedgerError('PACKET_INCOMPLETE', '出包前校验失败：packet.submit_format 必须是非空字符串');
+    }
+  }
+
+  // 身份字段单一来源是台账：只认台账值，不接受 CLI 覆盖（见 CLI 解析层）
+  const { worktree, branch, base } = wg;
+  if (!worktree || !branch || !base) {
+    throw new LedgerError(
+      'NO_IDENTITY',
+      `组 ${group} 尚未分配身份（worktree/branch/base 需经 set-state --identity 写入台账），拒绝出包`
+    );
+  }
+
+  // 组类型：kind 含 fix → 执行组模板；全部 kind=verify → 验收组模板
+  const kinds = packet.scs_inline.map((s) => s && typeof s === 'object' && s.kind ? s.kind : null);
+  const isExecGroup = kinds.some((k) => k === 'fix');
+  const isVerifyGroup = kinds.every((k) => k === 'verify');
+
+  if (isVerifyGroup) {
+    if (!wave.integrated_tip) {
+      throw new LedgerError(
+        'NO_INTEGRATED',
+        `验收组 ${group} 所在 wave ${wave.wave} 尚未集成（integrated_tip=null），无法渲染整合树复查项`
+      );
+    }
+    return renderVerifyPacket({ packet, group, wg, wave, identity: { worktree, branch, base } });
+  }
+  if (!isExecGroup) {
+    throw new LedgerError('PACKET_INCOMPLETE', `组 ${group} 的 scs_inline kind 既无 fix 也无全 verify，无法选模板`);
+  }
+  return renderExecPacket({ packet, group, wg, wave, identity: { worktree, branch, base } });
+}
+
+function renderExecPacket({ packet, group, wave, identity }) {
+  const lines = [];
+  // 固定头三要素（首行逐字；g7 文档测试会引用比对，一个字不能变）
+  lines.push('用 goal skill 执行。');
+  lines.push('--until-sc');
+  lines.push(`worktree=${identity.worktree} branch=${identity.branch} base=${identity.base}`);
+  lines.push('');
+  lines.push(`run-ledger 派工包：组 ${group}（wave ${wave.wave}，执行组）`);
+  lines.push('');
+  lines.push('## SC 清单');
+  for (const sc of packet.scs_inline) {
+    lines.push(`- ${sc.id}: ${typeof sc.change === 'string' ? sc.change.split('\n')[0] : ''}`);
+  }
+  lines.push('');
+  lines.push('## allowed_paths（唯一可写范围）');
+  for (const p of packet.allowed_paths) lines.push(`- ${p}`);
+  lines.push('');
+  lines.push('## 禁做');
+  for (const f of packet.forbidden) lines.push(`- ${f}`);
+  lines.push('');
+  lines.push('## 验证命令');
+  for (const c of packet.verify_cmds) lines.push(c);
+  lines.push('');
+  lines.push('## 交卷格式');
+  lines.push(packet.submit_format);
+  return `${lines.join('\n')}\n`;
+}
+
+function renderVerifyPacket({ packet, group, wave, identity }) {
+  const lines = [];
+  // 验收组：不带 goal 触发行，明确只跑 verify 命令出 verdict 不改代码
+  lines.push(`run-ledger 验收包：组 ${group}（wave ${wave.wave}，验收组）`);
+  lines.push(`worktree=${identity.worktree} branch=${identity.branch} base=${identity.base}`);
+  lines.push('');
+  lines.push('## 职责');
+  lines.push('只跑 verify 命令出 verdict，不改代码。');
+  lines.push('');
+  lines.push('## 验证命令');
+  for (const c of packet.verify_cmds) lines.push(c);
+  lines.push('');
+  lines.push('## 整合树复查');
+  lines.push(`integrated_tip=${wave.integrated_tip}（wave ${wave.wave} 集成 squash SHA）`);
+  lines.push('对 integrated_tip 相对上一集成点的 squash diff 执行复查指令：核对改动物与台账断言一致、无越域写入、验证命令与 manifest 逐条一致。');
+  return `${lines.join('\n')}\n`;
+}
+
+// ---------- record-delivery：worker 交卷进台账的唯一通道 ----------
+const EXEC_DELIVERY_KEYS = Object.freeze(['status', 'tip_sha', 'scs']);
+const EXEC_SC_KEYS = Object.freeze(['sc_id', 'status', 'evidence']);
+const REVIEW_DELIVERY_KEYS = Object.freeze(['rounds', 'findings_total', 'unresolved', 'fix_commits']);
+const VERIFY_DELIVERY_KEYS = Object.freeze(['scs', 'integration_review']);
+const INTEGRATION_REVIEW_KEYS = Object.freeze(['status', 'notes']);
+
+function classifyDelivery(data) {
+  const keys = Object.keys(data).sort();
+  const hasExec = EXEC_DELIVERY_KEYS.every((k) => keys.includes(k)) && keys.length === EXEC_DELIVERY_KEYS.length;
+  const hasReview = REVIEW_DELIVERY_KEYS.every((k) => keys.includes(k)) && keys.length === REVIEW_DELIVERY_KEYS.length;
+  const hasVerify = VERIFY_DELIVERY_KEYS.every((k) => keys.includes(k)) && keys.length === VERIFY_DELIVERY_KEYS.length;
+  const hits = [hasExec, hasReview, hasVerify].filter(Boolean).length;
+  if (hits !== 1) {
+    throw new LedgerError(
+      'DELIVERY_SCHEMA',
+      `交卷 schema 无法唯一识别（exec/review/verify 三类命中 ${hits} 类）；exact 契约，多余键或缺失键都拒`
+    );
+  }
+  if (hasExec) return 'exec';
+  if (hasReview) return 'review';
+  return 'verify';
+}
+
+function validateExecDelivery(data, packet) {
+  if (!EXEC_DELIVERY_STATUS.includes(data.status)) {
+    throw new LedgerError('DELIVERY_SCHEMA', `执行组交卷 status 非法: ${data.status}（枚举: ${EXEC_DELIVERY_STATUS.join('/')}）`);
+  }
+  if (typeof data.tip_sha !== 'string' || !TIP_SHA_RE.test(data.tip_sha)) {
+    throw new LedgerError('DELIVERY_SCHEMA', `执行组交卷 tip_sha 非 40 位十六进制（长度 ${data.tip_sha?.length ?? 0}）`);
+  }
+  if (!Array.isArray(data.scs) || data.scs.length === 0) {
+    throw new LedgerError('DELIVERY_SCHEMA', '执行组交卷 scs 必须是非空数组');
+  }
+  for (const sc of data.scs) {
+    assertKeys(sc, EXEC_SC_KEYS, '执行组交卷 sc 条目');
+    if (typeof sc.sc_id !== 'string' || sc.sc_id.length === 0) {
+      throw new LedgerError('DELIVERY_SCHEMA', '执行组交卷 sc.sc_id 必须是非空字符串');
+    }
+    if (!SC_RESULT_STATUS.includes(sc.status)) {
+      throw new LedgerError('DELIVERY_SCHEMA', `执行组交卷 sc ${sc.sc_id} 的 status 非法: ${sc.status}`);
+    }
+    if (typeof sc.evidence !== 'string' || sc.evidence.trim().length === 0) {
+      throw new LedgerError('DELIVERY_SCHEMA', `执行组交卷 sc ${sc.sc_id} 的 evidence 必须是非空字符串`);
+    }
+  }
+  assertScIdSet(data.scs, packet, '执行组交卷');
+}
+
+/** sc_id 集合必须与派工包 scs_inline 完全一致（exact：多/少/错都拒）+ 无重复。 */
+function assertScIdSet(scEntries, packet, what) {
+  const expectedIds = packet.scs_inline.map((s) => s.id);
+  const actualIds = scEntries.map((sc) => sc.sc_id);
+  const missing = expectedIds.filter((id) => !actualIds.includes(id));
+  const extra = actualIds.filter((id) => !expectedIds.includes(id));
+  if (missing.length > 0 || extra.length > 0) {
+    throw new LedgerError(
+      'SC_ID_MISMATCH',
+      `${what} sc_id 集合与派工包 scs_inline 不一致：缺 ${missing.join(',') || '无'}，多/错 ${extra.join(',') || '无'}`
+    );
+  }
+  if (new Set(actualIds).size !== actualIds.length) {
+    throw new LedgerError('DELIVERY_SCHEMA', `${what} 存在重复 sc_id`);
+  }
+}
+
+function validateReviewDelivery(data) {
+  // rounds/findings_total/unresolved 都是整数语义字段（台账 review 层为整数契约），
+  // 非负整数一把抓：字符串/小数/布尔/负值全部拒
+  for (const k of ['rounds', 'findings_total', 'unresolved']) {
+    if (!Number.isInteger(data[k]) || data[k] < 0) {
+      throw new LedgerError('DELIVERY_SCHEMA', `审查组交卷 ${k} 必须是非负整数（当前: ${data[k]}）`);
+    }
+  }
+  if (!Array.isArray(data.fix_commits)) {
+    throw new LedgerError('DELIVERY_SCHEMA', '审查组交卷 fix_commits 必须是数组');
+  }
+  for (const c of data.fix_commits) {
+    if (typeof c !== 'string') {
+      throw new LedgerError('DELIVERY_SCHEMA', '审查组交卷 fix_commits 元素必须是字符串');
+    }
+  }
+}
+
+function validateVerifyDelivery(data, packet) {
+  if (!Array.isArray(data.scs) || data.scs.length === 0) {
+    throw new LedgerError('DELIVERY_SCHEMA', '验收组交卷 scs 必须是非空数组');
+  }
+  for (const sc of data.scs) {
+    assertKeys(sc, EXEC_SC_KEYS, '验收组交卷 sc 条目');
+    if (typeof sc.sc_id !== 'string' || sc.sc_id.length === 0) {
+      throw new LedgerError('DELIVERY_SCHEMA', '验收组交卷 sc.sc_id 必须是非空字符串');
+    }
+    if (typeof sc.status !== 'string' || sc.status.length === 0) {
+      throw new LedgerError('DELIVERY_SCHEMA', `验收组交卷 sc ${sc.sc_id} 的 status 必须是非空字符串`);
+    }
+    if (typeof sc.evidence !== 'string' || sc.evidence.trim().length === 0) {
+      throw new LedgerError('DELIVERY_SCHEMA', `验收组交卷 sc ${sc.sc_id} 的 evidence 必须是非空字符串`);
+    }
+  }
+  assertScIdSet(data.scs, packet, '验收组交卷');
+  assertKeys(data.integration_review, INTEGRATION_REVIEW_KEYS, '验收组交卷 integration_review');
+  if (typeof data.integration_review.status !== 'string' || data.integration_review.status.length === 0) {
+    throw new LedgerError('DELIVERY_SCHEMA', '验收组交卷 integration_review.status 必须是非空字符串');
+  }
+  if (typeof data.integration_review.notes !== 'string') {
+    throw new LedgerError('DELIVERY_SCHEMA', '验收组交卷 integration_review.notes 必须是字符串');
+  }
+}
+
+export function recordDelivery({ ledgerPath, group, payload, now }) {
+  requireNow(now, 'record-delivery');
+  let data;
+  if (typeof payload === 'string' && payload.startsWith('@')) {
+    const filePath = resolve(payload.slice(1));
+    try {
+      data = JSON.parse(readFileSync(filePath, 'utf8'));
+    } catch (err) {
+      throw new LedgerError('DELIVERY_PARSE', `交卷文件解析失败（${filePath}）: ${err.message}`);
+    }
+  } else if (typeof payload === 'string') {
+    try {
+      data = JSON.parse(payload);
+    } catch (err) {
+      throw new LedgerError('DELIVERY_PARSE', `交卷 JSON 解析失败: ${err.message}`);
+    }
+  } else {
+    data = payload;
+  }
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+    throw new LedgerError('DELIVERY_SCHEMA', '交卷必须是 JSON 对象');
+  }
+
+  const ledger = readLedger(ledgerPath);
+  if (ledger.phase === 'ready') {
+    throw new LedgerError('FROZEN', `台账已 ready（phase=${ledger.phase}），冻结只读，拒绝写操作`);
+  }
+  const expected = ledger.version;
+  const wave = findGroupWave(ledger, group);
+  const wg = wave.groups.find((g) => g.group_id === group);
+  const manifest = readManifest(ledger.manifest_path);
+  const packet = findPacket(manifest, group);
+
+  const kind = classifyDelivery(data);
+  if (kind === 'exec') validateExecDelivery(data, packet);
+  if (kind === 'review') validateReviewDelivery(data);
+  if (kind === 'verify') validateVerifyDelivery(data, packet);
+
+  // 校验全部通过才原子写盘；任何失败路径都不触碰原台账（坏交卷后台账字节不变）
+  return writeLedgerAtomic(ledgerPath, expected, (cur) => {
+    const g = findGroup(cur, group);
+    if (kind === 'exec') {
+      g.tip_sha = data.tip_sha;
+      const scResults = data.scs.map((sc) => `${sc.sc_id}=${sc.status}`).join(', ');
+      cur.events.push({
+        type: 'delivery',
+        at: now,
+        detail: `group=${group} status=${data.status} tip_sha=${data.tip_sha} scs: ${scResults}`,
+      });
+    } else if (kind === 'review') {
+      g.review.rounds = data.rounds;
+      g.review.unresolved = data.unresolved;
+      cur.events.push({
+        type: 'delivery',
+        at: now,
+        detail: `group=${group} 审查交卷 rounds=${data.rounds} findings_total=${data.findings_total} unresolved=${data.unresolved} fix_commits=${data.fix_commits.length}`,
+      });
+    } else {
+      g.verify.status = data.integration_review.status;
+      g.verify.evidence_ref = `delivery#${cur.events.length + 1}`;
+      cur.events.push({
+        type: 'delivery',
+        at: now,
+        detail: `group=${group} 验收交卷 integration_review=${data.integration_review.status}: ${data.integration_review.notes}`,
+      });
+    }
+    return { ...cur, version: expected + 1 };
+  });
+}
+
 // ---------- CLI ----------
 function usage() {
   return [
@@ -670,6 +966,8 @@ function usage() {
     '  set-state <ledger> --identity <json> --group <gid> --now <ts>',
     '  set-state <ledger> --phase <phase> --now <ts> [--ready-check-exit0]',
     '  set-state <ledger> --wave <n> --integrate <hex40> --now <ts>',
+    '  render-packet <ledger> --group <gid> [--manifest <path>]',
+    '  record-delivery <ledger> --group <gid> --payload <json|@file> --now <ts>',
     '退出码：0 成功 / 1 用法错误 / 2 fail-closed（schema/CAS/前置/hash 不匹配等，点名原因）',
   ].join('\n');
 }
@@ -690,6 +988,9 @@ function parseFlags(args) {
   }
   return flags;
 }
+
+// render-packet 的身份字段单一来源是台账：CLI 一律拒（防覆盖）
+const IDENTITY_CLI_FLAGS = Object.freeze(['worktree', 'branch', 'base', 'identity']);
 
 export function runCli(argv) {
   if (argv.length === 0) {
@@ -759,6 +1060,31 @@ export function runCli(argv) {
         } else {
           console.log(`set-state: group ${flags.group} ${flags.to ?? ''}（version+1）`);
         }
+        return 0;
+      }
+      case 'render-packet': {
+        if (IDENTITY_CLI_FLAGS.some((k) => flags[k] !== undefined)) {
+          throw new LedgerError(
+            'ARGS',
+            'render-packet 身份字段（worktree/branch/base）单一来源是台账，不接受 CLI 覆盖'
+          );
+        }
+        const out = renderPacket({
+          ledgerPath,
+          group: flags.group,
+          manifestPath: flags.manifest,
+        });
+        process.stdout.write(out);
+        return 0;
+      }
+      case 'record-delivery': {
+        recordDelivery({
+          ledgerPath,
+          group: flags.group,
+          payload: flags.payload,
+          now: flags.now,
+        });
+        console.log(`record-delivery: group ${flags.group} 交卷已入账（version+1）`);
         return 0;
       }
       default:
