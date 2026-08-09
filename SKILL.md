@@ -6,22 +6,22 @@ trigger: 批准执行
 
 # approve-exec — lead 编排守则
 
-把 task-priority 产出的 `task-manifest.json` 自动执行到「可直接『提交 PR』」：
+**lead 按本文编排**（所有执行工作派 worker），把 task-priority 产出的 `task-manifest.json` 自动推进到「可直接『提交 PR』」：
 五阶段状态机 E(执行)→R(审查修复)→V(波集成+SC 验收)→T(e2e)→P(打包)→READY，lead 只编排决策、不亲手执行。
 生态链：task-priority（出 manifest）→ **本 skill（lead 编排 loop）** → goal（worker 端场景 C 消费派工包）→ submit-pr（三审收口）。
 
-本文是 lead 侧编排的**唯一守则**：换会话、换模型后按本文执行，编排行为不漂移。共十四段。
+本文是 lead 侧编排的**唯一守则**：换会话、换模型后按本文执行，编排行为不漂移（机器保障：`scripts/run-tests.mjs` 冻结枚举 + `tests/skill-doc.test.mjs` 结构断言，见第⑭段）。共十五段。
 
 ## ① 身份与触发
 
 - frontmatter：`name: approve-exec`，触发词「批准执行」。
-- 用法：`批准执行`（默认用当前最新 final manifest 开跑）/ `批准执行 --resume <run_id>`（从台账恢复，见第⑥段）/ `批准执行 --no-budget-pause`（关闭预算暂停类停，见第⑤段）。
+- 用法（触发词参数由 **lead** 输入，全部执行工作派 worker）：`批准执行`（默认用当前最新 final manifest 开跑）/ `批准执行 --resume <run_id>`（从台账恢复，见第⑥段）/ `批准执行 --no-budget-pause`（关闭预算暂停类停，见第⑤段）。
 - 本 skill 是 **lead 编排层**：不写业务代码，全部执行工作派给 worker（场景见第④段 D1）。
 
 ## ② 输入门：只消费 task-priority final manifest
 
 - 唯一输入：task-priority **final 阶段释放**的 manifest——顶层含 `waves` / `dispatch` / `receipts` 三要素，packets 每包含 `scs_inline` / `allowed_paths` / `verify_cmds` / `forbidden` / `submit_format` 五要素（与 `run-ledger` render-packet 出包前五项校验逐字对齐）。
-- **fail-closed**：manifest 缺 `waves`/`dispatch`/`receipts` 任一、或文件不存在、或 packet 缺五要素任一 → 视为 draft/缺 manifest，**不开跑**，停下指路 task-priority（先回上游产出 final manifest）。不得拿「差不多能跑」的中间产物开跑。
+- **fail-closed**：manifest 缺 `waves`/`dispatch`/`receipts` 任一、或文件不存在、或 packet 缺五要素任一 → 视为 draft/缺 manifest，**不开跑**，停下指路 task-priority（先回上游产出 final manifest）。不得拿「差不多能跑」的中间产物开跑。**机器闸如实标注**：文件不存在/非对象（readManifest）、`waves` 非空数组与组 `sc_ids` 非空（init，`scripts/run-ledger.mjs` initLedger）、`dispatch.packets` 存在且组有对应 packet、packet 五要素齐全（render-packet，PACKET_INCOMPLETE）——这些都有机器校验；**`receipts` 顶层键无机器校验**（实测 init 缺 receipts 仍 exit 0），「receipts 缺失不开跑」依赖 lead 检查。
 
 ## ③ 五阶段状态机与每边三动作
 
@@ -30,10 +30,10 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 ```
 
 - 阶段图真相源是 `graph.json`（席位表：E/R/V/T/P 五席，各自 route 档，E/R 另钉 agent_pin，先例 = submit-pr Phase 2 席位表）；本段只描述编排行为，不承载席位数据。
-- **每边固定三动作**（任何阶段之间一律如此，不许跳过）：
-  1. **收结构化交卷**：只认 `run-ledger` record-delivery 入账的 exact schema 交卷（exec / review / verify 三类，多余键或缺失键都拒）；lead 不做手工转录。
-  2. **archive 该 worker**——明示：**不是 idle**。idle 只释放进程、**不释放槽位**；只有 archive 才释放并发槽位。
-  3. **mem-probe + 槽位重算**：现跑 `mem-probe` 重算可用槽位，再派下一批（并发公式见第④段 D2）。
+- **lead 每边固定三动作**（任何阶段之间一律如此，不许跳过）：
+  1. **收结构化交卷**：只认 `run-ledger` record-delivery 入账的 exact schema 交卷（exec / review / verify 三类，多余键或缺失键都拒）；lead 不做手工转录。（机器闸：`scripts/run-ledger.mjs` record-delivery）
+  2. **archive 该 worker**——明示：**不是 idle**。idle 只释放进程、**不释放槽位**；只有 archive 才释放并发槽位。（无机器闸：archive/idle 语义是 Orca 平台行为，按时执行依赖 lead）
+  3. **mem-probe + 槽位重算**：现跑 `mem-probe` 重算可用槽位，再派下一批（并发公式见第④段 D2）。（机器闸：`scripts/mem-probe.mjs` 输出即槽位判据）
 
 ## ④ 设计决策 D0–D4
 
@@ -45,7 +45,7 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 
 ## ⑤ 不停机条款（仅三类停）
 
-仅以下三类情况允许停，此外全程自主执行、不弹确认：
+仅以下三类情况允许停，此外全程自主执行、不弹确认（本条无机器闸，依赖 lead 遵守；第 1 类为全局 autonomous-execution 规则、第 2 类为全局 orca-model-routing 规则，均无本仓脚本强制）：
 
 1. **autonomous-execution 硬停清单**（push --force 到 main、删远程分支/标签、删生产数据、提交密钥、对外不可撤回消息、改 CI/CD 配置）。
 2. **A 类配置 fail-closed**（模型路由规则的配置级失败：routing.json 读不到/解析失败/档 key 缺失/字段非法/模型 ID 核对不过等——停，报 lead 侧按规则处理）。
@@ -61,13 +61,14 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 ## ⑥ 断点续跑：--resume <run_id>
 
 - 一切状态落 run 台账：`runLedgerDir`（`~/.claude/.orca/approve-exec/<run_id>.json`），**不进仓**；`<run_id>` 是台账文件名（不含扩展名）。
-- `批准执行 --resume <run_id>` 从台账恢复：重建五阶段位置、已派组状态、已集成 tip、未决组队列，继续跑；台账带版本乐观锁（CAS），并发写冲突 exit 2，不静默覆盖。
-- 台账即唯一状态源：换会话、换模型后 `--resume` 即可无缝续跑，不需要人工回忆进度。
+- **`--resume` 是 skill 触发词参数，不是 `run-ledger` 的 CLI 子命令**：正确用法只有 `批准执行 --resume <run_id>`（lead 输入）；对脚本传 `node scripts/run-ledger.mjs --resume <id>` 会报「未知子命令」退出非零（实测 exit 1，`run-ledger.mjs` 无此子命令——两个审查席都误读过这个，先看清执行者再敲命令）。
+- **恢复动作由 lead 执行**：读台账文件重建五阶段位置、已派组状态、已集成 tip、未决组队列，继续跑。台账写操作带版本乐观锁（CAS），并发写冲突 exit 2，不静默覆盖（机器闸：`scripts/run-ledger.mjs` writeLedgerAtomic）。
+- 台账即唯一状态源：换会话、换模型后 `--resume` 即可无缝续跑，不需要人工回忆进度。（结构性成立：`runLedgerDir` 在仓外且 run-ledger 只读写台账；「lead 不另建状态」依赖 lead 遵守）
 
 ## ⑦ 模型现读纪律
 
 - **派工前现读 routing.json**（`routingPath` 指向，`orca-model-routing` 规则指定为真相源），禁凭记忆填模型；本 skill 的 `graph.json` 只引路由档名（E/R 另钉 agent_pin），**永不内嵌具体模型 ID**。
-- E/R 席（goal 场景 C + `/code-review`）要求 agent 家族 = claude-code：**routing fallback 链中非 claude-code 候选一律跳过**，只沿链找 claude-code 候选。
+- E/R 席（goal 场景 C + `/code-review`）要求 agent 家族 = claude-code：**routing fallback 链中非 claude-code 候选一律跳过**，只沿链找 claude-code 候选。（本条无机器闸，依赖 lead 遵守；routing.json 内容合法性的机器校验在 `scripts/selfcheck.mjs` 与全局 model-route 脚本）
 - 候选耗尽（E/R 席无 claude-code 可派） = **A 类 fail-closed**：停，向用户报告（路由档、已试候选、错误原文），等指令；**禁止「内联等价契约给 codex」变通**（codex 加载不到 goal skill，等价契约不成立）。
 - 派工说明必须标注实际使用模型（如 `(model/effort)`），多 worker 贴紧凑台账但不阻塞流程。
 
@@ -79,8 +80,8 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 
 ## ⑨ 批量派工与槽位纪律
 
-- **整波派发一律 `create_workers` 批量工具**（同批 ≥2 worker 禁连续 `create_worker` 单发）；只有波内确实只有 1 个 worker 时才允许 `create_worker`。
-- **每轮必清槽位**：交付/done/idle/error 的 worker 立即 archive（归档即释放槽位）；idle 不释放槽位，禁止用 idle 代替 archive 占着槽位。
+- **整波派发一律 `create_workers` 批量工具**（同批 ≥2 worker 禁连续 `create_worker` 单发）；只有波内确实只有 1 个 worker 时才允许 `create_worker`。（本条无机器闸，依赖 lead 遵守：平台侧不拦单发，`tests/skill-doc.test.mjs` 只保证文档表述存在）
+- **每轮必清槽位**：交付/done/idle/error 的 worker 立即 archive（归档即释放槽位）；idle 不释放槽位，禁止用 idle 代替 archive 占着槽位。（无机器闸，依赖 lead 遵守；archive 释放槽位是 Orca 平台语义）
 - 归档后槽位数立即反映到下一批的并发公式（第④段 D2）；台账 dispatch 记录与归档动作一一对应。
 
 ## ⑩ 术语边界：V 阶段验收组 ≠ orca-fanout verify 组
@@ -93,7 +94,7 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 
 - P 阶段（打包）worker：先从 manifest 的 goal/priorities 生成 **`.pr-intent.md`** workfile（意图声明，落在候选分支工作区），**之后**才运行 intent-check（presubmit 三闸：size / format / intent）。
 - **`.pr-intent.md` 的创建责任在本 skill 的 P 阶段，不在 submit-pr**；submit-pr 只消费该文件做 intent 核对。
-- 出口门由 `ready-check` 执行：全组 verified + 每 SC PASS 锚点 + 审查 unresolved==0 + e2e PASS + presubmit 三闸结果**绑定候选 HEAD SHA**，全齐才输出 READY_FOR_SUBMIT_PR。
+- 出口门由 `ready-check` 执行（机器闸：`scripts/ready-check.mjs` 七项检查 + HEAD SHA 绑定，任一 gap 即 exit 2 点名，全齐才 exit 0 输出 READY_FOR_SUBMIT_PR）：全组 verified + 每 SC PASS 锚点 + 审查 unresolved==0 + e2e PASS + presubmit 三闸结果**绑定候选 HEAD SHA**。
 
 ## ⑫ 预算告警如实声明
 
@@ -112,6 +113,21 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 
 ## ⑭ 保证等级声明
 
-- 本 skill 的保证等级是 **T1：防疏忽/漂移**——通过结构断言测试（`tests/` 顶层 `*.test.mjs`）、doc↔实现字面量同步（如「用 goal skill 执行。」）、config 键名引用比对，保证编排行为按守则执行、不因会话/模型更换而漂移。
+- 本 skill 的保证等级是 **T1：防疏忽/漂移**——通过结构断言测试（机器闸：`scripts/run-tests.mjs` 冻结枚举 + `tests/skill-doc.test.mjs` 章节/字面量断言）、doc↔实现字面量同步（如「用 goal skill 执行。」）、config 键名引用比对，保证编排行为按守则执行、不因会话/模型更换而漂移。
 - **不防恶意 worker 伪造交卷**：本 skill 的机制不承诺对抗伪造——兜底 = 独立 verify 席复验（非作者 worker 出 verdict）+ submit-pr 三审收口。
 - 交付报告不得把保证等级写成夸大类措辞；残余与保证边界按第⑬段、本段如实声明。
+
+## ⑮ 破坏性变更迁移表（旧用法 → 现在 → 替代）
+
+2026-08 实现收敛期移除了四条 CLI 旧用法（另有两条配套纪律一并列出），按旧文档调用会 fail-closed（exit 2 点名）。下表逐条列「旧调用 → 现在会怎样 → 替代」；「lead 动作」= lead 执行，「脚本判据」= 脚本机器校验（本表退出码均为实测）。
+
+| # | 旧调用（已失效） | 现在会怎样（实测） | 替代（当前唯一合法路径） |
+|---|---|---|---|
+| 1 | `set-state --ready-check-exit0 1`（布尔凭据，等号/空格两种形式都传不进） | exit 2：`--ready-check-exit0 布尔凭据已移除：→ready 只能由 ready-check 写入的 receipt 驱动` | lead 用 `run-ledger set-state <ledger> --phase ready --ready-receipt <path>`（合法 receipt 实测 exit 0）；receipt 由 ready-check 按消费契约产出（推荐 `<ledgerPath>.ready-receipt.json`，exact 三键 `candidate_sha`/`ledger_version`/`checked_at`，version 必须等于台账当前 version，candidate_sha 必须等于最终集成树） |
+| 2 | `set-state --verify-status pass` / `set-state --verify-evidence-ref delivery#N`（手工写入口） | exit 2：`已移除：verified 的 pass 凭据只能由验收组 record-delivery 写入` | **lead 动作**：组进 verified 前先让验收组经 `record-delivery` 交 verify 类交卷；**脚本判据**（机器闸）：evidence_ref 必须形如 `delivery#<n>` 且 <n> 能解析到 events 中真实存在的 delivery 事件，否则 exit 2「凭据伪造拒」（实测伪造 delivery#999 → exit 2） |
+| 3 | 在 `tests/` 顶层新增 `*.test.mjs` 后直接跑 run-tests | exit 2：`tests/ 顶层存在未枚举的测试文件`（双向 fail-closed：枚举文件被删同样 exit 2 `枚举的测试文件缺失`） | 新增测试文件必须同步进 `scripts/run-tests.mjs` 的 TEST_FILES 冻结数组（字母序）；删测试文件同理要先从数组移除 |
+| 4 | 改过 manifest 内容后复用旧台账跑 validate / render-packet / record-delivery | exit 2：`[HASH_MISMATCH] manifest core hash 不匹配：台账=…，现算=…（manifest 内容已变/异本，内容绑定拒）` | 消费命令按 manifest_core_hash 内容绑定（机器闸：`scripts/run-ledger.mjs` assertManifestBound）；manifest 内容变更即旧台账失效——改 manifest 后必须重 init 台账（或恢复原内容），不得复用旧台账 |
+| 5 | 台账 phase 已到 ready 后继续写（set-state / record-delivery） | exit 2：`[FROZEN] 台账已 ready（phase=ready），冻结只读，拒绝写操作` | ready 是**终态不可逆**（机器闸：`scripts/run-ledger.mjs` setState 入口冻结，ready 后一切写操作拒）；任何补写必须在 ready 之前完成，READY_FOR_SUBMIT_PR 输出即收手 |
+| 6 | （无旧调用；编排开跑前的最佳实践） | — | **lead 动作**：开跑前先跑 `node scripts/selfcheck.mjs --live`（机器闸：`scripts/selfcheck.mjs`）：校验 routing 四档 agent/model/effort 合法、orca-fanout 两脚本存在、goal SKILL.md 存在、runLedgerDir 可写、live symlink 指向本仓 checkout 根、`~/.claude/rules/skill-trigger-scan.md` 含精确触发行；任一 FAIL exit 2 点名（实测全过 exit 0） |
+
+另注意第①/②条的同源纪律：`--unresolved` 手工填数通道同样已关闭（unresolved 唯一写入通道 = record-delivery 审查交卷），set-state 收到即 exit 2。

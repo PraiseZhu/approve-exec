@@ -1,9 +1,9 @@
 // SKILL.md 编排守则结构断言测试（sc-p2b）。
-// 目标：lead 换会话/换模型后编排行为不漂移——守则十四段齐全且与实现字面量同步。
+// 目标：lead 换会话/换模型后编排行为不漂移——守则十五段齐全且与实现字面量同步。
 //
 // 断言口径：
 // 1. frontmatter：name=approve-exec、trigger=批准执行、正文含触发词「批准执行」。
-// 2. 十四段 marker 逐段齐全（精确段标题，防段落被删/改名漂移）。
+// 2. 十五段 marker 逐段齐全（精确段标题，防段落被删/改名漂移）。
 // 3. doc↔实现同步①：「用 goal skill 执行。」字面量必须与 scripts/run-ledger.mjs
 //    render-packet 模板（renderExecPacket 首行 lines.push）逐字一致——
 //    提取实现侧字面量断言 SKILL.md 包含，且 SKILL.md 中每处「用 goal skill 执行」
@@ -32,7 +32,7 @@ const ledgerSrc = readFileSync(join(root, 'scripts/run-ledger.mjs'), 'utf8');
 const defaults = JSON.parse(readFileSync(join(root, 'config/defaults.json'), 'utf8'));
 const defaultsKeys = Object.keys(defaults);
 
-// 十四段精确 marker（段标题与 SKILL.md 逐字一致；缺失/改名即红）
+// 十五段精确 marker（段标题与 SKILL.md 逐字一致；缺失/改名即红）
 const MARKERS = [
   '## ① 身份与触发',
   '## ② 输入门：只消费 task-priority final manifest',
@@ -48,6 +48,7 @@ const MARKERS = [
   '## ⑫ 预算告警如实声明',
   '## ⑬ 已知残余声明',
   '## ⑭ 保证等级声明',
+  '## ⑮ 破坏性变更迁移表（旧用法 → 现在 → 替代）',
 ];
 
 // 取第 N 段（marker N 到 marker N+1）之间的文本
@@ -66,7 +67,7 @@ test('frontmatter：name=approve-exec、trigger=批准执行', () => {
   assert.ok(skillDoc.includes('批准执行'), '正文应含触发词「批准执行」');
 });
 
-test('十四段 marker 齐全且顺序固定', () => {
+test('十五段 marker 齐全且顺序固定', () => {
   let pos = -1;
   for (const m of MARKERS) {
     const idx = skillDoc.indexOf(m, pos + 1);
@@ -134,6 +135,28 @@ test('第②段：输入门三要素 + fail-closed 指路 task-priority', () => 
   assert.ok(s2.includes('fail-closed'), '输入门段应声明 fail-closed');
   assert.ok(s2.includes('task-priority'), '输入门段应指路 task-priority');
   assert.ok(s2.includes('不开跑'), '输入门段应声明缺要素时不开跑（fail-closed 行为，非仅标签）');
+  assert.ok(s2.includes('无机器校验'), '输入门段应如实标注 receipts 顶层键无机器校验（诚实标注优先于假装有强制）');
+});
+
+test('第⑥段：--resume 是触发词参数而非 run-ledger CLI 子命令（两审查席误读点）', () => {
+  const s6 = sectionBetween(MARKERS[5], MARKERS[6]);
+  assert.ok(s6.includes('触发词参数'), '断点续跑段应声明 --resume 是 skill 触发词参数');
+  assert.ok(s6.includes('未知子命令'), '应写明对 run-ledger.mjs 传 --resume 会得「未知子命令」');
+  assert.ok(s6.includes('由 lead 执行'), '恢复动作应声明执行者是 lead');
+  assert.ok(s6.includes('writeLedgerAtomic'), 'CAS 乐观锁应点名机器闸 writeLedgerAtomic');
+});
+
+test('第⑮段：破坏性变更迁移表——六条迁移项逐条锚定', () => {
+  const s15 = sectionBetween(MARKERS[14], undefined);
+  assert.ok(s15.includes('--ready-check-exit0'), '迁移①应点名已移除 flag --ready-check-exit0');
+  assert.ok(s15.includes('--ready-receipt'), '迁移①应给出替代 --ready-receipt');
+  assert.ok(s15.includes('--verify-status') && s15.includes('--verify-evidence-ref'), '迁移②应点名两个已移除手工写入口');
+  assert.ok(s15.includes('record-delivery'), '迁移②应指向 record-delivery 唯一通道');
+  assert.ok(s15.includes('TEST_FILES'), '迁移③应点名 run-tests.mjs 冻结数组 TEST_FILES');
+  assert.ok(s15.includes('HASH_MISMATCH'), '迁移④应含 HASH_MISMATCH 退出码名');
+  assert.ok(s15.includes('FROZEN'), '迁移⑤应含 FROZEN 冻结退出码名');
+  assert.ok(s15.includes('selfcheck.mjs --live'), '迁移⑥应含 selfcheck --live 自检命令');
+  assert.ok(s15.includes('实测'), '迁移表应标注退出码为实测（实证而非纸面描述）');
 });
 
 test('第③段：每边三动作——archive 非 idle（idle 不释放槽位）+ mem-probe 重算', () => {
