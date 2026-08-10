@@ -7,9 +7,10 @@ import assert from 'node:assert/strict';
 import { spawnSync, spawn } from 'node:child_process';
 import {
   mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, existsSync, cpSync, rmSync,
+  symlinkSync, realpathSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve, dirname } from 'node:path';
+import { join, resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   readLedger, writeLedgerAtomic, writeTmp, renameTmp, initLedger,
@@ -1783,7 +1784,7 @@ test('F-J: 对照——packet.scs_inline 无重复时，交卷缺一/多一/重�
 // P1（整数精度边界）：isInteger 放行 2^53，version+1 在该值上精度饱和不再递增
 // （9007199254740992+1 === 9007199254740992）→ CAS 的「读到的版本 ≠ 当前版本就拒」恒判等，
 // 乐观锁彻底失效、多陈旧写者同时成功静默覆盖。修法：整数入口一律 Number.isSafeInteger。
-// 
+
 const SAFE_MAX = Number.MAX_SAFE_INTEGER; // 9007199254740991（2^53−1，安全边界）
 const OVERFLOW = 9007199254740992;        // 2^53：+1 恒等自身，超出安全范围
 
@@ -2234,13 +2235,57 @@ test('④: --identity.worktree 相对路径拒（强制绝对路径，exit 2 点
   assert.equal(r.status, 0, `绝对 worktree 应 exit 0: ${r.stderr}`);
 });
 
+// ============ 组 F：main guard realpath 归一（与 selfcheck 组F-1 / mem-probe 组F-1 同型） ============
+// 前提：import.meta.url 已被 ESM loader 规范化（realpath 后的真实路径），而 process.argv[1] 是调用方
+// 原样路径。macOS 上 os.tmpdir() 落在 /var/folders/...（/var → /private/var symlink），以逻辑 /var 路径
+// 调用时两者恒不相等（旧 guard 的 resolve(argv[1]) 不解析 symlink）——main 静默不执行（exit 0 + 零输出，
+// 与「写成功」同形，台账操作直接变假）。本用例断言：非规范化路径调用必须真的执行 init 并创建台账；
+// 只断言 exit code 会被「零输出」骗过。
+test('组F-1: 非规范化路径调用必须实际执行 init 并创建台账（main guard realpath 归一）', (t) => {
+  const dir = mkdtempSync(join(realpathSync(tmpdir()), 'rl-norm-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  // 保持 <root>/scripts/run-ledger.mjs 布局：脚本 root = dirname(import.meta.url) + '..'，
+  // config/defaults.json 按 root 解析（缺了会让命令与 guard 无关地失败）
+  mkdirSync(join(dir, 'scripts'), { recursive: true });
+  mkdirSync(join(dir, 'config'), { recursive: true });
+  cpSync(join(ROOT, 'scripts/run-ledger.mjs'), join(dir, 'scripts/run-ledger.mjs'));
+  writeFileSync(join(dir, 'config/defaults.json'), readFileSync(join(ROOT, 'config/defaults.json'), 'utf8'));
+  // link 名必须唯一：历史用 process.pid，进程被杀时 t.after 未注册 → link-<PID> 残留；
+  // 宿主并发下 PID 复用即撞名 EEXIST（mem-probe/selfcheck 组F-1 同款，tmpdir 曾积上千残留）。
+  // dir 名来自 mkdtemp 唯一，用它派生 link 名——残留永不撞名，非规范化语义不变。
+  const link = join(realpathSync(tmpdir()), `rl-norm-link-${basename(dir)}`);
+  symlinkSync(dir, link);
+  t.after(() => rmSync(link, { force: true }));
+  assert.notEqual(realpathSync(link), link, '前置条件: 调用路径必须非规范化（否则本用例空转）');
+  // 真实写操作：init 经非规范化路径执行 → 台账必须真的创建（静默跳过时连文件都不存在）
+  const runDir = mkdtempSync(join(realpathSync(tmpdir()), 'rl-norm-run-'));
+  t.after(() => rmSync(runDir, { recursive: true, force: true }));
+  const ledgerPath = join(runDir, 'ledger.json');
+  const manifestPath = fixtureCopy(runDir);
+  const r = spawnSync(process.execPath,
+    [join(link, 'scripts/run-ledger.mjs'), 'init', ledgerPath, '--manifest', manifestPath, '--run-id', 'norm', '--now', T],
+    { encoding: 'utf8' });
+  const text = `${r.stdout || ''}${r.stderr || ''}`;
+  assert.ok(text.length > 0, '非规范化路径调用不得静默零输出（guard 被 bypass 的形态就是 exit 0 + 全空）');
+  assert.ok(text.includes('init: 台账已创建'), `非规范化路径调用必须实际执行 init，实际:\n${text}`);
+  assert.ok(existsSync(ledgerPath), 'init 必须真的创建台账文件（静默跳过时文件不存在）');
+  assert.equal(r.status, 0, `期望 exit 0，实际 ${r.status}\n${text}`);
+});
+
 
 // =====================================================================
 // 变异反证（F1/F2 集成契约）：两组各自测试全绿 ≠ 串起来正确
 // =====================================================================
 // 机制同 ready-check.test.mjs 的 mutation-kill：把 scripts/tests/config/SKILL.md/graph.json 复制到
 // 临时目录，对 run-ledger.mjs 副本应用变异（精确字符串替换，锚点唯一），跑「跳过变异测试自身」
-// （RL_MUTATION_CHILD=1 + RC_MUTATION_CHILD=1）的完整 8 文件套件，断言失败集恰为预测集——
+// （RL_MUTATION_CHILD=1 + RC_MUTATION_CHILD=1）的完整 7 文件套件（清单见 RL_MUTATION_TEST_FILES），
+// 断言失败集恰为预测集——
+// 排除说明（两个测试文件都未列入，各有一个独立原因）：
+//   - selfcheck.test.mjs：其组B-1/组B-3 的 --live 接线检查依赖「真实仓库」（symlink 目标与 git
+//     common dir 同源），在变异复制树中天然 FAIL，与本三缺陷的变异无关（RL_MUTATION_TEST_FILES
+//     定义处有同款注释）。
+//   - run-tests.test.mjs：它测的是 runner 自身的枚举契约与黑盒入口（spawn run-tests.mjs 跑 fixture），
+//     与 run-ledger 写路径 / ready-check 读路径无断言交集，列入只会让子套件多跑一轮完整 runner。
 // 挖红（失败集非空）+ 隔离（恰等于预测集，无多余无遗漏）。真实脚本永不被触碰，无需恢复。
 //
 // F1 变异：把 dispatch/delivery 事件 detail 写回字符串（旧行为，ready-check 读 e.detail?.group_id

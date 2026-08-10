@@ -26,10 +26,10 @@
 import { createHash, randomBytes } from 'node:crypto';
 import {
   readFileSync, writeFileSync, renameSync, existsSync,
-  openSync, writeSync, closeSync, unlinkSync,
+  openSync, writeSync, closeSync, unlinkSync, realpathSync,
 } from 'node:fs';
 import { resolve, dirname, join, isAbsolute } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -1706,7 +1706,25 @@ export function runCli(argv) {
   }
 }
 
-const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (isMain) {
-  process.exitCode = runCli(process.argv.slice(2));
+// main-module guard：作为 CLI 入口才执行主流程；被测试 import（LedgerError/readLedger 等）时静默返回。
+// import.meta.url 已被 ESM loader 规范化（symlink/逻辑路径解析后的真实路径），而 process.argv[1] 是调用方
+// 原样路径——macOS 上 /tmp → /private/tmp、/var → /private/var 这类 symlink 会让两者恒不相等（旧实现
+// resolve(argv[1]) 不解析 symlink），guard 静默不执行（exit 0 + 零输出，与写成功长得一模一样，台账操作
+// 直接变假）。必须先 realpathSync 归一 argv[1] 再比较。
+// 分叉语义：argv[1] 缺失（node --input-type=module --eval 'import ...' 纯 import，无入口文件）→ 不可能是
+// CLI 调用，静默返回——run-ledger 必须支持被 import，库被加载不得杀死宿主进程；
+// argv[1] 存在但 realpath 失败 → fail-closed exit 2 点名（本该是 CLI 却无法验证，不静默假绿）。
+// 与 mem-probe.mjs / selfcheck.mjs / run-tests.mjs 同型（四处各自持有组F-1 回归测试；漂移预警：改一处
+// 必须同步其余三处）。
+if (process.argv[1] !== undefined) {
+  let entryReal;
+  try {
+    entryReal = realpathSync(process.argv[1]);
+  } catch (e) {
+    console.error(`run-ledger: 无法解析脚本真实路径 ${process.argv[1]}（${e.message}）`);
+    process.exit(2);
+  }
+  if (import.meta.url === pathToFileURL(entryReal).href) {
+    process.exitCode = runCli(process.argv.slice(2));
+  }
 }
