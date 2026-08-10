@@ -291,7 +291,17 @@ function main() {
   console.log('selfcheck: 全部检查通过（exit 0）');
 }
 
-// main-module guard：作为 CLI 入口才执行主流程；被测试 import（组B-2 注入 root 调 deriveLiveLink）时静默返回
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+// main-module guard：作为 CLI 入口才执行主流程；被测试 import（组B-2 注入 root 调 deriveLiveLink）时静默返回。
+// import.meta.url 已被 ESM loader 规范化（symlink/逻辑路径解析后的真实路径），而 process.argv[1] 是调用方原样
+// 路径——macOS 上 /var → /private/var 这类 symlink 会让两者恒不相等，main 静默不执行（exit 0 + 零输出，
+// 与全 PASS 长得一模一样，自检直接变假）。必须先用 realpathSync 归一 argv[1] 再比较；realpath 失败 fail-closed。
+let entryReal;
+try {
+  entryReal = realpathSync(process.argv[1]);
+} catch (e) {
+  console.error(`selfcheck: 无法解析脚本真实路径 ${process.argv[1]}（${e.message}）`);
+  process.exit(2);
+}
+if (import.meta.url === pathToFileURL(entryReal).href) {
   main();
 }

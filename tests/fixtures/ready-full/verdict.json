@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "run_id": "fixture-run",
+  "candidate_sha": "__HEAD_SHA__",
+  "verdict_date": "2026-08-09T03:00:00.000Z",
+  "scs": [
+    {
+      "sc_id": "sc-p0a",
+      "status": "pass",
+      "evidence": [
+        {
+          "file": "evidence/anchors/a.txt",
+          "command": "node scripts/run-tests.mjs",
+          "summary": "config.test.mjs 8 assertions all pass"
+        }
+      ]
+    },
+    {
+      "sc_id": "sc-p1f",
+      "status": "pass",
+      "evidence": [
+        {
+          "file": "evidence/anchors/b.txt",
+          "command": "node scripts/run-tests.mjs",
+          "summary": "ready-check.test.mjs all pass"
+        }
+      ]
+    },
+    {
+      "sc_id": "sc-p1g",
+      "status": "pass",
+      "evidence": [
+        {
+          "file": "evidence/anchors/c.txt",
+          "command": "node scripts/run-tests.mjs",
+          "summary": "mutation verification all pass"
+        }
+      ]
+    }
+  ],
+  "output_records": {
+    "evidence/anchors/a.txt": "config.test.mjs 8 assertions all pass",
+    "evidence/anchors/b.txt": "ready-check.test.mjs all pass",
+    "evidence/anchors/c.txt": "mutation verification all pass"
+  }
+}

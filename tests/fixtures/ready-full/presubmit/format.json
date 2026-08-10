@@ -1,0 +1,6 @@
+{
+  "gate": "format",
+  "result": "PASS",
+  "candidate_sha": "__HEAD_SHA__",
+  "detail": "PR title/body format checks passed"
+}
