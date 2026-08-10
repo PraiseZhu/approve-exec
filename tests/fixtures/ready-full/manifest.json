@@ -18,5 +18,13 @@
       { "group_id": "g2", "scs_inline": [{ "id": "sc-p1f" }, { "id": "sc-p1g" }] }
     ]
   },
+  "receipts": [
+    {
+      "slug": "approve-exec-fixture",
+      "manifest_core_hash": "0dc94687c4c8a0613f678ff21bb87258547ebebb18955488d5e9e6f04e403c27",
+      "plan_hash": "fde2f195d43f44767b9e611c82ecdf4fd934e357cddaff8cbda5e1edc7dc87ba",
+      "recorded_at": "2026-08-09T00:00:00Z"
+    }
+  ],
   "manifest_core_hash": "0dc94687c4c8a0613f678ff21bb87258547ebebb18955488d5e9e6f04e403c27"
 }

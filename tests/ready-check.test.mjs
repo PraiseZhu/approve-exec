@@ -212,8 +212,11 @@ test('gap1: 组非 verified → exit 2 gap ledger-partition', (t) => {
 test('gap1: 组 tip_sha 与 delivery 事件对账失败 → exit 2 gap ledger-partition', (t) => {
   const repo = makeRepo(t);
   const env = buildEnv(t, repo, (p) => {
-    const ev = p.ledger.events.find((e) => e.type === 'delivery' && e.detail?.group_id === 'g1');
-    ev.detail.tip_sha = 'a'.repeat(40);
+    // g1 有 exec/review/verify 多条 delivery（夹具已按真实落盘形状对齐）：任一条 tip_sha
+    // 与台账 tip_sha 相符都会让 ① 对账通过，故必须把 g1 全部 delivery 的 tip_sha 一起变异
+    for (const e of p.ledger.events) {
+      if (e.type === 'delivery' && e.detail?.group_id === 'g1') e.detail.tip_sha = 'a'.repeat(40);
+    }
     return p;
   });
   expectGaps(runReady(repo, env), ['ledger-partition'], 'delivery tip_sha 对账失败');
@@ -359,14 +362,34 @@ test('gap3: review.unresolved>0 → exit 2 gap review-clean', (t) => {
   expectGaps(runReady(repo, env), ['review-clean'], 'unresolved=1');
 });
 
-test('gap3: 审查交卷（delivery 入账）candidate_sha 过期 → exit 2 gap review-clean', (t) => {
+test('gap3: 审查交卷（review 类 delivery）candidate_sha 过期（verify 绑当前 SHA 不顶替）→ exit 2 gap review-clean', (t) => {
   const repo = makeRepo(t);
   const env = buildEnv(t, repo, (p) => {
-    const ev = p.ledger.events.find((e) => e.type === 'delivery' && e.detail?.group_id === 'g1');
+    // 缺陷组合：review 交卷（delivered 时入账）绑过期 SHA；verify 交卷（review_pass 时入账、
+    // 排在最后一条）绑当前 HEAD。旧实现取「最后一条交卷」= verify → 放行；修复后必须按
+    // review 类交卷取，点名 review 实际绑定的旧 SHA。夹具 g1 已含 verify 交卷（绑当前 HEAD）。
+    const ev = p.ledger.events.find((e) => e.type === 'delivery' && e.detail?.group_id === 'g1'
+      && typeof e.detail?.rounds === 'number');
+    assert.ok(ev, '夹具 g1 必须存在 review 类 delivery 事件');
     ev.detail.candidate_sha = 'a'.repeat(40); // SHA 过期夹具（③）
     return p;
   });
   expectGaps(runReady(repo, env), ['review-clean'], '审查交卷绑定 SHA 过期');
+});
+
+test('gap3: 组无 review 类交卷（仅 exec+verify delivery）→ exit 2 gap review-clean 且点名类别序列', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, (p) => {
+    // D2 fail-closed：组没有 review 类交卷时不得回落到「最后一条」或「视为通过」——
+    // 否则 exec/verify 交卷会冒充审查绑定。消息必须带组名与实际类别序列。
+    p.ledger.events = p.ledger.events.filter((e) => !(e.type === 'delivery' && e.detail?.group_id === 'g1'
+      && typeof e.detail?.rounds === 'number'));
+    return p;
+  });
+  const res = runReady(repo, env);
+  expectGaps(res, ['review-clean'], '无 review 类交卷必须 fail-closed');
+  assert.match(res.stderr, /g1 无 review 类交卷/, '必须点名组名');
+  assert.match(res.stderr, /exec, verify/, '必须点名实际 delivery 类别序列');
 });
 
 test('gap4: e2e 报告缺失 → exit 2 gap e2e-report', (t) => {
@@ -392,6 +415,18 @@ test('F-O: manifest+verdict 都删 → ledger-partition + verdict-anchors 双 ga
   rmSync(env.verdictPath, { force: true });
   // ① 依赖 manifest 点名 ledger-partition；② 依赖 manifest+verdict 各点名一次 verdict-anchors
   expectGaps(runReady(repo, env), ['ledger-partition', 'verdict-anchors', 'verdict-anchors'], 'manifest 缺失不得短路后项');
+});
+
+// receipts 在场契约（缺陷 #2 出口门侧回归守卫）：receipts 被 core hash 黑名单剔除，删它 hash 不变——
+// 出口门不能只靠 hash 兜底。ready-check 消费 manifest 必须走与 run-ledger 同一份判据（readManifest），
+// 不合约的 manifest（含删 receipts）转 gap 点名，不得输出 READY。
+test('receipts 在场契约: 全量凭据下删 manifest.receipts 键 → exit 2 gap ledger-partition+verdict-anchors，gap 点名 receipts（出口门同判据）', (t) => {
+  if (process.env.RC_MUTATION_CHILD === '1') { t.skip('变异子套件运行跳过本用例（与 ready-check 既有变异无关，防污染其失败集契约）'); return; }
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, (p) => { delete p.manifest.receipts; });
+  const res = runReady(repo, env);
+  expectGaps(res, ['ledger-partition', 'verdict-anchors'], '删 receipts 键必须被拒（receipts 在场契约收口于 readManifest，ready-check 同判据）');
+  assert.match(res.stderr, /receipts/, 'gap 必须点名 receipts（可解析但不合约，不得笼统说「不可解析」）');
 });
 
 test('gap4: e2e 报告 status=fail → exit 2 gap e2e-report', (t) => {
@@ -721,8 +756,8 @@ const MUTATION_PREDICTIONS = [
     to: '&& false) {',
     red: ['F-N: dispatch 事件 group_id 换成未知 gX（数量仍为 2）→ exit 2 gap ledger-partition',
           'F-N: manifest packet group_id 换成未知 gX → exit 2 gap ledger-partition'] },
-  { id: '变异⑦', label: 'F-O 不可解析输入不提前 exit', from: 'const manifest = readJsonOrNull(args.manifest);',
-    to: 'const manifest = readJsonOrNull(args.manifest); if (!ledger || !manifest) { console.error(\'GAP: ledger-partition: 前置输入不可解析（旧版提前 exit 行为）\'); process.exit(2); }',
+  { id: '变异⑦', label: 'F-O 不可解析输入不提前 exit', from: 'const ledger = readJsonOrNull(args.ledger);\n  // manifest 经 readManifest 统一收口（receipts 在场/形状契约与 run-ledger 全部消费入口同判据）：\n  // 不合约/不可解析 → 转 gap 占位（F-O：不提前 exit，后项照常运行），错误原文随 manifestError\n  // 进 gap detail——「可解析但不合约」不得被笼统说成「不可解析」。\n  let manifest = null;\n  let manifestError = null;\n  try { manifest = readManifest(args.manifest); } catch (err) { manifestError = err.message; }',
+    to: 'const ledger = readJsonOrNull(args.ledger);\n  const manifest = readJsonOrNull(args.manifest);\n  let manifestError = null;\n  if (!ledger || !manifest) { console.error(\'GAP: ledger-partition: 前置输入不可解析（旧版提前 exit 行为）\'); process.exit(2); }',
     red: ['F-O: ledger+e2e 都删 → 三项 gap 同时点名（不跳过后项）',
           'F-O: manifest+verdict 都删 → ledger-partition + verdict-anchors 双 gate 点名'] },
   { id: '变异⑨', label: '→ready receipt 写入（成功路径铸凭据）', from: 'const receiptError = writeReadyReceipt(args.receipt, { candidateSha: headSha, ledgerVersion: ledger.version, checkedAt: args.now });',
@@ -738,6 +773,13 @@ const MUTATION_PREDICTIONS = [
   { id: '变异⑩', label: 'receipt 未落盘不得输出 READY 的守卫（写失败 exit 2）', from: 'if (receiptError !== null) {',
     to: 'if (false) {',
     red: ['receipt 写盘失败: --receipt 指向不存在目录 → exit 2 gap ready-receipt，不输出 READY 行'] },
+  // 变异⑪（D1）：③ 的绑定对象是「该类组的结论交卷」（执行组=review / 验收组=verify）。
+  // 挖回「最后一条交卷」= verify（绑当前 HEAD）→ 两条新用例（review 旧 SHA 被顶替 /
+  // 无 review 类交卷）都变绿假通过而红
+  { id: '变异⑪', label: '③ 审查交卷绑定按该类组结论交卷（review 旧 SHA 不被 verify 顶替）', from: 'const lastBinding = binding[binding.length - 1];',
+    to: 'const lastBinding = deliveries[deliveries.length - 1];',
+    red: ['gap3: 审查交卷（review 类 delivery）candidate_sha 过期（verify 绑当前 SHA 不顶替）→ exit 2 gap review-clean',
+          'gap3: 组无 review 类交卷（仅 exec+verify delivery）→ exit 2 gap review-clean 且点名类别序列'] },
 ];
 
 // 复制 scripts/tests/config 到临时目录并对脚本副本应用变异；返回 { file, dir }——

@@ -43,6 +43,8 @@ function cliLedger(...args) {
 // ---------- 环境 ----------
 
 // 建临时候选仓：evidence 锚点 + 干净工作树 + 具名 feature 分支（ready-check ⑥⑦ 的真实来源）
+// 每个 git 调用都断言 status===0（fail-fast，与 ready-check.test.mjs makeRepo 同规）：fixture
+// 构造失败必须显式红并点名失败步骤，不允许「构造失败但继续跑并通过」的静默降级。
 function makeRepo(t) {
   const dir = mkdtempSync(join(tmpdir(), 'e2e-dryrun-repo-'));
   const gitRun = (args, label) => {
@@ -60,10 +62,9 @@ function makeRepo(t) {
   writeFileSync(join(dir, 'evidence/anchors/a.txt'), 'anchor a\n');
   writeFileSync(join(dir, 'evidence/anchors/b.txt'), 'anchor b\n');
   writeFileSync(join(dir, 'src.ts'), 'export const dryrun = 1;\n');
-  run('git', ['add', '-A'], { cwd: dir });
-  const commit = run('git', ['commit', '-q', '-m', 'dryrun fixture initial'], { cwd: dir });
-  assert.equal(commit.status, 0, `fixture repo 首提交失败: ${commit.stderr}`);
-  const sha = run('git', ['rev-parse', 'HEAD'], { cwd: dir }).stdout;
+  gitRun(['add', '-A'], 'git add -A');
+  gitRun(['commit', '-q', '-m', 'dryrun fixture initial'], 'git commit');
+  const sha = gitRun(['rev-parse', 'HEAD'], 'git rev-parse HEAD').stdout;
   assert.match(sha, /^[0-9a-f]{40}$/, '候选仓 HEAD 应为 40 位十六进制');
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return { dir, sha };
@@ -189,8 +190,8 @@ function execGroupToVerified(env) {
   assert.equal(rr.status, 0, `g4 →verified 应 exit 0: ${rr.stderr}`);
 }
 
-// 验收组（v1）到 verified：验收交卷（candidate_sha 绑定）——它是 v1 最后一条 delivery，
-// ready-check ③ 从它读 candidate_sha
+// 验收组（v1）到 verified：验收交卷（candidate_sha 绑定）——它是 v1 的 verify 类最后一条
+// delivery，ready-check ③ 按类别消费（验收组绑 verify 类最后一条）从它读 candidate_sha
 function verifyGroupToVerified(env) {
   dispatchGroup(env, 'v1', 'w2');
   const rr = cliLedger('record-delivery', env.ledgerPath, '--group', 'v1', '--payload', JSON.stringify({

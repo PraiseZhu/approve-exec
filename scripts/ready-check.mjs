@@ -23,7 +23,10 @@
 //                        verdict.candidate_sha == HEAD；证据锚点强校验：evidence.file realpath 后在 repo 内
 //                        （防仓内 symlink 指向仓外文件冒充锚点）+ summary 与 output_records 内嵌记录逐字一致
 //   ③ review-clean      每组 review.rounds ≤ config.reviewMaxRounds 且 unresolved==0；
-//                        每组最后一条 delivery 事件的 detail.candidate_sha == HEAD（审查交卷绑定）
+//                        每组「该类组的结论交卷」的 detail.candidate_sha == HEAD
+//                        （执行组 = review 类交卷，同类多条取最后一条；验收组 = verify 类交卷，
+//                        组类型按 manifest packet.scs_inline 全 kind=verify 判定，同 render-packet；
+//                        结论交卷缺失 → fail-closed 点名组名与 delivery 类别序列）
 //   ④ e2e-report        报告存在、status=pass、candidate_sha == HEAD
 //   ⑤ presubmit-gates   三闸结果存在、各自 result pass 语义、各自 candidate_sha == HEAD
 //   ⑥ git-clean         候选仓 git status --porcelain 为空
@@ -52,7 +55,10 @@ import { spawnSync } from 'node:child_process';
 // 名 <path>.tmp.<pid>.<随机nonce>（固定 tmp 会让并发写者互相覆盖）。
 // ready-check 只检查不写台账：phase→ready 的唯一写入者是 run-ledger set-state
 // --phase ready --ready-receipt（锁/CAS/phase 单步/全波集成/manifest hash 绑定都在它那边）。
-import { tmpPath } from './run-ledger.mjs';
+// readManifest 一并复用：manifest 在场/形状契约与 run-ledger 全部消费入口同判据（同一份实现，
+// 不在 ready-check 另写一套存在性检查——receipts 在 core hash 黑名单之外，删它 hash 不变，
+// 出口门不能只靠 hash 兜底）。
+import { tmpPath, readManifest } from './run-ledger.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -117,10 +123,13 @@ function isInsideRepo(repoRoot, relPath) {
 // ---------- 七项判据（每项独立函数，变异点字符串唯一） ----------
 
 // ① 台账互斥全分区对账
-function checkLedgerPartition(ledger, manifest, gaps) {
+function checkLedgerPartition(ledger, manifest, manifestError, gaps) {
   // F-O: 输入不可解析转 gap 占位而非提前 exit——不依赖其内容的后项（④⑤⑥⑦）照常运行
   if (!ledger) { gaps.push({ gate: 'ledger-partition', detail: '台账文件不存在或不可解析' }); return; }
-  if (!manifest) { gaps.push({ gate: 'ledger-partition', detail: 'manifest 文件不存在或不可解析' }); return; }
+  if (!manifest) {
+    gaps.push({ gate: 'ledger-partition', detail: manifestError ? `manifest 不合约: ${manifestError}` : 'manifest 文件不存在或不可解析' });
+    return;
+  }
   const groups = (ledger.waves || []).flatMap((w) => w.groups || []);
   const packets = manifest.dispatch?.packets || [];
   const events = ledger.events || [];
@@ -204,9 +213,11 @@ function validateScs(manifest, ledger) {
 }
 
 // ② 每条 SC 验收 verdict + 证据锚点强校验
-function checkVerdictAnchors(verdict, manifest, ledger, repoRoot, headSha, gaps) {
+function checkVerdictAnchors(verdict, manifest, manifestError, ledger, repoRoot, headSha, gaps) {
   if (!verdict) { gaps.push({ gate: 'verdict-anchors', detail: 'verdict 文件不存在或不可解析' }); }
-  if (!manifest) { gaps.push({ gate: 'verdict-anchors', detail: 'manifest 文件不存在或不可解析' }); }
+  if (!manifest) {
+    gaps.push({ gate: 'verdict-anchors', detail: manifestError ? `manifest 不合约: ${manifestError}` : 'manifest 文件不存在或不可解析' });
+  }
   if (!verdict || !manifest) return;
   const scv = validateScs(manifest, ledger);
   if (!scv.ok) {
@@ -242,12 +253,39 @@ function checkVerdictAnchors(verdict, manifest, ledger, repoRoot, headSha, gaps)
   }
 }
 
+// delivery 事件落盘时无显式类别字段（run-ledger 各写点分别落不同键），类别按 detail 形状判：
+//   review:    rounds（record-delivery 审查交卷；validateReviewDelivery 强制非负安全整数）
+//   verify:    integration_review_status（record-delivery 验收交卷）
+//   exec:      status + tip_sha + scs（record-delivery 执行交卷）
+//   delivered: 仅 tip_sha + candidate_sha（set-state --to delivered 的交付登记，非 worker 交卷）
+// 四者互斥；其余形状一律 unknown（fail-closed 点名，不猜测）。
+function deliveryCategory(d) {
+  const detail = d?.detail || {};
+  if (typeof detail.rounds === 'number') return 'review';
+  if (typeof detail.integration_review_status === 'string') return 'verify';
+  if (Array.isArray(detail.scs) && typeof detail.tip_sha === 'string') return 'exec';
+  if (typeof detail.tip_sha === 'string' && typeof detail.candidate_sha === 'string') return 'delivered';
+  return 'unknown';
+}
+
+// 组类型判别（与 run-ledger render-packet 同一判据）：packet.scs_inline 全部 kind=verify →
+// 验收组；含 fix 或无法判别 → 执行组。验收组没有 review 阶段（delivered 后直接出验收交卷，
+// DELIVERY_LIFECYCLE 注释「验收组（kind=verify）在 delivered 后立即出 verdict 是其交付物」），
+// 其「审查结论」的绑定对象是 verify 交卷；执行组才有 review 交卷。空 scs_inline 恒非验收组
+// （every 对空数组恒真，必须 length>0 守卫，与 run-ledger PACKET_INCOMPLETE 同向 fail-closed）。
+function isVerifyGroup(packet) {
+  const scs = packet?.scs_inline;
+  if (!Array.isArray(scs) || scs.length === 0) return false;
+  return scs.every((s) => s && typeof s === 'object' && s.kind === 'verify');
+}
+
 // ③ 每组审查收敛 + 审查交卷 candidate 绑定
-function checkReviewClean(ledger, headSha, reviewMaxRounds, gaps) {
+function checkReviewClean(ledger, manifest, headSha, reviewMaxRounds, gaps) {
   // F-O: 台账不可解析时本 gate 自身点名不可用，不拖垮不依赖台账的后项
   if (!ledger) { gaps.push({ gate: 'review-clean', detail: '台账不可用（文件不存在或不可解析）' }); return; }
   const groups = (ledger.waves || []).flatMap((w) => w.groups || []);
   const events = ledger.events || [];
+  const packets = manifest?.dispatch?.packets || [];
   for (const g of groups) {
     const review = g.review || {};
     if (typeof review.unresolved !== 'number' || review.unresolved !== 0) {
@@ -257,11 +295,26 @@ function checkReviewClean(ledger, headSha, reviewMaxRounds, gaps) {
       gaps.push({ gate: 'review-clean', detail: `${g.group_id} review.rounds=${review.rounds} > reviewMaxRounds=${reviewMaxRounds}` });
     }
     const deliveries = events.filter((e) => e.type === 'delivery' && e.detail?.group_id === g.group_id);
-    const lastDelivery = deliveries[deliveries.length - 1];
-    if (!lastDelivery || typeof lastDelivery.detail.candidate_sha !== 'string') {
-      gaps.push({ gate: 'review-clean', detail: `${g.group_id} 审查交卷（delivery 入账）缺 candidate_sha 绑定` });
-    } else if (lastDelivery.detail.candidate_sha !== headSha) {
-      gaps.push({ gate: 'review-clean', detail: `${g.group_id} 审查交卷 candidate_sha ${lastDelivery.detail.candidate_sha} != 当前 HEAD ${headSha}` });
+    // 绑定对象是「该类组的审查结论交卷」本身，不是「最后一条交卷」：执行组生命周期允许
+    // review 交卷在 delivered 入账（candidate_sha 可能是审查时的旧树）、verify 交卷在
+    // review_pass 入账（candidate_sha = 当时 HEAD）且排在 review 之后——拿最后一条会把
+    // verify 的 SHA 顶替掉 review 实际审查所绑的旧 SHA，「审查绑在当前候选」被后来的验收
+    // 交卷遮成恒真。验收组无 review 阶段，其结论交卷就是 verify（无后续交卷，无遮蔽面）。
+    // 同类多条（多轮审查各入账一次）取最后一条：最后一轮的 candidate_sha 才是审查结论所绑
+    // 的树，之前轮次的旧树已被后续轮次覆盖修正。
+    const packet = packets.find((p) => p.group_id === g.group_id);
+    const groupIsVerify = isVerifyGroup(packet);
+    const bindingKind = groupIsVerify ? 'verify' : 'review';
+    const binding = deliveries.filter((d) => deliveryCategory(d) === bindingKind);
+    const lastBinding = binding[binding.length - 1];
+    if (!lastBinding) {
+      // D2 fail-closed：该组结论交卷缺失不得回落到「最后一条」或「视为通过」——否则
+      // delivered 登记/exec/verify（执行组）会冒充审查绑定；消息带组名与实际类别序列。
+      gaps.push({ gate: 'review-clean', detail: `${g.group_id} 无 ${bindingKind} 类交卷（${groupIsVerify ? '验收组' : '执行组'}，delivery 类别序列: ${deliveries.map(deliveryCategory).join(', ') || '无'}）` });
+    } else if (typeof lastBinding.detail.candidate_sha !== 'string') {
+      gaps.push({ gate: 'review-clean', detail: `${g.group_id} 审查交卷（${bindingKind} 类 delivery）缺 candidate_sha 绑定` });
+    } else if (lastBinding.detail.candidate_sha !== headSha) {
+      gaps.push({ gate: 'review-clean', detail: `${g.group_id} 审查交卷 candidate_sha ${lastBinding.detail.candidate_sha} != 当前 HEAD ${headSha}` });
     }
   }
 }
@@ -343,9 +396,12 @@ function main() {
   const reviewMaxRounds = config.reviewMaxRounds;
 
   const ledger = readJsonOrNull(args.ledger);
-  const manifest = readJsonOrNull(args.manifest);
-  // F-O: ledger/manifest 不可解析不再提前 exit——由依赖它们的子检查各自转 gap 占位点名
-  // （①③ 依赖 ledger、② 依赖 manifest+verdict），不依赖其内容的后项（④⑤⑥⑦）照常运行。
+  // manifest 经 readManifest 统一收口（receipts 在场/形状契约与 run-ledger 全部消费入口同判据）：
+  // 不合约/不可解析 → 转 gap 占位（F-O：不提前 exit，后项照常运行），错误原文随 manifestError
+  // 进 gap detail——「可解析但不合约」不得被笼统说成「不可解析」。
+  let manifest = null;
+  let manifestError = null;
+  try { manifest = readManifest(args.manifest); } catch (err) { manifestError = err.message; }
 
   const headResult = runGit(args.repo, ['rev-parse', 'HEAD']);
   if (headResult.status !== 0) {
@@ -363,9 +419,9 @@ function main() {
 
   // 七项逐项独立检查，全部跑完再收束（不因前项失败跳过后项）
   const gaps = [];
-  checkLedgerPartition(ledger, manifest, gaps);
-  checkVerdictAnchors(verdict, manifest, ledger, args.repo, headSha, gaps);
-  checkReviewClean(ledger, headSha, reviewMaxRounds, gaps);
+  checkLedgerPartition(ledger, manifest, manifestError, gaps);
+  checkVerdictAnchors(verdict, manifest, manifestError, ledger, args.repo, headSha, gaps);
+  checkReviewClean(ledger, manifest, headSha, reviewMaxRounds, gaps);
   checkE2eReport(e2eReport, headSha, gaps);
   checkPresubmitGates(args.presubmitDir, headSha, gaps);
   checkGitClean(args.repo, gaps);

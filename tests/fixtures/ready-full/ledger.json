@@ -49,8 +49,12 @@
   "events": [
     { "type": "dispatch", "at": "2026-08-09T00:00:00.000Z", "detail": { "group_id": "g1", "worker_label": "fixture-w1" } },
     { "type": "dispatch", "at": "2026-08-09T00:00:00.000Z", "detail": { "group_id": "g2", "worker_label": "fixture-w2" } },
-    { "type": "delivery", "at": "2026-08-09T01:00:00.000Z", "detail": { "group_id": "g1", "tip_sha": "__HEAD_SHA__", "candidate_sha": "__HEAD_SHA__" } },
-    { "type": "delivery", "at": "2026-08-09T01:00:00.000Z", "detail": { "group_id": "g2", "tip_sha": "__HEAD_SHA__", "candidate_sha": "__HEAD_SHA__" } },
-    { "type": "review_round", "at": "2026-08-09T02:00:00.000Z", "detail": { "group_id": "g2", "rounds": 2, "unresolved": 0 } }
+    { "type": "delivery", "at": "2026-08-09T00:30:00.000Z", "detail": { "group_id": "g1", "status": "done", "tip_sha": "__HEAD_SHA__", "candidate_sha": "__HEAD_SHA__", "scs": [{ "sc_id": "sc-p0a", "status": "pass" }] } },
+    { "type": "delivery", "at": "2026-08-09T00:30:00.000Z", "detail": { "group_id": "g2", "status": "done", "tip_sha": "__HEAD_SHA__", "candidate_sha": "__HEAD_SHA__", "scs": [{ "sc_id": "sc-p1f", "status": "pass" }, { "sc_id": "sc-p1g", "status": "pass" }] } },
+    { "type": "delivery", "at": "2026-08-09T01:00:00.000Z", "detail": { "group_id": "g1", "tip_sha": "__HEAD_SHA__", "candidate_sha": "__HEAD_SHA__", "rounds": 1, "findings_total": 0, "unresolved": 0, "fix_commits": 0 } },
+    { "type": "delivery", "at": "2026-08-09T01:00:00.000Z", "detail": { "group_id": "g2", "tip_sha": "__HEAD_SHA__", "candidate_sha": "__HEAD_SHA__", "rounds": 2, "findings_total": 0, "unresolved": 0, "fix_commits": 0 } },
+    { "type": "review_round", "at": "2026-08-09T02:00:00.000Z", "detail": { "group_id": "g2", "rounds": 2, "unresolved": 0 } },
+    { "type": "delivery", "at": "2026-08-09T02:30:00.000Z", "detail": { "group_id": "g1", "integration_review_status": "pass", "notes": "fixture verify", "candidate_sha": "__HEAD_SHA__" } },
+    { "type": "delivery", "at": "2026-08-09T03:00:00.000Z", "detail": { "group_id": "g2", "integration_review_status": "pass", "notes": "fixture verify", "candidate_sha": "__HEAD_SHA__" } }
   ]
 }

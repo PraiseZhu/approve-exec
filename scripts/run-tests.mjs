@@ -8,7 +8,7 @@
 // 校验通过后逐个 spawn `node --test <file>`，node test runner 原始汇总（spec 报告器）经 stdio 原样透传；
 // 判据 = fail 0：全绿 → exit 0；有红 → exit 1；枚举为空 → exit 2（fail-closed，视为配置错误）。
 // RUN_TESTS_DIR（仅测试注入用）：覆盖 tests/ 目录路径，黑盒用例据此构造夹具目录。
-import { readdirSync, existsSync } from 'node:fs';
+import { readdirSync, existsSync, realpathSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -101,7 +101,24 @@ function main() {
   console.log(`run-tests: ${testFiles.length} file(s) run, ${failed ? 'FAIL (exit 1)' : 'all pass (exit 0)'}`);
 }
 
-// main-module guard：作为 CLI 入口才执行主流程；被测试 import（TEST_FILES/checkEnumeration）时静默返回
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main();
+// main-module guard：作为 CLI 入口才执行主流程；被测试 import（TEST_FILES/checkEnumeration）时静默返回。
+// import.meta.url 已被 ESM loader 规范化（symlink/逻辑路径解析后的真实路径），而 process.argv[1] 是调用方
+// 原样路径——macOS 上 /tmp → /private/tmp、/var → /private/var 这类 symlink 会让两者恒不相等，guard 静默
+// 不执行（exit 0 + 零输出，与全绿长得一模一样，测试入口直接变假）。必须先 realpathSync 归一 argv[1] 再比较。
+// 分叉语义：argv[1] 缺失（node --input-type=module --eval 'import ...' 纯 import，无入口文件）→ 不可能是
+// CLI 调用，静默返回——run-tests 必须支持被 import（测试文件即如此），库被加载不得杀死宿主进程；
+// argv[1] 存在但 realpath 失败 → fail-closed exit 2 点名（本该是 CLI 却无法验证，不静默假绿）。
+// 与 mem-probe.mjs / selfcheck.mjs / run-ledger.mjs 同型（四处各自持有组F-1 回归测试；漂移预警：改一处
+// 必须同步其余三处）。
+if (process.argv[1] !== undefined) {
+  let entryReal;
+  try {
+    entryReal = realpathSync(process.argv[1]);
+  } catch (e) {
+    console.error(`run-tests: 无法解析脚本真实路径 ${process.argv[1]}（${e.message}）`);
+    process.exit(2);
+  }
+  if (import.meta.url === pathToFileURL(entryReal).href) {
+    main();
+  }
 }

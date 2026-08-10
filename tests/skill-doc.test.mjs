@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const skillDoc = readFileSync(join(root, 'SKILL.md'), 'utf8');
+const ledgerSrc = readFileSync(join(root, 'scripts/run-ledger.mjs'), 'utf8');
 const defaults = JSON.parse(readFileSync(join(root, 'config/defaults.json'), 'utf8'));
 const defaultsKeys = Object.keys(defaults);
 
@@ -75,6 +76,18 @@ test('十五段 marker 齐全且顺序固定', () => {
   }
 });
 
+test('doc↔实现同步①：「用 goal skill 执行。」与 run-ledger render-packet 模板逐字一致', () => {
+  // 实现侧唯一权威字面量：renderExecPacket 首行 lines.push('…')（736 行，注释明示 g7 文档测试引用比对）
+  const pushes = [...ledgerSrc.matchAll(/lines\.push\('([^']+)'\);/g)].map((m) => m[1]);
+  const implLiteral = pushes.find((s) => s.includes('goal skill'));
+  assert.ok(implLiteral, 'run-ledger.mjs 中应有「用 goal skill 执行。」模板行');
+  // SKILL.md 必须包含实现字面量（逐字，含句号）
+  assert.ok(skillDoc.includes(implLiteral), `SKILL.md 应包含实现字面量: ${JSON.stringify(implLiteral)}`);
+  // 反向：SKILL.md 中每处「用 goal skill 执行」都必须带「。」（不许文档侧漏句号另写一套）
+  const occurrences = skillDoc.split('用 goal skill 执行').length - 1;
+  assert.ok(occurrences >= 1, 'SKILL.md 应至少出现一次「用 goal skill 执行」');
+  assert.equal(skillDoc.split('用 goal skill 执行。').length - 1, occurrences, 'SKILL.md 中每处「用 goal skill 执行」后都必须紧跟句号');
+});
 
 test('config 键名比对：SKILL.md 引用的 camelCase 键全部真实存在于 defaults.json', () => {
   const backtickTokens = [...skillDoc.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
@@ -122,7 +135,8 @@ test('第②段：输入门三要素 + fail-closed 指路 task-priority', () => 
   assert.ok(s2.includes('fail-closed'), '输入门段应声明 fail-closed');
   assert.ok(s2.includes('task-priority'), '输入门段应指路 task-priority');
   assert.ok(s2.includes('不开跑'), '输入门段应声明缺要素时不开跑（fail-closed 行为，非仅标签）');
-  assert.ok(s2.includes('无机器校验'), '输入门段应如实标注 receipts 顶层键无机器校验（诚实标注优先于假装有强制）');
+  assert.ok(s2.includes('readManifest'), '输入门段应点名 receipts 在场契约收口于 readManifest（机器闸唯一入口）');
+  assert.ok(s2.includes('全部有机器校验'), '输入门段应如实标注 receipts 校验已机器化（不再依赖 lead 手工检查）');
 });
 
 test('第⑥段：--resume 是触发词参数而非 run-ledger CLI 子命令（两审查席误读点）', () => {
@@ -197,4 +211,3 @@ test('第⑭段：保证等级如实（T1 防疏忽/漂移，不防恶意伪造�
   assert.ok(s14.includes('独立 verify 席'), '兜底应含独立 verify 席');
   assert.ok(!s14.includes('防篡改'), '不得写「防篡改」类夸大措辞');
 });
-

@@ -564,7 +564,15 @@ function runMutatedSuite(testFile, dir) {
 
 for (const m of MEM_PROBE_MUTATIONS) {
   test(`mutation-kill: ${m.id} ${m.label} 被挖 → 恰红预测用例，失败模式隔离`, (t) => {
-    if (process.env.MP_MUTATION_CHILD === '1') { t.skip('子套件运行跳过变异测试（防递归）'); return; }
+    // 防递归 + 跨子套件隔离：MP 标记 = mem-probe 自己的子套件（防递归）；RL 标记 = run-ledger 的
+    // F1/F2/G1/G2 变异子套件（RL_MUTATION_TEST_FILES 含本文件但只设 RL+RC，不设 MP）——
+    // 本测试与 run-ledger 变异无关，在其中执行会再 spawn 孙套件、向 RL 子套件流写行：
+    // 并发负载下 mem-probe 孙套件偶发红 → ✖ 行进 RL 流 → 污染 F1/F2/G1/G2 失败集契约
+    // （实测 F2 偶发红失败集多出「mutation-kill: 变异2」即此机制）。两标记任一命中都跳过。
+    if (process.env.MP_MUTATION_CHILD === '1' || process.env.RL_MUTATION_CHILD === '1') {
+      t.skip('子套件运行跳过变异测试（MP=防递归；RL=run-ledger 变异子套件隔离，防污染其失败集契约）');
+      return;
+    }
     const testFile = copyTreeForMutation(t, (src) => src.split(m.from).join(m.to));
     const { status, failedNames } = runMutatedSuite(testFile, dirname(testFile));
     assert.equal(status, 1, `变异 ${m.id} 后套件必须红（exit 1），实际 ${status}`);
