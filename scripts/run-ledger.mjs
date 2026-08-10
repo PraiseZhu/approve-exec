@@ -590,10 +590,10 @@ export function initLedger({ ledgerPath, manifestPath, runId, now }) {
     throw new LedgerError('MANIFEST', 'manifest.waves 必须是非空数组（禁止空波次计划，F-E fail-closed）');
   }
   // 波次编号唯一 + 严格升序（manifest 边界 fail-closed）：wave 编号是计划语义键，前波/后波、
-  // 「最新已集成」全部按数值定义——重复 wave 无消歧可言，乱序 wave 会让仓内按数组顺序读的
-  // 消费（前波 slice / 派工前沿 find / 末位取最新）全部静默错位。init 是唯一合法建台账路径，
-  // 入口即拒（点名词对），台账级 schema 只拒重复不拒乱序（见 assertLedgerSchema 注：乱序台账
-  // 必须可载入，render-packet 的数值语义消费侧防御才有对照用例可测）。
+  // 「最新已集成」全部按数值定义——重复 wave 无消歧可言，乱序 wave 则是异源/手写台账信号
+  // （消费侧已全部按数值读取：前波 wave<、派工前沿 wave min、最新已集成 wave max，乱序不再
+  // 静默错位）。init 是唯一合法建台账路径，入口即拒（点名词对），台账级 schema 只拒重复不拒
+  // 乱序（见 assertLedgerSchema 注：乱序台账必须可载入，数值语义消费侧防御才有对照用例可测）。
   const seenWaveNums = new Set();
   let prevWaveNum = -1;
   for (const w of manifest.waves) {
@@ -687,7 +687,7 @@ const GROUP_TRANSITIONS = Object.freeze({
 // phase 单向前进（波次顺序门 F-E）：→validating 及后续 phase 要求——
 //   ① 所有前波已 integrated（integrated_tip != null）；
 //   ② 当前波非空且全组 review_pass（或更终态 verified）；
-//   →ready 额外要求全部波已集成（最终树 = 最后一波 integrated_tip，与 ready receipt 绑定）。
+//   →ready 额外要求全部波已集成（最终树 = wave 数值最大的波 integrated_tip，与 ready receipt 绑定）。
 // →ready 的凭据 = ready-check 写入的 receipt（见 READY_RECEIPT_KEYS 契约），此处只查波次前置。
 // 返回 null = 允许；返回字符串 = 拒绝原因（非法跳转/缺失前置）。
 function phaseTransitionAllowed(ledger, targetPhase) {
@@ -697,16 +697,22 @@ function phaseTransitionAllowed(ledger, targetPhase) {
     return `phase 非法跳转：${ledger.phase} → ${targetPhase}（须依次经过 ${PHASE_ORDER.slice(idx + 1, targetIdx).join(' → ') || '无'} 前进）`;
   }
   if (targetIdx >= PHASE_ORDER.indexOf('validating')) {
-    // 本波 = 最后一个包含非 pending 组的 wave（run 逐波推进，派过工的波才算在途；
-    // 全 pending 时取第一个波——此时前置天然不满足，fail-closed）
-    const activeWave = [...ledger.waves].reverse()
-      .find((w) => w.groups.some((g) => g.state !== 'pending')) ?? ledger.waves[0];
+    // 本波 = wave 数值最大的包含非 pending 组的 wave（run 逐波推进，派过工的波才算在途；
+    // 全 pending 时取 wave 数值最小的波——此时前置天然不满足，fail-closed）。
+    // 按数值取不依赖数组顺序（同族：renderPacket/latestIntegratedTip 已按数值取最大；
+    // waves 数组有序性无处强制，末位 ≠ 数值最大；重复 wave 已由 schema 拒）。
+    const activeCandidates = ledger.waves.filter((w) => w.groups.some((g) => g.state !== 'pending'));
+    const activeWave = activeCandidates.length > 0
+      ? activeCandidates.reduce((max, w) => (w.wave > max.wave ? w : max))
+      : (ledger.waves.length > 0
+        ? ledger.waves.reduce((min, w) => (w.wave < min.wave ? w : min))
+        : undefined);
     if (!activeWave) {
       return `缺失前置：→${targetPhase} 要求存在在途波（waves 为空，F-E fail-closed）`;
     }
     // ① 所有前波必须已集成（F-E：禁止跳过未完成前波推进 phase）
-    const activeIdx = ledger.waves.indexOf(activeWave);
-    const unintegratedPrev = ledger.waves.slice(0, activeIdx).filter((w) => w.integrated_tip === null);
+    const unintegratedPrev = ledger.waves
+      .filter((w) => w.wave < activeWave.wave && w.integrated_tip === null);
     if (unintegratedPrev.length > 0) {
       return `缺失前置：→${targetPhase} 要求所有前波已集成，未集成前波: wave ${unintegratedPrev.map((w) => w.wave).join(', ')}`;
     }
@@ -1009,8 +1015,13 @@ export function setState({
     if (to === 'dispatched' && from === 'pending') {
       if (!workerLabel) return '缺失前置：pending→dispatched 必须携带 --worker-label';
       // F-E ② 波次顺序门：只允许最早未集成 wave 的组被派工（禁止跳过未完成前波开工）
+      // 最早未集成 = wave 数值最小，不按数组位置（同族：乱序台账下 find 取数组首位会
+      // 误拒数值更小未集成波的合法派工；重复 wave 已由 schema 拒，按数值取 min 无歧义）。
       const wave = ledger.waves.find((w) => w.groups.some((x) => x.group_id === group));
-      const firstUnintegrated = ledger.waves.find((w) => w.integrated_tip === null);
+      const unintegrated = ledger.waves.filter((w) => w.integrated_tip === null);
+      const firstUnintegrated = unintegrated.length > 0
+        ? unintegrated.reduce((min, w) => (w.wave < min.wave ? w : min))
+        : undefined;
       if (wave !== firstUnintegrated) {
         return `缺失前置：组 ${group} 所在 wave ${wave.wave} 不是最早未集成 wave（wave ${firstUnintegrated.wave} 仍在途），不可跳过未完成前波派工`;
       }
@@ -1278,9 +1289,10 @@ function renderVerifyPacket({ packet, group, wave, integratedWave, identity }) {
 // ---------- record-delivery：worker 交卷进台账的唯一通道 ----------
 const EXEC_DELIVERY_KEYS = Object.freeze(['status', 'tip_sha', 'scs']);
 const EXEC_SC_KEYS = Object.freeze(['sc_id', 'status', 'evidence']);
-// candidate_sha 是审查交卷的必填契约字段：ready-check ③ 消费每组最后一条 delivery
-// 事件的 detail.candidate_sha 绑定候选 HEAD——缺它则绑定形同虚设（F1 跨组断链补充），
-// 缺失/非 40hex 一律拒，禁止从台账派生默认（被审查对象由审查方在交卷里显式声明）。
+// candidate_sha 是审查交卷的必填契约字段：ready-check ③ 按交卷类别消费（执行组绑
+// review 类最后一条 delivery）的 detail.candidate_sha 绑定候选 HEAD——缺它则绑定形同虚设
+// （F1 跨组断链补充），缺失/非 40hex 一律拒，禁止从台账派生默认（被审查对象由审查方在
+// 交卷里显式声明）。
 const REVIEW_DELIVERY_KEYS = Object.freeze(['rounds', 'findings_total', 'unresolved', 'fix_commits', 'candidate_sha']);
 const VERIFY_DELIVERY_KEYS = Object.freeze(['scs', 'integration_review', 'candidate_sha']);
 const INTEGRATION_REVIEW_KEYS = Object.freeze(['status', 'notes']);
@@ -1390,8 +1402,8 @@ function validateReviewDelivery(data) {
       throw new LedgerError('DELIVERY_SCHEMA', '审查组交卷 fix_commits 元素必须是字符串');
     }
   }
-  // candidate_sha 必填（exact 契约，不许默认）：ready-check ③ 消费最后一条 delivery 的
-  // detail.candidate_sha 绑定 HEAD，审查方必须在交卷里显式声明所审查候选
+  // candidate_sha 必填（exact 契约，不许默认）：ready-check ③ 按交卷类别消费（执行组绑
+  // review 类最后一条 delivery）的 detail.candidate_sha 绑定 HEAD，审查方必须在交卷里显式声明所审查候选
   if (typeof data.candidate_sha !== 'string' || !TIP_SHA_RE.test(data.candidate_sha)) {
     throw new LedgerError(
       'DELIVERY_SCHEMA',
@@ -1424,9 +1436,10 @@ function validateVerifyDelivery(data, packet) {
   if (typeof data.integration_review.notes !== 'string') {
     throw new LedgerError('DELIVERY_SCHEMA', '验收组交卷 integration_review.notes 必须是字符串');
   }
-  // 验收交卷是验收组最后一条 delivery 事件：ready-check ③ 读它的 detail.candidate_sha 绑定 HEAD
+  // 验收交卷 = 验收组（verify 类）最后一条 delivery：ready-check ③ 按交卷类别消费
+  // （验收组绑 verify 类最后一条）的 detail.candidate_sha 绑定 HEAD
   if (typeof data.candidate_sha !== 'string' || !TIP_SHA_RE.test(data.candidate_sha)) {
-    throw new LedgerError('DELIVERY_SCHEMA', `验收组交卷 candidate_sha 非 40 位十六进制（ready-check ③ 最后一条 delivery 绑定的读取点，当前: ${data.candidate_sha}）`);
+    throw new LedgerError('DELIVERY_SCHEMA', `验收组交卷 candidate_sha 非 40 位十六进制（ready-check ③ 消费 verify 类最后一条 delivery 的读取点，当前: ${data.candidate_sha}）`);
   }
 }
 
@@ -1523,7 +1536,8 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
       cur.events.push({
         type: 'delivery',
         at: now,
-        // F1 修复：验收交卷通常是验收组最后一条 delivery——detail.candidate_sha 供 ready-check ③ 绑定
+        // F1 修复：验收交卷 = 验收组（verify 类）最后一条 delivery——detail.candidate_sha 供
+        // ready-check ③ 按类别消费（验收组绑 verify 类最后一条）绑定
         detail: {
           group_id: group,
           integration_review_status: data.integration_review.status,
