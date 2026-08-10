@@ -1051,6 +1051,101 @@ test('sc-p1d: F-E ② 波次顺序门——wave1 未集成时 wave2 组派工必
   assert.equal(ok.status, 0, `wave1 集成后 wave2 派工应 exit 0: ${ok.stderr}`);
 });
 
+/** 克隆组对象为新 id/state（波形保持 schema 合法，乱序对照用例的组形状构造）。
+ *  state=dispatched 时 worker_label 必须非空（与 forgeG4State 同规则）。 */
+function mkGroup(src, groupId, state, workerLabel = null) {
+  return { ...src, group_id: groupId, state, worker_label: workerLabel };
+}
+
+// 以下三条是「同族第 3–5 处仍按数组顺序读 waves」的对照用例（前两处 renderPacket /
+// latestIntegratedTip 已修，见 buildVerifyLedgerWithWaveOrder 的 D1 回归测试）：
+// 每一处都是同一语义输入、仅 waves 数组排布不同（ordered / unordered），两组结果必须相同。
+// 只有 ordered 正例的测试正是这些缺陷能藏进来的原因：数组顺序在有序输入下恰好等价于
+// wave 数值，无照不见乱序下取错。台账经 init 建好后手工重排 waves（消费侧防御：
+// assertLedgerSchema 有意容忍乱序，绕过 init 的手写台账也必须按数值读取）。
+
+test('sc-p1d: 乱序/有序对照——在途波按 wave 数值取最大（activeWave 不取数组末位）', (t) => {
+  // 与 F1/F2/G1/G2 变异无关，防污染其失败集契约（机制同下方 ready/receipts 系列测试）：
+  // 本用例走 set-state 派工/phase 写路径，F1 变异（detail 字符串化）下场景 C 的 dispatch
+  // 成功分支会红——但那红与 waves 顺序无关，子套件必须跳过本用例。
+  if (process.env.RL_MUTATION_CHILD === '1') { t.skip('变异子套件运行跳过本用例（与 F1/F2/G1/G2 变异无关，防污染其失败集契约）'); return; }
+  // 语义输入：w3/w1 在途（dispatched）、w2 全 pending、三波全未集成 → →validating。
+  // 正确：activeWave = w3（数值最大在途）→ 前波 = wave 1,2 未集成 → 点名「wave 1, 2」。
+  // 修复前 unordered [w3,w2,w1]：reverse().find 取数组末位在途波 w1 → 前波名单变成「wave 3, 2」。
+  for (const order of ['ordered', 'unordered']) {
+    const dir = newTmpDir();
+    const { ledgerPath } = initLedgerFor(dir);
+    const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+    const g4 = ledger.waves[0].groups[0];
+    const w1 = { wave: 1, integrated_tip: null, groups: [mkGroup(g4, 'g4', 'dispatched', 'w1')] };
+    const w2 = { wave: 2, integrated_tip: null, groups: [mkGroup(g4, 'gx', 'pending')] };
+    const w3 = { wave: 3, integrated_tip: null, groups: [mkGroup(g4, 'gy', 'dispatched', 'w3')] };
+    ledger.waves = order === 'ordered' ? [w1, w2, w3] : [w3, w2, w1];
+    writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+    let r = cli('set-state', ledgerPath, '--phase', 'reviewing', '--now', T);
+    assert.equal(r.status, 0, `[${order}] →reviewing 应 exit 0: ${r.stderr}`);
+    r = cli('set-state', ledgerPath, '--phase', 'validating', '--now', T);
+    assert.equal(r.status, 2, `[${order}] →validating 应 exit 2: ${r.stderr}`);
+    // 前波集合必须 = {wave 1, wave 2}（在途波 = 数值最大 w3；输出顺序随数组遍历，无契约）
+    assert.match(r.stderr, /未集成前波: wave (1, 2|2, 1)/,
+      `[${order}] 前波集合必须 = {wave 1, wave 2}（修复前 unordered 取数组末位在途波 w1，前波集合变成 {3,2}）`);
+    assert.ok(!/未集成前波: wave 3/.test(r.stderr),
+      `[${order}] 前波集合不得含 wave 3（w3 是在途波本身，不是前波）`);
+  }
+});
+
+test('sc-p1d: 乱序/有序对照——前波未集成检查按 wave 数值，不按数组位置', (t) => {
+  if (process.env.RL_MUTATION_CHILD === '1') { t.skip('变异子套件运行跳过本用例（与 F1/F2/G1/G2 变异无关，防污染其失败集契约）'); return; }
+  // 语义输入：w3 在途（dispatched）、w2 已集成（verified）、w1 未集成（pending）→ →validating。
+  // 正确：activeWave = w3 → 前波（wave<3）未集成 = w1 → 点名「未集成前波: wave 1」。
+  // 修复前 unordered [w2,w3,w1]：activeWave 恰好取对（w3），但 indexOf+slice 取数组位置
+  // 前波 [w2]（已集成）→ 漏报 w1 未集成，误判前波全集成（若 w3 全组 review_pass 将错误放行）。
+  for (const order of ['ordered', 'unordered']) {
+    const dir = newTmpDir();
+    const { ledgerPath } = initLedgerFor(dir);
+    const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+    const g4 = ledger.waves[0].groups[0];
+    const verified = { ...g4, state: 'verified', worker_label: 'w1', tip_sha: SHA1,
+      review: { rounds: 2, unresolved: 0 }, verify: { status: 'pass', evidence_ref: null },
+      worktree: '/wt/g4', branch: 'feat/run-ledger', base: SHA3 };
+    const w1 = { wave: 1, integrated_tip: null, groups: [mkGroup(g4, 'gx', 'pending')] };
+    const w2 = { wave: 2, integrated_tip: SHA2, groups: [verified] };
+    const w3 = { wave: 3, integrated_tip: null, groups: [mkGroup(g4, 'gy', 'dispatched', 'w3')] };
+    ledger.waves = order === 'ordered' ? [w1, w2, w3] : [w2, w3, w1];
+    writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+    let r = cli('set-state', ledgerPath, '--phase', 'reviewing', '--now', T);
+    assert.equal(r.status, 0, `[${order}] →reviewing 应 exit 0: ${r.stderr}`);
+    r = cli('set-state', ledgerPath, '--phase', 'validating', '--now', T);
+    assert.equal(r.status, 2, `[${order}] →validating 应 exit 2: ${r.stderr}`);
+    assert.match(r.stderr, /未集成前波: wave 1/,
+      `[${order}] 前波必须按 wave 数值（<3 的未集成波 = wave 1），不得按数组位置（修复前 unordered 漏报 w1）`);
+  }
+});
+
+test('sc-p1d: 乱序/有序对照——派工前沿按 wave 数值取最早未集成（firstUnintegrated 不取数组首位）', (t) => {
+  if (process.env.RL_MUTATION_CHILD === '1') { t.skip('变异子套件运行跳过本用例（与 F1/F2/G1/G2 变异无关，防污染其失败集契约）'); return; }
+  // 语义输入：v1 组在 wave1（未集成）、wave2 已集成、wave3 未集成空波 → 派 v1 组。
+  // 正确：数值最小未集成波 = wave1 = v1 所在波 → 放行 exit 0。
+  // 修复前 unordered [w2,w3,w1]：find 取数组首位未集成波 w3 → 误拒合法派工（wave 1 本就是最早未集成）。
+  for (const order of ['ordered', 'unordered']) {
+    const dir = newTmpDir();
+    const { ledgerPath } = initLedgerFor(dir);
+    const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+    const g4 = ledger.waves[0].groups[0];
+    Object.assign(g4, { state: 'verified', worker_label: 'w1', tip_sha: SHA1,
+      review: { rounds: 2, unresolved: 0 }, verify: { status: 'pass', evidence_ref: null },
+      worktree: '/wt/g4', branch: 'feat/run-ledger', base: SHA3 });
+    const v1 = ledger.waves[1].groups[0];
+    const w1 = { wave: 1, integrated_tip: null, groups: [v1] };
+    const w2 = { wave: 2, integrated_tip: SHA2, groups: [g4] };
+    const w3 = { wave: 3, integrated_tip: null, groups: [mkGroup(g4, 'gy', 'pending')] };
+    ledger.waves = order === 'ordered' ? [w1, w2, w3] : [w2, w3, w1];
+    writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+    const r = cli('set-state', ledgerPath, '--group', 'v1', '--to', 'dispatched', '--worker-label', 'wv1', '--now', T);
+    assert.equal(r.status, 0, `[${order}] v1 在数值最小未集成波，派工应放行: ${r.stderr}`);
+  }
+});
+
 test('sc-p1d: F-E 顺序门反例——伪造台账（v1 已 verified、wave1 未集成）→ phase 推进必拒', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerForClean(dir);

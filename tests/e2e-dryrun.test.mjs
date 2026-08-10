@@ -190,8 +190,8 @@ function execGroupToVerified(env) {
   assert.equal(rr.status, 0, `g4 →verified 应 exit 0: ${rr.stderr}`);
 }
 
-// 验收组（v1）到 verified：验收交卷（candidate_sha 绑定）——它是 v1 最后一条 delivery，
-// ready-check ③ 从它读 candidate_sha
+// 验收组（v1）到 verified：验收交卷（candidate_sha 绑定）——它是 v1 的 verify 类最后一条
+// delivery，ready-check ③ 按类别消费（验收组绑 verify 类最后一条）从它读 candidate_sha
 function verifyGroupToVerified(env) {
   dispatchGroup(env, 'v1', 'w2');
   const rr = cliLedger('record-delivery', env.ledgerPath, '--group', 'v1', '--payload', JSON.stringify({
