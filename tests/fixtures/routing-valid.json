@@ -1,0 +1,23 @@
+{
+  "_readme": "selfcheck 测试用合法夹具：四档齐全、agent/effort 枚举合法。夹具注入仅测试用（--routing-file），模型 id 为占位符，不校验存在性。",
+  "execute": {
+    "agent": "claude-code",
+    "model": "test-model-execute",
+    "effort": "max"
+  },
+  "review": {
+    "agent": "codex",
+    "model": "test-model-review",
+    "effort": "xhigh"
+  },
+  "e2e": {
+    "agent": "codex",
+    "model": "test-model-e2e",
+    "effort": "high"
+  },
+  "pr_merge": {
+    "agent": "claude-code",
+    "model": "test-model-merge",
+    "effort": "medium"
+  }
+}
