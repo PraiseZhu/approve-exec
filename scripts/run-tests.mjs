@@ -21,6 +21,7 @@ export const TEST_FILES = [
   'graph.test.mjs',
   'mem-probe.test.mjs',
   'ready-check.test.mjs',
+  'run-ledger.test.mjs',
   'run-tests.test.mjs',
   'selfcheck.test.mjs',
   'skill-doc.test.mjs',
