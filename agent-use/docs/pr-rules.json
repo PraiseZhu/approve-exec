@@ -1,0 +1,30 @@
+{
+  "_comment": "PR 提交规范的机器判定数据，单一真相源，消费方=pr-autopilot 仓 scripts/pr-format-gate.mjs（submit-pr Phase 1 的 presubmit-format 闸，双树严格交集读取：merge-base 树+候选树各读一份各判一次，任一侧 FAIL 即 FAIL；两侧都无判据才 SKIP）。titleTypes 是 title type 白名单（正则 fragment，直接 join('|') 拼进 `^(...)...: .+` 形态判定，scope 括号内不得为空、冒号后须有一个空格）；featureSections / bugfixSections 是段落名白名单，存在性用标题锚定 `^#{1,6}\\s+.*<段落名>`（im，大小写不敏感），正文里出现同名词句不算；lightTypes 是轻量类型白名单，命中则不查段落、不查 Self-review 勾选率。四个键任一声明为空数组=配置错误 fail-closed（exit 3），不声明=该检查 SKIP。titleTypes 取值依据本仓全历史 commit 统计（33 commit：fix 14 / feat 6 / test 1 / docs 1 / chore 1，2026-08-09 实测）——收紧方向只列实测用过的 type；refactor/perf/build/ci/revert 历史未出现，将来出现时需先经 PR 扩展本白名单（本门对未知 type 报 FAIL 点名是规则在起作用，不是配置缺项）。lightTypes 取实测出现过的轻量类型 chore/docs/test。featureSections 结构对齐本仓功能 PR 实际正文形态（背景/改动/验证/备注/Self-review，五段，2026-08-09 wave5 起草正文实测）：背景=为什么做（本仓每轮派工都以「为什么要做（实测证据）」开头，PR 正文同口径）；改动=改了什么；验证=怎么验证（run-tests/selfcheck/变异反证）；备注=注意事项/超范围说明（本仓 PR 规模大，拆分/后续规划在此交代）；Self-review=自检清单（pr-format-gate 的 checklistFacts 专门统计该段勾选率，<80% 判 FAIL，本段必须存在否则勾选率检查无对象）。bugfixSections = feature 全部 + 根因：修复 PR 必须写清根因（本仓文化：修 bug 不写根因=没分析）；「反证/回归」语义由「验证」段承载（本仓反复强调反向变异，修复 PR 的验证段应写反向变异/反证证据）——段落存在性检查只能保证段落在、不能保证内容有反证，反证内容由 submit-pr 第三席语义审查兜底，这是本门的声明边界。",
+  "titleTypes": [
+    "feat",
+    "fix",
+    "test",
+    "docs",
+    "chore"
+  ],
+  "lightTypes": [
+    "chore",
+    "docs",
+    "test"
+  ],
+  "featureSections": [
+    "背景",
+    "改动",
+    "验证",
+    "备注",
+    "Self-review"
+  ],
+  "bugfixSections": [
+    "背景",
+    "根因",
+    "改动",
+    "验证",
+    "备注",
+    "Self-review"
+  ]
+}

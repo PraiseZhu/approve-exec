@@ -1,0 +1,26 @@
+{
+  "_comments": {
+    "routingPath": "Orca 派工模型路由真相源（routing.json），~/.claude/rules/orca-model-routing.md 指定；脚本读取后传给 create_worker",
+    "orcaPlatformCap": "Orca 平台 worker 并发硬上限（平台侧常量，非本仓可调优参数）；规划轮定案 8，见 README 并发约束",
+    "memReserveRatio": "内存探针预留比：机器总内存中为宿主/其他进程保留的比例，mem-probe 据此计算可派 worker 槽位",
+    "perWorkerBytes": "单 worker 内存预算 524288000B = 500MiB，mem-probe 分配 worker 槽位时按此切分",
+    "workerTimeoutMinutes": "单轮 worker 执行超时（分钟），超时视为该轮失败收束",
+    "reviewMaxRounds": "单 SC 最大审查-修复轮数，超过判定该组不可收敛",
+    "budgetPauseUsd": "累计预算告警线（美元），--until-sc 打到即暂停等确认",
+    "goalSkillRoot": "goal skill 目录绝对路径（skill live 源在 capabilities/source/skills/claude-active/goal）",
+    "orcaFanoutScriptsRoot": "orca-fanout skill scripts 目录绝对路径（派工包模板等脚本来源）",
+    "runLedgerDir": "run 台账目录（~ 前缀，消费脚本内展开 HOME，不写死用户主目录），--resume 断点续跑状态源",
+    "skillTriggerScanPath": "selfcheck --live 校验「批准执行」触发词行的文件路径（~ 前缀，消费脚本内展开 HOME，不写死用户主目录）；真源在 ~/.claude/rules/"
+  },
+  "routingPath": "/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json",
+  "orcaPlatformCap": 8,
+  "memReserveRatio": 0.2,
+  "perWorkerBytes": 524288000,
+  "workerTimeoutMinutes": 40,
+  "reviewMaxRounds": 3,
+  "budgetPauseUsd": 30,
+  "goalSkillRoot": "/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/goal",
+  "orcaFanoutScriptsRoot": "/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/scripts",
+  "runLedgerDir": "~/.claude/.orca/approve-exec",
+  "skillTriggerScanPath": "~/.claude/rules/skill-trigger-scan.md"
+}
