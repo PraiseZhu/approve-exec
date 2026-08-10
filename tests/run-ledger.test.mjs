@@ -1388,6 +1388,104 @@ test('sc-p1e: 验收组无更早已集成 wave 时出包被点名拒（D2 fail-c
   assert.match(r2.stderr, /实际已集成的最新 wave: 无/, '拒绝消息必须如实报告已集成最新 wave 为无');
 });
 
+/**
+ * 乱序对照用例的台账构造（D1 二阶缺陷回归）：同样的语义输入——v1 在 wave 4（验收组）、
+ * wave 3 已集成 SHA2、wave 1 已集成 SHA1——只有 waves 数组排布不同（ordered=[1,3,4] /
+ * unordered=[4,3,1]）。render-packet 必须都取到数值最新的 wave 3（SHA2），不依赖数组顺序。
+ * 台账经 init 建好后手工重排 waves（本测试测的是消费侧防御：绕过 init 的手写乱序台账在
+ * render-packet 也必须按数值取最新；manifest 边界乱序拒由下方 init 测试单独覆盖）。
+ */
+function buildVerifyLedgerWithWaveOrder(dir, order) {
+  const { ledgerPath } = initLedgerFor(dir);
+  assignIdentity(ledgerPath, 'v1', 'feat/verify');
+  const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  const v1group = ledger.waves.find((w) => w.groups.some((g) => g.group_id === 'v1')).groups[0];
+  const mkWave = (wave, tip) => ({
+    wave, integrated_tip: tip,
+    groups: [{
+      group_id: `x${wave}`, state: 'pending', sc_ids: [`sc-x${wave}`],
+      worker_label: null, dispatched_at: null, tip_sha: null,
+      review: { rounds: 0, unresolved: 0 }, verify: { status: null, evidence_ref: null },
+      worktree: null, branch: null, base: null,
+    }],
+  });
+  const w4 = { wave: 4, integrated_tip: null, groups: [v1group] };
+  const w3 = mkWave(3, SHA2);
+  const w1 = mkWave(1, SHA1);
+  ledger.waves = order === 'ordered' ? [w1, w3, w4] : [w4, w3, w1];
+  writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+  return { ledgerPath };
+}
+
+test('sc-p1e: 乱序/有序对照——「严格早于且最新」按 wave 数值取最大，不按数组位置（D1 二阶回归）', () => {
+  // 只有 ordered 正例的测试正是这条缺陷能藏进来的原因：数组末位在有序输入下恰好等于
+  // 数值最大，无照不见乱序下取错波。对照用例两组都必须取到数值最新的那一波。
+  for (const order of ['ordered', 'unordered']) {
+    const dir = newTmpDir();
+    const { ledgerPath } = buildVerifyLedgerWithWaveOrder(dir, order);
+    const r = cli('render-packet', ledgerPath, '--group', 'v1');
+    assert.equal(r.status, 0, `[${order}] render-packet 应 exit 0: ${r.stderr}`);
+    assert.match(r.stdout, new RegExp(`integrated_tip=${SHA2}`),
+      `[${order}] 必须取到数值最新的 wave 3 集成 tip（SHA2），而非数组末位的 wave 1（SHA1）`);
+    assert.match(r.stdout, new RegExp(`integrated_tip=${SHA2}（wave 3 集成 squash SHA）`),
+      `[${order}] 复查项必须点名 tip 来自 wave 3 集成`);
+    assert.ok(!r.stdout.includes(`integrated_tip=${SHA1}`), `[${order}] 不得误取 wave 1 的 tip`);
+  }
+});
+
+test('sc-p1e: 重复 wave 台账被 schema 点名拒（validate 读台账 fail-closed）', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  const g4g = ledger.waves[0].groups[0];
+  const v1g = ledger.waves.find((w) => w.groups.some((g) => g.group_id === 'v1')).groups[0];
+  ledger.waves = [
+    { wave: 1, integrated_tip: null, groups: [g4g] },
+    { wave: 1, integrated_tip: null, groups: [v1g] },
+  ];
+  writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+  const r = cli('validate', ledgerPath);
+  assert.equal(r.status, 2, '重复 wave 台账必须 exit 2');
+  assert.match(r.stderr, /SCHEMA/);
+  assert.match(r.stderr, /重复 wave 编号: 1/, '拒绝消息必须点名重复的 wave 号');
+});
+
+test('sc-p1e: 重复 wave manifest 被 init 点名拒（manifest 边界 fail-closed）', () => {
+  const dir = newTmpDir();
+  const m = JSON.parse(readFileSync(FIXTURE, 'utf8'));
+  m.waves = [
+    { wave: 1, groups: [{ group_id: 'g4', sc_ids: ['sc-p1c'], worker_count: 1 }] },
+    { wave: 1, groups: [{ group_id: 'v1', sc_ids: ['sc-v1a'], worker_count: 1 }] },
+  ];
+  m.manifest_core_hash = manifestCoreHash(m);
+  const manifestPath = join(dir, 'sample-manifest.json');
+  writeFileSync(manifestPath, JSON.stringify(m));
+  const ledgerPath = join(dir, 'ledger.json');
+  const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'dup-run', '--now', T);
+  assert.equal(r.status, 2, '重复 wave manifest init 必须 exit 2');
+  assert.match(r.stderr, /MANIFEST/);
+  assert.match(r.stderr, /重复 wave 编号: 1/, '拒绝消息必须点名重复的 wave 号');
+  assert.ok(!existsSync(ledgerPath), 'init 拒后不得留下台账文件（校验失败不落盘）');
+});
+
+test('sc-p1e: 乱序 wave manifest 被 init 点名拒（逆序对进消息）', () => {
+  const dir = newTmpDir();
+  const m = JSON.parse(readFileSync(FIXTURE, 'utf8'));
+  m.waves = [
+    { wave: 3, groups: [{ group_id: 'g4', sc_ids: ['sc-p1c'], worker_count: 1 }] },
+    { wave: 1, groups: [{ group_id: 'v1', sc_ids: ['sc-v1a'], worker_count: 1 }] },
+  ];
+  m.manifest_core_hash = manifestCoreHash(m);
+  const manifestPath = join(dir, 'sample-manifest.json');
+  writeFileSync(manifestPath, JSON.stringify(m));
+  const ledgerPath = join(dir, 'ledger.json');
+  const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'order-run', '--now', T);
+  assert.equal(r.status, 2, '乱序 wave manifest init 必须 exit 2');
+  assert.match(r.stderr, /MANIFEST/);
+  assert.match(r.stderr, /乱序: wave 3 之后出现 wave 1/, '拒绝消息必须点名逆序对');
+  assert.ok(!existsSync(ledgerPath), 'init 拒后不得留下台账文件（校验失败不落盘）');
+});
+
 test('sc-p1e: T 阶段包 verify_cmds 与夹具 manifest 尾波逐条一致', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
