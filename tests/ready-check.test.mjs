@@ -212,8 +212,11 @@ test('gap1: 组非 verified → exit 2 gap ledger-partition', (t) => {
 test('gap1: 组 tip_sha 与 delivery 事件对账失败 → exit 2 gap ledger-partition', (t) => {
   const repo = makeRepo(t);
   const env = buildEnv(t, repo, (p) => {
-    const ev = p.ledger.events.find((e) => e.type === 'delivery' && e.detail?.group_id === 'g1');
-    ev.detail.tip_sha = 'a'.repeat(40);
+    // g1 有 exec/review/verify 多条 delivery（夹具已按真实落盘形状对齐）：任一条 tip_sha
+    // 与台账 tip_sha 相符都会让 ① 对账通过，故必须把 g1 全部 delivery 的 tip_sha 一起变异
+    for (const e of p.ledger.events) {
+      if (e.type === 'delivery' && e.detail?.group_id === 'g1') e.detail.tip_sha = 'a'.repeat(40);
+    }
     return p;
   });
   expectGaps(runReady(repo, env), ['ledger-partition'], 'delivery tip_sha 对账失败');
@@ -359,14 +362,34 @@ test('gap3: review.unresolved>0 → exit 2 gap review-clean', (t) => {
   expectGaps(runReady(repo, env), ['review-clean'], 'unresolved=1');
 });
 
-test('gap3: 审查交卷（delivery 入账）candidate_sha 过期 → exit 2 gap review-clean', (t) => {
+test('gap3: 审查交卷（review 类 delivery）candidate_sha 过期（verify 绑当前 SHA 不顶替）→ exit 2 gap review-clean', (t) => {
   const repo = makeRepo(t);
   const env = buildEnv(t, repo, (p) => {
-    const ev = p.ledger.events.find((e) => e.type === 'delivery' && e.detail?.group_id === 'g1');
+    // 缺陷组合：review 交卷（delivered 时入账）绑过期 SHA；verify 交卷（review_pass 时入账、
+    // 排在最后一条）绑当前 HEAD。旧实现取「最后一条交卷」= verify → 放行；修复后必须按
+    // review 类交卷取，点名 review 实际绑定的旧 SHA。夹具 g1 已含 verify 交卷（绑当前 HEAD）。
+    const ev = p.ledger.events.find((e) => e.type === 'delivery' && e.detail?.group_id === 'g1'
+      && typeof e.detail?.rounds === 'number');
+    assert.ok(ev, '夹具 g1 必须存在 review 类 delivery 事件');
     ev.detail.candidate_sha = 'a'.repeat(40); // SHA 过期夹具（③）
     return p;
   });
   expectGaps(runReady(repo, env), ['review-clean'], '审查交卷绑定 SHA 过期');
+});
+
+test('gap3: 组无 review 类交卷（仅 exec+verify delivery）→ exit 2 gap review-clean 且点名类别序列', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, (p) => {
+    // D2 fail-closed：组没有 review 类交卷时不得回落到「最后一条」或「视为通过」——
+    // 否则 exec/verify 交卷会冒充审查绑定。消息必须带组名与实际类别序列。
+    p.ledger.events = p.ledger.events.filter((e) => !(e.type === 'delivery' && e.detail?.group_id === 'g1'
+      && typeof e.detail?.rounds === 'number'));
+    return p;
+  });
+  const res = runReady(repo, env);
+  expectGaps(res, ['review-clean'], '无 review 类交卷必须 fail-closed');
+  assert.match(res.stderr, /g1 无 review 类交卷/, '必须点名组名');
+  assert.match(res.stderr, /exec, verify/, '必须点名实际 delivery 类别序列');
 });
 
 test('gap4: e2e 报告缺失 → exit 2 gap e2e-report', (t) => {
@@ -750,6 +773,13 @@ const MUTATION_PREDICTIONS = [
   { id: '变异⑩', label: 'receipt 未落盘不得输出 READY 的守卫（写失败 exit 2）', from: 'if (receiptError !== null) {',
     to: 'if (false) {',
     red: ['receipt 写盘失败: --receipt 指向不存在目录 → exit 2 gap ready-receipt，不输出 READY 行'] },
+  // 变异⑪（D1）：③ 的绑定对象是「该类组的结论交卷」（执行组=review / 验收组=verify）。
+  // 挖回「最后一条交卷」= verify（绑当前 HEAD）→ 两条新用例（review 旧 SHA 被顶替 /
+  // 无 review 类交卷）都变绿假通过而红
+  { id: '变异⑪', label: '③ 审查交卷绑定按该类组结论交卷（review 旧 SHA 不被 verify 顶替）', from: 'const lastBinding = binding[binding.length - 1];',
+    to: 'const lastBinding = deliveries[deliveries.length - 1];',
+    red: ['gap3: 审查交卷（review 类 delivery）candidate_sha 过期（verify 绑当前 SHA 不顶替）→ exit 2 gap review-clean',
+          'gap3: 组无 review 类交卷（仅 exec+verify delivery）→ exit 2 gap review-clean 且点名类别序列'] },
 ];
 
 // 复制 scripts/tests/config 到临时目录并对脚本副本应用变异；返回 { file, dir }——
