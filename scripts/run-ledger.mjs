@@ -268,6 +268,19 @@ export function assertLedgerSchema(ledger) {
       }
     }
   }
+  // 波次编号唯一性（fail-closed，放在 per-wave 字段校验之后）：wave 编号是计划语义键，
+  // 重复即坏——任何按数值读的消费（findGroupWave / latestIntegratedTip / render-packet 的
+  // 「最新已集成」）都无法消歧，在 schema 层点名拒（readLedger 全读路径 + writeLedgerAtomic
+  // 写路径共用本函数）。注意：数组顺序在此有意不校验（乱序由 initLedger 在 manifest 边界拒；
+  // 台账级容忍乱序是为了让 render-packet 的「按数值取最新」消费侧防御可被乱序对照用例
+  // 真正测到——消费侧必须在乱序下也正确，不能靠「顺序恰好有序」隐身）。
+  const seenWaveNums = new Set();
+  for (const wave of ledger.waves) {
+    if (seenWaveNums.has(wave.wave)) {
+      throw new LedgerError('SCHEMA', `台账 waves 含重复 wave 编号: ${wave.wave}（同一波次出现两次，语义非法，fail-closed 拒）`);
+    }
+    seenWaveNums.add(wave.wave);
+  }
   if (!Array.isArray(ledger.events)) {
     throw new LedgerError('SCHEMA', '台账 events 必须是数组');
   }
@@ -576,6 +589,26 @@ export function initLedger({ ledgerPath, manifestPath, runId, now }) {
   if (!Array.isArray(manifest.waves) || manifest.waves.length === 0) {
     throw new LedgerError('MANIFEST', 'manifest.waves 必须是非空数组（禁止空波次计划，F-E fail-closed）');
   }
+  // 波次编号唯一 + 严格升序（manifest 边界 fail-closed）：wave 编号是计划语义键，前波/后波、
+  // 「最新已集成」全部按数值定义——重复 wave 无消歧可言，乱序 wave 会让仓内按数组顺序读的
+  // 消费（前波 slice / 派工前沿 find / 末位取最新）全部静默错位。init 是唯一合法建台账路径，
+  // 入口即拒（点名词对），台账级 schema 只拒重复不拒乱序（见 assertLedgerSchema 注：乱序台账
+  // 必须可载入，render-packet 的数值语义消费侧防御才有对照用例可测）。
+  const seenWaveNums = new Set();
+  let prevWaveNum = -1;
+  for (const w of manifest.waves) {
+    if (!Number.isSafeInteger(w.wave) || w.wave < 0) {
+      throw new LedgerError('MANIFEST', `wave.wave 必须是非负安全整数（≤ ${Number.MAX_SAFE_INTEGER}），当前: ${w.wave}`);
+    }
+    if (seenWaveNums.has(w.wave)) {
+      throw new LedgerError('MANIFEST', `manifest.waves 含重复 wave 编号: ${w.wave}（同一波次出现两次，语义非法，fail-closed 拒）`);
+    }
+    if (w.wave <= prevWaveNum) {
+      throw new LedgerError('MANIFEST', `manifest.waves 乱序: wave ${prevWaveNum} 之后出现 wave ${w.wave}（要求按 wave 数值严格升序，fail-closed 拒）`);
+    }
+    seenWaveNums.add(w.wave);
+    prevWaveNum = w.wave;
+  }
   // waves/groups/sc_ids 原样映射（不重算分组）；manifest_core_hash 原样复制（validate 才现算比对）
   const waves = manifest.waves.map((w) => {
     if (!Array.isArray(w.groups) || w.groups.length === 0) {
@@ -734,11 +767,12 @@ export function readReadyReceipt(receiptPath) {
   return parsed;
 }
 
-/** 台账当前最新集成 tip = 最后一个 integrated_tip != null 的 wave 的 tip（全波集成时 = 最终树）。 */
+/** 台账当前最新集成 tip = wave 数值最大的已集成 wave 的 tip（全波集成时 = 最终树）。
+ *  按数值取不依赖数组顺序（同族：waves 有序性无处强制，末位 ≠ 数值最新；重复 wave 已由 schema 拒）。 */
 export function latestIntegratedTip(ledger) {
   const integrated = ledger.waves.filter((w) => w.integrated_tip !== null);
   if (integrated.length === 0) return null;
-  return integrated[integrated.length - 1].integrated_tip;
+  return integrated.reduce((max, w) => (w.wave > max.wave ? w : max)).integrated_tip;
 }
 
 /**
@@ -1153,15 +1187,20 @@ export function renderPacket({ ledgerPath, group, manifestPath }) {
     // 不是本组所在 wave 自己的树——本波要等本组 verified 后才集成，而 render-packet
     // 必须发生在派工之前（包是派工输入），读本波 integrated_tip 必然为 null，
     // 三者互相等待 = off-by-one-wave 死锁（实测：wave 1 集成后 render wave 2 的 v1 仍拒）。
+    // 「最新已集成」= wave 数值最大，不是数组末位：waves 数组的有序性此前无处强制
+    // （schema/init 均不校验），手写/异源台账可按任意顺序排布——取末位会取到数值更小的
+    // 已集成波（同族缺陷实测：乱序 [4,3,1] 下误取 wave 1 而非 wave 3）。重复 wave 已由
+    // schema 拒，按数值取 max 无歧义。initLedger 另在 manifest 边界拒乱序（合法输入恒有序，
+    // 此处是纵深防御：绕过 init 的手写台账也必须正确）。
     const integratedBefore = ledger.waves
       .filter((w) => w.wave < wave.wave && w.integrated_tip !== null);
-    const prevIntegrated = integratedBefore[integratedBefore.length - 1] ?? null;
+    const prevIntegrated = integratedBefore.reduce((max, w) => (max === null || w.wave > max.wave ? w : max), null);
     if (!prevIntegrated) {
       // D2：fail-closed 且点名。严格更早的已集成 wave 不存在（验收组被排进首波 /
       // 前波未集成）时不许回落 null/空串/当前 tip 静默继续——消息带组名、所在 wave、
       // 以及「实际已集成的最新 wave」是什么（无则明说无）。
       const latestIntegratedWave = ledger.waves.filter((w) => w.integrated_tip !== null);
-      const latest = latestIntegratedWave[latestIntegratedWave.length - 1] ?? null;
+      const latest = latestIntegratedWave.reduce((max, w) => (max === null || w.wave > max.wave ? w : max), null);
       throw new LedgerError(
         'NO_INTEGRATED',
         `验收组 ${group} 所在 wave ${wave.wave} 之前没有已集成 wave（严格更早的 integrated_tip 不存在；` +
