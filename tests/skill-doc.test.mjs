@@ -190,7 +190,10 @@ test('第⑮段：破坏性变更迁移表——九条迁移项逐条锚定（�
   assert.ok(s15.includes('--mem-snapshot'), '迁移⑧应点名 set-state --mem-snapshot flag');
   assert.ok(s15.includes('used_slots/platform_cap/concurrency/available_bytes'), '迁移⑧应列出四键快照键名');
   assert.ok(s15.includes('packet_rendered'), '迁移⑨应点名 packet_rendered 事件凭证');
-  assert.ok(s15.includes('凭证闸'), '迁移⑨应声明凭证闸消费最近一条该组 packet_rendered 事件');
+  // 用「凭证闸消费」整词而非裸「凭证闸」——迁移⑦行「基线闸/快照闸/凭证闸全部跳过」也含
+  // 「凭证闸」二字，裸词锚会被该行稀释：已用变异复现，删掉迁移⑨行「凭证闸消费最近一条该组
+  // packet_rendered 事件」整句后，裸词 includes('凭证闸') 仍因迁移⑦行残留命中而通过。
+  assert.ok(s15.includes('凭证闸消费'), '迁移⑨应声明凭证闸消费最近一条该组 packet_rendered 事件');
 });
 
 test('第③段：五步硬定序检查单——archive 非 idle（idle 不释放槽位）+ mem-probe 重算', () => {
@@ -204,10 +207,17 @@ test('第③段：五步硬定序检查单——archive 非 idle（idle 不释�
 test('第③段（sc-p1b）：五步检查单语序——archive（步2）先于 list_workers（步3），顺序不可交换', () => {
   const s3 = sectionBetween(MARKERS[2], MARKERS[3]);
   assert.ok(s3.includes('五步硬定序检查单'), '③段应声明五步硬定序检查单');
-  const step2 = s3.indexOf('archive');
-  const step3 = s3.indexOf('list_workers');
-  assert.ok(step2 >= 0, '检查单应含 archive 动作（步2）');
-  assert.ok(step3 > step2, '检查单中 archive（步2）必须出现在 list_workers（步3）之前（archive 先于 probe，使腾出的槽位天然计入下一环节）');
+  // 锚点用「archive 全部」「list_workers 取实数」（各检查单条目的开头短语，段内各恰好出现 1 次），
+  // 不用裸词 indexOf('archive')/indexOf('list_workers')——段首散文句「顺序不可交换——尤其
+  // archive 先于 probe」本身就含 archive 一词且位于两个检查单条目之前，会把 step2 提前钉死在
+  // 散文位置：已用变异复现，把检查单第 2/3 条 bullet 内容互换（archive 全部…条目挪到步 3、
+  // list_workers 取实数…条目挪到步 2）后，21 个测试仍全绿——旧锚是无效锚。
+  const step2 = s3.indexOf('archive 全部');
+  const step3 = s3.indexOf('list_workers 取实数');
+  assert.ok(step2 >= 0, '检查单应含「archive 全部」条目开头（步2）');
+  assert.ok(step3 > step2, '检查单中「archive 全部」（步2）必须出现在「list_workers 取实数」（步3）之前（archive 先于 probe，使腾出的槽位天然计入下一环节）');
+  assert.equal(s3.indexOf('archive 全部', step2 + 1), -1, '「archive 全部」应在③段内唯一出现（否则 indexOf 命中的不保证是步骤条目本身）');
+  assert.equal(s3.indexOf('list_workers 取实数', step3 + 1), -1, '「list_workers 取实数」应在③段内唯一出现（同上）');
   assert.ok(s3.includes('第 2 步'), '检查单应显式标注 archive 为第 2 步（语序锚定，防仅字样在场）');
 });
 
