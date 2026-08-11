@@ -2266,6 +2266,38 @@ test('①: verified 组 --identity 写入拒（exit 2 点名 + 台账字节不�
   assert.equal(g.worktree, '/wt/g4', '拒写后身份字段不得被改写');
 });
 
+test('F3: dispatched 及之后 --identity 写入拒（pending-only 守卫，exit 2 点名当前状态 + 重派指路）', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  // 推到 dispatched（pending 态写身份 + render + 派工——首次写身份正例必须仍放行）
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  renderGroup(ledgerPath, 'g4');
+  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched',
+    '--worker-label', 'w1', '--mem-snapshot', memSnapshotJson(), '--now', T);
+  assert.equal(r.status, 0, `首次 pending 态写身份 + 派工应 exit 0: ${r.stderr}`);
+  // dispatched 态改身份 → exit 2 点名当前状态 + pending-only 语义（派发后改身份凭证可伪造）
+  const before = readFileSync(ledgerPath, 'utf8');
+  r = cli('set-state', ledgerPath, '--group', 'g4', '--identity',
+    JSON.stringify({ worktree: '/wt/g4', branch: 'feat/changed', base: SHA3 }), '--now', T);
+  assert.equal(r.status, 2, 'dispatched 态改身份必须 exit 2');
+  assert.match(r.stderr, /dispatched/, '必须点名当前状态');
+  assert.match(r.stderr, /只能在 pending 写入/, '必须点名 pending-only 语义');
+  assert.equal(readFileSync(ledgerPath, 'utf8'), before, '拒写后台账字节必须不变（不落事件）');
+  const g4 = readLedger(ledgerPath).waves[0].groups[0];
+  assert.equal(g4.branch, 'feat/run-ledger', '拒写后身份字段不得被改写');
+  // 正例：failed→pending 重派回到 pending 后可正常重写身份（代际隔离链不误伤）
+  r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'delivered', '--tip-sha', SHA1, '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'failed', '--event', 'timeout_redispatch', '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'pending', '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', 'g4', '--identity',
+    JSON.stringify({ worktree: '/wt/g4', branch: 'feat/redispatch-v2', base: SHA3 }), '--now', T);
+  assert.equal(r.status, 0, `failed→pending 后重写身份应放行: ${r.stderr}`);
+  assert.equal(readLedger(ledgerPath).waves[0].groups[0].branch, 'feat/redispatch-v2', '重派后新身份必须写入');
+});
+
 test('①: verified 组 record-delivery 拒（exec/review/verify 三类交卷全拒 + 字节不变）', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
@@ -2602,7 +2634,7 @@ test('sc-p0a: expectedBase 单一判据——latestIntegratedTip 优先于 init 
   assert.equal(expectedBase(readLedger(ledgerPath)), SHA1, '乱序后仍按 wave 数值取最新（不依赖数组位置）');
 });
 
-test('sc-p0a: init --baseline 必填/格式——函数层漏传抛 ARGS、CLI 非 40hex 拒、schema 缺键拒、null 兼容放行', () => {
+test('sc-p0a: init --baseline 必填/格式——函数层漏传抛 ARGS、CLI 非 40hex 拒、缺键兼容读、有键非法值仍拒、null 兼容放行', () => {
   // 函数层：initLedger 不传 baseline（undefined）→ ARGS（导出函数漏传与 CLI 同判据）
   const dir = newTmpDir();
   const manifestPath = fixtureCopy(dir);
@@ -2618,19 +2650,53 @@ test('sc-p0a: init --baseline 必填/格式——函数层漏传抛 ARGS、CLI �
   assert.equal(r.status, 2, '--baseline 非 40hex 必须 exit 2');
   assert.match(r.stderr, /非 40 位十六进制/);
   assert.equal(existsSync(ledgerPath), false, '非法 baseline 的 init 不得创建台账');
-  // schema：手工删 baseline_tip 键 → validate 拒（必填字段键必须在场）
+  // schema：手工删 baseline_tip 键 → 读入口兼容（F1：旧台账补默认 null 放行，validate exit 0）
   const { ledgerPath: lp2 } = initLedgerFor(dir);
   const l = JSON.parse(readFileSync(lp2, 'utf8'));
   delete l.baseline_tip;
   writeFileSync(lp2, `${JSON.stringify(l, null, 2)}\n`);
   r = cli('validate', lp2);
-  assert.equal(r.status, 2, '缺 baseline_tip 键的台账必须 exit 2（schema 必填）');
+  assert.equal(r.status, 0, `缺 baseline_tip 键的旧台账必须兼容读 exit 0（F1 读入口补默认 null）: ${r.stderr}`);
+  assert.equal(readLedger(lp2).baseline_tip, null, '归一化后读出 baseline_tip===null（旧台账视为兼容模式）');
+  // 有键但值非法仍拒（宽容只针对「键完全缺失」，不放松值校验）
+  const lBad = JSON.parse(readFileSync(lp2, 'utf8'));
+  lBad.baseline_tip = 123; // 非 40hex 非 null
+  const lpBad = join(dir, 'ledger-bad.json');
+  writeFileSync(lpBad, `${JSON.stringify(lBad, null, 2)}\n`);
+  r = cli('validate', lpBad);
+  assert.equal(r.status, 2, '有键但值非法（数字 123）必须仍 exit 2');
+  assert.match(r.stderr, /baseline_tip/);
+  lBad.baseline_tip = 'abc'; // 非 40hex 字符串
+  writeFileSync(lpBad, `${JSON.stringify(lBad, null, 2)}\n`);
+  r = cli('validate', lpBad);
+  assert.equal(r.status, 2, '有键但值非 40hex 字符串必须仍 exit 2');
   assert.match(r.stderr, /baseline_tip/);
   // CLI 缺省 --baseline → null 兼容模式（e2e-dryrun 路径），台账仍合法
   const lp3 = join(dir, 'ledger3.json');
   r = cli('init', lp3, '--manifest', manifestPath, '--run-id', 'compat', '--now', T);
   assert.equal(r.status, 0, `CLI 缺省 --baseline（兼容模式）应 exit 0: ${r.stderr}`);
   assert.equal(readLedger(lp3).baseline_tip, null, '兼容模式 baseline_tip=null');
+});
+
+// F2：init 缺 --baseline 的降级动作必须可见——stderr WARN 有测试保护，
+// 删掉 WARN 输出块即红（「忘传 --baseline」与「明确要兼容模式」不许同形）。
+// 警告关键字从 run-ledger.mjs CLI init 分支实际输出的字符串派生（非硬编码猜测）。
+test('F2: init 缺 --baseline 时 stderr 必须含兼容模式警告（WARN 保护，删 WARN 块即红）', () => {
+  const dir = newTmpDir();
+  const manifestPath = fixtureCopy(dir);
+  const ledgerPath = join(dir, 'ledger.json');
+  const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'compat-warn', '--now', T);
+  assert.equal(r.status, 0, `兼容模式 init 应 exit 0: ${r.stderr}`);
+  assert.match(r.stderr, /\[WARN\]/, '缺 --baseline 时 stderr 必须含 WARN 标记（降级动作显式可见）');
+  assert.match(r.stderr, /兼容模式/, '必须点名兼容模式');
+  assert.match(r.stderr, /三道 P0 新闸全部不生效/, '必须声明基线闸/快照闸/凭证闸三道 P0 新闸不生效');
+  assert.match(r.stderr, /--baseline/, '必须指路显式传 --baseline');
+  // 对照：显式传 --baseline（严格模式）不得输出 WARN
+  const lp2 = join(dir, 'ledger2.json');
+  const r2 = cli('init', lp2, '--manifest', manifestPath, '--run-id', 'strict', '--now', T, '--baseline', SHA3);
+  assert.equal(r2.status, 0, r2.stderr);
+  assert.equal(r2.stderr.includes('[WARN]'), false, '显式 --baseline 的 init 不得输出 WARN');
+  assert.equal(readLedger(lp2).baseline_tip, SHA3, '严格模式 baseline_tip=40hex');
 });
 
 // =====================================================================
@@ -3057,6 +3123,9 @@ const RL_MUTATION_PREDICTIONS = [
       'sc-p0c: 身份变更后旧凭证失配拒（digest 不匹配，exit 2「身份已变更未重出包」）',
       'sc-p0c: 重派代际隔离——重派后 assignment_seq+1 旧凭证失配拒、重新 render 后放行、旧事件保留审计',
       'sc-p0a/b/c 兼容模式对照——init 无 baseline 时基线闸/快照闸/凭证闸全部不强制（e2e-dryrun 路径）',
+      // F3 测试含 set-state dispatched 写路径步骤（推到 dispatched 验证守卫）：
+      // F1 变异字符串化 detail → 该步骤 schema 拒 → 红（同上方 sc-p0c 组同因同款）
+      'F3: dispatched 及之后 --identity 写入拒（pending-only 守卫，exit 2 点名当前状态 + 重派指路）',
     ],
   },
   {
@@ -3089,10 +3158,10 @@ const RL_MUTATION_PREDICTIONS = [
   },
   {
     id: 'G1 变异',
-    label: '组可写性守卫挖除（identity 守卫 + 交卷生命周期门两锚点 → if (false)，① 修复点）',
+    label: '组可写性守卫挖除（identity pending-only 守卫 + 交卷生命周期门两锚点 → if (false)，① 修复点）',
     mutate: (src) => src
       .replace(
-        "if (g.state === 'verified') {",
+        "if (g.state !== 'pending') {",
         'if (false) {',
       )
       .replace(
@@ -3101,6 +3170,9 @@ const RL_MUTATION_PREDICTIONS = [
       ),
     red: [
       '①: verified 组 --identity 写入拒（exit 2 点名 + 台账字节不变，终态只读）',
+      // F3 收紧为 pending-only 后，dispatched 态改身份同样由本守卫拒绝——守卫挖除即放行红
+      // （同一锚点同一契约，语义合法扩展；verified 拒是 pending-only 的子集）
+      'F3: dispatched 及之后 --identity 写入拒（pending-only 守卫，exit 2 点名当前状态 + 重派指路）',
       '①: verified 组 record-delivery 拒（exec/review/verify 三类交卷全拒 + 字节不变）',
       '①: 方向 B——pending 组提交合法 verify payload 拒（验收证据不可预写）+ 字节不变',
       '①: 交卷生命周期矩阵——每类交卷在每个非法状态 exit 2 + 字节不变，合法状态放行',

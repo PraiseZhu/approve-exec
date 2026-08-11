@@ -214,11 +214,15 @@ export function assertLedgerSchema(ledger) {
   if (ledger.phase === 'ready' && typeof ledger.phase_at !== 'string') {
     throw new LedgerError('SCHEMA', '台账 phase=ready 必须携带非空 phase_at（ready 时点唯一记录；ready-check / set-state 凭据路径写入）');
   }
-  // baseline_tip（sc-p0a 基线漂移闸）：必填字段（键必须在场），值为 40hex 或 null。
+  // baseline_tip（sc-p0a 基线漂移闸）：值为 40hex 或 null。
   // 40hex = 严格模式（基线闸/快照闸/凭证闸全强制）；null = 兼容模式（e2e-dryrun 等
   // 无基线语义的旧路径，三道新闸跳过）。init 是唯一合法建台账路径，键由 initLedger 写入。
+  // 键完全缺失 = sc-p0a 引入前创建的存量台账（读入口宽容：补默认 null 后放行，不 throw，
+  // 语义 = 旧台账视为兼容模式——baseline_tip=null 本就是兼容模式的合法值；首次写操作经
+  // writeLedgerAtomic 自校验会把补默认后的键落盘，磁盘侧自然迁移）。宽容只针对「键完全
+  // 缺失」这一种向后兼容场景：有键但值非法（非 40hex 非 null）仍拒，不放松值校验。
   if (!('baseline_tip' in ledger)) {
-    throw new LedgerError('SCHEMA', '台账缺 baseline_tip 键（sc-p0a 必填字段：init 基线 SHA，40hex 或 null；手写/异源台账缺键即拒）');
+    ledger.baseline_tip = null;
   }
   if (ledger.baseline_tip !== null && !TIP_SHA_RE.test(ledger.baseline_tip)) {
     throw new LedgerError('SCHEMA', `台账 baseline_tip 非 40 位十六进制或 null: ${ledger.baseline_tip}`);
@@ -910,17 +914,20 @@ function rejectWithEvent({ ledgerPath, expected, now, group, reason, code, messa
 
 /**
  * 组级可写性守卫（① 修复点）：非状态写入口之一——身份写入（--identity）。
- * GROUP_TRANSITIONS.verified = [] 只挡「状态跳转」一条路径；身份写入不是跳转，
- * 旧实现完全绕过——终态组的 worktree/branch/base 仍可被改写（重放攻击的第二形态：
- * 不改状态改内容）。verified 是组级终态（不可回退），任何身份写入都拒。
+ * 只允许 pending 态：组一旦 dispatched 及之后（dispatched/delivered/review_pass/
+ * verified/failed），身份写入一律拒——派发后改身份会让台账审计成新身份，而唯一
+ * packet_rendered 凭证仍是旧身份的 identity_digest，失配却无人拦（F3：派发后改身份
+ * 凭证可伪造，伪身份可一路走到 verified）。verified 仅是其中不可回退的终态特例，
+ * 收紧为 pending-only 后自然覆盖。重派链 failed→pending 清空身份 + assignment_seq+1
+ * 回到 pending 后方可重写身份（代际隔离天然接续）。
  * 与 rejectWithEvent 不同：拒写不落事件（纯 throw）——验收口径要求被拒后台账字节不变
  * （同 phase=ready 冻结的 FROZEN 路径：冻结后不落事件）。
  */
 function assertGroupWritable(g, what) {
-  if (g.state === 'verified') {
+  if (g.state !== 'pending') {
     throw new LedgerError(
       'ILLEGAL_TRANSITION',
-      `组 ${g.group_id} 已 verified（组级终态，不可回退），拒绝${what}（终态只读，重放攻击拒）`
+      `组 ${g.group_id} 当前 ${g.state}，身份只能在 pending 写入（变更身份须先 failed→pending 重派；派发后组身份只读，重放攻击拒），拒绝${what}`
     );
   }
 }

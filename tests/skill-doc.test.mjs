@@ -115,6 +115,20 @@ test('doc↔实现同步②（sc-p1b）：四组字面量从 run-ledger.mjs 实�
   }
 });
 
+test('F4: --mem-snapshot 双锚——命令示例处（③段）与迁移表处（⑮段）任一被改即红', () => {
+  // 弱锚问题（独立核查变异实测）：同步②只断言「SKILL.md 任意处含 --mem-snapshot」，而该
+  // 字面量在 SKILL.md 多处出现（③段检查单命令示例 + ⑮迁移⑧行）——把③段命令示例处改错、
+  // 保留迁移表处的变异测试全绿（迁移表残留稀释断言）。对照 --baseline/packet_rendered 的
+  // 双锚（同步② + 迁移表段各一），把 --mem-snapshot 补成③段 + ⑮段双锚：任一被改即红。
+  // 字面量从实现源码派生（与同步②同一来源，不硬编码第二份）。
+  const impl = ledgerSrc.match(/--mem-snapshot/);
+  assert.ok(impl, 'run-ledger.mjs 中应有 --mem-snapshot 实现字面量');
+  const s3 = sectionBetween(MARKERS[2], MARKERS[3]);
+  assert.ok(s3.includes(impl[0]), `③段检查单命令示例必须含 --mem-snapshot（F4 双锚之命令示例处，防迁移表残留稀释）`);
+  const s15 = sectionBetween(MARKERS[14], MARKERS[15]);
+  assert.ok(s15.includes(impl[0]), `⑮迁移表段必须含 --mem-snapshot（F4 双锚之迁移表处）`);
+});
+
 test('config 键名比对：SKILL.md 引用的 camelCase 键全部真实存在于 defaults.json', () => {
   const backtickTokens = [...skillDoc.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
   const camelCaseTokens = backtickTokens.filter((t) => /^[a-z][a-zA-Z0-9]*$/.test(t) && /[A-Z]/.test(t));
