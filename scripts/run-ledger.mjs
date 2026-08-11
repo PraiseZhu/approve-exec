@@ -1918,6 +1918,19 @@ export function runCli(argv) {
         // sc-p0a：--baseline 可选（缺省 null = 兼容模式，e2e-dryrun 等旧路径；严格模式
         // 下 run-ledger 测试路径全部显式传 40hex）。函数层 initLedger 对 undefined 拒
         // （in-process 漏传同样拒），CLI 缺省显式传 null 走兼容。
+        // 审查发现（组级审查）：缺省即入兼容模式会让「忘传 --baseline」与「明确要兼容模式」
+        // 在 exit code / stdout 上完全同形——lead 真实 run 漏传 --baseline 时，基线闸/快照闸/
+        // 凭证闸三道 P0 新闸会静默全部不生效，且无任何区分信号。CLI 层无法强制必填
+        // （tests/e2e-dryrun.test.mjs 明确不改范围、不传 --baseline，强制必填会破坏该测试）；
+        // 折中：缺省时把降级动作打成显式 stderr 警告（不改变 exit code / stdout，不破坏既有
+        // 断言），让「三道新闸未生效」这件事在任何真实调用现场都可见，不再只是代码注释里的说明。
+        if (flags.baseline === undefined) {
+          console.error(
+            'run-ledger: [WARN] init 未传 --baseline，台账进入兼容模式（baseline_tip=null）：'
+            + 'sc-p0a 基线漂移闸 / sc-p0b 派发内存快照闸 / sc-p0c 出包凭证闸三道 P0 新闸全部不生效。'
+            + '真实执行请显式传 --baseline <40hex>；仅 e2e-dryrun 等无基线语义的旧路径应缺省此 flag。'
+          );
+        }
         initLedger({
           ledgerPath,
           manifestPath: flags.manifest,
