@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import {
   readLedger, writeLedgerAtomic, writeTmp, renameTmp, initLedger,
   tmpPath, acquireLedgerLock, releaseLedgerLock, manifestCoreHash, LedgerError,
+  identityDigest, expectedBase, staleness, assertMemSnapshot, renderPacket,
 } from '../scripts/run-ledger.mjs';
 // buildChildEnv：变异子套件自起子进程，git 隔离必须同一份实现（run-tests.mjs 是唯一权威）。
 // 子套件在复制树里跑（含 ready-check/e2e-dryrun 的 git makeRepo），缺隔离会继承机器全局
@@ -67,11 +68,12 @@ function tamperManifestThenInit(dir, mutate) {
   return { ledgerPath, manifestPath };
 }
 
-/** init 一个台账（CLI 层），返回 { ledgerPath, manifestPath }。 */
+/** init 一个台账（CLI 层），返回 { ledgerPath, manifestPath }。
+ *  sc-p0a 迁移：init 必传 --baseline SHA3（严格模式——基线闸/快照闸/凭证闸全强制）。 */
 function initLedgerFor(dir) {
   const ledgerPath = join(dir, 'ledger.json');
   const manifestPath = fixtureCopy(dir);
-  const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'test-run', '--now', T);
+  const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'test-run', '--now', T, '--baseline', SHA3);
   assert.equal(r.status, 0, `init 应 exit 0: ${r.stderr}`);
   return { ledgerPath, manifestPath };
 }
@@ -79,17 +81,31 @@ function initLedgerFor(dir) {
 function initLedgerForClean(dir) {
   const ledgerPath = join(dir, 'ledger.json');
   const manifestPath = fixtureCopy(dir);
-  initLedger({ ledgerPath, manifestPath, runId: 'test-run', now: T });
+  initLedger({ ledgerPath, manifestPath, runId: 'test-run', now: T, baseline: SHA3 });
   return { ledgerPath, manifestPath };
 }
 
-/** 给组分配身份（worktree/branch/base）。 */
-function assignIdentity(ledgerPath, group, branch) {
+/** 给组分配身份（worktree/branch/base）。base 默认 SHA3（= init 基线，无集成时期望基线）；
+ *  集成后派工的组必须显式传最新集成 tip（sc-p0a 基线闸）。 */
+function assignIdentity(ledgerPath, group, branch, base = SHA3) {
   const r = cli(
     'set-state', ledgerPath, '--group', group, '--identity',
-    JSON.stringify({ worktree: `/wt/${group}`, branch, base: SHA3 }), '--now', T
+    JSON.stringify({ worktree: `/wt/${group}`, branch, base }), '--now', T
   );
   assert.equal(r.status, 0, `set-state --identity 应 exit 0: ${r.stderr}`);
+}
+
+/** 合法 mem-snapshot（sc-p0b 四键 exact 契约的合法样例：全非负整数、concurrency<=cap、
+ *  used_slots<=cap）。lead 从 mem-probe --json 提取四键构造。 */
+function memSnapshotJson({ usedSlots = 0, platformCap = 8, concurrency = 8, availableBytes = 34359738368 } = {}) {
+  return JSON.stringify({ used_slots: usedSlots, platform_cap: platformCap, concurrency, available_bytes: availableBytes });
+}
+
+/** render-packet 成功出包（断言 exit 0），返回 stdout。sc-p0c 凭证闸的前置步骤。 */
+function renderGroup(ledgerPath, group) {
+  const r = cli('render-packet', ledgerPath, '--group', group);
+  assert.equal(r.status, 0, `render-packet ${group} 应 exit 0: ${r.stderr}`);
+  return r.stdout;
 }
 
 /** F-H 后唯一合法通道：record-delivery 验收交卷写入 verify.status=pass + evidence_ref
@@ -109,11 +125,15 @@ function grantVerifyPass(ledgerPath, group) {
 
 /** 把组 g4 走完到 verified 的合法链（sc-p1d 合法链 + verify 凭据走验收交卷）。
  * 注意：delivered 自环仅 rounds+1 且受 reviewMaxRounds 上限（unresolved 唯一通道是审查交卷，
- * 测试初始 unresolved=0 直接可 review_pass）。 */
+ * 测试初始 unresolved=0 直接可 review_pass）。
+ * sc-p0a/b/c 迁移：dispatched 前先分配身份（base=SHA3=init 基线）+ render-packet（凭证闸
+ * 前置）+ --mem-snapshot（快照闸）——g4 在 wave1、无已集成波，expectedBase=init 基线 SHA3。 */
 function runG4ToVerified(ledgerPath) {
   const g = 'g4';
+  assignIdentity(ledgerPath, g, 'feat/run-ledger');
+  renderGroup(ledgerPath, g);
   for (const [to, extra] of [
-    ['dispatched', ['--worker-label', 'w1']],
+    ['dispatched', ['--worker-label', 'w1', '--mem-snapshot', memSnapshotJson()]],
     ['delivered', ['--tip-sha', SHA1]],
     ['delivered', []],
     ['delivered', []],
@@ -173,14 +193,17 @@ function forgeG4State(ledgerPath, state) {
   writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
 }
 
-/** 完整合法链到 phase=packaging：两波全 verified + 集成 + 单向前进（→ready 测试的前置）。 */
+/** 完整合法链到 phase=packaging：两波全 verified + 集成 + 单向前进（→ready 测试的前置）。
+ *  sc-p0a/b/c 迁移：v1（验收组）在 wave1 集成后派工——base 取最新集成点 SHA2（基线闸），
+ *  render-packet 前置（凭证闸，验收组模板需严格更早的已集成波 = wave1） + --mem-snapshot。 */
 function runFullChainToPackaging(ledgerPath) {
   runG4ToVerified(ledgerPath);
   let r = cli('set-state', ledgerPath, '--wave', '1', '--integrate', SHA2, '--now', T);
   assert.equal(r.status, 0, r.stderr);
-  assignIdentity(ledgerPath, 'v1', 'feat/verify');
+  assignIdentity(ledgerPath, 'v1', 'feat/verify', SHA2);
+  renderGroup(ledgerPath, 'v1');
   for (const [to, extra] of [
-    ['dispatched', ['--worker-label', 'wv1']],
+    ['dispatched', ['--worker-label', 'wv1', '--mem-snapshot', memSnapshotJson()]],
     ['delivered', ['--tip-sha', SHA1]],
     ['delivered', []],
     ['review_pass', []],
@@ -467,7 +490,7 @@ test('sc-p1c: init 遇 manifest 组缺 sc_ids 数组 exit 2（禁止静默空组
   const m = JSON.parse(readFileSync(manifestPath, 'utf8'));
   delete m.waves[0].groups[0].sc_ids;
   writeFileSync(manifestPath, JSON.stringify(m));
-  const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T);
+  const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T, '--baseline', SHA3);
   assert.equal(r.status, 2, '组缺 sc_ids 必须 exit 2（fail-closed）');
   assert.match(r.stderr, /MANIFEST/, '必须走 MANIFEST 拒绝路径（点名，不是下游 TypeError 兜底）');
   assert.match(r.stderr, /缺少 sc_ids/);
@@ -494,7 +517,7 @@ test('sc-receipts: manifest.receipts 形状校验——坏形状 init 拒、合�
     const m = JSON.parse(readFileSync(manifestPath, 'utf8'));
     m.receipts = 'not-an-array';
     writeFileSync(manifestPath, JSON.stringify(m));
-    const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T);
+    const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T, '--baseline', SHA3);
     assert.equal(r.status, 2, 'receipts 非数组必须 exit 2');
     assert.match(r.stderr, /receipts 必须是数组/, `应点名 receipts 必须是数组: ${r.stderr}`);
   }
@@ -506,7 +529,7 @@ test('sc-receipts: manifest.receipts 形状校验——坏形状 init 拒、合�
     const m = JSON.parse(readFileSync(manifestPath, 'utf8'));
     m.receipts = [{ slug: 's', manifest_core_hash: SHA64, plan_hash: SHA64, recorded_at: T, extra: 1 }];
     writeFileSync(manifestPath, JSON.stringify(m));
-    const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T);
+    const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T, '--baseline', SHA3);
     assert.equal(r.status, 2, 'receipt 未知键必须 exit 2');
     assert.match(r.stderr, /未列键: extra/, `应点名未知键 extra: ${r.stderr}`);
   }
@@ -518,7 +541,7 @@ test('sc-receipts: manifest.receipts 形状校验——坏形状 init 拒、合�
     const m = JSON.parse(readFileSync(manifestPath, 'utf8'));
     m.receipts = [{ slug: 's', manifest_core_hash: 'short', plan_hash: SHA64, recorded_at: T }];
     writeFileSync(manifestPath, JSON.stringify(m));
-    const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T);
+    const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T, '--baseline', SHA3);
     assert.equal(r.status, 2, 'receipt hash 非 64hex 必须 exit 2');
     assert.match(r.stderr, /manifest_core_hash 必须是 64 位十六进制/);
   }
@@ -534,7 +557,7 @@ test('sc-receipts: manifest.receipts 形状校验——坏形状 init 拒、合�
       { slug: 'run-b', manifest_core_hash: SHA64, plan_hash: SHA64, recorded_at: T },
     ];
     writeFileSync(manifestPath, JSON.stringify(m));
-    const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T);
+    const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T, '--baseline', SHA3);
     assert.equal(r.status, 0, `合法 receipts 应 exit 0: ${r.stderr}`);
   }
 });
@@ -613,13 +636,18 @@ test('F-C: acquireLedgerLock 拿不到锁超时抛 LOCK_TIMEOUT（函数层，�
 test('F-C: 持锁中写操作 exit 2 点名 LOCK_TIMEOUT 且台账未被写入', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
+  // 先满足 sc-p0b/c 派工前置（身份+render+快照），让写路径真正走到锁获取处——
+  // 否则凭证闸在锁外先拒（PRECONDITION），测不到 LOCK_TIMEOUT。
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  renderGroup(ledgerPath, 'g4');
+  const verBefore = readLedger(ledgerPath).version;
   // 模拟他写者持锁（活 pid）
   writeFileSync(`${ledgerPath}.lock`, `${process.pid}\n`);
-  const r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--now', T);
+  const r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--mem-snapshot', memSnapshotJson(), '--now', T);
   assert.equal(r.status, 2, '持锁中写必须 exit 2（fail-closed，拿不到锁不得继续）');
   assert.match(r.stderr, /LOCK_TIMEOUT/);
   assert.match(r.stderr, /lock/);
-  assert.equal(readLedger(ledgerPath).version, 0, '持锁失败后台账必须未被写入');
+  assert.equal(readLedger(ledgerPath).version, verBefore, '持锁失败后台账必须未被写入');
 });
 
 test('F-C: 两个进程真实竞态——成功数 == version 增量，且每个报成功的写者回读到的都是自身的值', async () => {
@@ -736,9 +764,13 @@ test('sc-p1d: 合法链全通（dispatched→delivered→自环两轮→review_p
 test('sc-p1d: delivered 自环达上限拒（F-G 第 4 次自环必红，rounds 不可无限膨胀）', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
+  // sc-p0a/b/c 迁移：合法派工前先身份+render（凭证闸前置）
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  renderGroup(ledgerPath, 'g4');
+
   const g = 'g4';
   for (const [to, extra] of [
-    ['dispatched', ['--worker-label', 'w1']],
+    ['dispatched', ['--worker-label', 'w1', '--mem-snapshot', memSnapshotJson()]],
     ['delivered', ['--tip-sha', SHA1]],
   ]) {
     const r = cli('set-state', ledgerPath, '--group', g, '--to', to, ...extra, '--now', T);
@@ -758,9 +790,13 @@ test('sc-p1d: delivered 自环达上限拒（F-G 第 4 次自环必红，rounds 
 test('sc-p1d: rounds 超上限时 delivered→review_pass 拒（审查不收敛，record-delivery 通道写入的高 rounds）', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
+  // sc-p0a/b/c 迁移：合法派工前先身份+render（凭证闸前置）
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  renderGroup(ledgerPath, 'g4');
+
   const g = 'g4';
   for (const [to, extra] of [
-    ['dispatched', ['--worker-label', 'w1']],
+    ['dispatched', ['--worker-label', 'w1', '--mem-snapshot', memSnapshotJson()]],
     ['delivered', ['--tip-sha', SHA1]],
     ['delivered', []],
   ]) {
@@ -779,9 +815,13 @@ test('sc-p1d: rounds 超上限时 delivered→review_pass 拒（审查不收敛�
 test('sc-p1d: unresolved>0 时 review_pass 拒', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
+  // sc-p0a/b/c 迁移：合法派工前先身份+render（凭证闸前置）
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  renderGroup(ledgerPath, 'g4');
+
   const g = 'g4';
   for (const [to, extra] of [
-    ['dispatched', ['--worker-label', 'w1']],
+    ['dispatched', ['--worker-label', 'w1', '--mem-snapshot', memSnapshotJson()]],
     ['delivered', ['--tip-sha', SHA1]],
     ['delivered', []],
   ]) {
@@ -808,8 +848,10 @@ test('sc-p1d: 非法跳转矩阵（12 例）全部 exit 2 且落 illegal_transit
     const r = cli('set-state', ledgerPath, '--group', g, '--to', to, '--now', T);
     assert.equal(r.status, 2, `pending→${to} 必须 exit 2`);
   }
-  // 阶段 B：dispatched 上的非法目标
-  let r = cli('set-state', ledgerPath, '--group', g, '--to', 'dispatched', '--worker-label', 'w1', '--now', T);
+  // 阶段 B：dispatched 上的非法目标（sc-p0a/b/c 迁移：合法派工前先身份+render+快照）
+  assignIdentity(ledgerPath, g, 'feat/run-ledger');
+  renderGroup(ledgerPath, g);
+  let r = cli('set-state', ledgerPath, '--group', g, '--to', 'dispatched', '--worker-label', 'w1', '--mem-snapshot', memSnapshotJson(), '--now', T);
   assert.equal(r.status, 0, r.stderr);
   for (const to of ['review_pass', 'verified', 'dispatched', 'pending']) {
     r = cli('set-state', ledgerPath, '--group', g, '--to', to, '--now', T);
@@ -850,9 +892,11 @@ test('sc-p1d: failed→pending 后 rounds==0 且 tip_sha/worker_label/身份三�
   const g = 'g4';
   // 先分配身份（重派后必须被清空，render-packet 不得拿旧身份出包）
   assignIdentity(ledgerPath, g, 'feat/run-ledger');
+  // sc-p0c 迁移：派工前 render-packet 出包（凭证闸前置，落 packet_rendered 事件）
+  renderGroup(ledgerPath, g);
   // 走到 delivered 有计数（unresolved 走审查交卷唯一通道）
   for (const [to, extra] of [
-    ['dispatched', ['--worker-label', 'w1']],
+    ['dispatched', ['--worker-label', 'w1', '--mem-snapshot', memSnapshotJson()]],
     ['delivered', ['--tip-sha', SHA1]],
     ['delivered', []],
   ]) {
@@ -919,7 +963,10 @@ test('sc-p1d: --identity 含空白字符拒（身份行空格分隔解析）', (
 test('sc-p1d: tip_sha 非 40hex 拒（任意字符串拒，格式校验）', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
-  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--now', T);
+  // sc-p0a/b/c 迁移：合法派工前先身份+render+快照
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  renderGroup(ledgerPath, 'g4');
+  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--mem-snapshot', memSnapshotJson(), '--now', T);
   assert.equal(r.status, 0, r.stderr);
   for (const bad of ['xyz', SHA39, 'A'.repeat(40), '12345']) {
     r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'delivered', '--tip-sha', bad, '--now', T);
@@ -963,12 +1010,14 @@ test('sc-p1d: phase 单向前进合法链 + 波次顺序门（F-E）+ →ready r
   assert.equal(r.status, 2, 'wave1 未集成时 wave2 派工必须 exit 2（波次顺序门）');
   assert.match(r.stderr, /最早未集成|前波/);
   // 完整合法链：g4 → verified（凭据走验收交卷）→ wave1 集成；v1 → verified → wave2 集成
+  // sc-p0a/b/c 迁移：v1 在 wave1 集成后派工——base 取最新集成点 SHA2（基线闸）+ render 前置 + 快照
   runG4ToVerified(ledgerPath);
   r = cli('set-state', ledgerPath, '--wave', '1', '--integrate', SHA2, '--now', T);
   assert.equal(r.status, 0, r.stderr);
-  assignIdentity(ledgerPath, v, 'feat/verify');
+  assignIdentity(ledgerPath, v, 'feat/verify', SHA2);
+  renderGroup(ledgerPath, v);
   for (const [to, extra] of [
-    ['dispatched', ['--worker-label', 'wv1']],
+    ['dispatched', ['--worker-label', 'wv1', '--mem-snapshot', memSnapshotJson()]],
     ['delivered', ['--tip-sha', SHA1]],
     ['delivered', []],
     ['review_pass', []],
@@ -1035,7 +1084,9 @@ test('sc-p1d: phase 单向前进合法链 + 波次顺序门（F-E）+ →ready r
 test('sc-p1d: F-E ② 波次顺序门——wave1 未集成时 wave2 组派工必拒（跳过未完成前波开工）', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
-  // 原漏洞路径：跳过 wave1（g4 不派工不集成），直接派 wave2 的 v1
+  // 原漏洞路径：跳过 wave1（g4 不派工不集成），直接派 wave2 的 v1。
+  // sc-p0a 迁移：集成前的 identity base=init 基线 SHA3（此时无集成点）；波次门先于凭证闸，
+  // v1 无凭证也会先报「最早未集成」，故此处不 render（render 需要 wave1 已集成，验收组模板）。
   assignIdentity(ledgerPath, 'v1', 'feat/verify');
   const r = cli('set-state', ledgerPath, '--group', 'v1', '--to', 'dispatched', '--worker-label', 'wv1', '--now', T);
   assert.equal(r.status, 2, 'wave1 未集成时 wave2 派工必须 exit 2（波次顺序门）');
@@ -1043,11 +1094,14 @@ test('sc-p1d: F-E ② 波次顺序门——wave1 未集成时 wave2 组派工必
   const ledger = readLedger(ledgerPath);
   assert.equal(ledger.waves[0].groups[0].state, 'pending', 'wave1 g4 必须仍 pending');
   assert.equal(ledger.waves[1].groups[0].state, 'pending', 'wave2 v1 必须仍 pending（派工被顺序门拒）');
-  // 对照：wave1 集成后 wave2 派工放行（合法链前半段）
+  // 对照：wave1 集成后 wave2 派工放行（合法链前半段）。
+  // sc-p0a/b/c 迁移：v1 重分配身份（base=wave1 集成点 SHA2）+ render 前置（凭证闸）+ 快照
   runG4ToVerified(ledgerPath);
   let ok = cli('set-state', ledgerPath, '--wave', '1', '--integrate', SHA2, '--now', T);
   assert.equal(ok.status, 0, ok.stderr);
-  ok = cli('set-state', ledgerPath, '--group', 'v1', '--to', 'dispatched', '--worker-label', 'wv1', '--now', T);
+  assignIdentity(ledgerPath, 'v1', 'feat/verify', SHA2);
+  renderGroup(ledgerPath, 'v1');
+  ok = cli('set-state', ledgerPath, '--group', 'v1', '--to', 'dispatched', '--worker-label', 'wv1', '--mem-snapshot', memSnapshotJson(), '--now', T);
   assert.equal(ok.status, 0, `wave1 集成后 wave2 派工应 exit 0: ${ok.stderr}`);
 });
 
@@ -1136,12 +1190,29 @@ test('sc-p1d: 乱序/有序对照——派工前沿按 wave 数值取最早未�
       review: { rounds: 2, unresolved: 0 }, verify: { status: 'pass', evidence_ref: null },
       worktree: '/wt/g4', branch: 'feat/run-ledger', base: SHA3 });
     const v1 = ledger.waves[1].groups[0];
+    // sc-p0a 迁移：v1 在 wave1（手工构造）、wave2 已集成——期望基线 = wave2 集成点 SHA2，
+    // v1 身份 base 必须等于 SHA2（基线闸消费点①）；v1 是验收组且无更早已集成波，无法经
+    // render-packet 出包（NO_INTEGRATED）——凭证闸的凭证事件手工注入（夹具构造手段，
+    // digest 按当前身份现算；本用例语义是测派工前沿波次门，不是测凭证闸）。
+    v1.worktree = '/wt/v1';
+    v1.branch = 'feat/verify';
+    v1.base = SHA2;
+    v1.assignment_seq = 0;
+    ledger.events.push({
+      type: 'packet_rendered', at: T,
+      detail: {
+        group_id: 'v1',
+        identity_digest: identityDigest({ worktree: '/wt/v1', branch: 'feat/verify', base: SHA2, assignmentSeq: 0 }),
+        packet_sha256: 'f'.repeat(16),
+        assignment_seq: 0,
+      },
+    });
     const w1 = { wave: 1, integrated_tip: null, groups: [v1] };
     const w2 = { wave: 2, integrated_tip: SHA2, groups: [g4] };
     const w3 = { wave: 3, integrated_tip: null, groups: [mkGroup(g4, 'gy', 'pending')] };
     ledger.waves = order === 'ordered' ? [w1, w2, w3] : [w2, w3, w1];
     writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
-    const r = cli('set-state', ledgerPath, '--group', 'v1', '--to', 'dispatched', '--worker-label', 'wv1', '--now', T);
+    const r = cli('set-state', ledgerPath, '--group', 'v1', '--to', 'dispatched', '--worker-label', 'wv1', '--mem-snapshot', memSnapshotJson(), '--now', T);
     assert.equal(r.status, 0, `[${order}] v1 在数值最小未集成波，派工应放行: ${r.stderr}`);
   }
 });
@@ -1185,7 +1256,7 @@ test('sc-p1d: F-E 空结构 fail-closed——空 waves/groups/sc_ids 在 init �
     const m = JSON.parse(readFileSync(manifestPath, 'utf8'));
     mutate(m);
     writeFileSync(manifestPath, JSON.stringify(m));
-    const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T);
+    const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T, '--baseline', SHA3);
     assert.equal(r.status, 2, `${label} 的 init 必须 exit 2（fail-closed）`);
     assert.match(r.stderr, /MANIFEST/, `${label} 必须走 MANIFEST 拒绝路径`);
     assert.equal(existsSync(ledgerPath), false, `${label} 的 init 不得创建台账`);
@@ -1220,7 +1291,7 @@ test('init 输入门: manifest 缺 receipts 键 exit 2 点名且不建台账（r
   const m = JSON.parse(readFileSync(manifestPath, 'utf8'));
   delete m.receipts;
   writeFileSync(manifestPath, JSON.stringify(m));
-  const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T);
+  const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T, '--baseline', SHA3);
   assert.equal(r.status, 2, '缺 receipts 键必须 exit 2（fail-closed 不开跑）');
   assert.match(r.stderr, /MANIFEST/, '必须走 MANIFEST 拒绝路径');
   assert.match(r.stderr, /receipts/, '必须点名 receipts');
@@ -1235,7 +1306,7 @@ test('init 输入门: manifest 缺 dispatch 键 exit 2 点名且不建台账', (
   const m = JSON.parse(readFileSync(manifestPath, 'utf8'));
   delete m.dispatch;
   writeFileSync(manifestPath, JSON.stringify(m));
-  const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T);
+  const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T, '--baseline', SHA3);
   assert.equal(r.status, 2, '缺 dispatch 键必须 exit 2（fail-closed 不开跑）');
   assert.match(r.stderr, /MANIFEST/, '必须走 MANIFEST 拒绝路径');
   assert.match(r.stderr, /dispatch/, '必须点名 dispatch');
@@ -1250,7 +1321,7 @@ test('init 输入门: packet 缺五要素任一 exit 2 点名是哪个 packet �
   const m = JSON.parse(readFileSync(manifestPath, 'utf8'));
   delete m.dispatch.packets[0].allowed_paths;
   writeFileSync(manifestPath, JSON.stringify(m));
-  const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T);
+  const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T, '--baseline', SHA3);
   assert.equal(r.status, 2, 'packet 缺 allowed_paths 必须 exit 2（fail-closed 不开跑）');
   assert.match(r.stderr, /PACKET_INCOMPLETE/, '必须走 PACKET_INCOMPLETE 拒绝路径');
   assert.match(r.stderr, /g4/, '必须点名是哪个 packet（group_id）');
@@ -1411,13 +1482,15 @@ test('sc-p1e: CLI 传身份字段被拒（身份单一来源是台账，不接�
 test('sc-p1e: 验收组模板无 goal 触发行、含整合树复查项（integrated_tip 引用 + squash diff 复查指令）', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
-  assignIdentity(ledgerPath, 'v1', 'feat/verify');
+  // sc-p0a 迁移：v1 在 wave1 集成后派工/出包——身份 base 必须等于集成点 SHA2（基线闸），
+  // 故 assign 移到集成后（集成前 assign 的 base=SHA3 会在 render 时被基线闸拒）。
   // 真实编排顺序（D1 修复语义）：包是派工输入，render 必须先于派工。
   // wave 1 集成后立刻出 v1 的包——验收组复查的是上一波集成出来的树，
   // 不是它自己所在 wave 的树（读本波 integrated_tip 必然为 null，off-by-one-wave 死锁）。
   runG4ToVerified(ledgerPath);
   let r = cli('set-state', ledgerPath, '--wave', '1', '--integrate', SHA2, '--now', T);
   assert.equal(r.status, 0, r.stderr);
+  assignIdentity(ledgerPath, 'v1', 'feat/verify', SHA2);
   r = cli('render-packet', ledgerPath, '--group', 'v1');
   assert.equal(r.status, 0, `验收组在上一波集成后立刻 render 应 exit 0: ${r.stderr}`);
   const out = r.stdout;
@@ -1431,10 +1504,11 @@ test('sc-p1e: 验收组模板无 goal 触发行、含整合树复查项（integr
   assert.match(out, /squash diff/, '整合树复查项必须含 squash diff 复查指令');
   assert.match(out, new RegExp(`integrated_tip=${SHA2}（wave 1 集成 squash SHA）`),
     '整合树复查项必须点名 tip 来自 wave 1 集成');
-  // 出包之后才派工 v1 到 verified，然后集成 wave 2（真实顺序的剩余半程）
+  // 出包之后才派工 v1 到 verified，然后集成 wave 2（真实顺序的剩余半程）。
+  // sc-p0b：派工带 --mem-snapshot（凭证已在 render 时落账，digest 匹配）
   const v = 'v1';
   for (const [to, extra] of [
-    ['dispatched', ['--worker-label', 'wv1']],
+    ['dispatched', ['--worker-label', 'wv1', '--mem-snapshot', memSnapshotJson()]],
     ['delivered', ['--tip-sha', SHA1]],
     ['delivered', []],
     ['review_pass', []],
@@ -1470,7 +1544,7 @@ test('sc-p1e: 验收组无更早已集成 wave 时出包被点名拒（D2 fail-c
   const manifestPath2 = join(dir2, 'sample-manifest.json');
   writeFileSync(manifestPath2, JSON.stringify(m));
   const ledgerPath2 = join(dir2, 'ledger.json');
-  let r2 = cli('init', ledgerPath2, '--manifest', manifestPath2, '--run-id', 'test-run2', '--now', T);
+  let r2 = cli('init', ledgerPath2, '--manifest', manifestPath2, '--run-id', 'test-run2', '--now', T, '--baseline', SHA3);
   assert.equal(r2.status, 0, `verify 进首波的 manifest init 应放行（消费侧无尾波保证，D3 确认）: ${r2.stderr}`);
   r2 = cli('set-state', ledgerPath2, '--group', 'v1', '--identity',
     JSON.stringify({ worktree: '/wt/v1', branch: 'feat/verify', base: SHA3 }), '--now', T);
@@ -1495,13 +1569,16 @@ function buildVerifyLedgerWithWaveOrder(dir, order) {
   assignIdentity(ledgerPath, 'v1', 'feat/verify');
   const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
   const v1group = ledger.waves.find((w) => w.groups.some((g) => g.group_id === 'v1')).groups[0];
+  // sc-p0a 迁移：手工构造后 wave3 集成 SHA2 = 期望基线——v1 身份 base 必须改为 SHA2
+  // （基线闸消费点②：render-packet 出包时校验组 base === expectedBase）。
+  v1group.base = SHA2;
   const mkWave = (wave, tip) => ({
     wave, integrated_tip: tip,
     groups: [{
       group_id: `x${wave}`, state: 'pending', sc_ids: [`sc-x${wave}`],
       worker_label: null, dispatched_at: null, tip_sha: null,
       review: { rounds: 0, unresolved: 0 }, verify: { status: null, evidence_ref: null },
-      worktree: null, branch: null, base: null,
+      worktree: null, branch: null, base: null, assignment_seq: 0,
     }],
   });
   const w4 = { wave: 4, integrated_tip: null, groups: [v1group] };
@@ -1556,7 +1633,7 @@ test('sc-p1e: 重复 wave manifest 被 init 点名拒（manifest 边界 fail-clo
   const manifestPath = join(dir, 'sample-manifest.json');
   writeFileSync(manifestPath, JSON.stringify(m));
   const ledgerPath = join(dir, 'ledger.json');
-  const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'dup-run', '--now', T);
+  const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'dup-run', '--now', T, '--baseline', SHA3);
   assert.equal(r.status, 2, '重复 wave manifest init 必须 exit 2');
   assert.match(r.stderr, /MANIFEST/);
   assert.match(r.stderr, /重复 wave 编号: 1/, '拒绝消息必须点名重复的 wave 号');
@@ -1574,7 +1651,7 @@ test('sc-p1e: 乱序 wave manifest 被 init 点名拒（逆序对进消息）', 
   const manifestPath = join(dir, 'sample-manifest.json');
   writeFileSync(manifestPath, JSON.stringify(m));
   const ledgerPath = join(dir, 'ledger.json');
-  const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'order-run', '--now', T);
+  const r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'order-run', '--now', T, '--baseline', SHA3);
   assert.equal(r.status, 2, '乱序 wave manifest init 必须 exit 2');
   assert.match(r.stderr, /MANIFEST/);
   assert.match(r.stderr, /乱序: wave 3 之后出现 wave 1/, '拒绝消息必须点名逆序对');
@@ -1588,14 +1665,17 @@ test('sc-p1e: T 阶段包 verify_cmds 与夹具 manifest 尾波逐条一致', ()
   const lastWave = manifest.waves[manifest.waves.length - 1]; // 尾波 = wave 2
   const v1Group = lastWave.groups[0];
   const v1Packet = manifest.dispatch.packets.find((p) => p.group_id === v1Group.group_id);
-  assignIdentity(ledgerPath, v1Group.group_id, 'feat/verify');
-  // 集成两个 wave 让验收组可渲染
+  // sc-p0a/b/c 迁移：v1 在 wave1 集成后派工——base=集成点 SHA2（基线闸）+ render 前置
+  // （凭证闸；验收组模板需 wave1 已集成）→ render 输出保存在派工前，出包后 wave2 集成
+  // 会改变期望基线（SHA2→SHA1），此时不可再 render（基线闸拒）——断言用派工前输出。
   runG4ToVerified(ledgerPath);
   let r = cli('set-state', ledgerPath, '--wave', '1', '--integrate', SHA2, '--now', T);
   assert.equal(r.status, 0, r.stderr);
   const v = v1Group.group_id;
+  assignIdentity(ledgerPath, v, 'feat/verify', SHA2);
+  const packetOut = renderGroup(ledgerPath, v);
   for (const [to, extra] of [
-    ['dispatched', ['--worker-label', 'wv1']],
+    ['dispatched', ['--worker-label', 'wv1', '--mem-snapshot', memSnapshotJson()]],
     ['delivered', ['--tip-sha', SHA1]],
     ['delivered', []],
     ['review_pass', []],
@@ -1608,10 +1688,8 @@ test('sc-p1e: T 阶段包 verify_cmds 与夹具 manifest 尾波逐条一致', ()
   assert.equal(r.status, 0, r.stderr);
   r = cli('set-state', ledgerPath, '--wave', '2', '--integrate', SHA1, '--now', T);
   assert.equal(r.status, 0, r.stderr);
-  r = cli('render-packet', ledgerPath, '--group', v);
-  assert.equal(r.status, 0, r.stderr);
   // 渲染正文的验证命令必须与尾波 packet.verify_cmds 逐条一致（来自 manifest，不来自台账记忆）
-  const renderedCmds = r.stdout
+  const renderedCmds = packetOut
     .split('\n')
     .filter((line) => v1Packet.verify_cmds.includes(line.trim()));
   assert.deepEqual(renderedCmds, v1Packet.verify_cmds, '渲染正文 verify_cmds 必须与尾波 packet 逐条一致');
@@ -1632,7 +1710,10 @@ test('sc-p1h: 执行组合法交卷入账成功且台账对应字段逐项等于
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
   // 生命周期门（① 升级）：exec 交卷只允许 dispatched/delivered——先派工到 dispatched
-  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--now', T);
+  // sc-p0a/b/c 迁移：合法派工前先身份+render（凭证闸前置）+快照（快照闸）
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  renderGroup(ledgerPath, 'g4');
+  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--mem-snapshot', memSnapshotJson(), '--now', T);
   assert.equal(r.status, 0, r.stderr);
   const payload = execDeliveryPayload({ tipSha: SHA2 });
   r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
@@ -1659,7 +1740,10 @@ test('sc-p1h: 审查组合法交卷——unresolved 由此机器写入 review.un
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
   // 生命周期门（① 升级）：review 交卷只允许 delivered——先派工交付到 delivered
-  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--now', T);
+  // sc-p0a/b/c 迁移：合法派工前先身份+render（凭证闸前置）+快照（快照闸）
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  renderGroup(ledgerPath, 'g4');
+  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--mem-snapshot', memSnapshotJson(), '--now', T);
   assert.equal(r.status, 0, r.stderr);
   r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'delivered', '--tip-sha', SHA1, '--now', T);
   assert.equal(r.status, 0, r.stderr);
@@ -1715,7 +1799,10 @@ test('sc-p1h: 审查交卷 candidate_sha 合法入账——detail 携带审查�
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
   // 生命周期门（① 升级）：review 交卷只允许 delivered——先派工交付
-  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--now', T);
+  // sc-p0a/b/c 迁移：合法派工前先身份+render（凭证闸前置）+快照（快照闸）
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  renderGroup(ledgerPath, 'g4');
+  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--mem-snapshot', memSnapshotJson(), '--now', T);
   assert.equal(r.status, 0, r.stderr);
   r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'delivered', '--tip-sha', SHA1, '--now', T);
   assert.equal(r.status, 0, r.stderr);
@@ -1739,9 +1826,11 @@ test('sc-p1h: 验收组合法交卷——verify.status/evidence_ref 入账', () 
   let r0 = cli('set-state', ledgerPath, '--wave', '1', '--integrate', SHA2, '--now', T);
   assert.equal(r0.status, 0, r0.stderr);
   const v = 'v1';
-  assignIdentity(ledgerPath, v, 'feat/verify');
+  // sc-p0a/b/c 迁移：v1 在 wave1 集成后派工——base=集成点 SHA2（基线闸）+ render 前置（凭证闸）+ 快照
+  assignIdentity(ledgerPath, v, 'feat/verify', SHA2);
+  renderGroup(ledgerPath, v);
   for (const [to, extra] of [
-    ['dispatched', ['--worker-label', 'wv1']],
+    ['dispatched', ['--worker-label', 'wv1', '--mem-snapshot', memSnapshotJson()]],
     ['delivered', ['--tip-sha', SHA1]],
   ]) {
     r0 = cli('set-state', ledgerPath, '--group', v, '--to', to, ...extra, '--now', T);
@@ -1851,7 +1940,10 @@ test('sc-p1h: record-delivery 交卷文件路径（--payload @file）解析', ()
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
   // 生命周期门（① 升级）：exec 交卷只允许 dispatched/delivered——先派工
-  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--now', T);
+  // sc-p0a/b/c 迁移：合法派工前先身份+render（凭证闸前置）+快照（快照闸）
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  renderGroup(ledgerPath, 'g4');
+  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--mem-snapshot', memSnapshotJson(), '--now', T);
   assert.equal(r.status, 0, r.stderr);
   const payloadFile = join(dir, 'delivery.json');
   writeFileSync(payloadFile, JSON.stringify(execDeliveryPayload()));
@@ -1883,10 +1975,14 @@ test('F-H: set-state --verify-status/--verify-evidence-ref 手工写入口必拒
 test('F-H: →verified 无 pass 凭据拒（verify.status=null 或手工伪造的 evidence_ref 均拒）', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
+  // sc-p0a/b/c 迁移：合法派工前先身份+render（凭证闸前置）
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  renderGroup(ledgerPath, 'g4');
+
   const g = 'g4';
   // 走到 review_pass（无 verify 凭据）
   for (const [to, extra] of [
-    ['dispatched', ['--worker-label', 'w1']],
+    ['dispatched', ['--worker-label', 'w1', '--mem-snapshot', memSnapshotJson()]],
     ['delivered', ['--tip-sha', SHA1]],
     ['delivered', []],
     ['review_pass', []],
@@ -1941,9 +2037,10 @@ test('F-J: packet.scs_inline 含重复 id → render-packet 与 record-delivery 
     assert.match(rp.stderr, /重复 id|非字符串\/空 id/, `${label} 必须点名 id 契约`);
     assert.equal(rp.stdout, '', `${label} 不得出包`);
     // 交卷拒（即使交卷 scs 与去重后的 expected 一致，packet 自身契约先拒）。
-    // 生命周期门（① 升级）：exec 交卷需 dispatched——先派工，确保命中的是 id 契约而非生命周期拒
-    const dr = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--now', T);
-    assert.equal(dr.status, 0, dr.stderr);
+    // sc-p0c 迁移说明：此测试的 render-packet 已被 F-J 拒（无 packet_rendered 凭证），
+    // dispatched 必被凭证闸拦——不再派工，直接 record-delivery：validateExecDelivery 内的
+    // assertPacketScIds（packet 自身 id 契约）先于生命周期门执行，pending 组照样命中
+    // PACKET_INCOMPLETE（「确保命中的是 id 契约而非生命周期拒」语义保留）。
     const payload = execDeliveryPayload({ ids: ['sc-p1c', 'sc-p1d', 'sc-p1e', 'sc-p1h'] });
     const rd = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
     assert.equal(rd.status, 2, `${label} id 的 record-delivery 必须 exit 2`);
@@ -1955,7 +2052,10 @@ test('F-J: 对照——packet.scs_inline 无重复时，交卷缺一/多一/重�
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
   // 生命周期门（① 升级）：exec 交卷需 dispatched——先派工
-  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--now', T);
+  // sc-p0a/b/c 迁移：合法派工前先身份+render（凭证闸前置）+快照（快照闸）
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  renderGroup(ledgerPath, 'g4');
+  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--mem-snapshot', memSnapshotJson(), '--now', T);
   assert.equal(r.status, 0, r.stderr);
   // 缺一：只交 3 项
   r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload',
@@ -2130,7 +2230,10 @@ test('P2: failed 白名单内失败原因事件仍正常落盘（正例，未挡
 test('P2: 对照——delivery 事件合法通道仍工作（set-state delivered 转移 + record-delivery 交卷）', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
-  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--now', T);
+  // sc-p0a/b/c 迁移：合法派工前先身份+render（凭证闸前置）+快照（快照闸）
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  renderGroup(ledgerPath, 'g4');
+  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--mem-snapshot', memSnapshotJson(), '--now', T);
   assert.equal(r.status, 0, r.stderr);
   r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'delivered', '--tip-sha', SHA1, '--now', T);
   assert.equal(r.status, 0, `delivered 转移（真 delivery 通道）应 exit 0: ${r.stderr}`);
@@ -2286,8 +2389,10 @@ test('①: 重派链 failed→pending 后 exec 重新交卷放行（生命周期
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
   const g = 'g4';
-  // 第一轮：派工 → 交 exec → delivered → failed
-  let r = cli('set-state', ledgerPath, '--group', g, '--to', 'dispatched', '--worker-label', 'w1', '--now', T);
+  // 第一轮：身份+render（凭证闸前置）→ 派工 → 交 exec → delivered → failed
+  assignIdentity(ledgerPath, g, 'feat/run-ledger');
+  renderGroup(ledgerPath, g);
+  let r = cli('set-state', ledgerPath, '--group', g, '--to', 'dispatched', '--worker-label', 'w1', '--mem-snapshot', memSnapshotJson(), '--now', T);
   assert.equal(r.status, 0, r.stderr);
   r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify(execDeliveryPayload()), '--now', T);
   assert.equal(r.status, 0, `首轮 exec 交卷应 exit 0: ${r.stderr}`);
@@ -2295,11 +2400,13 @@ test('①: 重派链 failed→pending 后 exec 重新交卷放行（生命周期
   assert.equal(r.status, 0, r.stderr);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'failed', '--event', 'timeout_redispatch', '--now', T);
   assert.equal(r.status, 0, r.stderr);
-  // 重派链：failed → pending（计数/身份清零）→ 重新分配身份 → 重新派工
+  // 重派链：failed → pending（计数/身份清零，assignment_seq +1 代际隔离）→
+  // 重新分配身份 → 重新 render（新代凭证，旧代凭证因 seq 变化 digest 失配）→ 重新派工
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'pending', '--now', T);
   assert.equal(r.status, 0, r.stderr);
   assignIdentity(ledgerPath, g, 'feat/run-ledger-v2');
-  r = cli('set-state', ledgerPath, '--group', g, '--to', 'dispatched', '--worker-label', 'w2', '--now', T);
+  renderGroup(ledgerPath, g);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'dispatched', '--worker-label', 'w2', '--mem-snapshot', memSnapshotJson(), '--now', T);
   assert.equal(r.status, 0, r.stderr);
   // 重派后 exec 重新交卷（生命周期门必须放行）
   r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify(execDeliveryPayload({ tipSha: SHA2 })), '--now', T);
@@ -2351,7 +2458,7 @@ test('③: 未知 flag 静默忽略修复——init/set-state typo flag exit 2 �
   const dir = newTmpDir();
   const manifestPath = fixtureCopy(dir);
   const ledgerPath = join(dir, 'ledger.json');
-  let r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T, '--noww', 'typo');
+  let r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T, '--baseline', SHA3, '--noww', 'typo');
   assert.equal(r.status, 2, 'init 未知 flag 必须 exit 2');
   assert.match(r.stderr, /未知 flag/);
   assert.match(r.stderr, /--noww/);
@@ -2407,6 +2514,413 @@ test('③: 未知 flag 带值形态拒（--unrecognised value 此前 exit 0 且�
 });
 
 // =====================================================================
+// sc-p0a：基线漂移闸（identity 写入 + render-packet 出包双点消费 expectedBase）
+// =====================================================================
+test('sc-p0a: identity 写入基线漂移拒——base≠期望基线 exit 2 且消息含期望/实得/来源（init 基线）', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir); // baseline=SHA3
+  const before = readFileSync(ledgerPath, 'utf8');
+  // 期望基线 = init 基线 SHA3（无已集成波）——base=SHA1 漂移拒
+  let r = cli('set-state', ledgerPath, '--group', 'g4', '--identity',
+    JSON.stringify({ worktree: '/wt/g4', branch: 'feat/x', base: SHA1 }), '--now', T);
+  assert.equal(r.status, 2, 'identity base≠期望基线必须 exit 2（BASELINE_MISMATCH）');
+  assert.match(r.stderr, /BASELINE_MISMATCH/, '必须走 BASELINE_MISMATCH 拒绝路径');
+  assert.ok(r.stderr.includes(SHA1), '消息必须含实得值（传入 base）');
+  assert.ok(r.stderr.includes(SHA3), '消息必须含期望值（init 基线）');
+  assert.match(r.stderr, /init 基线/, '消息必须点名期望值来源（init 基线）');
+  assert.equal(readFileSync(ledgerPath, 'utf8'), before, '拒写后台账字节必须不变');
+  // 对照：base=SHA3（=期望基线）放行
+  r = cli('set-state', ledgerPath, '--group', 'g4', '--identity',
+    JSON.stringify({ worktree: '/wt/g4', branch: 'feat/x', base: SHA3 }), '--now', T);
+  assert.equal(r.status, 0, `base=期望基线应放行: ${r.stderr}`);
+});
+
+test('sc-p0a: render-packet 出包基线漂移拒——组 base≠期望基线 exit 2 且消息含期望/实得/来源（wave N 集成点）', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir); // baseline=SHA3
+  // 手工构造集成状态（绕过派工链，F1 变异隔离——不走 dispatch/delivery 写路径）：
+  // g4 verified + wave1 integrated_tip=SHA2 → 期望基线从 init 基线 SHA3 切到 SHA2
+  const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  const g4 = ledger.waves[0].groups[0];
+  Object.assign(g4, { state: 'verified', worker_label: 'w1', tip_sha: SHA1,
+    review: { rounds: 1, unresolved: 0 }, verify: { status: 'pass', evidence_ref: null },
+    worktree: '/wt/g4', branch: 'feat/run-ledger', base: SHA3 });
+  ledger.waves[0].integrated_tip = SHA2;
+  writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+  // identity 消费点①：v1 base=SHA3（init 基线）≠ 期望（wave 1 集成点 SHA2）→ 写入拒
+  let r = cli('set-state', ledgerPath, '--group', 'v1', '--identity',
+    JSON.stringify({ worktree: '/wt/v1', branch: 'feat/verify', base: SHA3 }), '--now', T);
+  assert.equal(r.status, 2, '集成后 identity base=SHA3 必须 exit 2（期望=wave 1 集成点 SHA2）');
+  assert.match(r.stderr, /wave 1 集成点/, 'identity 消费点①消息必须点名来源（wave N 集成点）');
+  assert.ok(r.stderr.includes(SHA2), 'identity 拒绝消息必须含期望值');
+  // base=集成点放行 → render 出包放行（消费点②同一基线）
+  r = cli('set-state', ledgerPath, '--group', 'v1', '--identity',
+    JSON.stringify({ worktree: '/wt/v1', branch: 'feat/verify', base: SHA2 }), '--now', T);
+  assert.equal(r.status, 0, `base=集成点应放行: ${r.stderr}`);
+  r = cli('render-packet', ledgerPath, '--group', 'v1');
+  assert.equal(r.status, 0, `集成后 base=集成点的 render 应 exit 0: ${r.stderr}`);
+  assert.match(r.stdout, new RegExp(`integrated_tip=${SHA2}`), '验收组模板复查项引用 wave 1 集成点');
+  // render 消费点②漂移拒：再集成 wave2（期望切到 SHA1），v1 base 仍 SHA2 → render 拒
+  const ledger2 = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  const v1 = ledger2.waves[1].groups[0];
+  Object.assign(v1, { state: 'verified', worker_label: 'wv1', tip_sha: SHA1,
+    review: { rounds: 1, unresolved: 0 }, verify: { status: 'pass', evidence_ref: null } });
+  ledger2.waves[1].integrated_tip = SHA1;
+  writeFileSync(ledgerPath, `${JSON.stringify(ledger2, null, 2)}\n`);
+  r = cli('render-packet', ledgerPath, '--group', 'v1');
+  assert.equal(r.status, 2, '组 base≠期望基线（wave 2 集成点）render 必须 exit 2');
+  assert.match(r.stderr, /BASELINE_MISMATCH/, '必须走 BASELINE_MISMATCH 拒绝路径');
+  assert.ok(r.stderr.includes(SHA2), '消息必须含实得值（组 base）');
+  assert.ok(r.stderr.includes(SHA1), '消息必须含期望值（wave 2 集成点）');
+  assert.match(r.stderr, /wave 2 集成点/, '消息必须点名期望值来源（wave N 集成点）');
+  assert.equal(r.stdout, '', '拒出包不得有正文输出');
+  // 对照：base=新集成点放行（v1 已 verified 终态，身份写入被拒——直接改台账组 base 再 render）
+  const ledger3 = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  ledger3.waves[1].groups[0].base = SHA1;
+  writeFileSync(ledgerPath, `${JSON.stringify(ledger3, null, 2)}\n`);
+  r = cli('render-packet', ledgerPath, '--group', 'v1');
+  assert.equal(r.status, 0, `base=wave 2 集成点的 render 应 exit 0: ${r.stderr}`);
+});
+
+test('sc-p0a: expectedBase 单一判据——latestIntegratedTip 优先于 init 基线（多波集成取数值最新，乱序不取数组位置）', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir); // baseline=SHA3
+  // 函数层断言（纯只读，F1 变异隔离）：无集成 → init 基线；集成 wave1 → wave1 tip；
+  // 再集成 wave2 → wave2 tip（数值最新）；waves 数组乱序后仍按数值取（消费侧防御）
+  let ledger = readLedger(ledgerPath);
+  assert.equal(expectedBase(ledger), SHA3, '无集成时期望基线 = init 基线');
+  ledger.waves[0].integrated_tip = SHA2;
+  writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+  assert.equal(expectedBase(readLedger(ledgerPath)), SHA2, 'wave1 集成后期望基线 = wave1 tip');
+  ledger = readLedger(ledgerPath);
+  ledger.waves[1].integrated_tip = SHA1;
+  writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+  assert.equal(expectedBase(readLedger(ledgerPath)), SHA1, 'wave2 集成后期望基线 = 数值最新已集成波（wave 2 tip）');
+  ledger = readLedger(ledgerPath);
+  ledger.waves = [ledger.waves[1], ledger.waves[0]]; // 乱序重排
+  writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+  assert.equal(expectedBase(readLedger(ledgerPath)), SHA1, '乱序后仍按 wave 数值取最新（不依赖数组位置）');
+});
+
+test('sc-p0a: init --baseline 必填/格式——函数层漏传抛 ARGS、CLI 非 40hex 拒、schema 缺键拒、null 兼容放行', () => {
+  // 函数层：initLedger 不传 baseline（undefined）→ ARGS（导出函数漏传与 CLI 同判据）
+  const dir = newTmpDir();
+  const manifestPath = fixtureCopy(dir);
+  assert.throws(
+    () => initLedger({ ledgerPath: join(dir, 'l.json'), manifestPath, runId: 'x', now: T }),
+    (err) => err instanceof LedgerError && err.code === 'ARGS' && /--baseline/.test(err.message),
+    'initLedger 漏传 baseline 必须抛 ARGS（函数层必填）'
+  );
+  assert.equal(existsSync(join(dir, 'l.json')), false, '函数层漏传不得创建台账');
+  // CLI：非 40hex --baseline 拒
+  const ledgerPath = join(dir, 'ledger.json');
+  let r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'x', '--now', T, '--baseline', 'not-a-sha');
+  assert.equal(r.status, 2, '--baseline 非 40hex 必须 exit 2');
+  assert.match(r.stderr, /非 40 位十六进制/);
+  assert.equal(existsSync(ledgerPath), false, '非法 baseline 的 init 不得创建台账');
+  // schema：手工删 baseline_tip 键 → validate 拒（必填字段键必须在场）
+  const { ledgerPath: lp2 } = initLedgerFor(dir);
+  const l = JSON.parse(readFileSync(lp2, 'utf8'));
+  delete l.baseline_tip;
+  writeFileSync(lp2, `${JSON.stringify(l, null, 2)}\n`);
+  r = cli('validate', lp2);
+  assert.equal(r.status, 2, '缺 baseline_tip 键的台账必须 exit 2（schema 必填）');
+  assert.match(r.stderr, /baseline_tip/);
+  // CLI 缺省 --baseline → null 兼容模式（e2e-dryrun 路径），台账仍合法
+  const lp3 = join(dir, 'ledger3.json');
+  r = cli('init', lp3, '--manifest', manifestPath, '--run-id', 'compat', '--now', T);
+  assert.equal(r.status, 0, `CLI 缺省 --baseline（兼容模式）应 exit 0: ${r.stderr}`);
+  assert.equal(readLedger(lp3).baseline_tip, null, '兼容模式 baseline_tip=null');
+});
+
+// =====================================================================
+// sc-p0b：派发内存快照闸（--mem-snapshot 四键 exact + 跨字段一致性）
+// =====================================================================
+test('sc-p0b: dispatched 缺 --mem-snapshot 拒（严格模式，exit 2 点名）', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  renderGroup(ledgerPath, 'g4'); // 凭证闸满足，快照闸独立生效
+  const r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--now', T);
+  assert.equal(r.status, 2, '缺 --mem-snapshot 必须 exit 2');
+  assert.match(r.stderr, /--mem-snapshot/, '必须点名 --mem-snapshot');
+  assert.match(r.stderr, /used_slots\/platform_cap\/concurrency\/available_bytes/, '必须点名四键');
+  assert.equal(readLedger(ledgerPath).waves[0].groups[0].state, 'pending', '被拒后台账组状态不得前进');
+});
+
+test('sc-p0b: --mem-snapshot 非法形状拒——未知键/缺键/负数/类型错/concurrency>cap/used_slots>cap', () => {
+  const bads = [
+    ['未知键', JSON.stringify({ used_slots: 0, platform_cap: 8, concurrency: 8, available_bytes: 1, extra: 1 })],
+    ['缺键', JSON.stringify({ used_slots: 0, platform_cap: 8, concurrency: 8 })],
+    ['负数', JSON.stringify({ used_slots: -1, platform_cap: 8, concurrency: 8, available_bytes: 1 })],
+    ['类型错', JSON.stringify({ used_slots: '0', platform_cap: 8, concurrency: 8, available_bytes: 1 })],
+    ['concurrency>cap', JSON.stringify({ used_slots: 0, platform_cap: 8, concurrency: 9, available_bytes: 1 })],
+    ['used_slots>cap', JSON.stringify({ used_slots: 9, platform_cap: 8, concurrency: 8, available_bytes: 1 })],
+  ];
+  for (const [label, snap] of bads) {
+    const dir = newTmpDir();
+    const { ledgerPath } = initLedgerFor(dir);
+    assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+    renderGroup(ledgerPath, 'g4');
+    const r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1',
+      '--mem-snapshot', snap, '--now', T);
+    assert.equal(r.status, 2, `${label} 快照必须 exit 2`);
+    assert.match(r.stderr, /--mem-snapshot/, `${label} 必须点名 --mem-snapshot`);
+    // 前置拒绝走 rejectWithEvent（落 illegal_transition 事件 + version+1，与 worker-label/
+    // 波次门/凭证闸等既有前置同风格）——断言组状态不得前进（派工未生效），不断言字节不变。
+    assert.equal(readLedger(ledgerPath).waves[0].groups[0].state, 'pending', `${label}：组状态不得前进`);
+    assert.equal(readLedger(ledgerPath).waves[0].groups[0].worker_label, null, `${label}：worker_label 不得写入`);
+  }
+});
+
+test('sc-p0b: 合法快照放行 + 导出函数同判据（assertMemSnapshot 直接调）+ 非 JSON 拒', () => {
+  // 导出函数：合法对象不抛；非法逐类抛 LedgerError（CLI 与函数层同一份判据）
+  assert.doesNotThrow(() => assertMemSnapshot({ used_slots: 0, platform_cap: 8, concurrency: 8, available_bytes: 1 }));
+  assert.throws(() => assertMemSnapshot({ used_slots: 9, platform_cap: 8, concurrency: 8, available_bytes: 1 }),
+    (err) => err instanceof LedgerError && /used_slots=9 > platform_cap=8/.test(err.message),
+    'used_slots>cap 导出函数必须抛（跨字段一致性，computeConcurrency 不查上限故此处补）');
+  assert.throws(() => assertMemSnapshot('not-an-object'), (err) => err instanceof LedgerError, '非对象必须抛');
+  // CLI 层：合法快照放行；JSON 非法拒（--mem-snapshot 不是合法 JSON）
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  renderGroup(ledgerPath, 'g4');
+  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1',
+    '--mem-snapshot', memSnapshotJson(), '--now', T);
+  assert.equal(r.status, 0, `合法快照派工应 exit 0: ${r.stderr}`);
+  const g4 = readLedger(ledgerPath).waves[0].groups[0];
+  assert.equal(g4.state, 'dispatched', '合法快照派工后组必须 dispatched');
+  // 非 JSON 字符串
+  const dir2 = newTmpDir();
+  const { ledgerPath: lp2 } = initLedgerFor(dir2);
+  assignIdentity(lp2, 'g4', 'feat/run-ledger');
+  renderGroup(lp2, 'g4');
+  r = cli('set-state', lp2, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1',
+    '--mem-snapshot', '{not-json', '--now', T);
+  assert.equal(r.status, 2, '非 JSON 的 --mem-snapshot 必须 exit 2');
+  assert.match(r.stderr, /不是合法 JSON/);
+});
+
+// =====================================================================
+// sc-p0c：render-packet 凭证闸（packet_rendered 事件 + assignment_seq 代际隔离）
+// =====================================================================
+test('sc-p0c: 未 render 派工拒（无 packet_rendered 事件，exit 2 点名）', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  const r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched',
+    '--worker-label', 'w1', '--mem-snapshot', memSnapshotJson(), '--now', T);
+  assert.equal(r.status, 2, '未经 render-packet 出包的派工必须 exit 2');
+  assert.match(r.stderr, /未经 render-packet 出包/, '必须点名「未经 render-packet 出包」');
+  assert.equal(readLedger(ledgerPath).waves[0].groups[0].state, 'pending', '被拒后组状态不得前进');
+});
+
+test('sc-p0c: render 后派工放行 + 事件 detail 契约（identity_digest 现算比对 + packet_sha256 + assignment_seq）', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  const out = renderGroup(ledgerPath, 'g4');
+  const ledger = readLedger(ledgerPath);
+  const pe = ledger.events.filter((e) => e.type === 'packet_rendered');
+  assert.equal(pe.length, 1, 'render 成功必须写恰 1 条 packet_rendered 事件');
+  const detail = pe[0].detail;
+  assert.equal(detail.group_id, 'g4');
+  // digest = 长度前缀编码 sha256 前 16hex（含 assignment_seq=0 代际）
+  const expectDigest = identityDigest({ worktree: '/wt/g4', branch: 'feat/run-ledger', base: SHA3, assignmentSeq: 0 });
+  assert.equal(detail.identity_digest, expectDigest, 'identity_digest 必须等于现算 digest（长度前缀编码）');
+  assert.match(detail.identity_digest, /^[0-9a-f]{16}$/, 'digest 必须为 16 位十六进制');
+  assert.match(detail.packet_sha256, /^[0-9a-f]{16}$/, 'packet_sha256 必须为 16 位十六进制');
+  assert.equal(detail.assignment_seq, 0, '首代 assignment_seq=0');
+  assert.equal(ledger.version >= 1, true, '出包写事件必须使 version 前进（CAS 版本+1）');
+  // 凭证匹配 → 派工放行
+  const r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched',
+    '--worker-label', 'w1', '--mem-snapshot', memSnapshotJson(), '--now', T);
+  assert.equal(r.status, 0, `render 后派工应 exit 0: ${r.stderr}`);
+});
+
+test('sc-p0c: 身份变更后旧凭证失配拒（digest 不匹配，exit 2「身份已变更未重出包」）', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  renderGroup(ledgerPath, 'g4');
+  // 身份变更（branch 改）但未重新 render → 现算 digest ≠ 最近凭证 digest → 拒
+  const r2 = cli('set-state', ledgerPath, '--group', 'g4', '--identity',
+    JSON.stringify({ worktree: '/wt/g4', branch: 'feat/changed', base: SHA3 }), '--now', T);
+  assert.equal(r2.status, 0, `身份重写（同基线）应放行: ${r2.stderr}`);
+  const r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched',
+    '--worker-label', 'w1', '--mem-snapshot', memSnapshotJson(), '--now', T);
+  assert.equal(r.status, 2, '身份变更未重出包的派工必须 exit 2');
+  assert.match(r.stderr, /身份已变更未重出包/, '必须点名「身份已变更未重出包」');
+  // 重新 render 后放行（新 digest 匹配）
+  renderGroup(ledgerPath, 'g4');
+  const r3 = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched',
+    '--worker-label', 'w1', '--mem-snapshot', memSnapshotJson(), '--now', T);
+  assert.equal(r3.status, 0, `重新 render 后派工应 exit 0: ${r3.stderr}`);
+});
+
+test('sc-p0c: 重派代际隔离——重派后 assignment_seq+1 旧凭证失配拒、重新 render 后放行、旧事件保留审计', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  const g = 'g4';
+  // 第一代：身份 + render + 派工 + delivered + failed
+  assignIdentity(ledgerPath, g, 'feat/run-ledger');
+  renderGroup(ledgerPath, g);
+  let r = cli('set-state', ledgerPath, '--group', g, '--to', 'dispatched', '--worker-label', 'w1',
+    '--mem-snapshot', memSnapshotJson(), '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'delivered', '--tip-sha', SHA1, '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'failed', '--event', 'timeout_redispatch', '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  const eventsBefore = readLedger(ledgerPath).events.length;
+  // 重派：failed→pending → assignment_seq 0→1，身份清空（pending 转移按既有语义落
+  // timeout_redispatch 事件，与 failed 时落的各一条——共 2 条重派链事件）
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'pending', '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  let g4 = readLedger(ledgerPath).waves[0].groups[0];
+  assert.equal(g4.assignment_seq, 1, '重派必须递增 assignment_seq（代际隔离计数器）');
+  // 旧 packet_rendered 事件保留（供审计）
+  const evs = readLedger(ledgerPath).events;
+  assert.equal(evs.filter((e) => e.type === 'packet_rendered').length, 1, '旧代凭证必须保留在 events 中');
+  assert.equal(evs.length, eventsBefore + 1, '重派链 pending 转移追加 timeout_redispatch 事件（failed 时已落一条）');
+  // 重新分配身份后，旧凭证 digest 因 seq 变化不再匹配 → 派工拒
+  assignIdentity(ledgerPath, g, 'feat/run-ledger-v2');
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'dispatched', '--worker-label', 'w2',
+    '--mem-snapshot', memSnapshotJson(), '--now', T);
+  assert.equal(r.status, 2, '重派后未重新 render 的派工必须 exit 2（旧代凭证 digest 失配）');
+  assert.match(r.stderr, /未经 render-packet 出包|身份已变更未重出包/);
+  // 重新 render（新代，seq=1）→ 新凭证匹配 → 放行
+  renderGroup(ledgerPath, g);
+  g4 = readLedger(ledgerPath).waves[0].groups[0];
+  const newPe = readLedger(ledgerPath).events.filter((e) => e.type === 'packet_rendered');
+  assert.equal(newPe.length, 2, '第二代 render 追加新凭证，旧凭证保留');
+  assert.equal(newPe[1].detail.assignment_seq, 1, '新代凭证 assignment_seq=1');
+  const expectDigest = identityDigest({ worktree: '/wt/g4', branch: 'feat/run-ledger-v2', base: SHA3, assignmentSeq: 1 });
+  assert.equal(newPe[1].detail.identity_digest, expectDigest, '新代 digest 必须含 assignment_seq=1（代际隔离）');
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'dispatched', '--worker-label', 'w2',
+    '--mem-snapshot', memSnapshotJson(), '--now', T);
+  assert.equal(r.status, 0, `重派后重新 render 的派工应 exit 0: ${r.stderr}`);
+});
+
+// =====================================================================
+// sc-p0d：staleness 只读子命令
+// =====================================================================
+test('sc-p0d: staleness 基本输出——phase/version/last_event_at/minutes 与 --now 注入、无事件 null', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  // 无事件：last_event_at/minutes 必须 null（不伪造 0）
+  let r = cli('staleness', ledgerPath, '--now', '2026-08-09T01:30:00Z');
+  assert.equal(r.status, 0, `staleness 应 exit 0: ${r.stderr}`);
+  let out = JSON.parse(r.stdout);
+  assert.equal(out.phase, 'executing');
+  assert.equal(out.version, 0);
+  assert.equal(out.last_event_at, null, '无事件时 last_event_at 必须 null（不伪造 0）');
+  assert.equal(out.minutes_since_last_event, null, '无事件时 minutes_since_last_event 必须 null');
+  assert.deepEqual(out.in_flight_groups, []);
+  assert.equal(out.all_waves_integrated, false);
+  // 派工几步（每次写事件）后：last_event_at=最后事件 at、minutes 按注入 now 计算
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  renderGroup(ledgerPath, 'g4');
+  const st = readLedger(ledgerPath);
+  r = cli('staleness', ledgerPath, '--now', '2026-08-09T01:30:00Z');
+  out = JSON.parse(r.stdout);
+  assert.equal(out.last_event_at, st.events[st.events.length - 1].at, 'last_event_at = 最后一条事件 at');
+  // 最后事件 = packet_rendered（render 写事件，at=系统时钟或缺省）——minutes 只断言非 null 可算
+  assert.equal(typeof out.minutes_since_last_event, 'number', '有事件时 minutes 必须可计算');
+  assert.ok(out.minutes_since_last_event >= 0, 'minutes 必须非负');
+  // 导出函数与 CLI 同实现：函数层输出与 CLI 逐字段一致
+  const fnOut = staleness({ ledgerPath, now: '2026-08-09T01:30:00Z' });
+  assert.deepEqual(fnOut, out, '导出函数与 CLI 必须输出同一份 JSON');
+});
+
+test('sc-p0d: in_flight_groups 按「未完成集成」语义过滤——dispatched/delivered/review_pass 可见，其余不可见', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  // 手工构造六态组（各 wave 一组；verified 组带身份字段保持 schema 合法）
+  const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  const states = ['pending', 'dispatched', 'delivered', 'review_pass', 'verified', 'failed'];
+  const base = ledger.waves[0].groups[0];
+  ledger.waves = states.map((s, i) => ({
+    wave: i + 1, integrated_tip: null,
+    groups: [{
+      ...base, group_id: `g-${s}`, state: s, sc_ids: [`sc-${s}`],
+      worker_label: s === 'pending' ? null : 'w',
+      tip_sha: ['delivered', 'review_pass', 'verified'].includes(s) ? SHA1 : null,
+      dispatched_at: s === 'pending' ? null : T,
+      review: { rounds: ['delivered', 'review_pass', 'verified'].includes(s) ? 1 : 0, unresolved: 0 },
+      verify: { status: s === 'verified' ? 'pass' : null, evidence_ref: null },
+      worktree: s === 'verified' ? '/wt/x' : null,
+      branch: s === 'verified' ? 'feat/x' : null,
+      base: s === 'verified' ? SHA3 : null,
+      assignment_seq: 0,
+    }],
+  }));
+  writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+  const out = staleness({ ledgerPath, now: '2026-08-09T01:30:00Z' });
+  // review_pass 可见：修正后的过滤语义（state 过滤含三态），不依赖补落事件
+  const visible = out.in_flight_groups.map((g) => g.state).sort();
+  assert.deepEqual(visible, ['delivered', 'dispatched', 'review_pass'], 'in_flight 必须恰含 dispatched/delivered/review_pass 三态');
+  for (const g of out.in_flight_groups) {
+    assert.equal(typeof g.group_id, 'string', 'in_flight 条目必须含 group_id');
+    assert.equal(typeof g.state, 'string', 'in_flight 条目必须含 state');
+    assert.ok('dispatched_at' in g, 'in_flight 条目必须含 dispatched_at 键');
+  }
+  // 对照：给 review_pass 补落事件不是判据（state 过滤已捕获）——events 全空时 review_pass 仍可见
+  const ledger2 = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  ledger2.events = [];
+  writeFileSync(ledgerPath, `${JSON.stringify(ledger2, null, 2)}\n`);
+  const out2 = staleness({ ledgerPath, now: '2026-08-09T01:30:00Z' });
+  assert.equal(out2.in_flight_groups.filter((g) => g.state === 'review_pass').length, 1,
+    'review_pass 组不落事件也必须在 in_flight（伪修复「给 review_pass 补落事件」不采用）');
+});
+
+test('sc-p0d: all_waves_integrated + ready 冻结不拦读 + --now 非法拒 + 未知 flag 拒', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  // 手工构造全集成台账
+  const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  for (const w of ledger.waves) w.integrated_tip = SHA1;
+  writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+  let out = staleness({ ledgerPath, now: '2026-08-09T01:30:00Z' });
+  assert.equal(out.all_waves_integrated, true, '全波集成后 all_waves_integrated=true');
+  // phase=ready（冻结态）：staleness 只读不拦（冻结只拦写路径）
+  const ledger2 = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  ledger2.phase = 'ready';
+  ledger2.phase_at = T;
+  writeFileSync(ledgerPath, `${JSON.stringify(ledger2, null, 2)}\n`);
+  let r = cli('staleness', ledgerPath, '--now', '2026-08-09T01:30:00Z');
+  assert.equal(r.status, 0, `ready 冻结期 staleness 应 exit 0（只读不拦）: ${r.stderr}`);
+  out = JSON.parse(r.stdout);
+  assert.equal(out.phase, 'ready');
+  // --now 非法 → exit 2 点名；未知 flag → exit 2
+  r = cli('staleness', ledgerPath, '--now', 'not-a-time');
+  assert.equal(r.status, 2, 'staleness --now 非法必须 exit 2');
+  assert.match(r.stderr, /无法解析为时间戳/);
+  r = cli('staleness', ledgerPath, '--foo', 'x');
+  assert.equal(r.status, 2, 'staleness 未知 flag 必须 exit 2（只读命令同样 exact）');
+  assert.match(r.stderr, /未知 flag/);
+});
+
+// =====================================================================
+// 兼容模式对照（init 无 --baseline → baseline_tip=null → 三道新闸全部跳过）
+// =====================================================================
+test('sc-p0a/b/c 兼容模式对照——init 无 baseline 时基线闸/快照闸/凭证闸全部不强制（e2e-dryrun 路径）', () => {
+  const dir = newTmpDir();
+  const manifestPath = fixtureCopy(dir);
+  const ledgerPath = join(dir, 'ledger.json');
+  let r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'compat', '--now', T);
+  assert.equal(r.status, 0, `兼容模式 init 应 exit 0: ${r.stderr}`);
+  // 基线闸跳过：identity base 任意 40hex（非 init 基线）放行
+  r = cli('set-state', ledgerPath, '--group', 'g4', '--identity',
+    JSON.stringify({ worktree: '/wt/g4', branch: 'feat/x', base: SHA1 }), '--now', T);
+  assert.equal(r.status, 0, `兼容模式 identity base 任意放行（基线闸跳过）: ${r.stderr}`);
+  // 凭证闸/快照闸跳过：无 render、无 mem-snapshot 直接派工
+  r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--now', T);
+  assert.equal(r.status, 0, `兼容模式派工无需凭证/快照应放行: ${r.stderr}`);
+  assert.equal(readLedger(ledgerPath).waves[0].groups[0].state, 'dispatched');
+});
+
+// =====================================================================
 // ④：identity.worktree 强制绝对路径
 // =====================================================================
 test('④: --identity.worktree 相对路径拒（强制绝对路径，exit 2 点名 + 字节不变）', () => {
@@ -2456,7 +2970,7 @@ test('组F-1: 非规范化路径调用必须实际执行 init 并创建台账（
   const ledgerPath = join(runDir, 'ledger.json');
   const manifestPath = fixtureCopy(runDir);
   const r = spawnSync(process.execPath,
-    [join(link, 'scripts/run-ledger.mjs'), 'init', ledgerPath, '--manifest', manifestPath, '--run-id', 'norm', '--now', T],
+    [join(link, 'scripts/run-ledger.mjs'), 'init', ledgerPath, '--manifest', manifestPath, '--run-id', 'norm', '--now', T, '--baseline', SHA3],
     { encoding: 'utf8' });
   const text = `${r.stdout || ''}${r.stderr || ''}`;
   assert.ok(text.length > 0, '非规范化路径调用不得静默零输出（guard 被 bypass 的形态就是 exit 0 + 全空）');
@@ -2520,7 +3034,9 @@ const RL_MUTATION_PREDICTIONS = [
       'P2: 对照——delivery 事件合法通道仍工作（set-state delivered 转移 + record-delivery 交卷）',
       // ① 升级后改造的测试含 set-state dispatch/delivered 步骤（走 dispatch/delivery 写路径）：
       // F1 变异字符串化 detail → schema 拒 → 这些测试的 set-state 步骤红（确定性，语义合法扩展）
-      'F-J: packet.scs_inline 含重复 id → render-packet 与 record-delivery 均拒',
+      // 「F-J: 重复 id」不在列：sc-p0c 迁移后该测试删除 dispatched 步骤（render-packet 被 F-J
+      // 拒、无凭证可派工），record-delivery 对 pending 组直接命中 PACKET_INCOMPLETE 不写事件——
+      // F1 变异下保持绿（语义合法收缩，测试注释同步说明）。
       'F-J: 对照——packet.scs_inline 无重复时，交卷缺一/多一/重复仍按计数比对拒（原有 exact 语义保留）',
       'sc-p1h: record-delivery 交卷文件路径（--payload @file）解析',
       'sc-p1h: 审查交卷 candidate_sha 合法入账——detail 携带审查方声明值（非派生默认）',
@@ -2532,14 +3048,25 @@ const RL_MUTATION_PREDICTIONS = [
       // F1 变异字符串化 detail → 链上 set-state 步骤 schema 拒 → 红（语义合法扩展，与上组同因）
       'F-D: →ready 绑定 manifest 内容——最后一次 hash 绑定后篡改，receipt 驱动必须 exit 2 HASH_MISMATCH（台账 phase 不前进）',
       'F-D: →ready manifest 绑定不误伤合法链——三重校验（manifest 内容/ledger_version/candidate_sha）各自独立成立',
+      // sc-p0a/b/c 新增断言组中含「set-state dispatched 成功」步骤（走 dispatch 写路径）：
+      // F1 变异字符串化 detail → schema 拒 → 这些测试的派工步骤红（确定性，语义合法扩展，
+      // 与上方「① 升级后改造的测试」同因同款）。sc-p0a 的漂移拒测试经手工构造集成状态、
+      // sc-p0d 的 staleness 测试只经 identity/render（不写 dispatch/delivery 事件），保持绿。
+      'sc-p0b: 合法快照放行 + 导出函数同判据（assertMemSnapshot 直接调）+ 非 JSON 拒',
+      'sc-p0c: render 后派工放行 + 事件 detail 契约（identity_digest 现算比对 + packet_sha256 + assignment_seq）',
+      'sc-p0c: 身份变更后旧凭证失配拒（digest 不匹配，exit 2「身份已变更未重出包」）',
+      'sc-p0c: 重派代际隔离——重派后 assignment_seq+1 旧凭证失配拒、重新 render 后放行、旧事件保留审计',
+      'sc-p0a/b/c 兼容模式对照——init 无 baseline 时基线闸/快照闸/凭证闸全部不强制（e2e-dryrun 路径）',
     ],
   },
   {
     id: 'F2 变异',
     label: 'phase_at 从 LEDGER_TOP_KEYS 挖除（F2 修复点挖除）',
+    // 只挖 phase_at 行：baseline_tip 独立成行（sc-p0a 新键）不在此锚点范围内——
+    // 挖掉它会让所有含 baseline_tip 的台账成「未列键」而全量红，污染 F2 的失败集契约。
     mutate: (src) => src.replace(
-      "  'version', 'phase', 'phase_at', 'waves', 'events',",
-      "  'version', 'phase', 'waves', 'events',",
+      "  'version', 'phase', 'phase_at',",
+      "  'version', 'phase',",
     ),
     // phase_at 写入路径的消费侧测试：闭环（ready-check 铸 receipt → run-ledger 消费 → ready）、
     // 并发（末轮 receipt 驱动）、sc-p1d / sc-p2d 都由 run-ledger 驱动 phase→ready，写 phase_at——
@@ -2555,6 +3082,9 @@ const RL_MUTATION_PREDICTIONS = [
       // F-D →ready 正例测试断言 phase=ready + phase_at（F2 契约的读取点）：
       // 变异挖除 phase_at → ready 台账成未列键形状 → 读即拒 → 红（语义合法扩展）
       'F-D: →ready manifest 绑定不误伤合法链——三重校验（manifest 内容/ledger_version/candidate_sha）各自独立成立',
+      // sc-p0d staleness 测试手工构造 phase=ready 台账（schema 要求 ready 必带 phase_at）：
+      // 变异挖除 phase_at → readLedger 拒 → staleness 读红（同一「读 ready 台账」契约，语义合法扩展）
+      'sc-p0d: all_waves_integrated + ready 冻结不拦读 + --now 非法拒 + 未知 flag 拒',
     ],
   },
   {
@@ -2586,6 +3116,63 @@ const RL_MUTATION_PREDICTIONS = [
     red: [
       '③: 未知 flag 静默忽略修复——init/set-state typo flag exit 2 点名未知 flag',
       '③: 未知 flag 带值形态拒（--unrecognised value 此前 exit 0 且写入成功）+ read 子命令 validate 同样覆盖',
+      // sc-p0d staleness 测试含「staleness 未知 flag 拒」断言（只读子命令同样 exact allowlist）：
+      // G2 变异挖除 unknown 过滤 → staleness 接受未知 flag → 该断言红（同一 allowlist 契约，语义合法扩展）
+      'sc-p0d: all_waves_integrated + ready 冻结不拦读 + --now 非法拒 + 未知 flag 拒',
+    ],
+  },
+  {
+    id: 'P0A 变异',
+    label: 'expectedBase 比对挖除（sc-p0a 基线闸双点：identity 写入 + render-packet 出包 → if (false)）',
+    mutate: (src) => src
+      .replace(
+        'if (parsed.base !== exp.base) {',
+        'if (false) {',
+      )
+      .replace(
+        'if (base !== exp.base) {',
+        'if (false) {',
+      ),
+    // 红集 = 基线闸断言组（漂移拒绝断言 exit 2 的用例）；合法流程（base=期望基线）挖除后
+    // 照样放行保持绿；expectedBase 函数本身不在变异范围（单一判据仍在）。兼容模式对照
+    // 用例本就不触发比对，挖除后不变。既有迁移测试的合法派工同样绿（隔离性验证）。
+    red: [
+      'sc-p0a: identity 写入基线漂移拒——base≠期望基线 exit 2 且消息含期望/实得/来源（init 基线）',
+      'sc-p0a: render-packet 出包基线漂移拒——组 base≠期望基线 exit 2 且消息含期望/实得/来源（wave N 集成点）',
+    ],
+  },
+  {
+    id: 'P0B 变异',
+    label: '--mem-snapshot 必填挖除（sc-p0b 快照闸缺失拒绝 → if (false)）',
+    mutate: (src) => src.replace(
+      'if (parsedMemSnapshot === undefined) {',
+      'if (false) {',
+    ),
+    // 红集 = 缺失断言组；非法形状拒绝走 assertMemSnapshot（独立校验函数，不在变异范围）——
+    // 未知键/缺键/负数/类型错/concurrency>cap/used_slots>cap 仍拒，保持绿（隔离性验证）。
+    // 合法快照与兼容模式对照用例不依赖缺失拒绝，保持绿。
+    red: [
+      'sc-p0b: dispatched 缺 --mem-snapshot 拒（严格模式，exit 2 点名）',
+    ],
+  },
+  {
+    id: 'P0C 变异',
+    label: 'packet_rendered 前置挖除（sc-p0c 凭证闸两锚点：无事件 + digest 失配 → if (false)）',
+    mutate: (src) => src
+      .replace(
+        'if (!latest) {',
+        'if (false) {',
+      )
+      .replace(
+        'if (latest.detail.identity_digest !== curDigest) {',
+        'if (false) {',
+      ),
+    // 红集 = 凭证闸断言组（依赖「无凭证拒绝」的用例）；render 后派工放行（凭证满足）与
+    // 兼容模式对照（本就不强制）不依赖拒绝路径，保持绿（隔离性验证）。
+    red: [
+      'sc-p0c: 未 render 派工拒（无 packet_rendered 事件，exit 2 点名）',
+      'sc-p0c: 身份变更后旧凭证失配拒（digest 不匹配，exit 2「身份已变更未重出包」）',
+      'sc-p0c: 重派代际隔离——重派后 assignment_seq+1 旧凭证失配拒、重新 render 后放行、旧事件保留审计',
     ],
   },
 ];

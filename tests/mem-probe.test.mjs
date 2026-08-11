@@ -1,8 +1,8 @@
-// mem-probe 测试：sc-p1a（换算/分支/入参校验）+ sc-p1b（fail-closed 反向变异）+ 组F（main guard realpath 归一）。
+// mem-probe 测试：sc-p1a（换算/分支/入参校验）+ sc-p0f（跨字段 usedSlots≤platformCap）+ sc-p1b（fail-closed 反向变异）+ 组F（main guard realpath 归一）。
 // 组结构（sc-p1b 变异红集预测依据）：
 //   组 A「换算/函数域」——有效夹具换算、三个 min 分支约束主体、floor 语义、无负数、内存真不足 concurrency=0 合法、
-//                       computeConcurrency 入参拒绝（含 platformCap 正整数）、parseVmStat 输入类型守卫、CLI 端到端、
-//                       同夹具两次输出逐字相同、非 JSON 摘要输出、CLI 帮助出口（--help/-h exit 0）
+//                       computeConcurrency 入参拒绝（含 platformCap 正整数）、跨字段 usedSlots≤platformCap（sc-p0f）、
+//                       parseVmStat 输入类型守卫、CLI 端到端、同夹具两次输出逐字相同、非 JSON 摘要输出、CLI 帮助出口（--help/-h exit 0）
 //   组 B「CLI 参数拒绝」——CLI 侧 --used-slots/--pending/未知参数/缺失参数/文件缺失
 //   组 C「fail-closed 解析拒绝」——乱码/缺 Pages free/inactive/speculative/首行无 page size/
 //                       page size 非法(0)/数字字段尾界畸形（千分位、单位后缀、数字中间字母、负数、行尾垃圾、
@@ -10,7 +10,9 @@
 //                       parseVmStat 点名 throw；CLI exit 2 并点名缺失字段，绝不回退默认换算
 //   组 F「main guard realpath」——非规范化路径调用必须真的执行并打印 JSON（防 exit 0 + 零输出假绿）
 // 预测红集（变异1 挖掉 parseVmStat 内容字段校验分支后）= 恰好组 C 全部测试（原 11 条 + 尾界畸形 6 条）；
-//   变异2 挖掉两处 Number.isSafeInteger 后 = 恰好 2 条 F-A 标题。组 A/B/F 必须仍绿。
+//   变异2 挖掉两处 Number.isSafeInteger 后 = 恰好 2 条 F-A 标题；变异3 挖掉 usedSlots≤platformCap
+//   跨字段校验后 = 恰好跨字段组 2 条（正向拒绝 + CLI 跨字段；边界放行/对照组不依赖抛错，仍绿）。
+//   组 A/B/F 其余必须仍绿。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdtempSync, rmSync, cpSync, mkdirSync, realpathSync, symlinkSync } from 'node:fs';
@@ -127,10 +129,8 @@ test('换算: ⌊⌋ 向下取整语义被钉死（1.5258… → 1，不四舍�
   assert.equal(r, 1);
 });
 
-test('换算: concurrency 不出现负数——used_slots 超 cap / 内存 0 / 待派 0 三种降为 0', () => {
+test('换算: concurrency 不出现负数——内存 0 / 待派 0 两种降为 0（used_slots 超 cap 已转为拒绝语义，见「跨字段」组）', () => {
   const base = { platformCap: orcaPlatformCap, perWorkerBytes, reserveRatio: memReserveRatio };
-  // 槽位分支为负：slots = 8−10 = −2 → min 取负 → max(0,·) = 0
-  assert.equal(computeConcurrency({ ...base, availableBytes: 35_520_512_000, usedSlots: 10, pendingGroups: 100 }), 0);
   // 内存分支为 0：available=0 → mem=0
   assert.equal(computeConcurrency({ ...base, availableBytes: 0, usedSlots: 0, pendingGroups: 5 }), 0);
   // 待派分支为 0
@@ -173,6 +173,50 @@ test('函数域: computeConcurrency 拒绝非法入参（与 CLI 同等拒绝，
 test('函数域: parseVmStat 拒绝非字符串输入', () => {
   assert.throws(() => parseVmStat(123), TypeError);
   assert.throws(() => parseVmStat(undefined), TypeError);
+});
+
+// ============ 跨字段校验（sc-p0f）：usedSlots ≤ platformCap（变异3 挖除目标） ============
+// 缺陷事实：旧实现 usedSlots 只过 assertNonNegInt、无上限校验——usedSlots > platformCap 时
+// slotsBranch = platformCap − usedSlots 为负、min 后夹 0，静默返回「没槽位」，lead 看不出自己
+// 传了自相矛盾的数（台账侧 run-ledger 已拦写入，决策侧输入仍脏）。修复：跨字段比较，违反即
+// TypeError（与现有单字段拒绝同一风格）。变异3 挖掉本校验后本组恰好全红；
+// 边界放行/对照组不依赖抛错，变异下仍绿。
+
+const CROSS_FIELD_VALID = {
+  availableBytes: 35_520_512_000,
+  pendingGroups: 100,
+  platformCap: orcaPlatformCap,
+  perWorkerBytes,
+  reserveRatio: memReserveRatio,
+};
+
+test('跨字段: usedSlots 超过 platformCap → 抛错且消息同时含两值（不静默返回 0）', () => {
+  const over = orcaPlatformCap + 1;
+  assert.throws(
+    () => computeConcurrency({ ...CROSS_FIELD_VALID, usedSlots: over }),
+    new RegExp(`usedSlots=${over} 超过 platformCap=${orcaPlatformCap}`),
+    `usedSlots=${over} > platformCap=${orcaPlatformCap} 必须被点名拒绝，不得静默返回 0`,
+  );
+});
+
+test('跨字段: usedSlots=platformCap（刚好占满）→ 不抛错返回 0（合法满仓，非错误）', () => {
+  const r = computeConcurrency({ ...CROSS_FIELD_VALID, usedSlots: orcaPlatformCap });
+  assert.equal(r, 0, 'usedSlots == platformCap 是合法「刚好占满」，slotsBranch=0 → concurrency=0');
+});
+
+test('跨字段: usedSlots < platformCap → 正常路径不受影响（slots 分支仍参与 min）', () => {
+  // mem = floor(35520512000×0.8/524288000) = 54；slots = 8−2 = 6；pending = 100 → min = 6
+  const r = computeConcurrency({ ...CROSS_FIELD_VALID, usedSlots: 2 });
+  assert.equal(r, 6, 'slots 分支 8−2=6 必须成为约束主体，证明校验不破坏正常路径');
+  assert.ok(6 < 54 && 6 < 100, 'slots 分支严格小于另外两分支，min 无歧义');
+});
+
+test('CLI 跨字段: --used-slots 超过 platform_cap → exit 2 且 stderr 点名 usedSlots 与 platformCap', () => {
+  const over = orcaPlatformCap + 1;
+  const r = runCli(['--json', '--used-slots', String(over), '--pending', '1', '--vm-stat-file', FIX['64g']]);
+  assert.equal(r.status, 2, `超 cap 必须受控 exit 2（而非 exit 0 静默 concurrency=0），stderr: ${r.stderr}`);
+  assert.match(r.stderr, new RegExp(`usedSlots=${over} 超过 platformCap=${orcaPlatformCap}`), 'stderr 必须点名两值');
+  assert.doesNotMatch(r.stderr, /TypeError/, '不得以 TypeError 裸栈崩溃（走 main 的受控 exit 2 路径）');
 });
 
 // ② 回归锚点：concurrency=0 在内存真不足时是合法输出（审查席实测 available=16384 时 concurrency=0）。
@@ -520,6 +564,16 @@ const MEM_PROBE_MUTATIONS = [
     red: [
       'CLI 参数拒绝(F-A): --used-slots 400 位数字 → exit 2 点名安全整数范围，不落 exit 1 裸栈',
       'CLI 参数拒绝(F-A): --pending 400 位数字 → exit 2 点名安全整数范围',
+    ],
+  },
+  {
+    id: '变异3',
+    label: 'usedSlots≤platformCap 跨字段上限校验被挖（sc-p0f）',
+    from: '  if (usedSlots > platformCap) {',
+    to: '  if (false && usedSlots > platformCap) {',
+    red: [
+      '跨字段: usedSlots 超过 platformCap → 抛错且消息同时含两值（不静默返回 0）',
+      'CLI 跨字段: --used-slots 超过 platform_cap → exit 2 且 stderr 点名 usedSlots 与 platformCap',
     ],
   },
 ];
