@@ -29,7 +29,7 @@ trigger: 批准执行
 E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包) → READY
 ```
 
-- 阶段图真相源是 `graph.json`（席位表：E/R/V/T/P 五席，各自 route 档，E/R 另钉 agent_pin，先例 = submit-pr Phase 2 席位表）；本段只描述编排行为，不承载席位数据。
+- 阶段图真相源是 `graph.json`（席位表：E/R/V/T/P 五席，各自 route 档，E 钉 agent_pin，R 钉 agent_pin + model/effort，先例 = submit-pr Phase 2 席位表）；本段只描述编排行为，不承载席位数据。
 - **lead 每边固定三动作**（任何阶段之间一律如此，不许跳过）：
   1. **收结构化交卷**：只认 `run-ledger` record-delivery 入账的 exact schema 交卷（exec / review / verify 三类，多余键或缺失键都拒）；lead 不做手工转录。（机器闸：`scripts/run-ledger.mjs` record-delivery）
   2. **archive 该 worker**——明示：**不是 idle**。idle 只释放进程、**不释放槽位**；只有 archive 才释放并发槽位。（无机器闸：archive/idle 语义是 Orca 平台行为，按时执行依赖 lead）
@@ -40,7 +40,7 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 - **D0（owner 拍板）**：执行环节（写代码）的派工包**必须以 goal skill 场景 C 触发**——包内首行「用 goal skill 执行。」+ 单独一行 `--until-sc`。连锁约束：execute 席 agent 钉死 claude-code（goal 声明 codex 加载不到）；routing fallback 链中**非 claude-code 候选跳过**，候选耗尽 = A 类 fail-closed，**禁止「内联等价契约给 codex」变通**（详见第⑦段）。
 - **D1（lead 只编排）**：SC 复验派**独立 verify worker**（≠ 作者 worker）；lead 只做台账对账/计数核对（确定性脚本），不亲手跑验证、不代写交卷。
 - **D2（并发公式）**：并发 = min(内存允许, Orca 平台硬上限 `orcaPlatformCap`=8, 待派组数)，**每次派工前现跑 mem-probe**。「不设上限」的物理含义 = 始终拉满 8；内存探测（`memReserveRatio` + `perWorkerBytes` 切分）是护栏（防多 loop 挤兑），非常态瓶颈。
-- **D3（R 席命令）**：R 席跑 claude-code 内置 `/code-review high --fix`（owner 确认为内置命令，带强度与 `--fix`），只能 claude-code agent；model 取 routing execute 档的 claude-code 值；**不改 routing.json 四档**（review 档语义留给 submit-pr 三审）；席位表落本 skill `graph.json`。
+- **D3（R 席命令）**：R 席跑 claude-code 内置 `/code-review high --fix`（owner 确认为内置命令，带强度与 `--fix`），只能 claude-code agent；R 席 model/effort 由 `graph.json` 席位表**显式钉死**为 `anthropic-claude/claude-sonnet-5` / `xhigh`（owner 2026-08-10 拍板，模型 ID 已用 models.cache.json 核实存在于 claude_code agent，tier=standard；**不再从 routing execute 档取值**）；**不改 routing.json 四档**（review 档语义留给 submit-pr 三审）；席位表落本 skill `graph.json`。
 - **D4（组级审查）**：每组 execute 交付后**立即在该组 worktree 内审+修**（各组可并行）；跨组问题由波级 SC 验收 + e2e 兜底。审查修复 ≤ `reviewMaxRounds` 轮不收敛 = 硬阻碍上报（见第⑤段）。
 
 ## ⑤ 不停机条款（仅三类停）
@@ -67,9 +67,9 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 
 ## ⑦ 模型现读纪律
 
-- **派工前现读 routing.json**（`routingPath` 指向，`orca-model-routing` 规则指定为真相源），禁凭记忆填模型；本 skill 的 `graph.json` 只引路由档名（E/R 另钉 agent_pin），**永不内嵌具体模型 ID**。
-- E/R 席（goal 场景 C + `/code-review`）要求 agent 家族 = claude-code：**routing fallback 链中非 claude-code 候选一律跳过**，只沿链找 claude-code 候选。（本条无机器闸，依赖 lead 遵守；routing.json 内容合法性的机器校验在 `scripts/selfcheck.mjs` 与全局 model-route 脚本）
-- 候选耗尽（E/R 席无 claude-code 可派） = **A 类 fail-closed**：停，向用户报告（路由档、已试候选、错误原文），等指令；**禁止「内联等价契约给 codex」变通**（codex 加载不到 goal skill，等价契约不成立）。
+- **派工前现读 routing.json**（`routingPath` 指向，`orca-model-routing` 规则指定为真相源），禁凭记忆填模型；本 skill 的 `graph.json` 只引路由档名（E 钉 agent_pin），**R 席例外**：model/effort 由席位表显式钉死（见第④段 D3，owner 2026-08-10 拍板），其余席位永不内嵌具体模型 ID——模型在派工时现读 routing.json。
+- E 席（goal 场景 C）要求 agent 家族 = claude-code：**routing fallback 链中非 claude-code 候选一律跳过**，只沿链找 claude-code 候选。（本条无机器闸，依赖 lead 遵守；routing.json 内容合法性的机器校验在 `scripts/selfcheck.mjs` 与全局 model-route 脚本。R 席不走 routing：agent_pin=claude-code、model/effort 由席位表钉死，见第④段 D3。）
+- 候选耗尽（E 席无 claude-code 可派） = **A 类 fail-closed**：停，向用户报告（路由档、已试候选、错误原文），等指令；**禁止「内联等价契约给 codex」变通**（codex 加载不到 goal skill，等价契约不成立）。（R 席无此问题——不走 routing，model/effort 钉死，无候选链可耗尽。）
 - 派工说明必须标注实际使用模型（如 `(model/effort)`），多 worker 贴紧凑台账但不阻塞流程。
 
 ## ⑧ pr-submit-gate 传导
