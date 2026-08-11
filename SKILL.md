@@ -10,7 +10,7 @@ trigger: 批准执行
 五阶段状态机 E(执行)→R(审查修复)→V(波集成+SC 验收)→T(e2e)→P(打包)→READY，lead 只编排决策、不亲手执行。
 生态链：task-priority（出 manifest）→ **本 skill（lead 编排 loop）** → goal（worker 端场景 C 消费派工包）→ submit-pr（三审收口）。
 
-本文是 lead 侧编排的**唯一守则**：换会话、换模型后按本文执行，编排行为不漂移（机器保障：`scripts/run-tests.mjs` 冻结枚举 + `tests/skill-doc.test.mjs` 结构断言，见第⑭段）。共十五段。
+本文是 lead 侧编排的**唯一守则**：换会话、换模型后按本文执行，编排行为不漂移（机器保障：`scripts/run-tests.mjs` 冻结枚举 + `tests/skill-doc.test.mjs` 结构断言，见第⑭段）。共十七段。
 
 ## ① 身份与触发
 
@@ -30,15 +30,17 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 ```
 
 - 阶段图真相源是 `graph.json`（席位表：E/R/V/T/P 五席，各自 route 档，E 钉 agent_pin，R 钉 agent_pin + model/effort，先例 = submit-pr Phase 2 席位表）；本段只描述编排行为，不承载席位数据。
-- **lead 每边固定三动作**（任何阶段之间一律如此，不许跳过）：
+- **lead 每边固定五步硬定序检查单**（任何阶段之间一律如此，不许跳过；**顺序不可交换**——尤其 archive 先于 probe，使腾出的槽位天然计入下一环节）：
   1. **收结构化交卷**：只认 `run-ledger` record-delivery 入账的 exact schema 交卷（exec / review / verify 三类，多余键或缺失键都拒）；lead 不做手工转录。（机器闸：`scripts/run-ledger.mjs` record-delivery）
-  2. **archive 该 worker**——明示：**不是 idle**。idle 只释放进程、**不释放槽位**；只有 archive 才释放并发槽位。（无机器闸：archive/idle 语义是 Orca 平台行为，按时执行依赖 lead）
-  3. **mem-probe + 槽位重算**：现跑 `mem-probe` 重算可用槽位，再派下一批（并发公式见第④段 D2）。（机器闸：`scripts/mem-probe.mjs` 输出即槽位判据）
+  2. **archive 全部 done/idle/error worker**——**汇报即清理（owner 硬指令(二)，2026-08-10）**：触发时机 = worker 交卷汇报一到即在同一轮动作内 archive，**不得攒批、不得延后到下一环节、不得用 idle 顶替**。明示：**不是 idle**——idle 只释放进程、**不释放槽位**；只有 archive 才释放并发槽位。（无机器闸：archive/idle 语义是 Orca 平台行为，按时执行依赖 lead）
+  3. **list_workers 取实数**：调 `list_workers` 读当前 worker 清单，**禁止心算/凭记忆**填 used_slots——记录实数（第 2 步已 archive 的槽位此刻已释放）。（无机器闸：list_workers 读数是平台查询，取实数依赖 lead 执行）
+  4. **mem-probe 现算并发**：`mem-probe --json --used-slots <第 3 步实数> --pending <待派组数>` 现算可用并发（并发公式见第④段 D2；`--pending` 同为必填，缺任一即 exit 2）。（机器闸：`scripts/mem-probe.mjs` 输出即槽位判据）
+  5. **create_workers 整批派发 + 落账**：同批 ≥2 worker 用 `create_workers` 批量派发（禁连续单发，见第⑨段），随后逐组 `set-state --group <gid> --to dispatched --now <ts> --mem-snapshot '<json>'` 落账（`--now` 是写操作通用必填时间戳，缺省即 exit 2 `NOW_REQUIRED`）——快照四键 `used_slots`/`platform_cap`/`concurrency`/`available_bytes` 由 lead 从 `mem-probe --json` 的 9 键输出中提取构造（原样直喂 9 键会被 exact 校验拒，提取步骤即本步，见第⑮段迁移⑦⑧⑨）。（机器闸：`scripts/run-ledger.mjs` set-state 快照闸 + 凭证闸）
 
 ## ④ 设计决策 D0–D4
 
 - **D0（owner 拍板）**：执行环节（写代码）的派工包**必须以 goal skill 场景 C 触发**——包内首行「用 goal skill 执行。」+ 单独一行 `--until-sc`。连锁约束：execute 席 agent 钉死 claude-code（goal 声明 codex 加载不到）；routing fallback 链中**非 claude-code 候选跳过**，候选耗尽 = A 类 fail-closed，**禁止「内联等价契约给 codex」变通**（详见第⑦段）。
-- **D1（lead 只编排）**：SC 复验派**独立 verify worker**（≠ 作者 worker）；lead 只做台账对账/计数核对（确定性脚本），不亲手跑验证、不代写交卷。
+- **D1（lead 只编排，owner 硬指令(三)，2026-08-10）**：lead 一律不亲手执行具体任务——一切执行/验证/打包工作必须派 Orca worker（或用户点名 sub 时派原生 subagent），lead 只做编排/决策/台账对账（确定性脚本），不亲手跑验证、不代写交卷；SC 复验派**独立 verify worker**（≠ 作者 worker）；违反即汇报链路膨胀、效率下降。
 - **D2（并发公式）**：并发 = min(内存允许, Orca 平台硬上限 `orcaPlatformCap`=8, 待派组数)，**每次派工前现跑 mem-probe**。「不设上限」的物理含义 = 始终拉满 8；内存探测（`memReserveRatio` + `perWorkerBytes` 切分）是护栏（防多 loop 挤兑），非常态瓶颈。
 - **D3（R 席命令）**：R 席跑 claude-code 内置 `/code-review high --fix`（owner 确认为内置命令，带强度与 `--fix`），只能 claude-code agent；R 席 model/effort 由 `graph.json` 席位表**显式钉死**为 `anthropic-claude/claude-sonnet-5` / `xhigh`（owner 2026-08-10 拍板，模型 ID 已用 models.cache.json 核实存在于 claude_code agent，tier=standard；**不再从 routing execute 档取值**）；**不改 routing.json 四档**（review 档语义留给 submit-pr 三审）；席位表落本 skill `graph.json`。
 - **D4（组级审查）**：每组 execute 交付后**立即在该组 worktree 内审+修**（各组可并行）；跨组问题由波级 SC 验收 + e2e 兜底。审查修复 ≤ `reviewMaxRounds` 轮不收敛 = 硬阻碍上报（见第⑤段）。
@@ -67,7 +69,7 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 
 ## ⑦ 模型现读纪律
 
-- **派工前现读 routing.json**（`routingPath` 指向，`orca-model-routing` 规则指定为真相源），禁凭记忆填模型；本 skill 的 `graph.json` 只引路由档名（E 钉 agent_pin），**R 席例外**：model/effort 由席位表显式钉死（见第④段 D3，owner 2026-08-10 拍板），其余席位永不内嵌具体模型 ID——模型在派工时现读 routing.json。
+- **硬指令（owner 2026-08-10 拍板）**：E/V/T/P 四席派 worker 前**必须现读模型说明书**配置 model/effort——真相源 = `routing.json`（`routingPath` 指向，`orca-model-routing` 规则指定为真相源）+ `model-route show` 可核对；**禁凭记忆填值，禁跳过读取直接派**。**R 席例外**：model/effort 由 `graph.json` 席位表显式钉死（见第④段 D3，owner 2026-08-10 拍板），**不从 routing 取值**。本 skill 的 `graph.json` 只引路由档名（E 钉 agent_pin），其余席位永不内嵌具体模型 ID——模型在派工时现读 routing.json。
 - E 席（goal 场景 C）要求 agent 家族 = claude-code：**routing fallback 链中非 claude-code 候选一律跳过**，只沿链找 claude-code 候选。（本条无机器闸，依赖 lead 遵守；routing.json 内容合法性的机器校验在 `scripts/selfcheck.mjs` 与全局 model-route 脚本。R 席不走 routing：agent_pin=claude-code、model/effort 由席位表钉死，见第④段 D3。）
 - 候选耗尽（E 席无 claude-code 可派） = **A 类 fail-closed**：停，向用户报告（路由档、已试候选、错误原文），等指令；**禁止「内联等价契约给 codex」变通**（codex 加载不到 goal skill，等价契约不成立）。（R 席无此问题——不走 routing，model/effort 钉死，无候选链可耗尽。）
 - 派工说明必须标注实际使用模型（如 `(model/effort)`），多 worker 贴紧凑台账但不阻塞流程。
@@ -119,7 +121,7 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 
 ## ⑮ 破坏性变更迁移表（旧用法 → 现在 → 替代）
 
-2026-08 实现收敛期移除了四条 CLI 旧用法（另有两条配套纪律一并列出），按旧文档调用会 fail-closed（exit 2 点名）。下表逐条列「旧调用 → 现在会怎样 → 替代」；「lead 动作」= lead 执行，「脚本判据」= 脚本机器校验（本表退出码均为实测）。
+2026-08 实现收敛期移除了七条 CLI 旧用法（另有两条配套纪律一并列出），按旧文档调用会 fail-closed（exit 2 点名）。下表逐条列「旧调用 → 现在会怎样 → 替代」；「lead 动作」= lead 执行，「脚本判据」= 脚本机器校验（本表退出码均为实测）。
 
 | # | 旧调用（已失效） | 现在会怎样（实测） | 替代（当前唯一合法路径） |
 |---|---|---|---|
@@ -129,5 +131,36 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 | 4 | 改过 manifest 内容后复用旧台账跑 validate / render-packet / record-delivery | exit 2：`[HASH_MISMATCH] manifest core hash 不匹配：台账=…，现算=…（manifest 内容已变/异本，内容绑定拒）` | 消费命令按 manifest_core_hash 内容绑定（机器闸：`scripts/run-ledger.mjs` assertManifestBound）；manifest 内容变更即旧台账失效——改 manifest 后必须重 init 台账（或恢复原内容），不得复用旧台账 |
 | 5 | 台账 phase 已到 ready 后继续写（set-state / record-delivery） | exit 2：`[FROZEN] 台账已 ready（phase=ready），冻结只读，拒绝写操作` | ready 是**终态不可逆**（机器闸：`scripts/run-ledger.mjs` setState 入口冻结，ready 后一切写操作拒）；任何补写必须在 ready 之前完成，READY_FOR_SUBMIT_PR 输出即收手 |
 | 6 | （无旧调用；编排开跑前的最佳实践） | — | **lead 动作**：开跑前先跑 `node scripts/selfcheck.mjs --live`（机器闸：`scripts/selfcheck.mjs`）：校验 routing 四档 agent/model/effort 合法、orca-fanout 两脚本存在、goal SKILL.md 存在、runLedgerDir 可写、live symlink 指向本仓 checkout 根、`~/.claude/rules/skill-trigger-scan.md` 含精确触发行；任一 FAIL exit 2 点名（实测全过 exit 0） |
+| 7 | init 不带 `--baseline <sha>`（sc-p0a 前的旧用法，无基线语义直接开跑） | CLI 缺省显式传 null → **兼容模式 exit 0**（实测：baseline=null，基线闸/快照闸/凭证闸全部跳过）；函数层 in-process 漏传则拒（`init 缺 --baseline <sha>`） | **lead 动作**：生产 run 一律显式传 `--baseline <40hex>` 走**严格模式**（sc-p0a 基线闸强制；非 40hex 即 exit 2）；兼容模式只留给 e2e-dryrun 等无基线语义的旧路径 |
+| 8 | set-state dispatched 不带 `--mem-snapshot`（sc-p0b 前的旧用法） | exit 2（实测）：`缺失前置：→dispatched 必须携带 --mem-snapshot '<json>'（四键 used_slots/platform_cap/concurrency/available_bytes，lead 从 mem-probe --json 提取）`；原样直喂 9 键也拒（实测 exit 2：`--mem-snapshot 含未列键: page_size（exact 契约，未知键拒）`） | **lead 动作**：从 `mem-probe --json` 的 9 键输出中**提取** `used_slots`/`platform_cap`/`concurrency`/`available_bytes` 构造四键快照（提取步骤见第③段检查单第 5 步） |
+| 9 | set-state dispatched 未经 render-packet 出包（sc-p0c 前的旧用法，直接派发） | exit 2（实测）：`缺失前置：组 <gid> 未经 render-packet 出包（无 packet_rendered 事件），拒绝派发` | **lead 动作**：先 `render-packet` 出包（成功即落 `packet_rendered` 事件凭证），再 set-state dispatched（凭证闸消费最近一条该组 packet_rendered 事件） |
 
 另注意第①/②条的同源纪律：`--unresolved` 手工填数通道同样已关闭（unresolved 唯一写入通道 = record-delivery 审查交卷），set-state 收到即 exit 2。
+
+## ⑯ verify 结果复用纪律（防重复纪律）
+
+- **复用键 = 展开后的 {cmd,args} + tree_binding**：tree_binding = worktree realpath + HEAD SHA + 工作树 clean-state + 依赖输入 ref SHA（如 `manifest_core_hash`）；四者任一变化即不复用。复用作用域**限单 wave**——跨 wave 不复用。
+- **五类 never-reuse**（出现任一即必须独立复跑，不得复用旧结果）：
+  1. **mutation 类 SC**（反向变异必须实测复跑，predicted vs actual 红集逐条比对）；
+  2. **有副作用的命令**（写文件/改状态/网络调用）；
+  3. **占位符展开后指向不同对象**（同一模板命令在不同组展开出不同目标）；
+  4. **SC 点名独立复跑**（SC 验收口径要求每轮各自跑）；
+  5. **环境/外部配置/volatile host input**——如 mem-probe 读 sysctl/vm_stat 依赖宿主运行态而非源码树，routing.json 在仓外依赖宿主文件系统——同 HEAD/args/clean 可因宿主内存变化或配置变更得不同结果，**必须显式列禁**。
+- **复用共享的是原始 outcome**：同一展开后命令的同一 outcome 可被多 SC 引用，但各 SC 仍按自己的 expect 分别判定（不因共享而合并验收口径）。
+- **测试分层**：worker 轮内只跑动过文件的相关测试；全量 run-tests 只在集成点（V 阶段）与 T 阶段各跑一次。
+- **e2e 时机**：全链只在 phase=e2e 跑一次；R 修复轮只跑受影响文件；ready-check 已有 candidate_sha 绑定机器闸兜底（见第⑪段）。
+
+## ⑰ 看门狗（每小时自检，防 lead 停摆）
+
+- **挂载**：init 台账后（第②段输入门通过、台账已建）用 cindy_scheduler 建 hourly schedule；READY（第⑪段出口门通过）或 run 终止时 lead **删除本 schedule**。
+- **scheduler 不可用**（setup 时即失败）：开场简报如实标注「看门狗未挂」，不静默（失败时间点 (a)）。
+- **提示词模板**（内嵌进 schedule 的 prompt 参数）：
+  > 跑 run-ledger staleness <ledger>；phase≠ready 且 minutes_since_last_event>=60 → 唤醒 lead（按第⑤⑨段清槽重派、继续推进）；phase=ready → 删除本 schedule 后退出。
+- **schedule_create 六项必填参数**（zod 契约，六项均无 .optional()，缺任一即 INVALID_ARGS）：name（唯一标识）、cronExpr（5 字段 cron）、timezone（IANA）、recurring（true 循环）、agentKind（claude-code/codex/pi）、notify{desktop,feishu}（通知开关，二者必填）。handler 是 s.create(o) **直接创建**——无 upsert / 无幂等键 / 无去重键（同名重复创建不拒）：**lead 需自行持久化并复用 schedule id** 防重复创建，否则重复触发即重复唤醒。
+- **四个失败时间点**：
+  (a) **setup 时 scheduler 不可用** → 开场简报标注「看门狗未挂」；
+  (b) **READY 后自删**（提示词模板内嵌删除分支）；
+  (c) **运行中 schedule 被删/停用** → 看门狗静默失效、staleness 不触发、lead 无外部唤醒 → 需**回检**：lead 断开会话后重连时，手动检查 schedule 存活性（读 cindy_scheduler schedule_list，确认本 run 的 schedule 仍在且未停用）；
+  (d) **scheduler 服务后续停机** → 同 (c) 回检机制，两者语义相同，统一按 (c) 的回检步骤处理。
+- **已知残余（review_pass 不落事件）**：`run-ledger staleness` 的 `minutes_since_last_event` 以台账最后事件 at 计算——`review_pass` 态组**不落事件**（`in_flight_groups` 已按 state 过滤含 `review_pass`，**不需要补落事件**；「补落事件」是伪修复，修的是症状不是判据）。组已 `review_pass` 而 events 停在更早时点会导致 minutes 虚高、看门狗**误判 run 停摆**，属已知残余。
+- **新增机制确认门答辩**（删掉看门狗则「lead 防自停」目标不成立）：lead 停摆时无任何外部唤醒源——autonomous-execution 不停机条款只约束 lead 主动行为、约束不了会话中断/宿主重启这类被动停摆（这是用户显式点名的四诉求之一）。按确认门「不成立」分支**保留**本机制；失败面与成本如实声明：schedule 唤醒的是**新会话**（原 lead 会话死了也能接续，接续通道 = `--resume <run_id>` 读台账重建——这正是 staleness 读数 + 「台账即唯一状态源」的消费场景，见第⑥段）；成本 = 每小时一次轻量 staleness 读取；孤儿风险 = READY 后忘删则下次触发发现 phase=ready **自删**（提示词模板内嵌自删分支，双保险）。
