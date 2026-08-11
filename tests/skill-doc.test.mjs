@@ -1,4 +1,4 @@
-// SKILL.md 编排守则结构断言测试（sc-p2b / sc-p1b）。
+// SKILL.md 编排守则结构断言测试（sc-p2b / sc-p1b / r4）。
 // 目标：lead 换会话/换模型后编排行为不漂移——守则十七段齐全且与实现字面量同步。
 //
 // 断言口径：
@@ -25,6 +25,10 @@
 // 9. doc↔实现同步②：--mem-snapshot / staleness / packet_rendered / --baseline
 //    四组字面量从 scripts/run-ledger.mjs 源码 grep 出实现值，再断言 SKILL.md 包含
 //    （测试内不写死第二份完整字面量，实现侧为唯一权威，改任一侧即红）。
+// 10.（r4 P1-1）⑰ 段 prompt payload 断言：payload = 起止标记之间、剥掉 blockquote
+//     「> 」前缀后的文本（接手会话实际会拿到的内容）。A1 观察协议、A2 互斥动作表、
+//     resume 入口、P1-2 按组判定、P1-3 暂停保护全部断言作用在 payload 上，
+//     不锁「段内出现」（段内出现 ≠ 进入 prompt，GPT 终审 P1-1 实证）。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -68,6 +72,23 @@ function sectionBetween(marker, nextMarker) {
   const end = nextMarker ? skillDoc.indexOf(nextMarker, start) : skillDoc.length;
   assert.ok(end > start, `marker 越界: ${marker}`);
   return skillDoc.slice(start + marker.length, end);
+}
+
+// r4 P1-1：从 ⑰ 段精确抽取 prompt payload 块。
+// 边界 = 起止标记（<!-- approve-exec:watchdog-payload:start --> / :end -->），
+// 抽取后剥掉每行 blockquote 前缀「> 」（与 SKILL.md「复制时去掉起止标记与 > 前缀」对齐）。
+// 断言作用对象 = payload（接手会话实际会拿到的文本）——段内出现 ≠ 进入 prompt。
+function extractWatchdogPayload() {
+  const startMarker = '<!-- approve-exec:watchdog-payload:start -->';
+  const endMarker = '<!-- approve-exec:watchdog-payload:end -->';
+  const start = skillDoc.indexOf(startMarker);
+  const end = skillDoc.indexOf(endMarker);
+  assert.ok(start >= 0 && end > start, '⑰ 段应含 watchdog payload 起止标记（start/end 成对且 start 在前）');
+  const raw = skillDoc.slice(start + startMarker.length, end);
+  const lines = raw.split('\n').map((l) => l.replace(/^\s*> ?/, ''));
+  const payload = lines.join('\n').trim();
+  assert.ok(payload.length > 0, 'watchdog payload 不应为空');
+  return payload;
 }
 
 test('frontmatter：name=approve-exec、trigger=批准执行', () => {
@@ -302,12 +323,14 @@ test('sc-p1b-①：新段标题在场——五步硬定序检查单所在段 + �
   // 防重复纪律段（⑯）与看门狗段（⑰）：标题逐字在场（MARKERS 已锚定，此处显式复核防引用漂移）
   assert.ok(skillDoc.includes('## ⑯ verify 结果复用纪律（防重复纪律）'), '⑯ 防重复纪律段标题应在场');
   assert.ok(skillDoc.includes('## ⑰ 看门狗（每小时自检，防 lead 停摆）'), '⑰ 看门狗段标题应在场');
-  // 段内容存在性（标题在场且非空段）
+  // ⑯ 段内容存在性（标题在场且非空段）
   const s16 = sectionBetween(MARKERS[15], MARKERS[16]);
   assert.ok(s16.includes('复用'), '⑯ 防重复纪律段应含复用语义内容');
-  const s17 = sectionBetween(MARKERS[16], undefined);
-  assert.ok(s17.includes('run-ledger staleness <ledger>'), '⑰ 看门狗段提示词模板应含 staleness 读数命令（与 run-ledger 实现子命令名逐字一致，防部分漂移）');
-  assert.ok(s17.includes('staleness'), '⑰ 看门狗段应含 staleness 读数语义内容');
+  // r4 P1-1：⑰ 看门狗提示词 = payload 块——读数命令必须是 payload 的自包含起手
+  // （接手会话只读 payload 即可执行，段内出现不算数）
+  const payload = extractWatchdogPayload();
+  assert.ok(payload.includes('run-ledger staleness <ledger>'), '⑰ payload 应含 staleness 读数命令（与 run-ledger 实现子命令名逐字一致，payload 自包含起手）');
+  assert.ok(payload.includes('staleness'), '⑰ payload 应含 staleness 读数语义内容');
 });
 
 test('sc-p1b-⑥：三条 owner 硬指令在场——「硬指令」≥3 处，且分别与三个语义锚点同段共现', () => {
@@ -329,4 +352,281 @@ test('sc-p1b-⑥：三条 owner 硬指令在场——「硬指令」≥3 处，�
   // 锚点三（④段，硬指令(三) lead 不亲手执行）：「硬指令」与「不亲手执行」同段共现
   const s4 = sectionBetween(MARKERS[3], MARKERS[4]);
   assert.ok(/硬指令[\s\S]{0,100}不亲手执行/.test(s4) || /不亲手执行[\s\S]{0,100}硬指令/.test(s4), '④段应「硬指令」与「lead 不亲手执行」同段共现（硬指令(三)）');
+});
+
+test('sc-p1b-⑦：看门狗心跳模式参数在场——bindToCurrentSession 与 persistentSession 必传且为 true（防退回每轮新建会话）', () => {
+  // 看门狗必须是心跳模式：schedule 触发把提示注入 lead 当前会话，不新建会话。
+  // 两参数（挂载时必传、值必须为 true）是宿主导航行为的开关——缺 bindToCurrentSession
+  // 退回「每轮新建会话」模式；只设它不设 persistentSession，lead 会话死亡时宿主会直接
+  // pause 整条 schedule 且不自动恢复（看门狗在最该起作用时失效）。
+  // 断言带 `: true` 形态、作用在 ⑰ 段内（非全文）：裸词在「六项必填参数」行亦有出现，
+  // 只锁裸词会在参数被改回非心跳模式时假绿（反向变异已证）；`: true` 形态仅「挂载」行持有。
+  // 注：这是挂载参数（lead 建 schedule 时用），不是载荷内容，保留段级断言。
+  const s17 = sectionBetween(MARKERS[16], undefined);
+  assert.ok(s17.includes('bindToCurrentSession: true'), '⑰ 看门狗段应含 bindToCurrentSession: true——看门狗必须是心跳模式（注入 lead 当前会话，不新建会话），缺该参数即退回每轮新建会话模式');
+  assert.ok(s17.includes('persistentSession: true'), '⑰ 看门狗段应含 persistentSession: true——lead 会话归档/删除时宿主自动新建会话接手，缺该参数宿主会直接 pause 整条 schedule 且不自动恢复');
+});
+
+test('sc-p1b-⑧（r4 改 payload）：payload 必须含接手触发词「批准执行 --resume <run_id>」（persistentSession 接手会话的恢复入口）', () => {
+  // F1 实证：⑰ 段此前只声称会话死亡后新会话「走 --resume <run_id> 读台账重建」，但注入的
+  // prompt 里没有这句触发词——接手会话既没进入本 skill、也不知道 run_id，容错承诺是空的。
+  // r4 改造：断言作用在 payload（接手会话实际拿到的文本）上——段内出现（如①段/说明块）
+  // 不等于进入 prompt。
+  const payload = extractWatchdogPayload();
+  assert.ok(
+    payload.includes('批准执行 --resume <run_id>'),
+    '⑰ payload 应含接手触发词「批准执行 --resume <run_id>」——persistentSession 新建的接手会话没有本 skill 上下文，只能靠 prompt 里的完整触发词进入 skill 恢复（与第⑥段唯一正确用法逐字一致，不得写成 run-ledger 子命令形态）'
+  );
+});
+
+test('sc-p1b-⑨（r4 改 payload）：payload 判据必须覆盖 minutes_since_last_event 为 null（台账无事件时的停摆盲区）', () => {
+  // F2 实证：run-ledger staleness 无事件时 last_event_at 为 null，null>=60 为 false——init 后
+  // 立即停摆（活已派出去、首个事件未落）时恢复分支永不命中，最该救的场景反而是盲区。
+  // 断言一锁判据行「为 null 或 >=60」组合短语（null 分支是追加不是替换，>=60 字面量保留）；
+  // 断言二锁 null 与「刚 init 正常态」的区分佐证短语（in_flight_groups 非空 = 活已派出去）。
+  // r4 改造：断言作用在 payload 上。
+  const payload = extractWatchdogPayload();
+  assert.ok(payload.includes('为 null 或 >=60'), '⑰ payload 判据应含「为 null 或 >=60」——minutes_since_last_event 为 null（台账无事件，如 init 后立即停摆）时 null>=60 为 false、恢复分支永不命中，判据必须覆盖 null 分支（追加不是替换）');
+  assert.ok(payload.includes('活已派出去'), 'payload 应给出与「刚 init 正常态」的区分佐证（in_flight_groups 非空 = 活已派出去、该落事件却没落，按疑似停摆处理）');
+});
+
+test('sc-p1b-⑩（r4 改 payload）：payload 必须含「先交叉核实再动手」缓解判据 + 两个核实对象（in_flight_groups / list_workers）', () => {
+  // F3(a) 是「误判 → 打断正在干活的 lead → 提前 archive worker / 重复派工」的唯一行为层屏障：
+  // 心跳模式下误判会向正在干活的 lead 会话注入「清槽重派」指令，payload 的交叉核实判据是唯一缓解。
+  // r4 改造：断言作用在 payload 上；串形态随 payload 重构更新（「**（查」→「——查」）。
+  // 说明块（确认门答辩）只复述「先交叉核实再动手」不带核实对象组合，payload 断言不受稀释。
+  const payload = extractWatchdogPayload();
+  assert.ok(
+    payload.includes('先交叉核实再动手——查 in_flight_groups 状态与 list_workers 存活情况'),
+    '⑰ payload 应含「先交叉核实再动手」缓解判据及其两个核实对象（in_flight_groups / list_workers）——这是挡住「误判 → 打断正在干活的 lead → 提前 archive worker / 重复派工」的唯一行为层屏障；删掉它会让残余声明的「已由 payload 判据缓解」变成空头支票'
+  );
+});
+
+test('sc-p1b-⑪（F4）：第五个失败时间点 (e) 在场——标题字面量「五个失败时间点」与 (e) 绑定会话死亡 pause 语义成对锁定', () => {
+  // F4：心跳模式特有失败面——只设 bindToCurrentSession 不设 persistentSession 时 lead 会话死亡
+  // 宿主直接 pause 整条 schedule 且不自动恢复；(a)-(d) 覆盖不到（setup 不可用 / READY 自删 /
+  // 被删停用 / 服务停机均不涉及绑定会话死亡）。标题字面量与 (e) 行成对锁定——只锁其一，
+  // 另一个被改不红（反向变异已证：删 (e) 行而标题保留，只锁标题的断言仍绿；改回「四个」
+  // 而 (e) 保留，只锁 (e) 的断言仍绿）。
+  // 注：失败时间点是设计说明（说明块），不是载荷内容，保留段级断言。
+  const s17 = sectionBetween(MARKERS[16], undefined);
+  assert.ok(s17.includes('五个失败时间点'), '⑰ 段应声明「五个失败时间点」（标题字面量，与 (e) 成对——只锁 (e) 不锁标题，标题被改回「四个」不红）');
+  assert.ok(
+    s17.includes('(e) **绑定会话死亡导致 schedule 被 pause'),
+    '⑰ 段应含第五个失败时间点 (e)「绑定会话死亡导致 schedule 被 pause」——心跳模式特有的失败面，(a)-(d) 覆盖不到，缺失即回检动作无对应失败面'
+  );
+});
+
+test('sc-p2b-A1（r4 改 payload）：payload 必须含 A1 观察协议——version 连续 3 轮不变 → 判定停摆；观察文件缺失/损坏 → 报告并重计', () => {
+  // F2 实证（lead 2026-08-11 独立复现）：init 产出 phase=executing + 全部组 pending + events=[]，
+  // staleness 输出 (null, in_flight=[], version 不变)；旧文「为空（刚 init 正常态）不动作，等下一轮」
+  // = 永久静默死循环（每小时读到完全相同数据，lead 永远不会被救）。
+  // 逃逸判据 = staleness 输出的 version 字段（台账每次写操作递增的单调量，run-ledger.mjs
+  // writeLedgerAtomic 的 buildNext 一律 expected+1，init 起 version=0）：连续 N 轮同一 version =
+  // 台账 N 小时完全没被写过 = 真停摆。N=3（3 轮 = 3 小时）。
+  // 假绿教训（2026-08-11 变异 I 实测）：分开 includes「连续 3 轮」与「同一 version」两个裸词，
+  // 会被执行方式句的复述「连续 3 轮同一 version」残留命中——删掉判据核心句后旧断言仍全绿。
+  // r4 改造：断言作用在 payload 上（A1 是载荷内容，必须进 prompt；移到说明块即红）。
+  const payload = extractWatchdogPayload();
+  assert.ok(
+    payload.includes('**连续 3 轮**（看门狗每小时触发一次，3 轮 = 3 小时）观察到同一 version'),
+    '⑰ payload 逃逸判据核心句必须在场：「连续 3 轮」与「同一 version」绑定且 N=3（3 轮=3 小时）——判据字段被换错（如 phase）、N 值被改、或核心句被掏空（只留裸词）都会破坏该串，即红'
+  );
+  assert.ok(payload.includes('watchdog.json'), 'payload A1 观察协议必须点名观察文件 <ledger>.watchdog.json（version 观察的落盘对象）');
+  assert.ok(payload.includes('从本轮重新计数'), 'payload 必须声明观察文件缺失/损坏 → 报告 owner 并从当前轮重新计数（P2-4 fail-safe 方向：宁可多等，不可误动）');
+  assert.ok(payload.includes('计数清零重计'), 'payload 必须声明 version 变化 → 计数清零重新计时（期间任何写操作即推翻停摆判据）');
+});
+
+test('sc-p2b-A2（r4 改 payload）：payload 必须含交叉核实互斥动作表——P1-2 按组判定三行语义 + 「仅报告 owner」安全兜底', () => {
+  // F3 批评（GPT 复审）：只写「查 in_flight_groups 状态与 list_workers 存活情况」无动作映射，
+  // 低配会话无从下手、且可能误动作（如 worker 已归档但台账未落账时误判「该重派」）。
+  // r4 P1-2：正常完工的组（delivered/review_pass）交付后已按纪律 archive，仍在 in_flight 里但
+  // list_workers 查无对应 worker——这是正常态不是 timeout，不得重派；只有 state=dispatched +
+  // 满 workerTimeoutMinutes(40min) + 确证 worker 已 terminal 才允许超时收束。
+  // r4 改造：断言作用在 payload 上（A2 是载荷内容，必须进 prompt；表格移到说明块即红）。
+  const payload = extractWatchdogPayload();
+  assert.ok(payload.includes('互斥动作表'), 'payload 应含「互斥动作表」标题（交叉核实结果 → 动作的明确映射，非仅核实对象清单）');
+  assert.ok(payload.includes('running/active'), '动作表第 1 行状态：对应 worker 存活（running/active）');
+  assert.ok(payload.includes('正常在跑'), '动作表第 1 行动作：存活 → 不动（正常在跑，只记录观察）');
+  assert.ok(
+    payload.includes('state=dispatched 且 dispatched_at+40min<=now 且该 worker 已 terminal'),
+    'P1-2 超时判定：只有 state=dispatched + dispatched_at+40min<=now（workerTimeoutMinutes=40，第⑤段）+ 确证 worker 已 terminal 才允许超时收束——放宽成任意 in_flight 态即红（会把正常完工的组误判成超时重派）'
+  );
+  assert.ok(payload.includes('超时/失败收束'), '动作表超时行动作：按第⑤段「worker 超时重派」纪律超时/失败收束并落账（归档该 worker、重建重派，台账 timeout_redispatch）');
+  assert.ok(
+    payload.includes('state=delivered/review_pass 且该 worker 不存在/已 terminal'),
+    'P1-2 正常态判定：delivered/review_pass 但无存活 worker 是正常态（交付后已按纪律 archive），不是 timeout——走 resume 从台账恢复后续，不重派'
+  );
+  assert.ok(payload.includes('正常态'), '动作表应标注 delivered/review_pass 行为正常态（≠ 超时）');
+  assert.ok(payload.includes('不重派'), '正常态行必须声明不重派（已完成的工作不得重复派工）');
+  assert.ok(payload.includes('仅报告 owner，不清槽不重派'), '动作表第 4 行安全兜底：映射缺失/多重/混合 → 仅报告 owner，不清槽不重派（宁可少动作，不可误清仍在跑的 worker）');
+});
+
+test('sc-r4-P1-3：payload 第 1 步必须含暂停保护——「允许停」路径下不得 resume/重派，仅报告 owner', () => {
+  // P1-3（GPT 终审，lead 实证）：PHASE_ORDER 无 paused/blocked 态——预算暂停等 owner 确认期间
+  // 台账 phase 仍是 executing、无写操作、version 不变 → 三小时后 A1 判定「真停摆」→ resume/重派，
+  // 直接违背用户的暂停授权。保护 = 进入「允许停」路径时 lead 停用/删除 schedule（选 (a)，见
+  // 说明块「暂停保护（P1-3，选 (a)）」）；payload 第 1 步是 lead 忘记停时的兜底闸。
+  // 断言作用在 payload 上：暂停保护必须进 prompt（移出 payload 即红）。
+  const payload = extractWatchdogPayload();
+  assert.ok(payload.includes('暂停保护'), 'payload 第 1 步必须含「暂停保护」步骤（进入允许停路径后的兜底闸）');
+  assert.ok(payload.includes('不得 resume/重派'), '暂停保护必须禁止 resume/重派——不得越过用户已授权的暂停自作主张继续跑');
+  assert.ok(payload.includes('仅报告 owner，不动作'), '暂停保护兜底动作：仅报告 owner，不动作（不清槽、不重派、不 resume）');
+});
+
+test('sc-⑫（GPT 终审唯一必修）：schedule_id 必须进展开清单与 payload 第 2/5 步——载荷要求的动作必须有输入', () => {
+  // GPT 终审实证：payload 第 2 步（READY 自删）与恢复入口步（暂停后重重挂）都要求用 schedule id，
+  // 但模板说明行只要求展开 ledger 路径与 run_id——persistentSession 新建的接手会话不知道
+  // schedule id：READY 时无法自删（孤儿 schedule 永远每小时跑下去，⑰ 段自列「自删是双保险」，
+  // 这个保险是空的），暂停后无法去重重挂（盲挂重复创建，schedule_create 无 upsert/无去重键）。
+  // 断言一锁展开清单：作用在「**提示词模板**」到 payload start marker 的区间——裸词段级断言会被
+  // 「schedule_create 六项必填参数」行的「schedule id」残留稀释（反向变异已复现），必须锁区间。
+  // 断言二锁 payload 第 2 步行：作用在具体行（含「**终态」）——全 payload includes 会被恢复
+  // 入口步的 <schedule_id> 残留稀释（反向变异已复现），必须按行锁定。
+  const s17 = sectionBetween(MARKERS[16], undefined);
+  const tmplStart = s17.indexOf('**提示词模板**');
+  assert.ok(tmplStart >= 0, '⑰ 段应含「**提示词模板**」说明行');
+  const payloadStart = s17.indexOf('<!-- approve-exec:watchdog-payload:start -->');
+  assert.ok(payloadStart > tmplStart, 'payload 起止标记应位于模板说明行之后');
+  const tmplBlock = s17.slice(tmplStart, payloadStart);
+  // 锁完整短语而非裸词 schedule_id：模板说明行内「payload 是接手方拿到 run_id 与 schedule_id
+  // 的唯一通道」「用 schedule_update 把 <schedule_id> 回填」等处也含 schedule_id 字样——
+  // 只删展开清单处的变异会被残留命中假绿（变异实测已复现），必须锁「…与 schedule_id 三者
+  // 都展开写进 prompt」整串。
+  assert.ok(tmplBlock.includes('与 schedule_id 三者都展开写进 prompt'), '模板说明行必须要求把 schedule_id 展开写进 prompt（payload 第 2/5 步动作的输入）——只展开 ledger/run_id 时接手会话不知道 schedule id，READY 自删与恢复重重挂都无从执行');
+  assert.ok(tmplBlock.includes('schedule_update'), '模板说明行必须写明两步时序：schedule_create 返回 id 后再用 schedule_update 把 id 回填进 prompt（创建时 prompt 已随提交、拿不到 id，回填是唯一可行路径）');
+
+  const payload = extractWatchdogPayload();
+  const lines = payload.split('\n');
+  const step2 = lines.find((l) => l.includes('**终态'));
+  assert.ok(step2, 'payload 应含第 2 步「终态/心跳」行');
+  assert.ok(step2.includes('<schedule_id>'), 'payload 第 2 步（phase=ready 自删）必须使用已给定的 <schedule_id>——写「持久化的 schedule id」这类指向不明说法即红（载荷里应是一个具体的、已被展开的值，接手会话才删得掉 schedule）');
+  const restoreStep = lines.find((l) => l.includes('**恢复入口'));
+  assert.ok(restoreStep, 'payload 应含恢复入口步');
+  assert.ok(restoreStep.includes('<schedule_id>'), '恢复入口步必须使用已给定的 <schedule_id>，与第 2 步同一展开值（resume 按 id 定位，写「持久化的 schedule id」这类指向不明说法即红）');
+});
+
+test('sc-收尾-①（GPT 阻断 1 确认）：payload 第 5 步恢复入口必须为 resume 语义且含 <schedule_id>（反向变异：改回「重重挂」恰红 1 条）', () => {
+  // 收尾轮（GPT 阻断 1，lead 实测工具契约确认）：schedule_delete 不可逆且 schedule_create 无
+  // id 参数——删掉的 schedule 无法用原 id 重建，payload 原「若 schedule 曾被停用或删除 → 用
+  // <schedule_id> 重重挂」是不可执行分支。修复 = 消除 deleted 分支本身：暂停路径只
+  // schedule_pause，恢复 = schedule_resume(<schedule_id>)，零新增参数。
+  // 断言作用在 payload 上（接手会话实际拿到的文本）；正向表述锁定 resume 语义（不加全文否定
+  // 断言「不得含重重挂」——否则反向变异改回「重重挂」会双红，破坏「恰红 1 条」验收口径）。
+  // 反向变异（实测）：把恢复动作改回「重重挂」→ 本测试红恰 1 条，其余全绿。
+  const payload = extractWatchdogPayload();
+  const lines = payload.split('\n');
+  const restoreStep = lines.find((l) => l.includes('**恢复入口'));
+  assert.ok(restoreStep, 'payload 应含恢复入口步');
+  assert.ok(
+    restoreStep.includes('<schedule_id>'),
+    '恢复入口步必须使用已给定的 <schedule_id>（resume 按 id 定位，与第 2 步同一展开值）'
+  );
+  assert.ok(
+    restoreStep.includes('schedule_resume'),
+    '恢复入口步必须是 resume 语义（schedule_resume(<schedule_id>) 恢复 paused 的 schedule）——「重重挂/重建」不可执行：schedule_create 无 id 参数，删了就再也拿不回同一 id'
+  );
+  assert.ok(
+    restoreStep.includes('处于 paused'),
+    '恢复入口步必须按 paused 态判据恢复（若本 schedule 处于 paused → resume）——「曾被停用或删除」是 deleted 分支残留说法'
+  );
+});
+
+test('sc-收尾-②（GPT 阻断 2 确认）：挂载说明必须含四步挂载流程 create → pause → update → resume（反向变异：删 pause 步恰红 1 条）', () => {
+  // 收尾轮（GPT 阻断 2，lead 实测确认）：schedule_create 返回后、schedule_update 回填前若撞上
+  // hourly tick，首轮 prompt 仍是 <schedule_id> 占位符——竞态窗口真实存在（create 无原子
+  // update 选项、无 status 参数）。修复 = 四步挂载：create → pause → update → resume，
+  // 窗口内 schedule 处于 paused 不触发，撞 tick 也不会跑占位符。
+  // 断言作用在模板说明区间（「**提示词模板**」→ payload start 之间），正则锁
+  // create→pause→update→resume 顺序（顺序不可换：pause 必须在 update 前才关得住窗口）。
+  // 反向变异（实测）：从挂载流程删掉 pause 步（退回两步 create→update）→ 本测试红恰 1 条。
+  const s17 = sectionBetween(MARKERS[16], undefined);
+  const tmplStart = s17.indexOf('**提示词模板**');
+  assert.ok(tmplStart >= 0, '⑰ 段应含「**提示词模板**」说明行');
+  const payloadStart = s17.indexOf('<!-- approve-exec:watchdog-payload:start -->');
+  assert.ok(payloadStart > tmplStart, 'payload 起止标记应位于模板说明行之后');
+  const tmplBlock = s17.slice(tmplStart, payloadStart);
+  assert.match(
+    tmplBlock,
+    /schedule_create[\s\S]{0,400}schedule_pause[\s\S]{0,400}schedule_update[\s\S]{0,400}schedule_resume/,
+    '模板说明行必须写明四步挂载流程（create → pause → update → resume，顺序不可换）——先 pause 把竞态窗口关死（create 后、update 回填前撞 tick 会跑 <schedule_id> 占位符 prompt），update 回填真实 id 后再 resume 放行'
+  );
+});
+
+test('sc-收尾-③：⑰ 段暂停路径必须声明只 pause 不 delete，delete 仅限 READY 终态（正向表述锁定）', () => {
+  // 收尾轮（GPT 阻断 1 的段级落实）：deleted 分支整体消除——挂载行「进入允许停路径 → 删除本
+  // schedule；恢复时重重挂」与暂停保护块「停用或删除本 run 的 schedule」都是不可执行分支
+  // （delete 不可逆、create 无 id 参数）。修复 = 只 pause；delete 只保留在 READY 终态
+  // （payload 第 2 步，那时不需要再挂回来）。
+  // 用正向表述锁定（lead 明示可用「锁 pause/resume 正向表述」替代否定断言——全文否定断言
+  // 会在「改回重重挂」反向变异时与 sc-收尾-① 双红，破坏「恰红 1 条」口径）。
+  const s17 = sectionBetween(MARKERS[16], undefined);
+  assert.ok(
+    s17.includes('只暂停本 schedule'),
+    '⑰ 段必须声明暂停路径只 pause 本 schedule（明确不 delete）——delete 不可逆且 schedule_create 无 id 参数，删了就再也挂不回同一 id'
+  );
+  assert.ok(
+    s17.includes('不 delete'),
+    '挂载行/暂停保护块必须显式声明「不 delete」边界（防只写 pause 不提 delete 边界的半修）'
+  );
+});
+
+test('sc-收尾-④（GPT 终审文字债①）：挂载时序必须承认毫秒级残余窗口 + fresh-init 前提限制（反向变异：改回「关死/杜绝」绝对表述恰红 1 条）', () => {
+  // GPT 终审文字债①：原「四步挂载，关死竞态窗口」「杜绝…竞态窗口」「窗口内 schedule 处于
+  // paused，撞 tick 也不会跑占位符 prompt」是绝对表述，暗示窗口被彻底消灭——实际
+  // schedule_create 返回即 active 且 nextFireAt 已设，create 成功返回到 pause 成功返回之间
+  // 仍有毫秒级残余窗口，撞 tick 仍可能触发一次占位符 prompt。修复 = 如实承认残余窗口
+  // （pause 成功后窗口才关死），并声明该残余的安全性依赖 fresh-init invariants（新 run 刚
+  // init 时 phase=executing / minutes=null / in_flight 为空 / 观察文件不存在 → 占位符 prompt
+  // 只写观察文件，不会走到 resume / archive / 重派）；非 fresh-init 的既有 run 上重新 create
+  // 会带真实 run_id 进入 --resume 并可能 archive+重派，故挂载只允许在 init 后的 fresh run 上做。
+  // 断言作用在模板说明区间（tmplBlock，同 sc-收尾-② 口径）；反向变异（改回绝对表述）时
+  // 这些新表述串消失即红，恰 1 条。
+  const s17 = sectionBetween(MARKERS[16], undefined);
+  const tmplStart = s17.indexOf('**提示词模板**');
+  assert.ok(tmplStart >= 0, '⑰ 段应含「**提示词模板**」说明行');
+  const payloadStart = s17.indexOf('<!-- approve-exec:watchdog-payload:start -->');
+  const tmplBlock = s17.slice(tmplStart, payloadStart);
+  assert.ok(
+    tmplBlock.includes('毫秒级残余窗口'),
+    '挂载时序必须承认毫秒级残余窗口（create 成功返回到 pause 成功返回之间撞 tick 仍可能触发一次占位符 prompt）——写「杜绝/关死窗口」类绝对表述即红'
+  );
+  assert.ok(
+    tmplBlock.includes('pause 成功后'),
+    '必须写明窗口在 pause 成功后（而非 create 返回时）才关死'
+  );
+  assert.ok(
+    tmplBlock.includes('fresh-init'),
+    '必须声明残余窗口的安全性依赖 fresh-init invariants（新 run 刚 init 时 phase=executing / minutes=null / in_flight 为空 / watchdog 观察文件不存在 → 占位符 prompt 只会写观察文件，不会走到 resume、不会 archive/重派）'
+  );
+  assert.ok(
+    tmplBlock.includes('挂载只允许在 init 后的 fresh run 上做'),
+    '必须声明挂载边界：只允许在 init 后的 fresh run 上做（非 fresh-init 的既有 run 上重新 create，占位符 prompt 会带真实 run_id 进入 --resume 并可能 archive+重派）'
+  );
+});
+
+test('sc-收尾-⑤（GPT 终审文字债②）：四步挂载必须含 fail-closed 规则，pause 失败不得继续（反向变异：删 fail-closed 句恰红 1 条）', () => {
+  // GPT 终审文字债②：四步调用缺显式「任一步失败即停止」fail-closed 句——尤其 pause 失败后若
+  // 继续 update→resume，等于回到无保护的两步流程，占位符窗口重新暴露整个 hourly 周期。
+  // 修复 = 四步任一步失败即停止；pause 失败绝不能继续 update→resume；create 成功后失败先
+  // pause 住防跑占位符再报告 owner；连 pause 都失败则立即报告 owner 存在活跃的占位符 schedule。
+  // 断言作用在模板说明区间（tmplBlock）；「fail-closed」裸词在全文多处出现（②⑤⑦段），
+  // 必须锁本段内新表述串，防残留稀释。
+  const s17 = sectionBetween(MARKERS[16], undefined);
+  const tmplStart = s17.indexOf('**提示词模板**');
+  assert.ok(tmplStart >= 0, '⑰ 段应含「**提示词模板**」说明行');
+  const payloadStart = s17.indexOf('<!-- approve-exec:watchdog-payload:start -->');
+  const tmplBlock = s17.slice(tmplStart, payloadStart);
+  assert.ok(
+    tmplBlock.includes('任一步失败即停止'),
+    '四步挂载必须声明 fail-closed：任一步失败即停止，不得继续后续步骤（现状「四步完成才算挂好」属隐含，不构成明确规则）'
+  );
+  assert.ok(
+    tmplBlock.includes('pause 失败绝不能继续'),
+    '必须显式点名 pause 失败绝不能继续 update→resume（等于回到无保护的两步流程，占位符窗口重新暴露整个 hourly 周期）'
+  );
+  assert.ok(
+    tmplBlock.includes('占位符 schedule'),
+    '必须声明连 pause 都失败时立即报告 owner 说明存在活跃的占位符 schedule（最后一道防线，create 已成功但回填/暂停全失败时的可观测出口）'
+  );
 });
