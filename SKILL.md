@@ -34,7 +34,7 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
   1. **收结构化交卷**：只认 `run-ledger` record-delivery 入账的 exact schema 交卷（exec / review / verify 三类，多余键或缺失键都拒）；lead 不做手工转录。（机器闸：`scripts/run-ledger.mjs` record-delivery）
   2. **archive 全部 done/idle/error worker**——**汇报即清理（owner 硬指令(二)，2026-08-10）**：触发时机 = worker 交卷汇报一到即在同一轮动作内 archive，**不得攒批、不得延后到下一环节、不得用 idle 顶替**。明示：**不是 idle**——idle 只释放进程、**不释放槽位**；只有 archive 才释放并发槽位。（无机器闸：archive/idle 语义是 Orca 平台行为，按时执行依赖 lead）
   3. **list_workers 取实数**：调 `list_workers` 读当前 worker 清单，**禁止心算/凭记忆**填 used_slots——记录实数（第 2 步已 archive 的槽位此刻已释放）。（无机器闸：list_workers 读数是平台查询，取实数依赖 lead 执行）
-  4. **mem-probe 现算并发**：`mem-probe --used-slots <第 3 步实数>` 现算可用并发（并发公式见第④段 D2）。（机器闸：`scripts/mem-probe.mjs` 输出即槽位判据）
+  4. **mem-probe 现算并发**：`mem-probe --json --used-slots <第 3 步实数> --pending <待派组数>` 现算可用并发（并发公式见第④段 D2；`--pending` 同为必填，缺任一即 exit 2）。（机器闸：`scripts/mem-probe.mjs` 输出即槽位判据）
   5. **create_workers 整批派发 + 落账**：同批 ≥2 worker 用 `create_workers` 批量派发（禁连续单发，见第⑨段），随后逐组 `set-state --group <gid> --to dispatched --mem-snapshot '<json>'` 落账——快照四键 `used_slots`/`platform_cap`/`concurrency`/`available_bytes` 由 lead 从 `mem-probe --json` 的 9 键输出中提取构造（原样直喂 9 键会被 exact 校验拒，提取步骤即本步，见第⑮段迁移⑦⑧⑨）。（机器闸：`scripts/run-ledger.mjs` set-state 快照闸 + 凭证闸）
 
 ## ④ 设计决策 D0–D4
