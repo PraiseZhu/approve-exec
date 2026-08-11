@@ -1,7 +1,8 @@
 // graph.json 席位表校验测试。
 // graph.json 是本 skill 的席位真相源（先例 = submit-pr Phase 2 席位表），
-// 只引「路由档名 + agent_pin」，永不内嵌具体模型 ID —— 模型在派工时现读
-// config/defaults.json 的 routingPath 指向的真实 routing.json。
+// 只引「路由档名 + agent_pin」；唯一例外 = R 席 model/effort 由席位表显式钉死
+// （D3，owner 2026-08-10 拍板：anthropic-claude/claude-sonnet-5 / xhigh，不走 routing）。
+// 其余席位的模型在派工时现读 config/defaults.json 的 routingPath 指向的真实 routing.json。
 //
 // 断言口径（sc-p2a）：
 // 1. 每个 route 值 ∈ 现读 routing.json 的顶层 key 集（subset 判定）。
@@ -14,9 +15,13 @@
 //    （全表唯一合法值），且必须与所在席位 route 档的 agent 一致 ——
 //    route=execute 的 E/R 席依赖 execute 档 agent=claude-code 的现状，
 //    若 routing.json 把 execute 档 agent 改成 codex，agent_pin 即失效，必须红。
-// 3. graph 内不出现任何具体模型 ID（deepseek/gpt-/claude- 之类字样，禁复述）。
+// 3. graph 内不出现任何具体模型 ID（deepseek/gpt-/claude- 之类字样，禁复述），
+//    **R 席 model 字段除外**：该字段是 D3 钉死值（anthropic-claude/claude-sonnet-5），
+//    豁免禁复述检测，其值绑定由独立 test 断言。
 //    检测范围是 phases 全部席位（含未来新增席位），不是白名单五席 ——
 //    多余席位带模型 ID 同样违反「graph 内不出现模型 ID」的禁复述意图。
+// 4. R 席 model/effort 必须存在且格式合法：model 非空字符串、effort ∈ 六枚举
+//    （low/medium/high/xhigh/max/ultra，与 scripts/selfcheck.mjs 的 EFFORTS 同一枚举）。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -32,10 +37,14 @@ const defaults = JSON.parse(readFileSync(join(root, 'config/defaults.json'), 'ut
 const routing = JSON.parse(readFileSync(defaults.routingPath, 'utf8'));
 const routingKeys = Object.keys(routing);
 
-// 模型 ID 禁复述检测模式：graph 内（agent_pin 字段除外）任何字符串值命中即红。
+// 模型 ID 禁复述检测模式：graph 内（agent_pin 与 R 席 model 字段除外）任何字符串值命中即红。
 // 只检前缀类字样（deepseek/gpt-/claude-/gemini/grok/qwen/llama），
 // route 档名（execute/e2e/pr_merge）与其它元数据字段不会命中。
 const MODEL_ID_PATTERN = /deepseek|gpt-|claude-|gemini|grok|qwen|llama|kimi|glm-|doubao/i;
+
+// effort 六枚举：与 scripts/selfcheck.mjs 的 EFFORTS 同一枚举（create_worker 的 effort 合法值），
+// 这里复用同一字面量清单，不另立一套。
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 
 const SEATS = ['E', 'R', 'V', 'T', 'P'];
 
@@ -80,8 +89,22 @@ function validateGraph(g) {
         return { ok: false, reason: `${seat}.agent_pin=claude-code 与其 route=${s.route} 档的 agent=${routeAgent ?? '缺失'} 不一致——按档派工出的 agent 与 agent_pin 矛盾` };
       }
     }
+    if (seat === 'R') {
+      // D3（owner 2026-08-10 拍板）：R 席 model/effort 由席位表显式钉死，不走 routing 路由。
+      // 这里只校验存在性与格式；值绑定（anthropic-claude/claude-sonnet-5 / xhigh）在独立 test 断言。
+      if (typeof s.model !== 'string' || s.model.length === 0) {
+        return { ok: false, reason: `R.model 必须是非空字符串（当前 ${s.model}）——D3 席位表钉死字段` };
+      }
+      if (typeof s.effort !== 'string' || s.effort.length === 0) {
+        return { ok: false, reason: `R.effort 必须是非空字符串（当前 ${s.effort}）——D3 席位表钉死字段` };
+      }
+      if (!EFFORTS.includes(s.effort)) {
+        return { ok: false, reason: `R.effort=${s.effort} 不在 effort 六枚举 {${EFFORTS.join(',')}} 内` };
+      }
+    }
     for (const [field, value] of Object.entries(s)) {
       if (field === 'agent_pin') continue; // 已在上方锁死唯一合法值 claude-code，无需再过模型前缀
+      if (seat === 'R' && field === 'model') continue; // R 席 model 是 D3 钉死值，豁免禁复述；值绑定在独立 test 断言
       if (typeof value === 'string' && MODEL_ID_PATTERN.test(value)) {
         return { ok: false, reason: `${seat}.${field} 出现模型 ID 字样 "${value}"（禁复述，模型派工时现读 routing）` };
       }
@@ -119,6 +142,15 @@ test('E/R 两席 agent_pin 必为 claude-code（D0: goal skill 仅 claude-code �
 test('graph 内不出现任何具体模型 ID（禁复述，模型永远派工时现读 routing）', () => {
   const result = validateGraph(graph);
   assert.equal(result.ok, true, result.reason);
+});
+
+test('R 席 model/effort 显式钉死（D3：owner 2026-08-10 拍板，不走 routing 路由）', () => {
+  assert.equal(graph.phases.R.model, 'anthropic-claude/claude-sonnet-5',
+    `R.model 必须为 anthropic-claude/claude-sonnet-5（当前 ${graph.phases.R.model}）`);
+  assert.equal(graph.phases.R.effort, 'xhigh',
+    `R.effort 必须为 xhigh（当前 ${graph.phases.R.effort}）`);
+  assert.ok(EFFORTS.includes(graph.phases.R.effort),
+    `R.effort=${graph.phases.R.effort} 不在 effort 六枚举 {${EFFORTS.join(',')}} 内`);
 });
 
 test('反证夹具：agent_pin 改 codex 的坏 graph → 断言红', () => {
@@ -172,4 +204,21 @@ test('反证夹具：E 席 route 改到 agent=codex 的档（review）→ agent_
   const result = validateGraph(bad);
   assert.equal(result.ok, false, 'E 席 route=review（档 agent=codex）与 agent_pin=claude-code 矛盾，必须被拒');
   assert.ok(result.reason.includes('不一致'), `拒绝理由应指向 agent_pin 与档 agent 不一致，实际: ${result.reason}`);
+});
+
+test('反证夹具：R 席删 model → 断言红', () => {
+  // R 席 model 是 D3 钉死字段（非空字符串），删掉必须被 validateGraph 拒。
+  const bad = structuredClone(graph);
+  delete bad.phases.R.model;
+  const result = validateGraph(bad);
+  assert.equal(result.ok, false, 'R 席缺 model 必须被拒');
+  assert.ok(result.reason.includes('R.model'), `拒绝理由应指向 R.model，实际: ${result.reason}`);
+});
+
+test('反证夹具：R 席 effort 越六枚举（turbo）→ 断言红', () => {
+  const bad = structuredClone(graph);
+  bad.phases.R.effort = 'turbo';
+  const result = validateGraph(bad);
+  assert.equal(result.ok, false, 'R.effort 越枚举必须被拒');
+  assert.ok(result.reason.includes('枚举'), `拒绝理由应指向 effort 枚举，实际: ${result.reason}`);
 });

@@ -6,6 +6,7 @@
   "manifest_core_hash": "0dc94687c4c8a0613f678ff21bb87258547ebebb18955488d5e9e6f04e403c27",
   "version": 3,
   "phase": "validating",
+  "baseline_tip": "cccccccccccccccccccccccccccccccccccccccc",
   "waves": [
     {
       "wave": 1,

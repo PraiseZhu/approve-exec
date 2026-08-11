@@ -107,6 +107,13 @@ export function computeConcurrency({
   assertNonNegInt(usedSlots, 'usedSlots');
   assertNonNegInt(pendingGroups, 'pendingGroups');
   assertPositiveInt(platformCap, 'platformCap');
+  // 跨字段（sc-p0f）：usedSlots 是「已占用槽位」计数，超过 platformCap 意味着调用方统计自相矛盾。
+  // 若不拦，slotsBranch = platformCap − usedSlots 为负、min 后夹 0，静默返回「没槽位」——
+  // lead 看不出自己传了个超限数，只会以为内存不够在干等。顺序：platformCap 单字段校验已在前，
+  // 非法 platformCap（0/负）先被点名，跨字段比较才有意义。
+  if (usedSlots > platformCap) {
+    throw new TypeError(`usedSlots=${usedSlots} 超过 platformCap=${platformCap}`);
+  }
   if (typeof availableBytes !== 'number' || !Number.isFinite(availableBytes) || availableBytes < 0) {
     throw new TypeError(`availableBytes 必须为非负有限数，收到 ${JSON.stringify(availableBytes)}`);
   }
