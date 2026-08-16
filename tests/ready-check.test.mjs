@@ -156,6 +156,42 @@ function gapGates(stderr) {
   return stderr.split('\n').filter((l) => l.startsWith('GAP: ')).map((l) => l.replace(/^GAP: /, '').split(':')[0]);
 }
 
+// 在候选仓追加 commit（模拟 V 波集成 squash/rebase 或 P 席打包），返回新 HEAD。
+// files: [{file, content}]；empty: true → git commit --allow-empty（树内容不变仅 SHA 变化，
+// 这是「squash/rebase 集成后 HEAD ≠ 各组已审 tip 但内容等值」的最小形态）。
+function appendCommit(t, repo, { files = [], empty = false, message = '集成/打包' } = {}) {
+  const gitRun = (args, label) => {
+    const r = run('git', args, { cwd: repo.dir, env: buildChildEnv(process.env) });
+    assert.equal(r.status, 0, `fixture ${label} 失败: ${r.stderr}`);
+    return r;
+  };
+  for (const f of files) writeFileSync(join(repo.dir, f.file), f.content);
+  gitRun(['add', '-A'], 'git add');
+  if (empty) gitRun(['commit', '-q', '--allow-empty', '-m', message], 'git commit --allow-empty');
+  else gitRun(['commit', '-q', '-m', message], 'git commit');
+  const sha = gitRun(['rev-parse', 'HEAD'], 'git rev-parse HEAD').stdout;
+  assert.match(sha, /^[0-9a-f]{40}$/, '追加 commit 后 HEAD 应为 40 位十六进制');
+  return sha;
+}
+
+// gate ③ 内容等值测试专用：追加 commit 后把 ②④⑤ 的 candidate_sha 重绑到新 HEAD——
+// 它们锚定的是验收/报告时点（当时的候选树），已审 tip 语义只属于 ③ review 交卷绑定的
+// candidate_sha（保持初始 commit 不变）。不重绑会让 ②④⑤ 因 SHA 过期而红，掩盖 ③ 本身。
+function rebindToHead(env, headSha) {
+  env.parsed.verdict.candidate_sha = headSha;
+  env.parsed.e2e.candidate_sha = headSha;
+  env.parsed.size.candidate_sha = headSha;
+  env.parsed.format.candidate_sha = headSha;
+  env.parsed.intent.candidate_sha = headSha;
+  const files = {
+    verdict: 'verdict.json', e2e: 'e2e-report.json',
+    size: 'presubmit/size.json', format: 'presubmit/format.json', intent: 'presubmit/intent.json',
+  };
+  for (const [key, rel] of Object.entries(files)) {
+    writeFileSync(join(env.dir, rel), `${JSON.stringify(env.parsed[key], null, 2)}\n`);
+  }
+}
+
 // 断言 exit 2 且 GAP gate 集合恰等于 expected（无多余无遗漏）
 function expectGaps(res, expected, msg = '') {
   assert.equal(res.status, 2, `期望 exit 2（${msg}），实际 ${res.status}\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
@@ -390,6 +426,86 @@ test('gap3: 组无 review 类交卷（仅 exec+verify delivery）→ exit 2 gap 
   expectGaps(res, ['review-clean'], '无 review 类交卷必须 fail-closed');
   assert.match(res.stderr, /g1 无 review 类交卷/, '必须点名组名');
   assert.match(res.stderr, /exec, verify/, '必须点名实际 delivery 类别序列');
+});
+
+// ---------- gate ③ 两层内容等值（sc-p2e 修复）：SHA 精确等值判据废除 ----------
+// 场景复现本次 mivo run：组级审查绑各组 worktree tip（已审 tip = 初始 commit）→ V 波集成
+// squash/rebase（内容不变仅 SHA 变化）→ P 席打包 commit（.pr-intent.md）→ HEAD ≠ 各组已审
+// tip。旧判据「结论交卷 candidate_sha == 当前 HEAD」让 READY 结构上不可达；新判据改为
+// 「审过的内容 == 最终提交的内容」：L1 组路径域零 diff + L2 全树封闭性。
+
+test('SC-gate3-layer1: squash+rebase+P 席 commit 后 HEAD ≠ 各组已审 tip 但组路径域零 diff → PASS（内容等值取代 SHA 精确等值）', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, null);
+  // V 波集成 squash（--allow-empty：内容不变仅 SHA 变化）+ P 席打包（.pr-intent.md 在
+  // packaging_paths 白名单内）→ HEAD 已偏离各组已审 tip（初始 commit）
+  appendCommit(t, repo, { empty: true, message: 'wave integrate squash' });
+  const headSha = appendCommit(t, repo, { files: [{ file: '.pr-intent.md', content: 'intent: fixture\n' }], message: 'P packaging' });
+  rebindToHead(env, headSha);
+  const res = runReady(repo, env);
+  assert.equal(res.status, 0, `期望 exit 0（HEAD≠已审 tip 但内容等值）\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+  assert.match(res.stdout, new RegExp(`^READY_FOR_SUBMIT_PR feat/fixture-branch ${headSha}$`), 'READY 行必须含集成后 HEAD SHA');
+});
+
+test('SC-gate3-layer2: HEAD 含白名单外新文件（root.txt）→ exit 2 gap review-clean 且点名路径', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, null);
+  // P 席打包夹带越域文件：root.txt 不在任何组 allowed_paths（src.ts/evidence/anchors），
+  // 也不在 packaging_paths（.pr-intent.md）→ 第 2 层全树封闭性必须点名
+  const headSha = appendCommit(t, repo, { files: [
+    { file: '.pr-intent.md', content: 'intent: fixture\n' },
+    { file: 'root.txt', content: '越域文件\n' },
+  ], message: 'P packaging with out-of-whitelist file' });
+  rebindToHead(env, headSha);
+  const res = runReady(repo, env);
+  expectGaps(res, ['review-clean'], '白名单外新文件必须 FAIL 全树封闭性');
+  assert.match(res.stderr, /root\.txt/, '必须点名越域路径 root.txt');
+  assert.match(res.stderr, /全树封闭性/, '必须点名第 2 层判据');
+});
+
+test('SC-gate3-layer2: .pr-intent.md 在 P 席打包白名单（packaging_paths）内 → PASS', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, null);
+  // 只加 .pr-intent.md：L1 组路径域零 diff（不在 allowed_paths）、L2 相对基线的唯一新增
+  // 在 packaging_paths 白名单内 → 全过
+  const headSha = appendCommit(t, repo, { files: [{ file: '.pr-intent.md', content: 'intent: fixture\n' }], message: 'P packaging' });
+  rebindToHead(env, headSha);
+  const res = runReady(repo, env);
+  assert.equal(res.status, 0, `期望 exit 0（.pr-intent.md 白名单内放行）\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+  assert.match(res.stdout, new RegExp(`^READY_FOR_SUBMIT_PR feat/fixture-branch ${headSha}$`));
+});
+
+test('SC-gate3-tamper: 已审 tip 之后偷改某组 allowed_paths 内一行（src.ts）→ exit 2 gap review-clean 且点名该组与路径', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, null);
+  // g1/g2 的 allowed_paths 都含 src.ts：集成时偷改 src.ts 一行 → L1 组路径域非空，
+  // 旧判据（SHA 精确等值）同样会红，但新判据必须点名「哪个组、哪个路径被改」
+  const headSha = appendCommit(t, repo, { files: [{ file: 'src.ts', content: 'export const fixture = 2;\n' }], message: 'tamper src.ts' });
+  rebindToHead(env, headSha);
+  const res = runReady(repo, env);
+  // src.ts 在 g1+g2 的 allowed_paths 内 → 两个组各自 FAIL（两条 review-clean gap 行）；
+  // expectGaps 的恰等断言要求无重复 gate，这里改按 stderr 内容断言（去重后 gate 集合仍恰为 review-clean）
+  assert.equal(res.status, 2, `组路径域被改必须 FAIL\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+  assert.equal(res.stdout, '', 'gap 态不应输出 READY 行');
+  assert.deepEqual([...new Set(gapGates(res.stderr))].sort(), ['review-clean'], 'gate 去重后必须恰为 review-clean');
+  assert.match(res.stderr, /g1/, '必须点名被改的组');
+  assert.match(res.stderr, /g2/, 'src.ts 在 g1+g2 白名单内，两组都必须点名');
+  assert.match(res.stderr, /src\.ts/, '必须点名被改的路径');
+  assert.match(res.stderr, /组路径域在已审 tip/, '必须点名第 1 层判据');
+});
+
+test('SC-gate3-compat: baseline_tip=null（兼容模式）→ [WARN] 点名且第 2 层真跳过（白名单外文件不拦）', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, (p) => { p.ledger.baseline_tip = null; });
+  // 白名单外新文件：若第 2 层未跳过（却也无 baseline 可比）→ fail-closed 应红；
+  // 兼容模式必须显式 WARN + 跳过 → 仍 PASS（与 run-ledger init 兼容模式同语义）
+  const headSha = appendCommit(t, repo, { files: [{ file: 'root.txt', content: '越域文件\n' }], message: 'out-of-whitelist commit' });
+  rebindToHead(env, headSha);
+  const res = runReady(repo, env);
+  assert.equal(res.status, 0, `兼容模式必须 exit 0（第 2 层跳过）\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+  assert.match(res.stderr, /\[WARN\]/, '必须输出 [WARN] 点名');
+  assert.match(res.stderr, /第 2 层|全树封闭性/, 'WARN 必须点名第 2 层全树封闭性');
+  assert.match(res.stderr, /baseline_tip=null|兼容模式/, 'WARN 必须点名兼容模式原因');
 });
 
 test('gap4: e2e 报告缺失 → exit 2 gap e2e-report', (t) => {
@@ -803,6 +919,9 @@ function copyTreeForMutation(t, mutateScript) {
   writeFileSync(join(dir, 'tests/ready-check.test.mjs'), readFileSync(join(root, 'tests/ready-check.test.mjs'), 'utf8'));
   cpSync(join(root, 'tests/fixtures'), join(dir, 'tests/fixtures'), { recursive: true });
   writeFileSync(join(dir, 'config/defaults.json'), readFileSync(join(root, 'config/defaults.json'), 'utf8'));
+  // gate ③ 第 2 层读 graph.json（P 席 packaging_paths 唯一真相源）：变异副本树必须带上，
+  // 否则子套件全部测试因「缺 packaging_paths」fail-closed 红，失败集契约被整体污染
+  writeFileSync(join(dir, 'graph.json'), readFileSync(join(root, 'graph.json'), 'utf8'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return { file: join(dir, 'tests/ready-check.test.mjs'), dir };
 }

@@ -3,10 +3,10 @@
   "run_id": "fixture-run",
   "slug": "approve-exec-fixture",
   "manifest_path": "tests/fixtures/ready-full/manifest.json",
-  "manifest_core_hash": "0dc94687c4c8a0613f678ff21bb87258547ebebb18955488d5e9e6f04e403c27",
+  "manifest_core_hash": "0be1c7b975189f91a6d7af7c7ff0ef480c494050c7ef64eb84e221a5a853eb72",
   "version": 3,
   "phase": "validating",
-  "baseline_tip": "cccccccccccccccccccccccccccccccccccccccc",
+  "baseline_tip": "__HEAD_SHA__",
   "waves": [
     {
       "wave": 1,
@@ -15,12 +15,20 @@
         {
           "group_id": "g1",
           "state": "verified",
-          "sc_ids": ["sc-p0a"],
+          "sc_ids": [
+            "sc-p0a"
+          ],
           "worker_label": "fixture-w1",
           "dispatched_at": "2026-08-09T00:00:00.000Z",
           "tip_sha": "__HEAD_SHA__",
-          "review": { "rounds": 1, "unresolved": 0 },
-          "verify": { "status": "pass", "evidence_ref": "tests/fixtures/ready-full/verdict.json" },
+          "review": {
+            "rounds": 1,
+            "unresolved": 0
+          },
+          "verify": {
+            "status": "pass",
+            "evidence_ref": "tests/fixtures/ready-full/verdict.json"
+          },
           "worktree": null,
           "branch": null,
           "base": null
@@ -34,12 +42,21 @@
         {
           "group_id": "g2",
           "state": "verified",
-          "sc_ids": ["sc-p1f", "sc-p1g"],
+          "sc_ids": [
+            "sc-p1f",
+            "sc-p1g"
+          ],
           "worker_label": "fixture-w2",
           "dispatched_at": "2026-08-09T00:00:00.000Z",
           "tip_sha": "__HEAD_SHA__",
-          "review": { "rounds": 2, "unresolved": 0 },
-          "verify": { "status": "pass", "evidence_ref": "tests/fixtures/ready-full/verdict.json" },
+          "review": {
+            "rounds": 2,
+            "unresolved": 0
+          },
+          "verify": {
+            "status": "pass",
+            "evidence_ref": "tests/fixtures/ready-full/verdict.json"
+          },
           "worktree": null,
           "branch": null,
           "base": null
@@ -48,14 +65,112 @@
     }
   ],
   "events": [
-    { "type": "dispatch", "at": "2026-08-09T00:00:00.000Z", "detail": { "group_id": "g1", "worker_label": "fixture-w1" } },
-    { "type": "dispatch", "at": "2026-08-09T00:00:00.000Z", "detail": { "group_id": "g2", "worker_label": "fixture-w2" } },
-    { "type": "delivery", "at": "2026-08-09T00:30:00.000Z", "detail": { "group_id": "g1", "status": "done", "tip_sha": "__HEAD_SHA__", "candidate_sha": "__HEAD_SHA__", "scs": [{ "sc_id": "sc-p0a", "status": "pass" }] } },
-    { "type": "delivery", "at": "2026-08-09T00:30:00.000Z", "detail": { "group_id": "g2", "status": "done", "tip_sha": "__HEAD_SHA__", "candidate_sha": "__HEAD_SHA__", "scs": [{ "sc_id": "sc-p1f", "status": "pass" }, { "sc_id": "sc-p1g", "status": "pass" }] } },
-    { "type": "delivery", "at": "2026-08-09T01:00:00.000Z", "detail": { "group_id": "g1", "tip_sha": "__HEAD_SHA__", "candidate_sha": "__HEAD_SHA__", "rounds": 1, "findings_total": 0, "unresolved": 0, "fix_commits": 0 } },
-    { "type": "delivery", "at": "2026-08-09T01:00:00.000Z", "detail": { "group_id": "g2", "tip_sha": "__HEAD_SHA__", "candidate_sha": "__HEAD_SHA__", "rounds": 2, "findings_total": 0, "unresolved": 0, "fix_commits": 0 } },
-    { "type": "review_round", "at": "2026-08-09T02:00:00.000Z", "detail": { "group_id": "g2", "rounds": 2, "unresolved": 0 } },
-    { "type": "delivery", "at": "2026-08-09T02:30:00.000Z", "detail": { "group_id": "g1", "integration_review_status": "pass", "notes": "fixture verify", "candidate_sha": "__HEAD_SHA__" } },
-    { "type": "delivery", "at": "2026-08-09T03:00:00.000Z", "detail": { "group_id": "g2", "integration_review_status": "pass", "notes": "fixture verify", "candidate_sha": "__HEAD_SHA__" } }
+    {
+      "type": "dispatch",
+      "at": "2026-08-09T00:00:00.000Z",
+      "detail": {
+        "group_id": "g1",
+        "worker_label": "fixture-w1"
+      }
+    },
+    {
+      "type": "dispatch",
+      "at": "2026-08-09T00:00:00.000Z",
+      "detail": {
+        "group_id": "g2",
+        "worker_label": "fixture-w2"
+      }
+    },
+    {
+      "type": "delivery",
+      "at": "2026-08-09T00:30:00.000Z",
+      "detail": {
+        "group_id": "g1",
+        "status": "done",
+        "tip_sha": "__HEAD_SHA__",
+        "candidate_sha": "__HEAD_SHA__",
+        "scs": [
+          {
+            "sc_id": "sc-p0a",
+            "status": "pass"
+          }
+        ]
+      }
+    },
+    {
+      "type": "delivery",
+      "at": "2026-08-09T00:30:00.000Z",
+      "detail": {
+        "group_id": "g2",
+        "status": "done",
+        "tip_sha": "__HEAD_SHA__",
+        "candidate_sha": "__HEAD_SHA__",
+        "scs": [
+          {
+            "sc_id": "sc-p1f",
+            "status": "pass"
+          },
+          {
+            "sc_id": "sc-p1g",
+            "status": "pass"
+          }
+        ]
+      }
+    },
+    {
+      "type": "delivery",
+      "at": "2026-08-09T01:00:00.000Z",
+      "detail": {
+        "group_id": "g1",
+        "tip_sha": "__HEAD_SHA__",
+        "candidate_sha": "__HEAD_SHA__",
+        "rounds": 1,
+        "findings_total": 0,
+        "unresolved": 0,
+        "fix_commits": 0
+      }
+    },
+    {
+      "type": "delivery",
+      "at": "2026-08-09T01:00:00.000Z",
+      "detail": {
+        "group_id": "g2",
+        "tip_sha": "__HEAD_SHA__",
+        "candidate_sha": "__HEAD_SHA__",
+        "rounds": 2,
+        "findings_total": 0,
+        "unresolved": 0,
+        "fix_commits": 0
+      }
+    },
+    {
+      "type": "review_round",
+      "at": "2026-08-09T02:00:00.000Z",
+      "detail": {
+        "group_id": "g2",
+        "rounds": 2,
+        "unresolved": 0
+      }
+    },
+    {
+      "type": "delivery",
+      "at": "2026-08-09T02:30:00.000Z",
+      "detail": {
+        "group_id": "g1",
+        "integration_review_status": "pass",
+        "notes": "fixture verify",
+        "candidate_sha": "__HEAD_SHA__"
+      }
+    },
+    {
+      "type": "delivery",
+      "at": "2026-08-09T03:00:00.000Z",
+      "detail": {
+        "group_id": "g2",
+        "integration_review_status": "pass",
+        "notes": "fixture verify",
+        "candidate_sha": "__HEAD_SHA__"
+      }
+    }
   ]
 }

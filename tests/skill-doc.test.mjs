@@ -180,6 +180,17 @@ test('第⑪段：.pr-intent.md workfile 创建责任在本 skill P 阶段', () 
   assert.ok(s11.includes('intent-check'), 'P 阶段段应提及 intent-check');
 });
 
+test('第⑪段：gate ③ 两层内容等值（sc-p2e 修复）描述 + 打包白名单 packaging_paths + 残余声明', () => {
+  const s11 = sectionBetween(MARKERS[10], MARKERS[11]);
+  assert.ok(s11.includes('两层内容等值'), '第⑪段应声明 gate ③ 两层内容等值（sc-p2e 修复）');
+  assert.ok(s11.includes('组路径域内容等值'), '第⑪段应描述 L1 组路径域内容等值');
+  assert.ok(s11.includes('全树封闭性'), '第⑪段应描述 L2 全树封闭性');
+  assert.ok(s11.includes('packaging_paths'), '第⑪段应点名打包白名单唯一真相源 packaging_paths');
+  assert.ok(s11.includes('.pr-intent.md'), '第⑪段应声明打包白名单默认至少含 .pr-intent.md');
+  assert.ok(s11.includes('残余声明'), '第⑪段应声明残余');
+  assert.ok(s11.includes('submit-pr 三审兜底'), '残余声明应点名交互面语义由 submit-pr 三审兜底');
+});
+
 test('第⑫段：预算告警如实声明（计量方式 + 粗估标注）', () => {
   const s12 = sectionBetween(MARKERS[11], MARKERS[12]);
   assert.ok(s12.includes('budgetPauseUsd'), '预算段应引用 budgetPauseUsd 键');
