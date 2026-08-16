@@ -22,7 +22,8 @@
       "route": "e2e"
     },
     "P": {
-      "route": "pr_merge"
+      "route": "pr_merge",
+      "packaging_paths": [".pr-intent.md"]
     }
   }
 }

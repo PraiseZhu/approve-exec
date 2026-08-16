@@ -3,28 +3,103 @@
   "slug": "approve-exec-fixture",
   "goal": "fixture goal for ready-check exit-gate tests",
   "scs": [
-    { "id": "sc-p0a", "kind": "fix", "priority_id": "p0", "verify": { "cmd": "node", "args": ["scripts/run-tests.mjs"] } },
-    { "id": "sc-p1f", "kind": "fix", "priority_id": "p1", "verify": { "cmd": "node", "args": ["scripts/run-tests.mjs"] } },
-    { "id": "sc-p1g", "kind": "fix", "priority_id": "p1", "verify": { "cmd": "node", "args": ["scripts/run-tests.mjs"] } }
+    {
+      "id": "sc-p0a",
+      "kind": "fix",
+      "priority_id": "p0",
+      "verify": {
+        "cmd": "node",
+        "args": [
+          "scripts/run-tests.mjs"
+        ]
+      }
+    },
+    {
+      "id": "sc-p1f",
+      "kind": "fix",
+      "priority_id": "p1",
+      "verify": {
+        "cmd": "node",
+        "args": [
+          "scripts/run-tests.mjs"
+        ]
+      }
+    },
+    {
+      "id": "sc-p1g",
+      "kind": "fix",
+      "priority_id": "p1",
+      "verify": {
+        "cmd": "node",
+        "args": [
+          "scripts/run-tests.mjs"
+        ]
+      }
+    }
   ],
   "waves": [
-    { "wave": 1, "groups": [{ "group_id": "g1", "sc_ids": ["sc-p0a"] }] },
-    { "wave": 2, "groups": [{ "group_id": "g2", "sc_ids": ["sc-p1f", "sc-p1g"] }] }
+    {
+      "wave": 1,
+      "groups": [
+        {
+          "group_id": "g1",
+          "sc_ids": [
+            "sc-p0a"
+          ]
+        }
+      ]
+    },
+    {
+      "wave": 2,
+      "groups": [
+        {
+          "group_id": "g2",
+          "sc_ids": [
+            "sc-p1f",
+            "sc-p1g"
+          ]
+        }
+      ]
+    }
   ],
   "dispatch": {
     "capacity": 8,
     "packets": [
-      { "group_id": "g1", "scs_inline": [{ "id": "sc-p0a" }] },
-      { "group_id": "g2", "scs_inline": [{ "id": "sc-p1f" }, { "id": "sc-p1g" }] }
+      {
+        "group_id": "g1",
+        "scs_inline": [
+          {
+            "id": "sc-p0a"
+          }
+        ],
+        "allowed_paths": [
+          "src.ts",
+          "evidence/anchors"
+        ]
+      },
+      {
+        "group_id": "g2",
+        "scs_inline": [
+          {
+            "id": "sc-p1f"
+          },
+          {
+            "id": "sc-p1g"
+          }
+        ],
+        "allowed_paths": [
+          "src.ts"
+        ]
+      }
     ]
   },
   "receipts": [
     {
       "slug": "approve-exec-fixture",
-      "manifest_core_hash": "0dc94687c4c8a0613f678ff21bb87258547ebebb18955488d5e9e6f04e403c27",
+      "manifest_core_hash": "0be1c7b975189f91a6d7af7c7ff0ef480c494050c7ef64eb84e221a5a853eb72",
       "plan_hash": "fde2f195d43f44767b9e611c82ecdf4fd934e357cddaff8cbda5e1edc7dc87ba",
       "recorded_at": "2026-08-09T00:00:00Z"
     }
   ],
-  "manifest_core_hash": "0dc94687c4c8a0613f678ff21bb87258547ebebb18955488d5e9e6f04e403c27"
+  "manifest_core_hash": "0be1c7b975189f91a6d7af7c7ff0ef480c494050c7ef64eb84e221a5a853eb72"
 }

@@ -96,7 +96,11 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 
 - P 阶段（打包）worker：先从 manifest 的 goal/priorities 生成 **`.pr-intent.md`** workfile（意图声明，落在候选分支工作区），**之后**才运行 intent-check（presubmit 三闸：size / format / intent）。
 - **`.pr-intent.md` 的创建责任在本 skill 的 P 阶段，不在 submit-pr**；submit-pr 只消费该文件做 intent 核对。
-- 出口门由 `ready-check` 执行（机器闸：`scripts/ready-check.mjs` 七项检查 + HEAD SHA 绑定，任一 gap 即 exit 2 点名，全齐才 exit 0 输出 READY_FOR_SUBMIT_PR）：全组 verified + 每 SC PASS 锚点 + 审查 unresolved==0 + e2e PASS + presubmit 三闸结果**绑定候选 HEAD SHA**。
+- 出口门由 `ready-check` 执行（机器闸：`scripts/ready-check.mjs` 七项检查，任一 gap 即 exit 2 点名，全齐才 exit 0 输出 READY_FOR_SUBMIT_PR）：全组 verified + 每 SC PASS 锚点 + 审查 unresolved==0 + e2e PASS + presubmit 三闸结果**绑定候选 HEAD SHA**。
+- **gate ③（review-clean）两层内容等值（sc-p2e 修复）**：组级审查绑各组 worktree tip → V 波集成 squash/rebase → P 席打包 commit 必然产生新 HEAD，旧「结论交卷 candidate_sha == 当前 HEAD」的 SHA 精确等值判据让 READY 成为结构上不可达终态；要守的语义是「审过的内容 == 最终提交的内容」，两层均为确定性 git 命令、fail-closed：
+  - **L1 组路径域内容等值**：每组结论交卷绑定的 candidate_sha（已审 tip，执行组=review 类交卷 / 验收组=verify 类交卷）→ 当前 HEAD 的 diff 落在该组 `allowed_paths` 内必须为空，非空即 FAIL 点名组名与路径（已审 tip 无法解析同样 FAIL-closed）；
+  - **L2 全树封闭性**：HEAD 相对台账 `baseline_tip` 的 diff 必须全部落在「全组 `allowed_paths` 并集 ∪ P 席打包白名单」内，越域即 FAIL 逐路径点名；打包白名单 = `graph.json` P 席位 `packaging_paths`（唯一真相源，默认至少含 `.pr-intent.md`，缺失即 fail-closed 拒）；`baseline_tip=null`（兼容模式）→ stderr WARN 点名跳过（与 run-ledger init 兼容模式既有处理风格一致，不得静默）。
+  - **残余声明**：内容等值只证「审过的字节没变」，不证「rebase 后与新 base 的交互面语义仍成立」——该维度由 submit-pr 三审兜底。
 
 ## ⑫ 预算告警如实声明
 

@@ -144,6 +144,17 @@ test('graph 内不出现任何具体模型 ID（禁复述，模型永远派工�
   assert.equal(result.ok, true, result.reason);
 });
 
+test('P 席 packaging_paths：打包白名单唯一真相源，默认至少含 .pr-intent.md（ready-check gate ③ 第 2 层消费）', () => {
+  const pp = graph.phases.P.packaging_paths;
+  assert.ok(Array.isArray(pp), 'P 席 packaging_paths 必须是数组');
+  assert.ok(pp.length > 0, 'packaging_paths 不得为空（全树封闭性白名单缺打包路径即 fail-closed 拒）');
+  assert.ok(pp.includes('.pr-intent.md'), 'packaging_paths 默认至少含 .pr-intent.md');
+  for (const p of pp) {
+    assert.equal(typeof p, 'string', `packaging_paths 元素必须是字符串: ${p}`);
+    assert.ok(p.length > 0, 'packaging_paths 元素不得为空字符串');
+  }
+});
+
 test('R 席 model/effort 显式钉死（D3：owner 2026-08-10 拍板，不走 routing 路由）', () => {
   assert.equal(graph.phases.R.model, 'anthropic-claude/claude-sonnet-5',
     `R.model 必须为 anthropic-claude/claude-sonnet-5（当前 ${graph.phases.R.model}）`);

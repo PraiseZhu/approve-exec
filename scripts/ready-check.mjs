@@ -23,10 +23,20 @@
 //                        verdict.candidate_sha == HEAD；证据锚点强校验：evidence.file realpath 后在 repo 内
 //                        （防仓内 symlink 指向仓外文件冒充锚点）+ summary 与 output_records 内嵌记录逐字一致
 //   ③ review-clean      每组 review.rounds ≤ config.reviewMaxRounds 且 unresolved==0；
-//                        每组「该类组的结论交卷」的 detail.candidate_sha == HEAD
-//                        （执行组 = review 类交卷，同类多条取最后一条；验收组 = verify 类交卷，
-//                        组类型按 manifest packet.scs_inline 全 kind=verify 判定，同 render-packet；
-//                        结论交卷缺失 → fail-closed 点名组名与 delivery 类别序列）
+//                        两层内容等值（修复 sc-p2e：组级审查绑各组 worktree tip → V 波集成
+//                        squash/rebase → P 席打包 commit 必然产生新 HEAD，旧「结论交卷
+//                        candidate_sha == HEAD」的 SHA 精确等值判据让 READY 结构上不可达；
+//                        要守的语义是「审过的内容 == 最终提交的内容」）：
+//                          L1 组路径域内容等值——每组「该类组的结论交卷」绑定的 candidate_sha
+//                              （已审 tip，执行组 = review 类交卷同类多条取最后一条；验收组 =
+//                              verify 类交卷，组类型按 manifest packet.scs_inline 全 kind=verify
+//                              判定，同 render-packet；结论交卷缺失 → fail-closed 点名组名与
+//                              delivery 类别序列）到当前 HEAD 的 diff 落在该组 packet.allowed_paths
+//                              内必须为空；不为空 → FAIL 点名组名与路径；
+//                          L2 全树封闭性——HEAD 相对台账 baseline_tip 的 diff 必须全部落在
+//                              「全组 allowed_paths 并集 ∪ P 席打包白名单（graph.json
+//                              phases.P.packaging_paths）」内；baseline_tip=null（兼容模式）
+//                              → stderr WARN 点名跳过（与 run-ledger init 兼容模式同风格）
 //   ④ e2e-report        报告存在、status=pass、candidate_sha == HEAD
 //   ⑤ presubmit-gates   三闸结果存在、各自 result pass 语义、各自 candidate_sha == HEAD
 //   ⑥ git-clean         候选仓 git status --porcelain 为空
@@ -279,8 +289,16 @@ function isVerifyGroup(packet) {
   return scs.every((s) => s && typeof s === 'object' && s.kind === 'verify');
 }
 
-// ③ 每组审查收敛 + 审查交卷 candidate 绑定
-function checkReviewClean(ledger, manifest, headSha, reviewMaxRounds, gaps) {
+// ③ 每组审查收敛 + 两层内容等值出口门（sc-p2e 修复：组级审查绑各组 worktree tip → V 波
+// 集成 squash/rebase → P 席打包 commit 必然产生新 HEAD，「结论交卷 candidate_sha == 当前
+// HEAD」的 SHA 精确等值判据让 READY 成为结构上不可达终态。要守的语义是「审过的内容 ==
+// 最终提交的内容」，改为两层内容等值，均为确定性 git 命令、fail-closed）：
+//   L1 组路径域内容等值——每组结论交卷绑定的 candidate_sha（已审 tip）→ 当前 HEAD 的 diff
+//      落在该组 allowed_paths 内必须为空（审过的字节没变即可，不再要求 SHA 精确等值）；
+//   L2 全树封闭性——HEAD 相对台账 baseline_tip 的 diff 必须全部落在「全组 allowed_paths
+//      并集 ∪ P 席打包白名单（graph.json phases.P.packaging_paths）」内；baseline_tip=null
+//      （兼容模式）→ stderr WARN 点名跳过（与 run-ledger init 兼容模式既有处理风格一致）。
+function checkReviewClean(ledger, manifest, repoRoot, headSha, reviewMaxRounds, packagingPaths, gaps) {
   // F-O: 台账不可解析时本 gate 自身点名不可用，不拖垮不依赖台账的后项
   if (!ledger) { gaps.push({ gate: 'review-clean', detail: '台账不可用（文件不存在或不可解析）' }); return; }
   const groups = (ledger.waves || []).flatMap((w) => w.groups || []);
@@ -313,8 +331,44 @@ function checkReviewClean(ledger, manifest, headSha, reviewMaxRounds, gaps) {
       gaps.push({ gate: 'review-clean', detail: `${g.group_id} 无 ${bindingKind} 类交卷（${groupIsVerify ? '验收组' : '执行组'}，delivery 类别序列: ${deliveries.map(deliveryCategory).join(', ') || '无'}）` });
     } else if (typeof lastBinding.detail.candidate_sha !== 'string') {
       gaps.push({ gate: 'review-clean', detail: `${g.group_id} 审查交卷（${bindingKind} 类 delivery）缺 candidate_sha 绑定` });
-    } else if (lastBinding.detail.candidate_sha !== headSha) {
-      gaps.push({ gate: 'review-clean', detail: `${g.group_id} 审查交卷 candidate_sha ${lastBinding.detail.candidate_sha} != 当前 HEAD ${headSha}` });
+    } else {
+      // L1 组路径域内容等值：已审 tip（该组结论交卷绑定的 candidate_sha，即审查时的树）→
+      // 当前 HEAD 在组 allowed_paths 内必须零 diff。集成 squash/rebase/P 席打包都会产生新
+      // HEAD——SHA 精确等值因此不再适用；改证「审过的字节没变」。git 无法解析已审 tip
+      // （过期/伪造 SHA）→ fail-closed 点名，不猜测不降级。
+      const allowedPaths = Array.isArray(packet?.allowed_paths) ? packet.allowed_paths : [];
+      const reviewedTip = lastBinding.detail.candidate_sha;
+      const domainDiff = runGit(repoRoot, ['diff', '--name-only', reviewedTip, headSha, '--', ...allowedPaths]);
+      if (domainDiff.status !== 0) {
+        gaps.push({ gate: 'review-clean', detail: `${g.group_id} 已审 tip ${reviewedTip} 无法与当前 HEAD 比较（${domainDiff.stderr}）` });
+      } else if (domainDiff.stdout.length > 0) {
+        gaps.push({ gate: 'review-clean', detail: `${g.group_id} 组路径域在已审 tip ${reviewedTip} 之后被修改: ${domainDiff.stdout.split('\n').filter(Boolean).join(', ')}（审查绑定的是 ${reviewedTip}，集成/打包不得改动组域内容）` });
+      }
+    }
+  }
+  // L2 全树封闭性（组循环外一次）：HEAD 相对台账 baseline_tip 的 diff 必须全部落在「全组
+  // allowed_paths 并集 ∪ P 席打包白名单」内——集成/打包不得引入任何组域与打包白名单之外
+  // 的改动。baseline_tip=null = 兼容模式（无基线可比），沿用 run-ledger init 兼容模式
+  // 既有处理风格：stderr WARN 点名跳过，不得静默。
+  const baseline = ledger.baseline_tip ?? null;
+  if (baseline === null) {
+    console.error('ready-check: [WARN] gate ③ 第 2 层（全树封闭性）跳过：台账 baseline_tip=null（兼容模式，无基线可比）——HEAD 相对基线的越域改动不会被本闸拦下（与 run-ledger init 兼容模式同语义）');
+  } else {
+    const treeWhitelist = [
+      ...packets.flatMap((p) => (Array.isArray(p.allowed_paths) ? p.allowed_paths : [])),
+      ...(Array.isArray(packagingPaths) ? packagingPaths : []),
+    ];
+    const treeDiff = runGit(repoRoot, ['diff', '--name-only', baseline, headSha]);
+    if (treeDiff.status !== 0) {
+      gaps.push({ gate: 'review-clean', detail: `全树封闭性: 基线 ${baseline} 无法与当前 HEAD 比较（${treeDiff.stderr}）` });
+    } else {
+      // 路径命中判据 = 全等或目录前缀（w='src/' 命中 'src/lib/a.ts'；w 是文件则仅全等）。
+      // 白名单外的任何文件（新增/修改/删除）都算封闭性违反，逐路径点名。
+      const outside = treeDiff.stdout.split('\n').filter(Boolean)
+        .filter((f) => !treeWhitelist.some((w) => f === w || f.startsWith(`${w}/`)));
+      if (outside.length > 0) {
+        gaps.push({ gate: 'review-clean', detail: `全树封闭性违反: 以下路径不在任何组 allowed_paths 或 P 席打包白名单内: ${outside.join(', ')}（基线 ${baseline} → HEAD ${headSha}）` });
+      }
     }
   }
 }
@@ -395,6 +449,16 @@ function main() {
   }
   const reviewMaxRounds = config.reviewMaxRounds;
 
+  // gate ③ 第 2 层（全树封闭性）的打包白名单唯一真相源 = graph.json P 席位 packaging_paths
+  // （默认至少含 .pr-intent.md，由 graph.test.mjs 结构断言锁死）。缺失/非数组 = 配置损坏，
+  // fail-closed 点名，不静默降级到内置默认值。
+  const graph = readJsonOrNull(join(root, 'graph.json'));
+  const packagingPaths = graph?.phases?.P?.packaging_paths;
+  if (!Array.isArray(packagingPaths)) {
+    console.error('GAP: review-clean: graph.json 缺 P 席 packaging_paths（打包白名单唯一真相源，fail-closed 拒绝猜测）');
+    process.exit(2);
+  }
+
   const ledger = readJsonOrNull(args.ledger);
   // manifest 经 readManifest 统一收口（receipts 在场/形状契约与 run-ledger 全部消费入口同判据）：
   // 不合约/不可解析 → 转 gap 占位（F-O：不提前 exit，后项照常运行），错误原文随 manifestError
@@ -421,7 +485,7 @@ function main() {
   const gaps = [];
   checkLedgerPartition(ledger, manifest, manifestError, gaps);
   checkVerdictAnchors(verdict, manifest, manifestError, ledger, args.repo, headSha, gaps);
-  checkReviewClean(ledger, manifest, headSha, reviewMaxRounds, gaps);
+  checkReviewClean(ledger, manifest, args.repo, headSha, reviewMaxRounds, packagingPaths, gaps);
   checkE2eReport(e2eReport, headSha, gaps);
   checkPresubmitGates(args.presubmitDir, headSha, gaps);
   checkGitClean(args.repo, gaps);
