@@ -1382,9 +1382,13 @@ export function renderPacket({ ledgerPath, group, manifestPath, now }) {
     }
   }
 
-  // 组类型：kind 含 fix → 执行组模板；全部 kind=verify → 验收组模板
+  // 组类型：kind 含 fix 或 probe → 执行组模板；全部 kind=verify → 验收组模板。
+  // probe 走执行组：task-priority waves-plan 官方把 probe 池排进首波（p1..），
+  // 其产出是落盘证据/清单（goal 场景 C 照发），allowed_paths 已由 manifest 限死；
+  // 只认 fix 会让合法首波恒 PACKET_INCOMPLETE（实测卡死 akb2-cloud-ci /
+  // mivo-repo-split-closeout / mivo-slack-mention 三个 run 的 wave 1）。
   const kinds = packet.scs_inline.map((s) => s && typeof s === 'object' && s.kind ? s.kind : null);
-  const isExecGroup = kinds.some((k) => k === 'fix');
+  const isExecGroup = kinds.some((k) => k === 'fix' || k === 'probe');
   const isVerifyGroup = kinds.every((k) => k === 'verify');
 
   if (isVerifyGroup) {
@@ -1418,7 +1422,7 @@ export function renderPacket({ ledgerPath, group, manifestPath, now }) {
     });
   }
   if (!isExecGroup) {
-    throw new LedgerError('PACKET_INCOMPLETE', `组 ${group} 的 scs_inline kind 既无 fix 也无全 verify，无法选模板`);
+    throw new LedgerError('PACKET_INCOMPLETE', `组 ${group} 的 scs_inline kind 既无 fix/probe 也无全 verify，无法选模板`);
   }
   return renderPacketWithCredential({
     ledgerPath, group, ledger,

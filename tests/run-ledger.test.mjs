@@ -1430,6 +1430,41 @@ test('sc-p1e: needs_three_review 缺失/非布尔 exit 2 点名（fail-closed，
   }
 });
 
+test('probe 组走执行组模板：全 kind=probe 出包 exit 0 且带 goal 三要素（task-priority 首波 probe 池合法出包）', () => {
+  const dir = newTmpDir();
+  // 把 g4 全部 SC 的 kind 改成 probe（waves-plan 的 probe 池首波形态），同步 hash
+  const { ledgerPath } = tamperManifestThenInit(dir, (m) => {
+    const pkt = m.dispatch.packets.find((p) => p.group_id === 'g4');
+    for (const sc of pkt.scs_inline) sc.kind = 'probe';
+    for (const sc of m.scs) if (pkt.scs_inline.some((s) => s.id === sc.id)) sc.kind = 'probe';
+  });
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  const r = cli('render-packet', ledgerPath, '--group', 'g4');
+  assert.equal(r.status, 0, `全 probe 组必须出包 exit 0（曾误判 PACKET_INCOMPLETE 卡死首波）: ${r.stderr}`);
+  const lines = r.stdout.split('\n');
+  assert.equal(lines[0], '用 goal skill 执行。', 'probe 组走执行组模板：首行逐字');
+  assert.equal(lines[1], '--until-sc', 'probe 组走执行组模板：--until-sc 独占一行');
+  assert.match(r.stdout, /执行组/, 'probe 组包头必须标执行组');
+});
+
+test('probe+verify 混合组按执行组出包（probe 在场即执行组；该形态上游分池不产出，此处钉住判定方向）', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = tamperManifestThenInit(dir, (m) => {
+    const pkt = m.dispatch.packets.find((p) => p.group_id === 'g4');
+    pkt.scs_inline.forEach((sc, i) => { sc.kind = i === 0 ? 'probe' : 'verify'; });
+    for (const sc of m.scs) {
+      const inl = pkt.scs_inline.find((s) => s.id === sc.id);
+      if (inl) sc.kind = inl.kind;
+    }
+  });
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  const r = cli('render-packet', ledgerPath, '--group', 'g4');
+  // 注意：probe 现在归入执行组判定（some(fix|probe)），混入 verify 不改变执行组判定，
+  // 该形态由上游 waves-plan 保证不产出（probe 池与尾波池分池），此处按执行组出包。
+  assert.equal(r.status, 0, `probe+verify 混合按执行组出包（probe 在场即执行组）: ${r.stderr}`);
+  assert.equal(r.stdout.split('\n')[0], '用 goal skill 执行。');
+});
+
 test('sc-p1e: 完整包包含三要素——首行逐字「用 goal skill 执行。」、--until-sc 独占一行、身份行只认台账值', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
