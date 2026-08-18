@@ -3161,6 +3161,14 @@ const RL_MUTATION_PREDICTIONS = [
       // F3 测试含 set-state dispatched 写路径步骤（推到 dispatched 验证守卫）：
       // F1 变异字符串化 detail → 该步骤 schema 拒 → 红（同上方 sc-p0c 组同因同款）
       'F3: dispatched 及之后 --identity 写入拒（pending-only 守卫，exit 2 点名当前状态 + 重派指路）',
+      // ae-prewalk 组经 dispatchG4（set-state dispatched）再 record-delivery：
+      // F1 变异字符串化 dispatch detail → schema 拒 → 派工步骤红（同 sc-p0c 组同因）
+      'ae-prewalk-class: 四键 exact 判为 prewalk；exec 多塞 first_edit 红；prewalk 少 open_unknowns 红',
+      'ae-first-edit-contract: sha 非 40hex / open_unknowns 长度 5 / sentence 超限 均 DELIVERY_SCHEMA',
+      'ae-first-edit-exists: 40hex 但不在 worktree 的 sha 红；sha 在但 path 不在该 commit 红；真 sha+path 绿',
+      'ae-prewalk-lifecycle: 第二组交 prewalk 红；同一组交第二次红；pending/delivered 交 prewalk 红',
+      'ae-prewalk-persist: 入账后再读 events 含四键原文，无只剩 status/tip_sha/scs 的摘要替代',
+      'ae-prewalk-render: render 前后 manifest_core_hash 不变；包文含 first_edit.path 与 landmines',
     ],
   },
   {
@@ -3211,6 +3219,8 @@ const RL_MUTATION_PREDICTIONS = [
       '①: verified 组 record-delivery 拒（exec/review/verify 三类交卷全拒 + 字节不变）',
       '①: 方向 B——pending 组提交合法 verify payload 拒（验收证据不可预写）+ 字节不变',
       '①: 交卷生命周期矩阵——每类交卷在每个非法状态 exit 2 + 字节不变，合法状态放行',
+      // G1 挖掉 allowedStates 门后，pending/delivered 组也能交 prewalk → 本条红
+      'ae-prewalk-lifecycle: 第二组交 prewalk 红；同一组交第二次红；pending/delivered 交 prewalk 红',
     ],
   },
   {
@@ -3283,6 +3293,208 @@ const RL_MUTATION_PREDICTIONS = [
     ],
   },
 ];
+
+function prewalkPayload({
+  sha = SHA1,
+  path = 'scripts/run-ledger.mjs',
+  sentence = 'first reversible commit',
+  read_paths = ['scripts/run-ledger.mjs'],
+  landmines = [{ path: 'scripts/run-ledger.mjs', sentence: 'exact key set' }],
+  open_unknowns = [{ sentence: 'open question one' }],
+} = {}) {
+  return {
+    first_edit: { sha, path, sentence },
+    read_paths,
+    landmines,
+    open_unknowns,
+  };
+}
+
+function dispatchG4(ledgerPath) {
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  renderGroup(ledgerPath, 'g4');
+  const r = cli(
+    'set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched',
+    '--worker-label', 'w1', '--mem-snapshot', memSnapshotJson(), '--now', T,
+  );
+  assert.equal(r.status, 0, r.stderr);
+}
+
+function bindG4Worktree(ledgerPath, worktree) {
+  const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  ledger.waves[0].groups[0].worktree = worktree;
+  writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+}
+
+function makeGitRepoWithFile(t, relPath, contents) {
+  const dir = mkdtempSync(join(tmpdir(), 'prewalk-git-'));
+  const runGit = (args) => {
+    const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8', env: buildChildEnv(process.env) });
+    assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+    return r;
+  };
+  runGit(['init', '-q']);
+  runGit(['config', 'user.email', 'fixture@test.local']);
+  runGit(['config', 'user.name', 'Fixture']);
+  mkdirSync(join(dir, dirname(relPath)), { recursive: true });
+  writeFileSync(join(dir, relPath), contents);
+  runGit(['add', '-A']);
+  runGit(['commit', '-q', '-m', 'prewalk fixture']);
+  const sha = runGit(['rev-parse', 'HEAD']).stdout.trim();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return { dir, sha };
+}
+
+test('ae-prewalk-class: 四键 exact 判为 prewalk；exec 多塞 first_edit 红；prewalk 少 open_unknowns 红', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  dispatchG4(ledgerPath);
+  const missing = { first_edit: { sha: SHA1, path: 'scripts/run-ledger.mjs', sentence: 'x' }, read_paths: [], landmines: [] };
+  let before = readFileSync(ledgerPath, 'utf8');
+  let r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(missing), '--now', T);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /DELIVERY_SCHEMA/);
+  assert.equal(readFileSync(ledgerPath, 'utf8'), before);
+
+  const mixed = { ...execDeliveryPayload({ tipSha: SHA2 }), first_edit: { sha: SHA1, path: 'a', sentence: 'x' } };
+  before = readFileSync(ledgerPath, 'utf8');
+  r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(mixed), '--now', T);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /DELIVERY_SCHEMA/);
+  assert.equal(readFileSync(ledgerPath, 'utf8'), before);
+});
+
+test('ae-first-edit-contract: sha 非 40hex / open_unknowns 长度 5 / sentence 超限 均 DELIVERY_SCHEMA', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  dispatchG4(ledgerPath);
+  const cases = [
+    prewalkPayload({ sha: SHA39 }),
+    prewalkPayload({ open_unknowns: Array.from({ length: 5 }, (_, i) => ({ sentence: `u${i}` })) }),
+    prewalkPayload({ sentence: 'x'.repeat(81) }),
+  ];
+  for (const payload of cases) {
+    const before = readFileSync(ledgerPath, 'utf8');
+    const r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
+    assert.equal(r.status, 2, JSON.stringify(payload).slice(0, 80));
+    assert.match(r.stderr, /DELIVERY_SCHEMA/);
+    assert.equal(readFileSync(ledgerPath, 'utf8'), before);
+  }
+});
+
+test('ae-first-edit-exists: 40hex 但不在 worktree 的 sha 红；sha 在但 path 不在该 commit 红；真 sha+path 绿', (t) => {
+  const { dir: repo, sha } = makeGitRepoWithFile(t, 'scripts/run-ledger.mjs', 'ok\n');
+  const tmp = newTmpDir();
+  const { ledgerPath } = initLedgerFor(tmp);
+  dispatchG4(ledgerPath);
+  bindG4Worktree(ledgerPath, repo);
+
+  let before = readFileSync(ledgerPath, 'utf8');
+  let r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(prewalkPayload({ sha: SHA1 })), '--now', T);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /FIRST_EDIT_MISSING/);
+  assert.equal(readFileSync(ledgerPath, 'utf8'), before);
+
+  before = readFileSync(ledgerPath, 'utf8');
+  r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(prewalkPayload({ sha, path: 'no/such/file.mjs' })), '--now', T);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /FIRST_EDIT_MISSING/);
+  assert.equal(readFileSync(ledgerPath, 'utf8'), before);
+
+  r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(prewalkPayload({ sha, path: 'scripts/run-ledger.mjs' })), '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  const ev = ledger.events.filter((e) => e.type === 'delivery').at(-1);
+  assert.equal(ev.detail.first_edit.sha, sha);
+  assert.equal(ev.detail.first_edit.path, 'scripts/run-ledger.mjs');
+  assert.deepEqual(ev.detail.read_paths, ['scripts/run-ledger.mjs']);
+  assert.equal(ledger.waves[0].groups[0].state, 'dispatched');
+});
+
+test('ae-prewalk-lifecycle: 第二组交 prewalk 红；同一组交第二次红；pending/delivered 交 prewalk 红', (t) => {
+  const { dir: repo, sha } = makeGitRepoWithFile(t, 'scripts/run-ledger.mjs', 'ok\n');
+  const payload = prewalkPayload({ sha, path: 'scripts/run-ledger.mjs' });
+
+  const pendingDir = newTmpDir();
+  const pending = initLedgerFor(pendingDir);
+  assignIdentity(pending.ledgerPath, 'g4', 'feat/run-ledger');
+  bindG4Worktree(pending.ledgerPath, repo);
+  let before = readFileSync(pending.ledgerPath, 'utf8');
+  let r = cli('record-delivery', pending.ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /ILLEGAL_TRANSITION/);
+  assert.equal(readFileSync(pending.ledgerPath, 'utf8'), before);
+
+  const deliveredDir = newTmpDir();
+  const delivered = initLedgerFor(deliveredDir);
+  dispatchG4(delivered.ledgerPath);
+  forgeG4State(delivered.ledgerPath, 'delivered');
+  bindG4Worktree(delivered.ledgerPath, repo);
+  before = readFileSync(delivered.ledgerPath, 'utf8');
+  r = cli('record-delivery', delivered.ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /ILLEGAL_TRANSITION/);
+  assert.equal(readFileSync(delivered.ledgerPath, 'utf8'), before);
+
+  const okDir = newTmpDir();
+  const ok = initLedgerFor(okDir);
+  dispatchG4(ok.ledgerPath);
+  bindG4Worktree(ok.ledgerPath, repo);
+  r = cli('record-delivery', ok.ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  before = readFileSync(ok.ledgerPath, 'utf8');
+  r = cli('record-delivery', ok.ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /ILLEGAL_TRANSITION/);
+  assert.equal(readFileSync(ok.ledgerPath, 'utf8'), before);
+
+  r = cli('record-delivery', ok.ledgerPath, '--group', 'v1', '--payload', JSON.stringify(payload), '--now', T);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /ILLEGAL_TRANSITION/);
+});
+
+test('ae-prewalk-persist: 入账后再读 events 含四键原文，无只剩 status/tip_sha/scs 的摘要替代', (t) => {
+  const { dir: repo, sha } = makeGitRepoWithFile(t, 'scripts/run-ledger.mjs', 'ok\n');
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  dispatchG4(ledgerPath);
+  bindG4Worktree(ledgerPath, repo);
+  const payload = prewalkPayload({ sha, path: 'scripts/run-ledger.mjs' });
+  const r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  const ev = ledger.events.filter((e) => e.type === 'delivery').at(-1);
+  assert.deepEqual(ev.detail.first_edit, payload.first_edit);
+  assert.deepEqual(ev.detail.read_paths, payload.read_paths);
+  assert.deepEqual(ev.detail.landmines, payload.landmines);
+  assert.deepEqual(ev.detail.open_unknowns, payload.open_unknowns);
+  assert.equal(ev.detail.status, undefined);
+  assert.equal(ev.detail.tip_sha, undefined);
+  assert.equal(ev.detail.scs, undefined);
+});
+
+test('ae-prewalk-render: render 前后 manifest_core_hash 不变；包文含 first_edit.path 与 landmines', (t) => {
+  const { dir: repo, sha } = makeGitRepoWithFile(t, 'scripts/run-ledger.mjs', 'ok\n');
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  dispatchG4(ledgerPath);
+  bindG4Worktree(ledgerPath, repo);
+  const beforeHash = JSON.parse(readFileSync(ledgerPath, 'utf8')).manifest_core_hash;
+  const payload = prewalkPayload({ sha, path: 'scripts/run-ledger.mjs' });
+  let r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('render-packet', ledgerPath, '--group', 'g4');
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /first_edit\.path=scripts\/run-ledger\.mjs/);
+  assert.match(r.stdout, /landmines:/);
+  assert.match(r.stdout, /exact key set/);
+  const after = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  assert.equal(after.manifest_core_hash, beforeHash);
+  const manifest = JSON.parse(readFileSync(after.manifest_path, 'utf8'));
+  const pkt = manifest.dispatch.packets.find((p) => p.group_id === 'g4');
+  assert.equal(Object.hasOwn(pkt, 'first_edit'), false);
+  assert.equal(Object.hasOwn(pkt, 'landmines'), false);
+});
 
 // 变异子套件要跑的测试文件集（含 e2e-dryrun 与 ready-check，证明「其余绿」覆盖到消费侧单测，
 // 不只是生产侧）。不含 selfcheck.test.mjs：其组B-1/组B-3 的 --live 接线检查依赖「真实仓库」

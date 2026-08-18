@@ -267,12 +267,19 @@ function checkVerdictAnchors(verdict, manifest, manifestError, ledger, repoRoot,
 //   review:    rounds（record-delivery 审查交卷；validateReviewDelivery 强制非负安全整数）
 //   verify:    integration_review_status（record-delivery 验收交卷）
 //   exec:      status + tip_sha + scs（record-delivery 执行交卷）
+//   prewalk:   first_edit + read_paths + landmines + open_unknowns（第 4 类现场，不绑审查）
 //   delivered: 仅 tip_sha + candidate_sha（set-state --to delivered 的交付登记，非 worker 交卷）
-// 四者互斥；其余形状一律 unknown（fail-closed 点名，不猜测）。
+// 五者互斥；其余形状一律 unknown（fail-closed 点名，不猜测）。
 function deliveryCategory(d) {
   const detail = d?.detail || {};
   if (typeof detail.rounds === 'number') return 'review';
   if (typeof detail.integration_review_status === 'string') return 'verify';
+  if (
+    detail.first_edit && typeof detail.first_edit === 'object'
+    && Array.isArray(detail.read_paths)
+    && Array.isArray(detail.landmines)
+    && Array.isArray(detail.open_unknowns)
+  ) return 'prewalk';
   if (Array.isArray(detail.scs) && typeof detail.tip_sha === 'string') return 'exec';
   if (typeof detail.tip_sha === 'string' && typeof detail.candidate_sha === 'string') return 'delivered';
   return 'unknown';

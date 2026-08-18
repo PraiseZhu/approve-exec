@@ -945,6 +945,25 @@ function runMutatedSuite(testFile, dir) {
   return { status: r.status, failedNames: [...failedNames] };
 }
 
+test('ae-prewalk-persist: deliveryCategory 把四键现场判为 prewalk，不绑 review/verify/exec', () => {
+  const src = readFileSync(READY_CHECK, 'utf8');
+  const start = src.indexOf('function deliveryCategory');
+  const end = src.indexOf('\nfunction isVerifyGroup', start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const body = src.slice(start, end);
+  assert.match(body, /return 'prewalk'/);
+  assert.match(body, /first_edit/);
+  assert.match(body, /read_paths/);
+  assert.match(body, /landmines/);
+  assert.match(body, /open_unknowns/);
+  const prewalkAt = body.indexOf("return 'prewalk'");
+  const execAt = body.indexOf("return 'exec'");
+  const deliveredAt = body.indexOf("return 'delivered'");
+  assert.ok(prewalkAt > 0 && prewalkAt < execAt && execAt < deliveredAt,
+    'prewalk 必须先于 exec/delivered，避免四键现场被 scs/tip_sha 误判');
+});
+
 for (const m of MUTATION_PREDICTIONS) {
   test(`mutation-kill: ${m.id} ${m.label} 被挖 → 恰红预测用例，失败模式隔离`, (t) => {
     if (process.env.RC_MUTATION_CHILD === '1') { t.skip('子套件运行跳过变异测试（防递归）'); return; }
