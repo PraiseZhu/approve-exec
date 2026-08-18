@@ -58,6 +58,15 @@ test('组A-2: 方向 A 触发时不误报方向 B（隔离）', () => {
   });
 });
 
+test('ae-tests-enum: 磁盘多一个未枚举 *.test.mjs 时 run-tests exit 2', () => {
+  const extra = 'prewalk-delivery.test.mjs';
+  withFixture([...TEST_FILES, extra], (dir) => {
+    const r = runOnFixture(dir);
+    assert.equal(r.status, 2, `期望 exit 2，实际 ${r.status}\n${out(r)}`);
+    assert.ok(out(r).includes(extra), `应点名未枚举文件 ${extra}，实际:\n${out(r)}`);
+  });
+});
+
 test('组B-1: tests/ 顶层存在未枚举的 *.test.mjs → exit 2 且点名该文件', () => {
   const extra = 'zzz-unenumerated.test.mjs';
   withFixture([...TEST_FILES, extra], (dir) => {
