@@ -3169,6 +3169,7 @@ const RL_MUTATION_PREDICTIONS = [
       'ae-prewalk-lifecycle: 第二组交 prewalk 红；同一组交第二次红；pending/delivered 交 prewalk 红',
       'ae-prewalk-persist: 入账后再读 events 含四键原文，无只剩 status/tip_sha/scs 的摘要替代',
       'ae-prewalk-render: render 前后 manifest_core_hash 不变；包文含 first_edit.path 与 landmines',
+      'ae-prewalk-handoff: 后续执行组出包含波0组的 first_edit.path/landmines，hashed packet 仍无四键',
     ],
   },
   {
@@ -3323,6 +3324,42 @@ function dispatchG4(ledgerPath) {
 function bindG4Worktree(ledgerPath, worktree) {
   const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
   ledger.waves[0].groups[0].worktree = worktree;
+  writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+}
+
+/** 在既有台账/manifest 上挂一个同波执行组（夹具只有 g4+v1，测跨组 PreWalk 注入用）。 */
+function attachSiblingExecGroup(ledgerPath, manifestPath, groupId) {
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  const srcPkt = manifest.dispatch.packets.find((p) => p.group_id === 'g4');
+  const pkt = JSON.parse(JSON.stringify(srcPkt));
+  pkt.group_id = groupId;
+  pkt.scs_inline = [srcPkt.scs_inline[0]];
+  manifest.dispatch.packets.push(pkt);
+  manifest.waves[0].groups.push({
+    group_id: groupId,
+    sc_ids: [srcPkt.scs_inline[0].id],
+    worker_count: 1,
+  });
+  manifest.manifest_core_hash = manifestCoreHash(manifest);
+  writeFileSync(manifestPath, JSON.stringify(manifest));
+
+  const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  const srcG = ledger.waves[0].groups[0];
+  ledger.waves[0].groups.push({
+    group_id: groupId,
+    state: 'pending',
+    sc_ids: [srcG.sc_ids[0]],
+    worker_label: null,
+    dispatched_at: null,
+    tip_sha: null,
+    review: { rounds: 0, unresolved: 0 },
+    verify: { status: null, evidence_ref: null },
+    worktree: null,
+    branch: null,
+    base: null,
+    assignment_seq: 0,
+  });
+  ledger.manifest_core_hash = manifest.manifest_core_hash;
   writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
 }
 
@@ -3494,6 +3531,39 @@ test('ae-prewalk-render: render 前后 manifest_core_hash 不变；包文含 fir
   const pkt = manifest.dispatch.packets.find((p) => p.group_id === 'g4');
   assert.equal(Object.hasOwn(pkt, 'first_edit'), false);
   assert.equal(Object.hasOwn(pkt, 'landmines'), false);
+});
+
+test('ae-prewalk-handoff: 后续执行组出包含波0组的 first_edit.path/landmines，hashed packet 仍无四键', (t) => {
+  const { dir: repo, sha } = makeGitRepoWithFile(t, 'scripts/run-ledger.mjs', 'ok\n');
+  const dir = newTmpDir();
+  const { ledgerPath, manifestPath } = initLedgerFor(dir);
+  dispatchG4(ledgerPath);
+  bindG4Worktree(ledgerPath, repo);
+  const payload = prewalkPayload({ sha, path: 'scripts/run-ledger.mjs' });
+  let r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+
+  attachSiblingExecGroup(ledgerPath, manifestPath, 'g5');
+  assignIdentity(ledgerPath, 'g5', 'feat/g5');
+  r = cli('render-packet', ledgerPath, '--group', 'g5');
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /first_edit\.path=scripts\/run-ledger\.mjs/);
+  assert.match(r.stdout, /landmines:/);
+  assert.match(r.stdout, /exact key set/);
+  assert.match(r.stdout, /组 g5/);
+  const after = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  const manifest = JSON.parse(readFileSync(after.manifest_path, 'utf8'));
+  const pkt = manifest.dispatch.packets.find((p) => p.group_id === 'g5');
+  assert.equal(Object.hasOwn(pkt, 'first_edit'), false);
+  assert.equal(Object.hasOwn(pkt, 'landmines'), false);
+
+  const dir2 = newTmpDir();
+  const second = initLedgerFor(dir2);
+  attachSiblingExecGroup(second.ledgerPath, second.manifestPath, 'g5');
+  assignIdentity(second.ledgerPath, 'g5', 'feat/g5');
+  r = cli('render-packet', second.ledgerPath, '--group', 'g5');
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stdout, /## PreWalk 现场/);
 });
 
 // 变异子套件要跑的测试文件集（含 e2e-dryrun 与 ready-check，证明「其余绿」覆盖到消费侧单测，
