@@ -24,6 +24,7 @@
 //     分区对账与 delivery 绑定形同虚设）。phase→ready 时写 phase_at（ready 时点唯一记录）。
 //   - manifest 绑定是内容绑定：manifest_core_hash（黑名单剔除 + 键排序 + sha256）。
 import { createHash, randomBytes } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import {
   readFileSync, writeFileSync, renameSync, existsSync,
   openSync, writeSync, closeSync, unlinkSync, realpathSync,
@@ -947,6 +948,8 @@ const DELIVERY_LIFECYCLE = Object.freeze({
   exec: ['dispatched', 'delivered'],
   review: ['delivered'],
   verify: ['delivered', 'review_pass'],
+  // prewalk：只允许 dispatched；入账不改组状态。组级次数/波 0 门在 recordDelivery 锁内另判。
+  prewalk: ['dispatched'],
 });
 
 export function setState({
@@ -1426,7 +1429,10 @@ export function renderPacket({ ledgerPath, group, manifestPath, now }) {
   }
   return renderPacketWithCredential({
     ledgerPath, group, ledger,
-    out: renderExecPacket({ packet, group, wg, wave, identity: { worktree, branch, base } }),
+    out: renderExecPacket({
+      packet, group, wg, wave, identity: { worktree, branch, base },
+      prewalk: latestPrewalkDetail(ledger, group),
+    }),
     now,
   });
 }
@@ -1466,7 +1472,7 @@ function renderGateNote(packet) {
     : 'needs_three_review=false：本包对应非功能性改动，免 submit-pr 三审，常规验证照常。';
 }
 
-function renderExecPacket({ packet, group, wave, identity }) {
+function renderExecPacket({ packet, group, wave, identity, prewalk }) {
   const lines = [];
   // 固定头三要素（首行逐字；g7 文档测试会引用比对，一个字不能变）
   lines.push('用 goal skill 执行。');
@@ -1477,6 +1483,23 @@ function renderExecPacket({ packet, group, wave, identity }) {
   lines.push('');
   lines.push('## pr-submit-gate 门禁');
   lines.push(renderGateNote(packet));
+  if (prewalk) {
+    // 现场只进渲染文本，不进 hashed packet JSON（ae-prewalk-render）
+    lines.push('');
+    lines.push('## PreWalk 现场');
+    lines.push(`first_edit.path=${prewalk.first_edit.path}`);
+    lines.push(`first_edit.sha=${prewalk.first_edit.sha}`);
+    lines.push(`first_edit.sentence=${prewalk.first_edit.sentence}`);
+    lines.push(`read_paths=${JSON.stringify(prewalk.read_paths)}`);
+    lines.push('landmines:');
+    for (const item of prewalk.landmines) {
+      lines.push(`- ${item.path}: ${item.sentence}`);
+    }
+    lines.push('open_unknowns:');
+    for (const item of prewalk.open_unknowns) {
+      lines.push(`- ${item.sentence}`);
+    }
+  }
   lines.push('');
   lines.push('## SC 清单');
   for (const sc of packet.scs_inline) {
@@ -1529,22 +1552,143 @@ const EXEC_SC_KEYS = Object.freeze(['sc_id', 'status', 'evidence']);
 const REVIEW_DELIVERY_KEYS = Object.freeze(['rounds', 'findings_total', 'unresolved', 'fix_commits', 'candidate_sha']);
 const VERIFY_DELIVERY_KEYS = Object.freeze(['scs', 'integration_review', 'candidate_sha']);
 const INTEGRATION_REVIEW_KEYS = Object.freeze(['status', 'notes']);
+// 第 4 类：与 exec/review/verify 并列的 exact 键集。hits===1 仍是唯一识别门。
+export const PREWALK_DELIVERY_KEYS = Object.freeze(['first_edit', 'read_paths', 'landmines', 'open_unknowns']);
+const PREWALK_SENTENCE_MAX = 80;
+const PREWALK_OPEN_UNKNOWNS_MAX = 4;
+const RELATIVE_PATH_RE = /^(?!\.\.?(?:\/|$))(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$)).+$/;
 
 function classifyDelivery(data) {
   const keys = Object.keys(data).sort();
   const hasExec = EXEC_DELIVERY_KEYS.every((k) => keys.includes(k)) && keys.length === EXEC_DELIVERY_KEYS.length;
   const hasReview = REVIEW_DELIVERY_KEYS.every((k) => keys.includes(k)) && keys.length === REVIEW_DELIVERY_KEYS.length;
   const hasVerify = VERIFY_DELIVERY_KEYS.every((k) => keys.includes(k)) && keys.length === VERIFY_DELIVERY_KEYS.length;
-  const hits = [hasExec, hasReview, hasVerify].filter(Boolean).length;
+  const hasPrewalk = PREWALK_DELIVERY_KEYS.every((k) => keys.includes(k)) && keys.length === PREWALK_DELIVERY_KEYS.length;
+  const hits = [hasExec, hasReview, hasVerify, hasPrewalk].filter(Boolean).length;
   if (hits !== 1) {
     throw new LedgerError(
       'DELIVERY_SCHEMA',
-      `交卷 schema 无法唯一识别（exec/review/verify 三类命中 ${hits} 类）；exact 契约，多余键或缺失键都拒`
+      `交卷 schema 无法唯一识别（exec/review/verify/prewalk 四类命中 ${hits} 类）；exact 契约，多余键或缺失键都拒`
     );
   }
   if (hasExec) return 'exec';
   if (hasReview) return 'review';
-  return 'verify';
+  if (hasVerify) return 'verify';
+  return 'prewalk';
+}
+
+function assertPrewalkSentence(value, what) {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new LedgerError('DELIVERY_SCHEMA', `${what} 必须是非空短句`);
+  }
+  if (value.length > PREWALK_SENTENCE_MAX) {
+    throw new LedgerError('DELIVERY_SCHEMA', `${what} 超限（>${PREWALK_SENTENCE_MAX}）：长度 ${value.length}`);
+  }
+  if (value.includes('\n')) {
+    throw new LedgerError('DELIVERY_SCHEMA', `${what} 不得含换行（散文拒）`);
+  }
+}
+
+function assertRelativePath(value, what) {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new LedgerError('DELIVERY_SCHEMA', `${what} 必须是非空相对路径`);
+  }
+  if (!RELATIVE_PATH_RE.test(value) || value.includes('\\')) {
+    throw new LedgerError('DELIVERY_SCHEMA', `${what} 必须是非空相对路径（当前: ${value}）`);
+  }
+}
+
+function validatePrewalkDelivery(data) {
+  const fe = data.first_edit;
+  if (fe === null || typeof fe !== 'object' || Array.isArray(fe)) {
+    throw new LedgerError('DELIVERY_SCHEMA', 'prewalk.first_edit 必须是 {sha,path,sentence} 对象');
+  }
+  const feKeys = Object.freeze(['sha', 'path', 'sentence']);
+  assertKeys(fe, feKeys, 'prewalk.first_edit');
+  if (typeof fe.sha !== 'string' || !TIP_SHA_RE.test(fe.sha)) {
+    throw new LedgerError('DELIVERY_SCHEMA', `prewalk.first_edit.sha 非 40 位十六进制（长度 ${fe.sha?.length ?? 0}）`);
+  }
+  assertRelativePath(fe.path, 'prewalk.first_edit.path');
+  assertPrewalkSentence(fe.sentence, 'prewalk.first_edit.sentence');
+  if (!Array.isArray(data.read_paths)) {
+    throw new LedgerError('DELIVERY_SCHEMA', 'prewalk.read_paths 必须是字符串数组');
+  }
+  for (let i = 0; i < data.read_paths.length; i += 1) {
+    assertRelativePath(data.read_paths[i], `prewalk.read_paths[${i}]`);
+  }
+  if (!Array.isArray(data.landmines)) {
+    throw new LedgerError('DELIVERY_SCHEMA', 'prewalk.landmines 必须是 {path,sentence}[]');
+  }
+  for (let i = 0; i < data.landmines.length; i += 1) {
+    const item = data.landmines[i];
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+      throw new LedgerError('DELIVERY_SCHEMA', `prewalk.landmines[${i}] 必须是 {path,sentence} 对象`);
+    }
+    assertKeys(item, Object.freeze(['path', 'sentence']), `prewalk.landmines[${i}]`);
+    assertRelativePath(item.path, `prewalk.landmines[${i}].path`);
+    assertPrewalkSentence(item.sentence, `prewalk.landmines[${i}].sentence`);
+  }
+  if (!Array.isArray(data.open_unknowns)) {
+    throw new LedgerError('DELIVERY_SCHEMA', 'prewalk.open_unknowns 必须是 {sentence}[]');
+  }
+  if (data.open_unknowns.length > PREWALK_OPEN_UNKNOWNS_MAX) {
+    throw new LedgerError(
+      'DELIVERY_SCHEMA',
+      `prewalk.open_unknowns 长度 ${data.open_unknowns.length} 超限（≤${PREWALK_OPEN_UNKNOWNS_MAX}）`
+    );
+  }
+  for (let i = 0; i < data.open_unknowns.length; i += 1) {
+    const item = data.open_unknowns[i];
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+      throw new LedgerError('DELIVERY_SCHEMA', `prewalk.open_unknowns[${i}] 必须是 {sentence} 对象`);
+    }
+    assertKeys(item, Object.freeze(['sentence']), `prewalk.open_unknowns[${i}]`);
+    assertPrewalkSentence(item.sentence, `prewalk.open_unknowns[${i}].sentence`);
+  }
+}
+
+function assertFirstEditExists(worktree, firstEdit) {
+  if (typeof worktree !== 'string' || worktree.length === 0) {
+    throw new LedgerError('FIRST_EDIT_MISSING', 'prewalk 入账要求组 identity.worktree 已分配');
+  }
+  const typeR = spawnSync('git', ['-C', worktree, 'cat-file', '-t', firstEdit.sha], { encoding: 'utf8' });
+  if (typeR.status !== 0 || String(typeR.stdout).trim() !== 'commit') {
+    throw new LedgerError(
+      'FIRST_EDIT_MISSING',
+      `first_edit.sha=${firstEdit.sha} 不在 worktree ${worktree}（git cat-file -t 非 commit）`
+    );
+  }
+  const showR = spawnSync('git', ['-C', worktree, 'show', `${firstEdit.sha}:${firstEdit.path}`], { encoding: 'utf8' });
+  if (showR.status !== 0) {
+    throw new LedgerError(
+      'FIRST_EDIT_MISSING',
+      `first_edit.path=${firstEdit.path} 不在 commit ${firstEdit.sha}（git show 失败）`
+    );
+  }
+}
+
+function isWaveZeroGroup(ledger, groupId) {
+  if (!Array.isArray(ledger.waves) || ledger.waves.length === 0) return false;
+  const firstWave = ledger.waves.reduce((min, w) => (w.wave < min.wave ? w : min));
+  const firstGroup = firstWave.groups?.[0];
+  return firstGroup?.group_id === groupId;
+}
+
+function latestPrewalkDetail(ledger, groupId) {
+  for (let i = ledger.events.length - 1; i >= 0; i -= 1) {
+    const ev = ledger.events[i];
+    if (ev.type !== 'delivery' || ev.detail?.group_id !== groupId) continue;
+    const d = ev.detail;
+    if (
+      d.first_edit && typeof d.first_edit === 'object'
+      && Array.isArray(d.read_paths)
+      && Array.isArray(d.landmines)
+      && Array.isArray(d.open_unknowns)
+    ) {
+      return d;
+    }
+  }
+  return null;
 }
 
 function validateExecDelivery(data, packet) {
@@ -1715,6 +1859,11 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
   if (kind === 'exec') validateExecDelivery(data, packet);
   if (kind === 'review') validateReviewDelivery(data);
   if (kind === 'verify') validateVerifyDelivery(data, packet);
+  if (kind === 'prewalk') {
+    validatePrewalkDelivery(data);
+    // 存在性放到锁内、生命周期门之后：pending/非波0 组应先 ILLEGAL_TRANSITION，
+    // 不能被 FIRST_EDIT_MISSING 抢先（第二组可能还没 identity.worktree）。
+  }
 
   // 校验全部通过才原子写盘；任何失败路径都不触碰原台账（坏交卷后台账字节不变）
   return writeLedgerAtomic(ledgerPath, expected, (cur) => {
@@ -1730,7 +1879,45 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
         `组 ${group} 状态 ${g.state} 不允许 ${kind} 类交卷入账（生命周期门：${kind} 类只允许在 ${allowedStates.join('/')} 状态入账；交卷类别必须匹配组阶段，防验收凭据预写/终态改写）`
       );
     }
-    if (kind === 'exec') {
+    if (kind === 'prewalk') {
+      if (!isWaveZeroGroup(cur, group)) {
+        throw new LedgerError(
+          'ILLEGAL_TRANSITION',
+          `组 ${group} 不是第一波第一组，拒绝 prewalk（只允许 wave 0 组交恰好一次）`
+        );
+      }
+      const already = cur.events.some((e) => (
+        e.type === 'delivery'
+        && e.detail?.group_id === group
+        && e.detail?.first_edit
+        && Array.isArray(e.detail?.read_paths)
+        && Array.isArray(e.detail?.landmines)
+        && Array.isArray(e.detail?.open_unknowns)
+      ));
+      if (already) {
+        throw new LedgerError(
+          'ILLEGAL_TRANSITION',
+          `组 ${group} 已有一条 prewalk 交卷，拒绝第二次`
+        );
+      }
+      assertFirstEditExists(g.worktree, data.first_edit);
+      cur.events.push({
+        type: 'delivery',
+        at: now,
+        detail: {
+          group_id: group,
+          first_edit: {
+            sha: data.first_edit.sha,
+            path: data.first_edit.path,
+            sentence: data.first_edit.sentence,
+          },
+          read_paths: data.read_paths.slice(),
+          landmines: data.landmines.map((x) => ({ path: x.path, sentence: x.sentence })),
+          open_unknowns: data.open_unknowns.map((x) => ({ sentence: x.sentence })),
+        },
+      });
+      // 不改组状态：仍 dispatched，随后仍能交 exec
+    } else if (kind === 'exec') {
       g.tip_sha = data.tip_sha;
       cur.events.push({
         type: 'delivery',
