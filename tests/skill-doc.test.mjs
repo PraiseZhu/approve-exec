@@ -248,6 +248,7 @@ test('第③段：四类交卷 + 整波回滚 first_edit 失效（ae-skill-doc-w
   assert.ok(s3.includes('波 0'), '③段应写波 0=第一波第一组');
   assert.ok(s3.includes('整波'), '③段应把 first_edit 失效定义成整波回滚');
   assert.ok(s3.includes('first_edit 失效'), '③段应锚到 first_edit 失效');
+  assert.ok(s3.includes('最新一条'), '③段应写后续执行组出包取全台账最新一条 prewalk');
   assert.ok(s3.includes('archive 全部'), '③段仍须含 archive 全部');
   assert.ok(s3.includes('list_workers 取实数'), '③段仍须含 list_workers 取实数');
 });

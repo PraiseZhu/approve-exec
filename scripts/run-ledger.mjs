@@ -1431,7 +1431,8 @@ export function renderPacket({ ledgerPath, group, manifestPath, now }) {
     ledgerPath, group, ledger,
     out: renderExecPacket({
       packet, group, wg, wave, identity: { worktree, branch, base },
-      prewalk: latestPrewalkDetail(ledger, group),
+      // 全台账最新一条 prewalk（不限本组）：波 0 现场要进后续执行组的包文
+      prewalk: latestPrewalkDetail(ledger),
     }),
     now,
   });
@@ -1674,13 +1675,13 @@ function isWaveZeroGroup(ledger, groupId) {
   return firstGroup?.group_id === groupId;
 }
 
-function latestPrewalkDetail(ledger, groupId) {
+function latestPrewalkDetail(ledger) {
   for (let i = ledger.events.length - 1; i >= 0; i -= 1) {
     const ev = ledger.events[i];
-    if (ev.type !== 'delivery' || ev.detail?.group_id !== groupId) continue;
+    if (ev.type !== 'delivery') continue;
     const d = ev.detail;
     if (
-      d.first_edit && typeof d.first_edit === 'object'
+      d?.first_edit && typeof d.first_edit === 'object'
       && Array.isArray(d.read_paths)
       && Array.isArray(d.landmines)
       && Array.isArray(d.open_unknowns)
