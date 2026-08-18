@@ -31,7 +31,8 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 
 - 阶段图真相源是 `graph.json`（席位表：E/R/V/T/P 五席，各自 route 档，E 钉 agent_pin，R 钉 agent_pin + model/effort，先例 = submit-pr Phase 2 席位表）；本段只描述编排行为，不承载席位数据。
 - **lead 每边固定五步硬定序检查单**（任何阶段之间一律如此，不许跳过；**顺序不可交换**——尤其 archive 先于 probe，使腾出的槽位天然计入下一环节）：
-  1. **收结构化交卷**：只认 `run-ledger` record-delivery 入账的 exact schema 交卷（exec / review / verify 三类，多余键或缺失键都拒）；lead 不做手工转录。（机器闸：`scripts/run-ledger.mjs` record-delivery）
+  1. **收结构化交卷**：只认 `run-ledger` record-delivery 入账的 exact schema 交卷（exec / review / verify / prewalk 四类，多余键或缺失键都拒）；lead 不做手工转录。（机器闸：`scripts/run-ledger.mjs` record-delivery）
+  - **PreWalk（第 4 类交卷）**：波 0 = 第一波第一组。该组 dispatched 后先交恰好一条 prewalk（`first_edit`/`read_paths`/`landmines`/`open_unknowns`），不改组状态，再 archive；随后仍走 exec。入账后若后续组发现 first_edit 相对当前树已漂移（rebase/squash 后 sha 不再祖先、或 path 内容已变），**整波**退回第一组重做 PreWalk——first_edit 失效不得假装现场仍活。
   2. **archive 全部 done/idle/error worker**——**汇报即清理（owner 硬指令(二)，2026-08-10）**：触发时机 = worker 交卷汇报一到即在同一轮动作内 archive，**不得攒批、不得延后到下一环节、不得用 idle 顶替**。明示：**不是 idle**——idle 只释放进程、**不释放槽位**；只有 archive 才释放并发槽位。（无机器闸：archive/idle 语义是 Orca 平台行为，按时执行依赖 lead）
   3. **list_workers 取实数**：调 `list_workers` 读当前 worker 清单，**禁止心算/凭记忆**填 used_slots——记录实数（第 2 步已 archive 的槽位此刻已释放）。（无机器闸：list_workers 读数是平台查询，取实数依赖 lead 执行）
   4. **mem-probe 现算并发**：`mem-probe --json --used-slots <第 3 步实数> --pending <待派组数>` 现算可用并发（并发公式见第④段 D2；`--pending` 同为必填，缺任一即 exit 2）。（机器闸：`scripts/mem-probe.mjs` 输出即槽位判据）
@@ -138,6 +139,7 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 | 7 | init 不带 `--baseline <sha>`（sc-p0a 前的旧用法，无基线语义直接开跑） | CLI 缺省显式传 null → **兼容模式 exit 0**（实测：baseline=null，基线闸/快照闸/凭证闸三道 P0 新闸全部跳过，且 stderr 输出 `[WARN]` 点名「三道 P0 新闸全部不生效」——警告有测试保护，不可静默移除）；函数层 in-process 漏传则拒（`init 缺 --baseline <sha>`） | **lead 动作**：缺省 = 兼容模式 = **三道 P0 闸不生效**是**显式设计决策，不是后门**——仅供 e2e-dryrun 等无基线语义的旧路径与 sc-p0a 前创建的旧台账（缺 `baseline_tip` 键读入即归一化为 null）；生产 run 必须显式传 `--baseline <40hex>` 走**严格模式**（sc-p0a 基线闸强制；非 40hex 即 exit 2） |
 | 8 | set-state dispatched 不带 `--mem-snapshot`（sc-p0b 前的旧用法） | exit 2（实测）：`缺失前置：→dispatched 必须携带 --mem-snapshot '<json>'（四键 used_slots/platform_cap/concurrency/available_bytes，lead 从 mem-probe --json 提取）`；原样直喂 9 键也拒（实测 exit 2：`--mem-snapshot 含未列键: page_size（exact 契约，未知键拒）`） | **lead 动作**：从 `mem-probe --json` 的 9 键输出中**提取** `used_slots`/`platform_cap`/`concurrency`/`available_bytes` 构造四键快照（提取步骤见第③段检查单第 5 步） |
 | 9 | set-state dispatched 未经 render-packet 出包（sc-p0c 前的旧用法，直接派发） | exit 2（实测）：`缺失前置：组 <gid> 未经 render-packet 出包（无 packet_rendered 事件），拒绝派发` | **lead 动作**：先 `render-packet` 出包（成功即落 `packet_rendered` 事件凭证），再 set-state dispatched（凭证闸消费最近一条该组 packet_rendered 事件） |
+| 10 | 把 prewalk 四键塞进 exec 交卷、或用 exec 三键冒充 prewalk | exit 2：`DELIVERY_SCHEMA`（classifyDelivery 四类 hits!==1） | **lead 动作**：prewalk 只交 `first_edit/read_paths/landmines/open_unknowns` 恰好四键；exec/review/verify 旧三类形状不能冒充 prewalk |
 
 另注意第①/②条的同源纪律：`--unresolved` 手工填数通道同样已关闭（unresolved 唯一写入通道 = record-delivery 审查交卷），set-state 收到即 exit 2。
 

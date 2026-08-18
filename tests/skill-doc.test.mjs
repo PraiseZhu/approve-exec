@@ -242,6 +242,30 @@ test('第⑮段：破坏性变更迁移表——九条迁移项逐条锚定（�
   assert.ok(s15.includes('凭证闸消费'), '迁移⑨应声明凭证闸消费最近一条该组 packet_rendered 事件');
 });
 
+test('第③段：四类交卷 + 整波回滚 first_edit 失效（ae-skill-doc-wave0 / ae-false-first-edit-rollback）', () => {
+  const s3 = sectionBetween(MARKERS[2], MARKERS[3]);
+  assert.ok(s3.includes('exec / review / verify / prewalk 四类'), '③段应收四类交卷');
+  assert.ok(s3.includes('波 0'), '③段应写波 0=第一波第一组');
+  assert.ok(s3.includes('整波'), '③段应把 first_edit 失效定义成整波回滚');
+  assert.ok(s3.includes('first_edit 失效'), '③段应锚到 first_edit 失效');
+  assert.ok(s3.includes('archive 全部'), '③段仍须含 archive 全部');
+  assert.ok(s3.includes('list_workers 取实数'), '③段仍须含 list_workers 取实数');
+});
+
+test('第⑮段：第 10 行可加且不得删改既有九行锚点', () => {
+  const s15 = sectionBetween(MARKERS[14], MARKERS[15]);
+  assert.ok(s15.includes('| 10 |'), '⑮段可加第 10 行说明旧三类不能冒充 prewalk');
+  assert.ok(s15.includes('不能冒充 prewalk'), '第 10 行应写旧三类形状不能冒充 prewalk');
+  for (const keep of [
+    '--ready-check-exit0', '--ready-receipt', '--verify-status', 'TEST_FILES',
+    'HASH_MISMATCH', 'FROZEN', 'selfcheck.mjs --live', '--baseline', '兼容模式',
+    '--mem-snapshot', 'used_slots/platform_cap/concurrency/available_bytes',
+    'packet_rendered', '凭证闸消费',
+  ]) {
+    assert.ok(s15.includes(keep), `⑮既有九行锚点仍须在场: ${keep}`);
+  }
+});
+
 test('第③段：五步硬定序检查单——archive 非 idle（idle 不释放槽位）+ mem-probe 重算', () => {
   const s3 = sectionBetween(MARKERS[2], MARKERS[3]);
   assert.ok(s3.includes('archive'), '检查单应含 archive');
