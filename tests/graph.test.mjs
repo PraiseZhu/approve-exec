@@ -1,7 +1,7 @@
 // graph.json 席位表校验测试。
 // graph.json 是本 skill 的席位真相源（先例 = submit-pr Phase 2 席位表），
 // 只引「路由档名 + agent_pin」；唯一例外 = R 席 model/effort 由席位表显式钉死
-// （D3，owner 2026-08-10 拍板：anthropic-claude/claude-sonnet-5 / xhigh，不走 routing）。
+// （D3，owner 2026-08-21 改钉：x-ai/grok-4.6 / high，不走 routing）。
 // 其余席位的模型在派工时现读 config/defaults.json 的 routingPath 指向的真实 routing.json。
 //
 // 断言口径（sc-p2a）：
@@ -16,7 +16,7 @@
 //    route=execute 的 E/R 席依赖 execute 档 agent=claude-code 的现状，
 //    若 routing.json 把 execute 档 agent 改成 codex，agent_pin 即失效，必须红。
 // 3. graph 内不出现任何具体模型 ID（deepseek/gpt-/claude- 之类字样，禁复述），
-//    **R 席 model 字段除外**：该字段是 D3 钉死值（anthropic-claude/claude-sonnet-5），
+//    **R 席 model 字段除外**：该字段是 D3 钉死值（x-ai/grok-4.6），
 //    豁免禁复述检测，其值绑定由独立 test 断言。
 //    检测范围是 phases 全部席位（含未来新增席位），不是白名单五席 ——
 //    多余席位带模型 ID 同样违反「graph 内不出现模型 ID」的禁复述意图。
@@ -91,7 +91,7 @@ function validateGraph(g) {
     }
     if (seat === 'R') {
       // D3（owner 2026-08-10 拍板）：R 席 model/effort 由席位表显式钉死，不走 routing 路由。
-      // 这里只校验存在性与格式；值绑定（anthropic-claude/claude-sonnet-5 / xhigh）在独立 test 断言。
+      // 这里只校验存在性与格式；值绑定（x-ai/grok-4.6 / high）在独立 test 断言。
       if (typeof s.model !== 'string' || s.model.length === 0) {
         return { ok: false, reason: `R.model 必须是非空字符串（当前 ${s.model}）——D3 席位表钉死字段` };
       }
@@ -155,11 +155,11 @@ test('P 席 packaging_paths：打包白名单唯一真相源，默认至少含 .
   }
 });
 
-test('R 席 model/effort 显式钉死（D3：owner 2026-08-10 拍板，不走 routing 路由）', () => {
-  assert.equal(graph.phases.R.model, 'anthropic-claude/claude-sonnet-5',
-    `R.model 必须为 anthropic-claude/claude-sonnet-5（当前 ${graph.phases.R.model}）`);
-  assert.equal(graph.phases.R.effort, 'xhigh',
-    `R.effort 必须为 xhigh（当前 ${graph.phases.R.effort}）`);
+test('R 席 model/effort 显式钉死（D3：owner 2026-08-21 改钉，不走 routing 路由）', () => {
+  assert.equal(graph.phases.R.model, 'x-ai/grok-4.6',
+    `R.model 必须为 x-ai/grok-4.6（当前 ${graph.phases.R.model}）`);
+  assert.equal(graph.phases.R.effort, 'high',
+    `R.effort 必须为 high（当前 ${graph.phases.R.effort}）`);
   assert.ok(EFFORTS.includes(graph.phases.R.effort),
     `R.effort=${graph.phases.R.effort} 不在 effort 六枚举 {${EFFORTS.join(',')}} 内`);
 });
