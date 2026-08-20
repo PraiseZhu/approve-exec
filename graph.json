@@ -11,8 +11,8 @@
       "agent_pin": "claude-code",
       "command": "/code-review high --fix",
       "max_rounds_key": "reviewMaxRounds",
-      "model": "anthropic-claude/claude-sonnet-5",
-      "effort": "xhigh"
+      "model": "x-ai/grok-4.6",
+      "effort": "high"
     },
     "V": {
       "route": "e2e",
