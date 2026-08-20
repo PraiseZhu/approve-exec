@@ -1,4 +1,4 @@
-# approve-exec — 「批准执行」lead 侧多 worker loop 编排 skill
+# approve-exec — Graph loop 编排 skill
 
 把 task-priority 产出的 task-manifest.json 自动执行到「可直接『提交 PR』」：
 E(执行)→R(审查修复)→V(SC 验收)→T(e2e)→P(打包) 五阶段状态机，lead 只编排决策。
