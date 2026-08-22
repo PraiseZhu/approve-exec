@@ -3198,6 +3198,9 @@ const RL_MUTATION_PREDICTIONS = [
       'ae-prewalk-persist: 入账后再读 events 含四键原文，无只剩 status/tip_sha/scs 的摘要替代',
       'ae-prewalk-render: render 前后 manifest_core_hash 不变；包文含 first_edit.path 与 landmines',
       'ae-prewalk-handoff: 后续执行组出包含波0组的 first_edit.path/landmines，hashed packet 仍无四键',
+      // lead-self 正路径走 set-state dispatched（写 dispatch 事件）+ record-delivery exec：
+      // F1 变异字符串化 dispatch detail → schema 拒 → 派工步骤红（同 sc-p0c 组同因）
+      'lead-self: worker-label=lead-self 逻辑派工后 exec 交卷成功（无真实 Orca worker）',
     ],
   },
   {
@@ -3250,6 +3253,9 @@ const RL_MUTATION_PREDICTIONS = [
       '①: 交卷生命周期矩阵——每类交卷在每个非法状态 exit 2 + 字节不变，合法状态放行',
       // G1 挖掉 allowedStates 门后，pending/delivered 组也能交 prewalk → 本条红
       'ae-prewalk-lifecycle: 第二组交 prewalk 红；同一组交第二次红；pending/delivered 交 prewalk 红',
+      // lead-self 反路径：init 后 pending 组直接 exec 交卷，正是生命周期门在咬；
+      // G1 挖掉 allowedStates 门后该条放行 → 红（同一锚点，语义合法扩展）
+      'lead-self: pending 组直接 record-delivery exec 被生命周期门拒绝',
     ],
   },
   {
