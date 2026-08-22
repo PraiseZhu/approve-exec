@@ -4,11 +4,14 @@
     "E": {
       "route": "execute",
       "agent_pin": "claude-code",
-      "dispatch": "goal-scenario-c"
+      "dispatch": "lead-self",
+      "goal": "goal-scenario-c"
     },
     "R": {
       "route": "execute",
       "agent_pin": "claude-code",
+      "dispatch": "lead-self",
+      "pre_command": "simplify-inline",
       "command": "/code-review high --fix",
       "max_rounds_key": "reviewMaxRounds",
       "model": "x-ai/grok-4.6",
@@ -16,13 +19,16 @@
     },
     "V": {
       "route": "e2e",
-      "independence": "non-author"
+      "dispatch": "lead-self",
+      "independence": "same-session-not-author-worker"
     },
     "T": {
-      "route": "e2e"
+      "route": "e2e",
+      "dispatch": "worker"
     },
     "P": {
       "route": "pr_merge",
+      "dispatch": "lead-self",
       "packaging_paths": [".pr-intent.md"]
     }
   }

@@ -10,7 +10,7 @@
 //    routing.json 换值（换模型）不需要改 graph —— graph 只引档名。
 // 2. E/R 两席的 agent_pin 必为 claude-code：
 //    D0：goal skill 仅 claude-code 会话可加载（codex worker 加载不到 SKILL.md）；
-//    D3：/code-review high --fix 是 claude-code 内置命令。
+//    D3：R 先 simplify-inline，再跑本机 slash /code-review high --fix（~/.claude/commands/code-review.md），lead 本会话跑，不派 worker、不走 /rc。
 //    agent_pin 是 agent 家族钉：任何席位出现 agent_pin 都只允许 claude-code
 //    （全表唯一合法值），且必须与所在席位 route 档的 agent 一致 ——
 //    route=execute 的 E/R 席依赖 execute 档 agent=claude-code 的现状，
@@ -45,8 +45,11 @@ const MODEL_ID_PATTERN = /deepseek|gpt-|claude-|gemini|grok|qwen|llama|kimi|glm-
 // effort 六枚举：与 scripts/selfcheck.mjs 的 EFFORTS 同一枚举（create_worker 的 effort 合法值），
 // 这里复用同一字面量清单，不另立一套。
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+const DISPATCH_MODES = ['lead-self', 'worker'];
 
 const SEATS = ['E', 'R', 'V', 'T', 'P'];
+const LEAD_SELF_SEATS = ['E', 'R', 'V', 'P'];
+const WORKER_SEATS = ['T'];
 
 function validateGraph(g) {
   // 返回 { ok: true } 或 { ok: false, reason }
@@ -80,7 +83,7 @@ function validateGraph(g) {
     }
     if (seat === 'E' || seat === 'R') {
       if (s.agent_pin !== 'claude-code') {
-        return { ok: false, reason: `${seat}.agent_pin 必须为 claude-code（当前 ${s.agent_pin}）——goal skill 仅 claude-code 可加载 / /code-review 为 claude-code 内置` };
+        return { ok: false, reason: `${seat}.agent_pin 必须为 claude-code（当前 ${s.agent_pin}）——goal skill 仅 claude-code 可加载 / /code-review 仅 lead 本会话可跑` };
       }
       // agent_pin 钉的 agent 家族必须与 route 档的 agent 一致：
       // E/R 席走 execute 档依赖 execute 档 agent=claude-code，档 agent 一变 agent_pin 即失效。
@@ -88,6 +91,9 @@ function validateGraph(g) {
       if (routeAgent !== 'claude-code') {
         return { ok: false, reason: `${seat}.agent_pin=claude-code 与其 route=${s.route} 档的 agent=${routeAgent ?? '缺失'} 不一致——按档派工出的 agent 与 agent_pin 矛盾` };
       }
+    }
+    if (s.dispatch != null && !DISPATCH_MODES.includes(s.dispatch)) {
+      return { ok: false, reason: `${seat}.dispatch=${s.dispatch} 不在 {${DISPATCH_MODES.join(',')}} 内` };
     }
     if (seat === 'R') {
       // D3（owner 2026-08-10 拍板）：R 席 model/effort 由席位表显式钉死，不走 routing 路由。
@@ -132,7 +138,7 @@ test('route 值均为 routing.json 顶层 key 集的子集（subset 判定）', 
   }
 });
 
-test('E/R 两席 agent_pin 必为 claude-code（D0: goal skill 仅 claude-code 可加载；D3: /code-review 为 claude-code 内置）', () => {
+test('E/R 两席 agent_pin 必为 claude-code（D0: goal skill 仅 claude-code 可加载；D3: /code-review 仅 lead 本会话可跑）', () => {
   for (const seat of ['E', 'R']) {
     assert.equal(graph.phases[seat].agent_pin, 'claude-code',
       `${seat}.agent_pin 必须为 claude-code（当前 ${graph.phases[seat].agent_pin}）`);
@@ -153,6 +159,23 @@ test('P 席 packaging_paths：打包白名单唯一真相源，默认至少含 .
     assert.equal(typeof p, 'string', `packaging_paths 元素必须是字符串: ${p}`);
     assert.ok(p.length > 0, 'packaging_paths 元素不得为空字符串');
   }
+});
+
+test('席位 dispatch：E/R/V/P=lead-self，T=worker（2026-08-22 改钉）', () => {
+  for (const seat of LEAD_SELF_SEATS) {
+    assert.equal(graph.phases[seat].dispatch, 'lead-self',
+      `${seat}.dispatch 必须为 lead-self（当前 ${graph.phases[seat].dispatch}）`);
+  }
+  for (const seat of WORKER_SEATS) {
+    assert.equal(graph.phases[seat].dispatch, 'worker',
+      `${seat}.dispatch 必须为 worker（当前 ${graph.phases[seat].dispatch}）`);
+  }
+  assert.equal(graph.phases.E.goal, 'goal-scenario-c',
+    'E 席仍走 goal 场景 C，只是执行者改为 lead');
+  assert.equal(graph.phases.R.pre_command, 'simplify-inline',
+    'R 席开审前必须先做 simplify-inline（不调 /simplify 或 /rc）');
+  assert.equal(graph.phases.R.command, '/code-review high --fix',
+    'R 席审查命令仍为 /code-review high --fix');
 });
 
 test('R 席 model/effort 显式钉死（D3：owner 2026-08-21 改钉，不走 routing 路由）', () => {

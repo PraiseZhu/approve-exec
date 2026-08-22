@@ -1971,7 +1971,7 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
   });
 }
 
-// ---------- sc-p0d：staleness 只读子命令（看门狗/停摆判定的数据源） ----------
+// ---------- sc-p0d：staleness 只读子命令（台账新鲜度诊断） ----------
 // last_event_at = 台账最后一条事件的 at（events 数组按写入顺序追加，末位即最新）。
 // 无事件时 last_event_at/minutes_since_last_event 输出 null——不伪造 0（0 会被看成
 // 「刚刚有活动」，掩盖「自 init 起就无事件」的停摆事实）。
@@ -1979,8 +1979,7 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
 // 三态（组已派工但尚未 verified/集成）。**这与落不落事件无关**：review_pass 态组不落
 // 事件照样被 state 过滤捕获；「给 review_pass 补落事件」是伪修复（修的是症状不是判据）。
 // review_pass 不落事件的真实后果：last_event_at 不被推进（组已 review_pass 但 events
-// 停在更早时点，minutes_since_last_event 虚高 → 看门狗误判 run 停摆），此影响在
-// SKILL.md 看门狗段单独成句说明。
+// 停在更早时点，minutes_since_last_event 虚高）。
 // 导出函数与 CLI 同实现：只读（readLedger，ready 冻结不拦读——冻结只拦写路径）；
 // --now 注入供确定性测试，缺省取系统时钟。
 export function staleness({ ledgerPath, now }) {
