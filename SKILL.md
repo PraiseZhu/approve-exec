@@ -30,7 +30,8 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 ```
 
 - 阶段图真相源是 `graph.json`（席位表：E/R/V/T/P 五席，各自 route 档与 `dispatch`，E 钉 agent_pin，R 钉 agent_pin + model/effort，先例 = submit-pr Phase 2 席位表）；本段只描述编排行为，不承载席位数据。默认 `dispatch=lead-self` 的席（E/R/V/P）出包后由 lead 本会话执行并 `record-delivery`，不走 create_workers；`dispatch=worker` 的席（仅 T）才派工。
-- **lead 每边固定五步硬定序检查单**（派 T worker 的边一律如此，不许跳过；**顺序不可交换**——尤其 archive 先于 probe，使腾出的槽位天然计入下一环节。E/R/V/P 自跑边只走第 1 步入账，不派工）：
+- **lead-self 逻辑派工（E/R/V/P 自跑边，不 create_workers，但仍走台账 dispatched）**：`record-delivery` exec 只允许组状态 ∈ {dispatched, delivered}（`DELIVERY_LIFECYCLE`）；pending 直接交卷 = `ILLEGAL_TRANSITION`。自跑边固定顺序：① `set-state --identity` ② `render-packet`（严格模式凭证闸）③ `set-state --to dispatched --worker-label lead-self`（`--worker-label` 取值唯一为 `lead-self`，禁止即兴填）并在严格模式带 `--mem-snapshot` 四键 ④ 本会话执行 ⑤ `record-delivery`。`ready-check` 仍按组对账 `dispatch` 事件——该事件由 pending→dispatched 写入，不是 Orca worker 回执。不派 Orca worker ≠ 跳过 set-state dispatched。
+- **lead 每边固定五步硬定序检查单**（派 T worker 的边一律如此，不许跳过；**顺序不可交换**——尤其 archive 先于 probe，使腾出的槽位天然计入下一环节。E/R/V/P 自跑边走上一款逻辑派工，不走本检查单第 2–5 步的 create_workers）：
   1. **收结构化交卷**：只认 `run-ledger` record-delivery 入账的 exact schema 交卷（exec / review / verify / prewalk 四类，多余键或缺失键都拒）；lead 不做手工转录。（机器闸：`scripts/run-ledger.mjs` record-delivery）
   - **PreWalk（第 4 类交卷）**：波 0 = 第一波第一组。该组 dispatched 后先交恰好一条 prewalk（`first_edit`/`read_paths`/`landmines`/`open_unknowns`），不改组状态，再 archive；随后仍走 exec。后续执行组 `render-packet` 注入全台账**最新一条** prewalk 现场（不限本组），只进包文、不改 hashed packet。入账后若后续组发现 first_edit 相对当前树已漂移（rebase/squash 后 sha 不再祖先、或 path 内容已变），**整波**退回第一组重做 PreWalk——first_edit 失效不得假装现场仍活。
   2. **archive 全部 done/idle/error worker**——**汇报即清理（owner 硬指令(二)，2026-08-10）**：触发时机 = worker 交卷汇报一到即在同一轮动作内 archive，**不得攒批、不得延后到下一环节、不得用 idle 顶替**。明示：**不是 idle**——idle 只释放进程、**不释放槽位**；只有 archive 才释放并发槽位。（无机器闸：archive/idle 语义是 Orca 平台行为，按时执行依赖 lead）
@@ -41,8 +42,8 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 ## ④ 设计决策 D0–D4
 
 - **D0（owner 拍板）**：执行环节（写代码）**必须以 goal skill 场景 C 触发**——出包首行「用 goal skill 执行。」+ 单独一行 `--until-sc`。默认由**当前 lead**在本会话加载 goal 自跑（lead 已是 claude-code，不另派 E 席 worker）。若某次显式改回派 E 席 worker：该 worker 仍钉死 claude-code（goal 声明 codex 加载不到）；routing fallback 链中**非 claude-code 候选跳过**，候选耗尽 = A 类 fail-closed，**禁止「内联等价契约给 codex」变通**（详见第⑦段）。
-- **D1（lead 自跑 E/R/V/P，owner 硬指令(三)，2026-08-22 改钉）**：汇总完任务优先级之后，当前 lead **亲手执行** E（goal 场景 C + `--until-sc`）、R（先 simplify 再本会话 `/code-review high --fix`，不派 worker）、V（零改代码的验收 + 入账）与 P（写 `.pr-intent.md` + 出口门）；**不派** E / R / V / P worker。worker **只用在** T e2e。台账、出包、交卷入账、清槽仍由 lead 编排。V 不得另派作者 worker 代跑——验收就在 lead 本会话做，交卷仍走 `record-delivery` verify 类 exact schema。R 不得派 Orca worker 跑斜杠命令——2026-08-16 实测 slash 在 worker 会话不可用。旧口径「lead 一律派 worker、一切不自己干」作废。
-- **D2（并发公式）**：只对**实际要派的 worker 席**（T）生效。并发 = min(内存允许, Orca 平台硬上限 `orcaPlatformCap`=8, 待派组数)，**每次派 T 前现跑 mem-probe**。「不设上限」的物理含义 = 始终拉满 8；内存探测（`memReserveRatio` + `perWorkerBytes` 切分）是护栏（防多 loop 挤兑），非常态瓶颈。E/R/V/P 不占 Orca worker 槽。
+- **D1（lead 自跑 E/R/V/P，owner 硬指令(三)，2026-08-22 改钉）**：汇总完任务优先级之后，当前 lead **亲手执行** E（goal 场景 C + `--until-sc`）、R（先 simplify 再本会话 `/code-review high --fix`，不派 worker）、V（零改代码的验收 + 入账）与 P（写 `.pr-intent.md` + 出口门）；**不派** E / R / V / P worker。worker **只用在** T e2e。台账、出包、交卷入账、清槽仍由 lead 编排。自跑边交卷前仍须按第③段逻辑派工把组落到 dispatched（`--worker-label lead-self`）。V 不得另派作者 worker 代跑——验收就在 lead 本会话做，交卷仍走 `record-delivery` verify 类 exact schema。R 不得派 Orca worker 跑斜杠命令——2026-08-16 实测 slash 在 worker 会话不可用。旧口径「lead 一律派 worker、一切不自己干」作废。
+- **D2（并发公式）**：Orca worker 并发公式只对**实际要派的 worker 席**（T）生效。并发 = min(内存允许, Orca 平台硬上限 `orcaPlatformCap`=8, 待派组数)，**每次派 T 前现跑 mem-probe**。「不设上限」的物理含义 = 始终拉满 8；内存探测（`memReserveRatio` + `perWorkerBytes` 切分）是护栏（防多 loop 挤兑），非常态瓶颈。E/R/V/P 不占 Orca worker 槽。**但**自跑边 `set-state dispatched` 在严格模式仍要 `--mem-snapshot`（台账快照闸对一切 →dispatched 生效，与是否 create_workers 无关）：lead 仍跑一次 `mem-probe --json`，按第③段检查单第 5 步提取四键；`used_slots` 取当时 Orca 实数（自跑边自身为 0 槽）。
 - **D3（R 席命令）**：R 是两步、同一席，不新开席、不走 `/rc`（`/rc` 的审查段只报告不自动修，和本席 `--fix` + 5 键 JSON 交卷对不上）。**当前 lead 在本会话、本组 worktree、仅 `allowed_paths` 内**：① **simplify 前置**（内联 `/rc.md` Phase 1 四维：复用 / 简化 / 效率 / 抽象层级；改代码、不找 bug、不改变外部行为；本机无独立 `/simplify` 命令，Cindy 也调不到内置版，故内联执行，不调 slash）。有清理 diff 则先落到该组 tip，再进入②。② **审查**：本地 slash `/code-review high --fix`（来源 = `~/.claude/commands/code-review.md`，**不是** Claude 内置命令，**禁止**派 Orca worker 跑这条斜杠）。审查对象必须是 simplify 之后的 tip。审查交卷仍按 review 类 exact schema 由 lead 入账。席位表仍钉 `agent_pin=claude-code` 与 model/effort `x-ai/grok-4.6` / `high`（owner 2026-08-21 改钉；本会话已是 claude-code 时用本会话模型，不必另开 worker）。**不改 routing.json 四档**（review 档语义留给 submit-pr 三审）；席位表落本 skill `graph.json`（`pre_command=simplify-inline` + `command=/code-review high --fix`）。
 - **D4（组级审查）**：每组 execute 交付后**立即在该组 worktree 内先 simplify、再审+修**（各组可并行）；跨组问题由波级 SC 验收 + e2e 兜底。审查修复 ≤ `reviewMaxRounds` 轮不收敛 = 硬阻碍上报（见第⑤段）。simplify 不算审查轮次。
 
@@ -118,12 +119,12 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 1. **批次收缩序列**：内存收缩导致的批次序列（如 3,3,1）视为**满载合规**——满载判据以**派发时刻 mem-probe 输出**为准，不要求每波都打到 8。
 2. **目标仓 build/typecheck SC 缺失不代补**：manifest 若缺目标仓 build/typecheck SC，本 skill **不代补**（上游 task-priority 起草责任），submit-pr P1 typecheck-merged 兜底。
 3. **版本 bump 无核对**：各仓版本策略不一，本 skill 不做版本 bump 核对，submit-pr 三审兜底。
-4. **席位 dispatch 无运行时消费者**：`graph.json` 的 `dispatch` / `pre_command` 只被测试断言锁值，脚本（run-ledger / ready-check / selfcheck）不读它们做派工决策。哪席派工仍靠 lead 按本文执行（T1：防漂移、不防不遵守）。升级成机器闸属下一轮，本轮不代做。
+4. **席位 dispatch 无运行时消费者**：`graph.json` 的 `dispatch` / `pre_command` 只被测试断言锁值，脚本（run-ledger / ready-check / selfcheck）不读它们做派工决策。哪席派工仍靠 lead 按本文执行（T1：防漂移、不防不遵守）。升级成机器闸属下一轮，本轮不代做。同键 `V.independence=same-session-not-author-worker` 亦无运行时消费者；自跑后 V 与 E 同会话，「独立 verify 席」只指另一席位、不是独立 agent。
 
 ## ⑭ 保证等级声明
 
 - 本 skill 的保证等级是 **T1：防疏忽/漂移**——通过结构断言测试（机器闸：`scripts/run-tests.mjs` 冻结枚举 + `tests/skill-doc.test.mjs` 章节/字面量断言）、doc↔实现字面量同步（如「用 goal skill 执行。」）、config 键名引用比对，保证编排行为按守则执行、不因会话/模型更换而漂移。
-- **不防恶意伪造交卷**：本 skill 的机制不承诺对抗伪造——兜底 = lead 本会话跑独立 verify 席复验（V 不派作者 worker）+ submit-pr 三审收口。
+- **不防恶意伪造交卷**：本 skill 的机制不承诺对抗伪造——兜底 = lead 本会话跑 verify 席复验（同会话、非独立 agent；V 不派作者 worker）+ submit-pr 三审收口。
 - 交付报告不得把保证等级写成夸大类措辞；残余与保证边界按第⑬段、本段如实声明。
 
 ## ⑮ 破坏性变更迁移表（旧用法 → 现在 → 替代）

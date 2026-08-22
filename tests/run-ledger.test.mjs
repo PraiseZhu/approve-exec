@@ -1741,6 +1741,34 @@ function execDeliveryPayload({ tipSha = SHA1, status = 'done', ids = ['sc-p1c', 
   };
 }
 
+test('lead-self: pending 组直接 record-delivery exec 被生命周期门拒绝', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  const r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(execDeliveryPayload()), '--now', T);
+  assert.equal(r.status, 2, 'pending 直接交 exec 必须 exit 2');
+  assert.match(r.stderr, /ILLEGAL_TRANSITION/);
+  assert.match(r.stderr, /pending 不允许 exec/);
+});
+
+test('lead-self: worker-label=lead-self 逻辑派工后 exec 交卷成功（无真实 Orca worker）', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  renderGroup(ledgerPath, 'g4');
+  let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'lead-self', '--mem-snapshot', memSnapshotJson(), '--now', T);
+  assert.equal(r.status, 0, `lead-self dispatched 应 exit 0: ${r.stderr}`);
+  r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(execDeliveryPayload({ tipSha: SHA2 })), '--now', T);
+  assert.equal(r.status, 0, `lead-self exec 交卷应 exit 0: ${r.stderr}`);
+  const ledger = readLedger(ledgerPath);
+  const g4 = ledger.waves[0].groups[0];
+  assert.equal(g4.worker_label, 'lead-self');
+  assert.equal(g4.tip_sha, SHA2);
+  const dispatch = ledger.events.filter((e) => e.type === 'dispatch');
+  assert.equal(dispatch.length, 1);
+  assert.equal(dispatch[0].detail.worker_label, 'lead-self');
+});
+
 test('sc-p1h: 执行组合法交卷入账成功且台账对应字段逐项等于交卷值', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);

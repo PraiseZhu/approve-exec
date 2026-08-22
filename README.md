@@ -1,7 +1,7 @@
 # approve-exec — Graph loop 编排 skill
 
 把 task-priority 产出的 task-manifest.json 自动执行到「可直接『提交 PR』」：
-E(执行)→R(审查修复)→V(SC 验收)→T(e2e)→P(打包) 五阶段状态机。默认 E/R/V/P 由当前 lead 自跑，worker 只派 T e2e。
+E(执行)→R(审查修复)→V(SC 验收)→T(e2e)→P(打包) 五阶段状态机。默认 E/R/V/P 由当前 lead 自跑（不 create_workers，但仍走台账 `set-state dispatched --worker-label lead-self` 再 `record-delivery`），worker 只派 T e2e。
 
 - 执行环节硬约束：必须以 goal skill 场景 C 触发（claude-code 钉死）；默认 lead 本会话加载 goal，不派 E 席 worker
 - R 席硬约束：E 交卷后、开审前，lead 对本组 `allowed_paths` 做 simplify（内联，不调 `/simplify`/`/rc`），再跑本会话 `/code-review high --fix`

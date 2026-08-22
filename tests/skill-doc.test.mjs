@@ -253,6 +253,17 @@ test('第③段：五步硬定序检查单——archive 非 idle（idle 不释�
   assert.ok(s3.includes('mem-probe'), '检查单应含 mem-probe 槽位重算');
 });
 
+test('第③段：自跑边逻辑派工——不 create_workers 但仍走 dispatched，--worker-label 固定 lead-self', () => {
+  const s3 = sectionBetween(MARKERS[2], MARKERS[3]);
+  assert.ok(s3.includes('--worker-label'), '③段必须出现 --worker-label（自跑边 dispatched 取值来源）');
+  assert.ok(s3.includes('lead-self'), '③段必须把 worker-label 钉死为 lead-self');
+  assert.ok(s3.includes('不派 Orca worker ≠ 跳过 set-state dispatched'), '③段应显式否定「不派工=跳过 dispatched」');
+  assert.ok(!s3.includes('自跑边只走第 1 步入账，不派工'), '禁止保留「只走第 1 步入账，不派工」字面跳过 dispatched');
+  const s4 = sectionBetween(MARKERS[3], MARKERS[4]);
+  assert.ok(s4.includes('--worker-label lead-self'), 'D1 应写明自跑边 dispatched 用 --worker-label lead-self');
+  assert.ok(s4.includes('--mem-snapshot'), 'D2 应声明自跑边严格模式仍要 --mem-snapshot');
+});
+
 test('第③段（sc-p1b）：五步检查单语序——archive（步2）先于 list_workers（步3），顺序不可交换', () => {
   const s3 = sectionBetween(MARKERS[2], MARKERS[3]);
   assert.ok(s3.includes('五步硬定序检查单'), '③段应声明五步硬定序检查单');
@@ -320,6 +331,7 @@ test('第⑬段：四条接受残余并声明（批次序列 / build SC 不代�
   assert.ok(s13.includes('dispatch'), '残余④应声明 graph.json dispatch 无运行时消费者');
   assert.ok(s13.includes('pre_command'), '残余④应声明 pre_command 无运行时消费者');
   assert.ok(s13.includes('无运行时'), '残余④应点名无运行时消费');
+  assert.ok(s13.includes('independence'), '残余④应声明 V.independence 无运行时消费者');
 });
 
 test('第⑭段：保证等级如实（T1 防疏忽/漂移，不防恶意伪造，不夸大）', () => {
@@ -329,7 +341,7 @@ test('第⑭段：保证等级如实（T1 防疏忽/漂移，不防恶意伪造�
   assert.ok(s14.includes('漂移'), '应声明防漂移');
   assert.ok(s14.includes('伪造'), '应如实声明不防恶意 worker 伪造交卷');
   assert.ok(s14.includes('submit-pr 三审'), '兜底应含 submit-pr 三审');
-  assert.ok(s14.includes('独立 verify 席'), '兜底应含独立 verify 席');
+  assert.ok(s14.includes('同会话、非独立 agent'), '兜底应写明 V 是同会话复验，不是独立 agent');
   assert.ok(s14.includes('不派作者 worker') || s14.includes('V 不派'), '兜底应写明 V 不派作者 worker');
   assert.ok(!s14.includes('防篡改'), '不得写「防篡改」类夸大措辞');
 });
