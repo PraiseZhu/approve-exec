@@ -1,22 +1,22 @@
 ---
 name: approve-exec
-description: 批准执行——lead 侧多 worker loop 编排：把 task-priority final 阶段释放的 task-manifest.json 自动执行到「可直接『提交 PR』」的候选分支。触发词：批准执行。
+description: 批准执行——task-priority final manifest 之后由当前 lead 自己跑 E/R/V/P（E 走 goal 场景 C；R 先对本组 allowed_paths 做 simplify，再跑本会话 /code-review high --fix）；worker 只派 T e2e。触发词：批准执行。
 trigger: 批准执行
 ---
 
 # approve-exec — lead 编排守则
 
-**lead 按本文编排**（所有执行工作派 worker），把 task-priority 产出的 `task-manifest.json` 自动推进到「可直接『提交 PR』」：
-五阶段状态机 E(执行)→R(审查修复)→V(波集成+SC 验收)→T(e2e)→P(打包)→READY，lead 只编排决策、不亲手执行。
-生态链：task-priority（出 manifest）→ **本 skill（lead 编排 loop）** → goal（worker 端场景 C 消费派工包）→ submit-pr（三审收口）。
+**lead 按本文编排**：把 task-priority 产出的 `task-manifest.json` 自动推进到「可直接『提交 PR』」。
+五阶段状态机 E(执行)→R(审查修复)→V(波集成+SC 验收)→T(e2e)→P(打包)→READY。默认 **E / R / V / P 由当前 lead 自己跑**（E 走 goal 场景 C + `--until-sc`；R 先对本组 `allowed_paths` 做 simplify，再跑本会话 `/code-review high --fix`，不派 worker、不走 `/rc`），**worker 只派 T e2e**。
+生态链：task-priority（出 manifest）→ **本 skill（lead 自跑 E/R/V/P + 只把 T 派 worker）** → goal（lead 在本会话按场景 C 消费出包）→ submit-pr（三审收口）。
 
-本文是 lead 侧编排的**唯一守则**：换会话、换模型后按本文执行，编排行为不漂移（机器保障：`scripts/run-tests.mjs` 冻结枚举 + `tests/skill-doc.test.mjs` 结构断言，见第⑭段）。共十七段。
+本文是 lead 侧编排的**唯一守则**：换会话、换模型后按本文执行，编排行为不漂移（机器保障：`scripts/run-tests.mjs` 冻结枚举 + `tests/skill-doc.test.mjs` 结构断言，见第⑭段）。共十六段。
 
 ## ① 身份与触发
 
 - frontmatter：`name: approve-exec`，触发词「批准执行」。
-- 用法（触发词参数由 **lead** 输入，全部执行工作派 worker）：`批准执行`（默认用当前最新 final manifest 开跑）/ `批准执行 --resume <run_id>`（从台账恢复，见第⑥段）/ `批准执行 --no-budget-pause`（关闭预算暂停类停，见第⑤段）。
-- 本 skill 是 **lead 编排层**：不写业务代码，全部执行工作派给 worker（场景见第④段 D1）。
+- 用法（触发词参数由 **lead** 输入）：`批准执行`（默认用当前最新 final manifest 开跑）/ `批准执行 --resume <run_id>`（从台账恢复，见第⑥段）/ `批准执行 --no-budget-pause`（关闭预算暂停类停，见第⑤段）。
+- 本 skill 是 **lead 编排 + 自跑层**：E / R / V / P 由当前 lead 在本会话执行；只把 T 派 worker（席位见第④段 D1）。
 
 ## ② 输入门：只消费 task-priority final manifest
 
@@ -29,8 +29,8 @@ trigger: 批准执行
 E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包) → READY
 ```
 
-- 阶段图真相源是 `graph.json`（席位表：E/R/V/T/P 五席，各自 route 档，E 钉 agent_pin，R 钉 agent_pin + model/effort，先例 = submit-pr Phase 2 席位表）；本段只描述编排行为，不承载席位数据。
-- **lead 每边固定五步硬定序检查单**（任何阶段之间一律如此，不许跳过；**顺序不可交换**——尤其 archive 先于 probe，使腾出的槽位天然计入下一环节）：
+- 阶段图真相源是 `graph.json`（席位表：E/R/V/T/P 五席，各自 route 档与 `dispatch`，E 钉 agent_pin，R 钉 agent_pin + model/effort，先例 = submit-pr Phase 2 席位表）；本段只描述编排行为，不承载席位数据。默认 `dispatch=lead-self` 的席（E/R/V/P）出包后由 lead 本会话执行并 `record-delivery`，不走 create_workers；`dispatch=worker` 的席（仅 T）才派工。
+- **lead 每边固定五步硬定序检查单**（派 T worker 的边一律如此，不许跳过；**顺序不可交换**——尤其 archive 先于 probe，使腾出的槽位天然计入下一环节。E/R/V/P 自跑边只走第 1 步入账，不派工）：
   1. **收结构化交卷**：只认 `run-ledger` record-delivery 入账的 exact schema 交卷（exec / review / verify / prewalk 四类，多余键或缺失键都拒）；lead 不做手工转录。（机器闸：`scripts/run-ledger.mjs` record-delivery）
   - **PreWalk（第 4 类交卷）**：波 0 = 第一波第一组。该组 dispatched 后先交恰好一条 prewalk（`first_edit`/`read_paths`/`landmines`/`open_unknowns`），不改组状态，再 archive；随后仍走 exec。后续执行组 `render-packet` 注入全台账**最新一条** prewalk 现场（不限本组），只进包文、不改 hashed packet。入账后若后续组发现 first_edit 相对当前树已漂移（rebase/squash 后 sha 不再祖先、或 path 内容已变），**整波**退回第一组重做 PreWalk——first_edit 失效不得假装现场仍活。
   2. **archive 全部 done/idle/error worker**——**汇报即清理（owner 硬指令(二)，2026-08-10）**：触发时机 = worker 交卷汇报一到即在同一轮动作内 archive，**不得攒批、不得延后到下一环节、不得用 idle 顶替**。明示：**不是 idle**——idle 只释放进程、**不释放槽位**；只有 archive 才释放并发槽位。（无机器闸：archive/idle 语义是 Orca 平台行为，按时执行依赖 lead）
@@ -40,11 +40,11 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 
 ## ④ 设计决策 D0–D4
 
-- **D0（owner 拍板）**：执行环节（写代码）的派工包**必须以 goal skill 场景 C 触发**——包内首行「用 goal skill 执行。」+ 单独一行 `--until-sc`。连锁约束：execute 席 agent 钉死 claude-code（goal 声明 codex 加载不到）；routing fallback 链中**非 claude-code 候选跳过**，候选耗尽 = A 类 fail-closed，**禁止「内联等价契约给 codex」变通**（详见第⑦段）。
-- **D1（lead 只编排，owner 硬指令(三)，2026-08-10）**：lead 一律不亲手执行具体任务——一切执行/验证/打包工作必须派 Orca worker（或用户点名 sub 时派原生 subagent），lead 只做编排/决策/台账对账（确定性脚本），不亲手跑验证、不代写交卷；SC 复验派**独立 verify worker**（≠ 作者 worker）；违反即汇报链路膨胀、效率下降。
-- **D2（并发公式）**：并发 = min(内存允许, Orca 平台硬上限 `orcaPlatformCap`=8, 待派组数)，**每次派工前现跑 mem-probe**。「不设上限」的物理含义 = 始终拉满 8；内存探测（`memReserveRatio` + `perWorkerBytes` 切分）是护栏（防多 loop 挤兑），非常态瓶颈。
-- **D3（R 席命令）**：R 席跑 claude-code 内置 `/code-review high --fix`（owner 确认为内置命令，带强度与 `--fix`），只能 claude-code agent；R 席 model/effort 由 `graph.json` 席位表**显式钉死**为 `x-ai/grok-4.6` / `high`（owner 2026-08-21 改钉，原值 `anthropic-claude/claude-sonnet-5` / `xhigh`；模型 ID 已用 models.cache.json 核实存在于 claude_code agent，tier=standard；**不再从 routing execute 档取值**）；**不改 routing.json 四档**（review 档语义留给 submit-pr 三审）；席位表落本 skill `graph.json`。
-- **D4（组级审查）**：每组 execute 交付后**立即在该组 worktree 内审+修**（各组可并行）；跨组问题由波级 SC 验收 + e2e 兜底。审查修复 ≤ `reviewMaxRounds` 轮不收敛 = 硬阻碍上报（见第⑤段）。
+- **D0（owner 拍板）**：执行环节（写代码）**必须以 goal skill 场景 C 触发**——出包首行「用 goal skill 执行。」+ 单独一行 `--until-sc`。默认由**当前 lead**在本会话加载 goal 自跑（lead 已是 claude-code，不另派 E 席 worker）。若某次显式改回派 E 席 worker：该 worker 仍钉死 claude-code（goal 声明 codex 加载不到）；routing fallback 链中**非 claude-code 候选跳过**，候选耗尽 = A 类 fail-closed，**禁止「内联等价契约给 codex」变通**（详见第⑦段）。
+- **D1（lead 自跑 E/R/V/P，owner 硬指令(三)，2026-08-22 改钉）**：汇总完任务优先级之后，当前 lead **亲手执行** E（goal 场景 C + `--until-sc`）、R（先 simplify 再本会话 `/code-review high --fix`，不派 worker）、V（零改代码的验收 + 入账）与 P（写 `.pr-intent.md` + 出口门）；**不派** E / R / V / P worker。worker **只用在** T e2e。台账、出包、交卷入账、清槽仍由 lead 编排。V 不得另派作者 worker 代跑——验收就在 lead 本会话做，交卷仍走 `record-delivery` verify 类 exact schema。R 不得派 Orca worker 跑斜杠命令——2026-08-16 实测 slash 在 worker 会话不可用。旧口径「lead 一律派 worker、一切不自己干」作废。
+- **D2（并发公式）**：只对**实际要派的 worker 席**（T）生效。并发 = min(内存允许, Orca 平台硬上限 `orcaPlatformCap`=8, 待派组数)，**每次派 T 前现跑 mem-probe**。「不设上限」的物理含义 = 始终拉满 8；内存探测（`memReserveRatio` + `perWorkerBytes` 切分）是护栏（防多 loop 挤兑），非常态瓶颈。E/R/V/P 不占 Orca worker 槽。
+- **D3（R 席命令）**：R 是两步、同一席，不新开席、不走 `/rc`（`/rc` 的审查段只报告不自动修，和本席 `--fix` + 5 键 JSON 交卷对不上）。**当前 lead 在本会话、本组 worktree、仅 `allowed_paths` 内**：① **simplify 前置**（内联 `/rc.md` Phase 1 四维：复用 / 简化 / 效率 / 抽象层级；改代码、不找 bug、不改变外部行为；本机无独立 `/simplify` 命令，Cindy 也调不到内置版，故内联执行，不调 slash）。有清理 diff 则先落到该组 tip，再进入②。② **审查**：本地 slash `/code-review high --fix`（来源 = `~/.claude/commands/code-review.md`，**不是** Claude 内置命令，**禁止**派 Orca worker 跑这条斜杠）。审查对象必须是 simplify 之后的 tip。审查交卷仍按 review 类 exact schema 由 lead 入账。席位表仍钉 `agent_pin=claude-code` 与 model/effort `x-ai/grok-4.6` / `high`（owner 2026-08-21 改钉；本会话已是 claude-code 时用本会话模型，不必另开 worker）。**不改 routing.json 四档**（review 档语义留给 submit-pr 三审）；席位表落本 skill `graph.json`（`pre_command=simplify-inline` + `command=/code-review high --fix`）。
+- **D4（组级审查）**：每组 execute 交付后**立即在该组 worktree 内先 simplify、再审+修**（各组可并行）；跨组问题由波级 SC 验收 + e2e 兜底。审查修复 ≤ `reviewMaxRounds` 轮不收敛 = 硬阻碍上报（见第⑤段）。simplify 不算审查轮次。
 
 ## ⑤ 不停机条款（仅三类停）
 
@@ -67,12 +67,13 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 - **`--resume` 是 skill 触发词参数，不是 `run-ledger` 的 CLI 子命令**：正确用法只有 `批准执行 --resume <run_id>`（lead 输入）；对脚本传 `node scripts/run-ledger.mjs --resume <id>` 会报「未知子命令」退出非零（实测 exit 1，`run-ledger.mjs` 无此子命令——两个审查席都误读过这个，先看清执行者再敲命令）。
 - **恢复动作由 lead 执行**：读台账文件重建五阶段位置、已派组状态、已集成 tip、未决组队列，继续跑。台账写操作带版本乐观锁（CAS），并发写冲突 exit 2，不静默覆盖（机器闸：`scripts/run-ledger.mjs` writeLedgerAtomic）。
 - 台账即唯一状态源：换会话、换模型后 `--resume` 即可无缝续跑，不需要人工回忆进度。（结构性成立：`runLedgerDir` 在仓外且 run-ledger 只读写台账；「lead 不另建状态」依赖 lead 遵守）
+- **诊断读数**：`run-ledger staleness <ledger>` 只读台账新鲜度（phase / version / minutes_since_last_event / in_flight_groups），供 lead 自己查，不挂调度、不自唤醒。
 
 ## ⑦ 模型现读纪律
 
-- **硬指令（owner 2026-08-10 拍板）**：E/V/T/P 四席派 worker 前**必须现读模型说明书**配置 model/effort——真相源 = `routing.json`（`routingPath` 指向，`orca-model-routing` 规则指定为真相源）+ `model-route show` 可核对；**禁凭记忆填值，禁跳过读取直接派**。**R 席例外**：model/effort 由 `graph.json` 席位表显式钉死（见第④段 D3，owner 2026-08-10 拍板），**不从 routing 取值**。本 skill 的 `graph.json` 只引路由档名（E 钉 agent_pin），其余席位永不内嵌具体模型 ID——模型在派工时现读 routing.json。
-- E 席（goal 场景 C）要求 agent 家族 = claude-code：**routing fallback 链中非 claude-code 候选一律跳过**，只沿链找 claude-code 候选。（本条无机器闸，依赖 lead 遵守；routing.json 内容合法性的机器校验在 `scripts/selfcheck.mjs` 与全局 model-route 脚本。R 席不走 routing：agent_pin=claude-code、model/effort 由席位表钉死，见第④段 D3。）
-- 候选耗尽（E 席无 claude-code 可派） = **A 类 fail-closed**：停，向用户报告（路由档、已试候选、错误原文），等指令；**禁止「内联等价契约给 codex」变通**（codex 加载不到 goal skill，等价契约不成立）。（R 席无此问题——不走 routing，model/effort 钉死，无候选链可耗尽。）
+- **硬指令（owner 2026-08-10 拍板）**：凡要派 worker 的席（默认只有 T；若某次显式派 E/R/V/P 也算）派工前**必须现读模型说明书**配置 model/effort——真相源 = `routing.json`（`routingPath` 指向，`orca-model-routing` 规则指定为真相源）+ `model-route show` 可核对；**禁凭记忆填值，禁跳过读取直接派**。E/V/T/P 四席现读 routing.json 取档名（默认 E/R/V/P 不派 worker，lead 用本会话模型自跑，不必为这四席填 create_worker 的 model）。**R 席例外**：model/effort 由 `graph.json` 席位表显式钉死（见第④段 D3，owner 2026-08-10 拍板），**不从 routing 取值**；R 默认也不派 worker。本 skill 的 `graph.json` 只引路由档名（E 钉 agent_pin），其余席位永不内嵌具体模型 ID——模型在派工时现读 routing.json。
+- E 席（goal 场景 C）要求 agent 家族 = claude-code：默认 lead 本会话已是 claude-code，直接加载 goal。若某次改回派 E 席 worker：**routing fallback 链中非 claude-code 候选一律跳过**，只沿链找 claude-code 候选。（本条无机器闸，依赖 lead 遵守；routing.json 内容合法性的机器校验在 `scripts/selfcheck.mjs` 与全局 model-route 脚本。R 席不走 routing：agent_pin=claude-code、model/effort 由席位表钉死，见第④段 D3。）
+- 候选耗尽（仅当改回派 E 席且无 claude-code 可派） = **A 类 fail-closed**：停，向用户报告（路由档、已试候选、错误原文），等指令；**禁止「内联等价契约给 codex」变通**（codex 加载不到 goal skill，等价契约不成立）。（R 席无此问题——不走 routing，model/effort 钉死，无候选链可耗尽。）
 - 派工说明必须标注实际使用模型（如 `(model/effort)`），多 worker 贴紧凑台账但不阻塞流程。
 
 ## ⑧ pr-submit-gate 传导
@@ -83,19 +84,19 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 
 ## ⑨ 批量派工与槽位纪律
 
-- **整波派发一律 `create_workers` 批量工具**（同批 ≥2 worker 禁连续 `create_worker` 单发）；只有波内确实只有 1 个 worker 时才允许 `create_worker`。（本条无机器闸，依赖 lead 遵守：平台侧不拦单发，`tests/skill-doc.test.mjs` 只保证文档表述存在）
+- **只派 T**。同批 ≥2 worker 一律 `create_workers` 批量工具（禁连续 `create_worker` 单发）；只有本批确实只有 1 个 worker 时才允许 `create_worker`。E / R / V / P 默认不派，不适用本条。（本条无机器闸，依赖 lead 遵守：平台侧不拦单发，`tests/skill-doc.test.mjs` 只保证文档表述存在）
 - **每轮必清槽位**：交付/done/idle/error 的 worker 立即 archive（归档即释放槽位）；idle 不释放槽位，禁止用 idle 代替 archive 占着槽位。（无机器闸，依赖 lead 遵守；archive 释放槽位是 Orca 平台语义）
 - 归档后槽位数立即反映到下一批的并发公式（第④段 D2）；台账 dispatch 记录与归档动作一一对应。
 
 ## ⑩ 术语边界：V 阶段验收组 ≠ orca-fanout verify 组
 
-- 本 skill 的 **V 阶段验收组**：**零代码修改**，只跑 verify 命令出 verdict + 整合树复查（integrated_tip 相对上一集成点的 squash diff 交互面复查），出包用 `run-ledger` 验收模板（render-verify，不带 goal 触发行）。
+- 本 skill 的 **V 阶段验收组**：由**当前 lead 自跑**，**零代码修改**，只跑 verify 命令出 verdict + 整合树复查（integrated_tip 相对上一集成点的 squash diff 交互面复查），出包用 `run-ledger` 验收模板（render-verify，不带 goal 触发行），再由 lead 按 verify 类 schema 入账。不派验收 worker。
 - **orca-fanout 的 verify 组**：语义不同——允许改测试路径。
 - **派工包模板二者分开，禁互套**：验收组的包不得带「可改测试」授权，orca-fanout verify 组的包不得套用「零修改」措辞；lead 打包时按组 kind 选模板，出错包即 fail-closed。
 
 ## ⑪ P 阶段职责：.pr-intent.md workfile
 
-- P 阶段（打包）worker：先从 manifest 的 goal/priorities 生成 **`.pr-intent.md`** workfile（意图声明，落在候选分支工作区），**之后**才运行 intent-check（presubmit 三闸：size / format / intent）。
+- P 阶段（打包）由**当前 lead 自跑**：先从 manifest 的 goal/priorities 生成 **`.pr-intent.md`** workfile（意图声明，落在候选分支工作区），**之后**才运行 intent-check（presubmit 三闸：size / format / intent）。不派打包 worker。
 - **`.pr-intent.md` 的创建责任在本 skill 的 P 阶段，不在 submit-pr**；submit-pr 只消费该文件做 intent 核对。
 - 出口门由 `ready-check` 执行（机器闸：`scripts/ready-check.mjs` 七项检查，任一 gap 即 exit 2 点名，全齐才 exit 0 输出 READY_FOR_SUBMIT_PR）：全组 verified + 每 SC PASS 锚点 + 审查 unresolved==0 + e2e PASS + presubmit 三闸结果**绑定候选 HEAD SHA**。
 - **gate ③（review-clean）两层内容等值（sc-p2e 修复）**：组级审查绑各组 worktree tip → V 波集成 squash/rebase → P 席打包 commit 必然产生新 HEAD，旧「结论交卷 candidate_sha == 当前 HEAD」的 SHA 精确等值判据让 READY 成为结构上不可达终态；要守的语义是「审过的内容 == 最终提交的内容」，两层均为确定性 git 命令、fail-closed：
@@ -112,16 +113,17 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 
 ## ⑬ 已知残余声明
 
-三条「接受残余并声明」，如实写在台账与交付报告里，不包装成已解决：
+四条「接受残余并声明」，如实写在台账与交付报告里，不包装成已解决：
 
 1. **批次收缩序列**：内存收缩导致的批次序列（如 3,3,1）视为**满载合规**——满载判据以**派发时刻 mem-probe 输出**为准，不要求每波都打到 8。
 2. **目标仓 build/typecheck SC 缺失不代补**：manifest 若缺目标仓 build/typecheck SC，本 skill **不代补**（上游 task-priority 起草责任），submit-pr P1 typecheck-merged 兜底。
 3. **版本 bump 无核对**：各仓版本策略不一，本 skill 不做版本 bump 核对，submit-pr 三审兜底。
+4. **席位 dispatch 无运行时消费者**：`graph.json` 的 `dispatch` / `pre_command` 只被测试断言锁值，脚本（run-ledger / ready-check / selfcheck）不读它们做派工决策。哪席派工仍靠 lead 按本文执行（T1：防漂移、不防不遵守）。升级成机器闸属下一轮，本轮不代做。
 
 ## ⑭ 保证等级声明
 
 - 本 skill 的保证等级是 **T1：防疏忽/漂移**——通过结构断言测试（机器闸：`scripts/run-tests.mjs` 冻结枚举 + `tests/skill-doc.test.mjs` 章节/字面量断言）、doc↔实现字面量同步（如「用 goal skill 执行。」）、config 键名引用比对，保证编排行为按守则执行、不因会话/模型更换而漂移。
-- **不防恶意 worker 伪造交卷**：本 skill 的机制不承诺对抗伪造——兜底 = 独立 verify 席复验（非作者 worker 出 verdict）+ submit-pr 三审收口。
+- **不防恶意伪造交卷**：本 skill 的机制不承诺对抗伪造——兜底 = lead 本会话跑独立 verify 席复验（V 不派作者 worker）+ submit-pr 三审收口。
 - 交付报告不得把保证等级写成夸大类措辞；残余与保证边界按第⑬段、本段如实声明。
 
 ## ⑮ 破坏性变更迁移表（旧用法 → 现在 → 替代）
@@ -155,43 +157,3 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 - **复用共享的是原始 outcome**：同一展开后命令的同一 outcome 可被多 SC 引用，但各 SC 仍按自己的 expect 分别判定（不因共享而合并验收口径）。
 - **测试分层**：worker 轮内只跑动过文件的相关测试；全量 run-tests 只在集成点（V 阶段）与 T 阶段各跑一次。
 - **e2e 时机**：全链只在 phase=e2e 跑一次；R 修复轮只跑受影响文件；ready-check 已有 candidate_sha 绑定机器闸兜底（见第⑪段）。
-
-## ⑰ 看门狗（每小时自检，防 lead 停摆）
-
-- **挂载**：init 台账后（第②段输入门通过、台账已建）用 cindy_scheduler 建 hourly schedule，**必须**带 `bindToCurrentSession: true` 与 `persistentSession: true` 两个参数——心跳模式：每次触发把提示注入 lead 当前会话、不新建会话；persistentSession 保证 lead 会话归档/删除时宿主自动新建会话接手，否则宿主会直接 pause 整条 schedule（看门狗在最该起作用时失效）。model/effort 留空（沿用 lead 会话当前模型，显式设置会覆盖并改掉 lead 自己的模型）。READY（第⑪段出口门通过）时 lead **删除本 schedule**（终态，不再需要挂回）；run 终止或进入任一「允许停」路径（第⑤段三类停，见下「暂停保护」）时 lead **只暂停本 schedule（`schedule_pause(<schedule_id>)`），明确不 delete**——delete 不可逆且 `schedule_create` 无 id 参数（新建拿不到同一 id），删了就再也挂不回；恢复时用持久化的 schedule id 经 `schedule_resume(<schedule_id>)` 恢复，零新增参数（resume 只需 id，不需要重建）。
-- **scheduler 不可用**（setup 时即失败）：开场简报如实标注「看门狗未挂」，不静默（失败时间点 (a)）。
-- **提示词模板**（内嵌进 schedule 的 prompt 参数；**lead 建 schedule 时必须把实际 ledger 路径、run_id 与 schedule_id 三者都展开写进 prompt，不得保留 `<ledger>`/`<run_id>`/`<schedule_id>` 占位符**——prompt 是静态文本，persistentSession 新建的接手会话没有本 skill 上下文，payload 是接手方拿到 run_id 与 schedule_id 的唯一通道。**时序（四步挂载，pause 成功后关死竞态窗口）**：`schedule_create` 返回 id 时 prompt 已随创建提交、创建时拿不到 id——正确流程：① `schedule_create(...)` 创建（拿 id）；② 立即 `schedule_pause(<schedule_id>)`——**pause 成功后**窗口才关死：create 成功返回到 pause 成功返回之间仍有**毫秒级残余窗口**，撞上 hourly tick 仍可能触发一次占位符 prompt（首轮 prompt 仍是 `<schedule_id>` 占位符）；③ `schedule_update(<schedule_id>, prompt=<回填了真实 id 的 payload>)`；④ `schedule_resume(<schedule_id>)` 放行。四步完成才算挂好。**残余窗口的安全性依赖 fresh-init invariants**：新 run 刚 init 时 phase=executing、minutes=null、in_flight 为空、watchdog 观察文件不存在——占位符 prompt 即便跑起来也只会写观察文件（payload 第 3b 步 A1 协议），不会走到第 5 步 resume、不会 archive/重派；**若在非 fresh-init 的既有 run 上重新 create**（例如遗留 watchdog 观察文件已计数达 3、且 in_flight 有超时组），占位符 prompt 会带真实 run_id 进入 `批准执行 --resume <run_id>` 并可能 archive+重派——**挂载只允许在 init 后的 fresh run 上做**。**fail-closed**：四步中任一步失败即停止，不得继续后续步骤——尤其 **pause 失败绝不能继续 update→resume**（那等于回到无保护的两步流程，占位符窗口重新暴露整个 hourly 周期）；失败时报告 owner；若 create 已成功但后续步失败，schedule 处于「已创建但 prompt 未回填」状态——先 `schedule_pause(<schedule_id>)` pause 住防跑占位符，再报告 owner；若连 pause 都失败，必须立即报告 owner 说明存在活跃的占位符 schedule）。payload 边界由下方起止标记包裹，**复制时去掉起止标记与 `>` 前缀**：
-  <!-- approve-exec:watchdog-payload:start -->
-  > 每轮动作（按序执行，命中即停）：先跑 `run-ledger staleness <ledger>`（只读）取 phase / version / minutes_since_last_event / in_flight_groups，然后：
-  > 1. **暂停保护**：若本 run 处于「允许停」路径（autonomous-execution 硬停 / A 类配置 fail-closed / 预算暂停等 owner 确认）——此时 lead 已暂停本 schedule，本 prompt 不应触发；若仍触发（lead 未暂停），仅报告 owner，不动作、不得 resume/重派（不得越过用户已授权的暂停）。
-  > 2. **终态/心跳**：phase=ready → 删除本 schedule（用 `<schedule_id>`）后退出；否则 minutes_since_last_event 非 null 且 <60 → 无事，退出。
-  > 3. **疑似停摆**（minutes_since_last_event 为 null 或 >=60）：
-  >    a. in_flight_groups 非空（活已派出去、该落事件却没落）→ 按第 4 步互斥动作表逐组核实；
-  >    b. in_flight_groups 为空 → A1 观察协议：把本轮 staleness 的 version 与触发时刻写入 `<ledger>.watchdog.json`（只保留最近 3 条观察）；该文件缺失或损坏 → 报告 owner，从本轮重新计数（宁可多等，不可误动）；**连续 3 轮**（看门狗每小时触发一次，3 轮 = 3 小时）观察到同一 version → 判定真停摆，执行第 5 步；version 变化 → 计数清零重计。
-  > 4. **交叉核实互斥动作表**（A2 按组判定；先交叉核实再动手——查 in_flight_groups 状态与 list_workers 存活情况，确认真的停摆才动作，不得直接清槽重派）：对 in_flight_groups 每个组，把台账该组 worker_label 与 list_workers 对照（staleness 输出不含 worker_label，组→worker 映射从台账读）：
-  >    | in_flight 组对应 worker 在 list_workers 里的状态 | 动作 |
-  >    |---|---|
-  >    | 对应 worker 存活（running/active） | **不动**（正常在跑，只记录观察） |
-  >    | state=dispatched 且 dispatched_at+40min<=now 且该 worker 已 terminal | **真超时**：resume 后按第⑤段「worker 超时重派」纪律对该组超时/失败收束并落账（归档该 worker、重建重派，台账 timeout_redispatch） |
-  >    | state=delivered/review_pass 且该 worker 不存在/已 terminal | **正常态**（交付后已按纪律 archive），不重派，走第 5 步从台账恢复后续 |
-  >    | 映射缺失 / 多重 / 混合（含 dispatched 未满 40min） | **仅报告 owner，不清槽不重派** |
-  >    命中「真超时」或「正常态」行 → 执行第 5 步；全部「不动」→ 退出。
-  > 5. **恢复入口**：一律先执行 `批准执行 --resume <run_id>`（幂等读台账重建，多跑一次代价远小于分支判断出错；不做「本会话正在跑本 run」自判断，不设任何直接续跑分支）；恢复后按第⑤⑨段纪律继续；若本 schedule 处于 paused（暂停保护路径 lead 已 `schedule_pause`）→ 用已展开的 `<schedule_id>` 经 `schedule_resume(<schedule_id>)` 恢复（schedule 从未被删除，pause/resume 只需 id，直接恢复即可）。
-  <!-- approve-exec:watchdog-payload:end -->
-- **payload 边界（本轮重构）**：起止标记之间 = **prompt payload**——接手会话只读 payload 即可完整执行（A1 观察协议、A2 互斥动作表、resume 入口、暂停保护、按组超时判定全部在 payload 内）；本段其余内容（挂载/参数/失败时间点/残余/设计说明）是说明与残余声明，不进入 prompt。
-- **null 判据与观察文件语义（P2-4）**：`<ledger>.watchdog.json` 是**看门狗控制状态**（不是 run 状态：不参与 `--resume` 恢复、不参与 ready-check，丢失只会导致计数清零重计 3 轮——不违反第⑥段「台账即唯一状态源」纪律）；但它确实影响看门狗行为（liveness），不能以「不影响正确性」一句带过。**「最多等 3 轮必动作、不存在无限等待路径」是有条件声明**：前提是**单写者**——该文件只由看门狗触发方单方读写；缺失/损坏/部分写/多写者并发读写会破坏计数语义，按 payload 第 3b 步处理：报告 owner 并从当前轮重新计数（fail-safe 方向：宁可多等，不可误动）。
-- **交叉核实映射源（P1-2）**：staleness 输出只有 group_id/state/dispatched_at，**不含 worker_label**——组→worker 映射从台账直接读（set-state dispatched 时经 `--worker-label` 落账于组字段；读法：读 `<ledger>.json` 的 waves[].groups[] 取 worker_label）。「能确证 worker 已 terminal」= 该组有 worker_label 且 list_workers 查无该 worker（或已归档）。**按组判定边界（P1-2）**：只有 state=dispatched 且已满 40min（= `workerTimeoutMinutes`，第⑤段）且能确证 worker 已 terminal 的组才允许走超时收束；delivered/review_pass 且无存活 worker 是**正常态**（交付后已按纪律 archive），走 resume 从台账恢复后续，**不重派**；映射缺失/多重/混合仅报告 owner，不动。
-- **暂停保护（P1-3，选 (a)）**：进入任一「允许停」路径（第⑤段三类停）时 lead **只暂停本 run 的 schedule（`schedule_pause(<schedule_id>)`），不删除**——暂停期 schedule 处于 paused、不触发，看门狗不注入，不可能误判停摆并 resume/重派；恢复时用持久化的 schedule id 经 `schedule_resume(<schedule_id>)` 恢复（零新增参数）。**如实声明**：该保护无机器闸——依赖 lead 在暂停时同轮 pause schedule；若未暂停，payload 第 1 步兜底「仅报告 owner 不动作」，但兜底同样依赖 lead 执行。选 (a) 理由：不需要新状态（暂停 = schedule 的 paused 态，恢复 = `schedule_resume`，复用的是宿主导航原语而非自建状态）、复用既有「持久化 schedule id」纪律；暂停期不触发注入，不打扰正在等 owner 确认的会话。
-- **B1 分支删除（本轮）**：原「正向确认本会话正在跑本 run → 直接续跑」分支已删除，统一一律先 `批准执行 --resume <run_id>`（幂等读台账，多跑一次代价远小于分支判断出错）；原 F1 残余（自判断非机器闸）随之消除。
-- **schedule_create 六项必填参数**（zod 契约，六项均无 .optional()，缺任一即 INVALID_ARGS）：name（唯一标识）、cronExpr（5 字段 cron）、timezone（IANA）、recurring（true 循环）、agentKind（claude-code/codex/pi）、notify{desktop,feishu}（通知开关，二者必填）。handler 是 s.create(o) **直接创建**——无 upsert / 无幂等键 / 无去重键（同名重复创建不拒）：**lead 需自行持久化并复用 schedule id** 防重复创建，否则重复触发即重复唤醒。`bindToCurrentSession` 与 `persistentSession` 虽是可选字段（不属上述六项），但二者决定了「心跳注入 lead 当前会话」还是「每轮新建会话」两种模式——看门狗场景两者**必传**（见上「挂载」）：缺 `bindToCurrentSession` 即退回每轮新建会话模式；只设 `bindToCurrentSession` 而不设 `persistentSession`，lead 会话死亡时宿主会直接 pause 整条 schedule 且不自动恢复。
-- **五个失败时间点**：
-  (a) **setup 时 scheduler 不可用** → 开场简报标注「看门狗未挂」；
-  (b) **READY 后自删**（payload 第 2 步内嵌删除分支）；
-  (c) **运行中 schedule 被删/停用** → 看门狗静默失效、staleness 不触发、lead 无外部唤醒 → 需**回检**：lead 断开会话后重连时，手动检查 schedule 存活性（读 cindy_scheduler schedule_list，确认本 run 的 schedule 仍在且未停用）；**发现问题后的动作：报告 owner + 用持久化的 schedule id 经 `schedule_resume(<schedule_id>)` 恢复**（复用「lead 需自行持久化并复用 schedule id」纪律，不引入第二套 id 管理；若 schedule 确已被外部删除致 resume 失败，仅报告 owner 等指令——`schedule_create` 无 id 参数，无法重建同一 id）；
-  (d) **scheduler 服务后续停机** → 同 (c) 回检机制，两者语义相同，统一按 (c) 的回检步骤处理（含发现后的报告 owner + `schedule_resume(<schedule_id>)` 恢复）；
-  (e) **绑定会话死亡导致 schedule 被 pause（心跳模式特有）** → 只设 `bindToCurrentSession` 未设 `persistentSession` 时，lead 会话死亡宿主会直接 pause 整条 schedule 且不自动恢复；创建时配置漂移（漏传两参数，退回每轮新建会话或无接手能力）同属此面 → 同 (c) 回检，发现问题后报告 owner + 用持久化的 schedule id 经 `schedule_resume(<schedule_id>)` 恢复。
-- **已知残余（review_pass 不落事件）**：`run-ledger staleness` 的 `minutes_since_last_event` 以台账最后事件 at 计算——`review_pass` 态组**不落事件**（`in_flight_groups` 已按 state 过滤含 `review_pass`，**不需要补落事件**；「补落事件」是伪修复，修的是症状不是判据）。组已 `review_pass` 而 events 停在更早时点会导致 minutes 虚高、看门狗**误判 run 停摆**，属已知残余。**后果升级（心跳模式后，2026-08-11）**：误判的代价不再是「白开一个没用的新会话」——心跳模式下误判会向**正在干活的 lead 会话**注入「清槽重派」指令，可能提前 archive worker、重复派工。缓解 = payload 第 4 步已要求疑似停摆先交叉核实（查 in_flight_groups / list_workers）再动手，但核实判据非机器闸、依赖 lead 执行，误判残余仍然存在。
-- **已知残余（F5：minutes 读数无有效测试保护）**：`minutes_since_last_event` 的两个变异（取 `events[0]`、固定返回 0）测试全绿——看门狗唯一阈值 `>=60` 依赖该值却无有效测试保护（缺「两事件精确 `--now` 断言」区分 last-event 语义）。列为已知残余，下轮补「两事件精确 --now 断言」。
-- **已知残余（sc-p1b-⑦ 断言作用域边界）**：部分段级断言仍用 `sectionBetween(MARKERS[16], undefined)` 取到文件末尾——当前正确（⑰ 是最后一段），但将来新增 ⑱ 段后会把 ⑱ 文本也纳入这些段级断言的段作用域、可能稀释断言（如 ⑱ 内出现同名字面量或 backtick token 命中）。届时补 ⑱ marker 收窄作用域即可（⑱ 尚不存在，不为不存在的段提前加锚）；payload 断言已按起止标记抽取，不受影响。
-- **已知残余（F4 回检执行者未定义 / F5 第⑤⑨段无 staleness 操作序列——既有设计债，2026-08-11 记录，留待下轮）**：第⑤⑨段「清槽重派」引用与 (c)(d) 回检动作系改动前既有写法：回检由谁在何时执行未定义（依赖 lead 断开会话后重连时手动检查，无机器闸、无 schedule 探活）；第⑤⑨段未提供基于 staleness 读数的操作序列。本轮不重写第⑤⑨段，留待下轮处理。
-- **新增机制确认门答辩**（删掉看门狗则「lead 防自停」目标不成立）：lead 停摆时无任何外部唤醒源——autonomous-execution 不停机条款只约束 lead 主动行为、约束不了会话中断/宿主重启这类被动停摆（这是用户显式点名的四诉求之一）。按确认门「不成立」分支**保留**本机制；失败面与成本如实声明：schedule 默认把提示注入 lead 的当前会话（心跳模式，不新建会话）；仅当该会话已归档/删除时，`persistentSession` 才让宿主新建一个会话接手，此时走 `--resume <run_id>` 读台账重建（这正是 staleness 读数 + 「台账即唯一状态源」的消费场景，见第⑥段）；成本 = 每小时一次 staleness 读数（对台账的只读查询）+ 疑似停摆时的交叉核实（in_flight_groups / list_workers）与可能的恢复动作（`--resume` 接手）；**误判最坏代价** = 向正在干活的 lead 会话注入「清槽重派」指令，可能提前 archive worker、重复派工——已由 payload 第 4 步「先交叉核实再动手」判据缓解，但缓解依赖 lead 执行（非机器闸）；孤儿风险 = READY 后忘删则下次触发发现 phase=ready **自删**（payload 第 2 步内嵌自删分支，双保险）。
