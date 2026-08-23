@@ -58,7 +58,7 @@ const JOURNAL_TOP_KEYS = Object.freeze([
 const REQUEST_RECORD_KEYS = Object.freeze([
   'decision_id', 'decision_key', 'handoff_hash', 'context_hash', 'model_config_digest',
   'lease_nonce', 'status', 'opened_at', 'expires_at', 'wave', 'revision',
-  'selected_option_id', 'rationale', 'residual', 'tools_used',
+  'option_ids', 'pending_evidence', 'selected_option_id', 'rationale', 'residual', 'tools_used',
 ]);
 const RESULT_KEYS = Object.freeze([
   'decision_id', 'handoff_hash', 'lease_nonce', 'selected_option_id',
@@ -108,9 +108,14 @@ function assertKeys(obj, allowed, what) {
   }
 }
 
+const ISO_NOW_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+
 function requireNow(now, what) {
   if (typeof now !== 'string' || now.length === 0) {
     throw new LedgerError('NOW_REQUIRED', `${what} 是写操作：必须携带 --now 时间戳`);
+  }
+  if (!ISO_NOW_RE.test(now) || !Number.isFinite(Date.parse(now))) {
+    throw new LedgerError('NOW_REQUIRED', `${what} 的 --now 必须是可解析 ISO 时间戳（当前: ${now}）`);
   }
   return now;
 }
@@ -374,6 +379,17 @@ export function assertEligibility(request) {
   if (request.handoff.original_question !== request.original_question) {
     throw new LedgerError('HANDOFF', 'handoff.original_question 必须与 request.original_question 逐字一致');
   }
+  const q = `${request.original_question}\n${request.why_autonomy_cannot_choose}`;
+  const forbidden = [
+    [/要开始吗/, '确认句式不得进 Fable'],
+    [/能不能并行/, '并行确认不得进 Fable'],
+    [/查(一下)?资料/, '查资料不得进 Fable'],
+    [/帮我执行/, '执行题不得进 Fable'],
+    [/代码审查|review code/, '审查题不得进 Fable'],
+  ];
+  for (const [re, reason] of forbidden) {
+    if (re.test(q)) throw new LedgerError('ELIGIBILITY', reason);
+  }
 }
 
 export function renderDecisionPacket(request, hashes) {
@@ -465,6 +481,15 @@ export function openDecision({ journalPath, now, request }) {
     const expiresAt = new Date(Date.parse(now) + config.leaseTtlMs).toISOString();
     cur.quota.per_wave[waveKey] = waveUsed + 1;
     cur.quota.per_run += 1;
+    for (const stale of cur.requests) {
+      if (stale.status === 'open' && stale.context_hash !== contextHash) {
+        stale.status = 'superseded';
+        pushEvent(cur, 'decision_superseded', now, {
+          decision_id: stale.decision_id,
+          reason: 'context_hash 已变，旧 lease 作废',
+        });
+      }
+    }
     cur.requests.push({
       decision_id: decisionId,
       decision_key: decisionKey,
@@ -477,6 +502,8 @@ export function openDecision({ journalPath, now, request }) {
       expires_at: expiresAt,
       wave: scope.wave,
       revision: 0,
+      option_ids: request.options.map((o) => o.id),
+      pending_evidence: false,
       selected_option_id: null,
       rationale: null,
       residual: [],
@@ -530,6 +557,7 @@ export function requestEvidence({ journalPath, decisionId, now, query }) {
     if (!live || live.status !== 'open') {
       throw new LedgerError('NOT_OPEN', `decision ${decisionId} 非 open`);
     }
+    live.pending_evidence = true;
     pushEvent(cur, 'evidence_requested', now, {
       decision_id: decisionId,
       queries: query.queries,
@@ -558,7 +586,18 @@ export function attachEvidence({ journalPath, decisionId, now, bundle }) {
     if (!live || live.status !== 'open') {
       throw new LedgerError('NOT_OPEN', `decision ${decisionId} 非 open`);
     }
+    if (live.pending_evidence !== true) {
+      throw new LedgerError('EVIDENCE', `decision ${decisionId} 未 request-evidence，拒绝 attach`);
+    }
+    const expectedRevision = live.revision + 1;
+    if (bundle.revision !== expectedRevision) {
+      throw new LedgerError(
+        'EVIDENCE',
+        `bundle.revision 必须是当前+1（当前 ${live.revision}，收到 ${bundle.revision}）`
+      );
+    }
     live.revision = bundle.revision;
+    live.pending_evidence = false;
     pushEvent(cur, 'evidence_attached', now, {
       decision_id: decisionId,
       revision: bundle.revision,
@@ -621,7 +660,13 @@ export function resolveDecision({ journalPath, decisionId, now, result, worktree
     });
     throw new LedgerError('DECISION_SUPERSEDED', 'lease 已过期');
   }
-  if (Array.isArray(optionIds) && !optionIds.includes(result.selected_option_id)) {
+  const allowedOptions = Array.isArray(req.option_ids) && req.option_ids.length > 0
+    ? req.option_ids
+    : (Array.isArray(optionIds) ? optionIds : []);
+  if (allowedOptions.length === 0) {
+    throw new LedgerError('SCHEMA', `decision ${decisionId} 未持久化 option_ids，拒绝裁决`);
+  }
+  if (!allowedOptions.includes(result.selected_option_id)) {
     throw new LedgerError('SCHEMA', `selected_option_id=${result.selected_option_id} 不在选项集`);
   }
   if (worktree) {
@@ -639,7 +684,8 @@ export function resolveDecision({ journalPath, decisionId, now, result, worktree
       throw new LedgerError('ABUSE', 'decision worker worktree 必须零 diff（T1 闸一）');
     }
   }
-  const claimedVerify = result.tools_used.some((t) => typeof t === 'string' && /read|grep|bash|edit|write/i.test(t));
+  const claimedVerify = /已核实|已查证|我核实|核实过|查过了/.test(result.rationale)
+    || result.tools_used.some((t) => typeof t === 'string' && /read|grep|bash|edit|write/i.test(t));
   const hasEvidence = journal.events.some((e) => e.type === 'evidence_attached' && e.detail.decision_id === decisionId);
   if (claimedVerify && !hasEvidence) {
     throw new LedgerError('ABUSE', '声称已核实但无 evidence_attached 事件（T1 闸三）');

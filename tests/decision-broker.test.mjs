@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -82,7 +82,7 @@ test('config 钉死 fable5/low/T1，且不进 defaults/routing', () => {
   assert.deepEqual(Object.keys(graph.phases).sort(), ['E', 'P', 'R', 'T', 'V']);
 });
 
-test('资格门：缺原问句 / 单选项 / 人独占 / 非 grok_user_choice 均拒', () => {
+test('资格门：缺原问句 / 单选项 / 人独占 / 非 grok_user_choice / 禁入场句式均拒', () => {
   assert.throws(() => assertEligibility(sampleRequest({ original_question: ' ' })), /ELIGIBILITY|非空/);
   assert.throws(
     () => assertEligibility(sampleRequest({ options: [{ id: 'A', summary: 'x', consequences: 'y' }] })),
@@ -95,6 +95,13 @@ test('资格门：缺原问句 / 单选项 / 人独占 / 非 grok_user_choice �
   assert.throws(
     () => assertEligibility(sampleRequest({ origin: 'lead_curious' })),
     /grok_user_choice/,
+  );
+  assert.throws(
+    () => assertEligibility(sampleRequest({
+      original_question: '查一下资料',
+      handoff: { original_question: '查一下资料' },
+    })),
+    /查资料/,
   );
 });
 
@@ -130,6 +137,8 @@ test('HEAD 变则 context_hash 变，另开一条并占配额', () => {
     assert.equal(opened.reused, false);
     const journal = JSON.parse(readFileSync(path, 'utf8'));
     assert.equal(journal.quota.per_run, 2);
+    assert.equal(journal.requests[0].status, 'superseded');
+    assert.equal(journal.requests[1].status, 'open');
     assert.notEqual(
       computeContextHash(sampleRequest().active_scope),
       computeContextHash(other.active_scope),
@@ -377,6 +386,141 @@ test('CLI check 绿；open/resolve 黑盒可用', () => {
     const journal = JSON.parse(shown.stdout);
     assert.equal(journal.requests[0].status, 'resolved');
     assert.equal(journal.events.every((e) => e.detail.group_id === null), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('CLI resolve 越界选项 C 拒；option_ids 已落盘', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'decision-opt-'));
+  try {
+    const path = join(dir, 'j.json');
+    const reqFile = join(dir, 'req.json');
+    writeFileSync(reqFile, JSON.stringify(sampleRequest()));
+    const opened = cli('open', '--run-id', 'run-dec-1', '--now', NOW, '--request', `@${reqFile}`, '--journal', path);
+    assert.equal(opened.status, 0, opened.stderr);
+    const parsed = JSON.parse(opened.stdout.slice(0, opened.stdout.indexOf('【决策席禁令】')));
+    const resFile = join(dir, 'res.json');
+    writeFileSync(resFile, JSON.stringify({
+      decision_id: parsed.decision_id,
+      handoff_hash: parsed.handoff_hash,
+      lease_nonce: parsed.lease_nonce,
+      selected_option_id: 'C',
+      rationale: '选 C',
+      residual: [],
+      tools_used: [],
+    }));
+    const resolved = cli('resolve', '--journal', path, '--decision-id', parsed.decision_id, '--now', NOW, '--result', `@${resFile}`);
+    assert.equal(resolved.status, 2, resolved.stderr);
+    assert.match(resolved.stderr, /不在选项集/);
+    const journal = JSON.parse(readFileSync(path, 'utf8'));
+    assert.deepEqual(journal.requests[0].option_ids, ['A', 'B']);
+    assert.equal(journal.requests[0].status, 'open');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('旧 HEAD lease 在新 context open 后 resolve 必须 SUPERSEDED', () => {
+  const { dir, path } = journalPath();
+  try {
+    const first = openDecision({ journalPath: path, now: NOW, request: sampleRequest() });
+    openDecision({
+      journalPath: path,
+      now: NOW,
+      request: sampleRequest({ active_scope: { head_sha: 'c'.repeat(40) } }),
+    });
+    assert.throws(
+      () => resolveDecision({
+        journalPath: path,
+        decisionId: first.decision_id,
+        now: NOW,
+        result: {
+          decision_id: first.decision_id,
+          handoff_hash: first.handoff_hash,
+          lease_nonce: first.lease_nonce,
+          selected_option_id: 'A',
+          rationale: '选 A',
+          residual: [],
+          tools_used: [],
+        },
+      }),
+      (err) => err instanceof LedgerError && err.code === 'DECISION_SUPERSEDED',
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rationale 声称已核实且 tools_used 空 → ABUSE', () => {
+  const { dir, path } = journalPath();
+  try {
+    const opened = openDecision({ journalPath: path, now: NOW, request: sampleRequest() });
+    assert.throws(
+      () => resolveDecision({
+        journalPath: path,
+        decisionId: opened.decision_id,
+        now: NOW,
+        result: {
+          decision_id: opened.decision_id,
+          handoff_hash: opened.handoff_hash,
+          lease_nonce: opened.lease_nonce,
+          selected_option_id: 'A',
+          rationale: '我已核实但没有证据',
+          residual: [],
+          tools_used: [],
+        },
+      }),
+      (err) => err instanceof LedgerError && err.code === 'ABUSE',
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('attach 跳号 revision / 未 request 先 attach 均拒', () => {
+  const { dir, path } = journalPath();
+  try {
+    const opened = openDecision({ journalPath: path, now: NOW, request: sampleRequest() });
+    assert.throws(
+      () => attachEvidence({
+        journalPath: path,
+        decisionId: opened.decision_id,
+        now: NOW,
+        bundle: { revision: 99, bundle_hash: 'ev99', items: [] },
+      }),
+      (err) => err instanceof LedgerError && err.code === 'EVIDENCE',
+    );
+    requestEvidence({
+      journalPath: path,
+      decisionId: opened.decision_id,
+      now: NOW,
+      query: { queries: ['q1'] },
+    });
+    assert.throws(
+      () => attachEvidence({
+        journalPath: path,
+        decisionId: opened.decision_id,
+        now: NOW,
+        bundle: { revision: 99, bundle_hash: 'ev99', items: [] },
+      }),
+      /当前\+1/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--now 非法日期 fail-closed，不落盘', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'decision-now-'));
+  try {
+    const path = join(dir, 'j.json');
+    const reqFile = join(dir, 'req.json');
+    writeFileSync(reqFile, JSON.stringify(sampleRequest()));
+    const opened = cli('open', '--run-id', 'run-dec-1', '--now', 'not-a-date', '--request', `@${reqFile}`, '--journal', path);
+    assert.equal(opened.status, 2, opened.stderr);
+    assert.match(opened.stderr, /NOW_REQUIRED|ISO/);
+    assert.equal(existsSync(path), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
