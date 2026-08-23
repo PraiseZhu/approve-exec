@@ -1,9 +1,9 @@
 // SKILL.md 编排守则结构断言测试（sc-p2b / sc-p1b / r4）。
-// 目标：lead 换会话/换模型后编排行为不漂移——守则十六段齐全且与实现字面量同步。
+// 目标：lead 换会话/换模型后编排行为不漂移——守则十七段齐全且与实现字面量同步。
 //
 // 断言口径：
 // 1. frontmatter：name=approve-exec、trigger=批准执行、正文含触发词「批准执行」。
-// 2. 十六段 marker 逐段齐全（精确段标题，防段落被删/改名漂移）。
+// 2. 十七段 marker 逐段齐全（精确段标题，防段落被删/改名漂移）。
 // 3. doc↔实现同步①：「用 goal skill 执行。」字面量必须与 scripts/run-ledger.mjs
 //    render-packet 模板（renderExecPacket 首行 lines.push）逐字一致——
 //    提取实现侧字面量断言 SKILL.md 包含，且 SKILL.md 中每处「用 goal skill 执行」
@@ -38,7 +38,7 @@ const ledgerSrc = readFileSync(join(root, 'scripts/run-ledger.mjs'), 'utf8');
 const defaults = JSON.parse(readFileSync(join(root, 'config/defaults.json'), 'utf8'));
 const defaultsKeys = Object.keys(defaults);
 
-// 十六段精确 marker（段标题与 SKILL.md 逐字一致；缺失/改名即红）
+// 十七段精确 marker（段标题与 SKILL.md 逐字一致；缺失/改名即红）
 // 注：第③段标题保留「每边三动作」历史命名（段落仍以状态机为主题，五步检查单在段内显式声明），
 //     MARKERS 继续逐字锚定该标题——改标题需先改 SKILL.md（不在本测试授权面），见 g2 请示项。
 const MARKERS = [
@@ -58,6 +58,7 @@ const MARKERS = [
   '## ⑭ 保证等级声明',
   '## ⑮ 破坏性变更迁移表（旧用法 → 现在 → 替代）',
   '## ⑯ verify 结果复用纪律（防重复纪律）',
+  '## ⑰ Fable 决策 sidecar（非第六席）',
 ];
 
 // 取第 N 段（marker N 到 marker N+1）之间的文本
@@ -76,7 +77,7 @@ test('frontmatter：name=approve-exec、trigger=批准执行', () => {
   assert.ok(skillDoc.includes('批准执行'), '正文应含触发词「批准执行」');
 });
 
-test('十六段 marker 齐全且顺序固定', () => {
+test('十七段 marker 齐全且顺序固定', () => {
   let pos = -1;
   for (const m of MARKERS) {
     const idx = skillDoc.indexOf(m, pos + 1);
@@ -351,8 +352,26 @@ test('sc-p1b-①：新段标题在场——五步硬定序检查单所在段 + �
   const s3 = sectionBetween(MARKERS[2], MARKERS[3]);
   assert.ok(s3.includes('五步硬定序检查单'), '③段应声明五步硬定序检查单（检查单所在段）');
   assert.ok(skillDoc.includes('## ⑯ verify 结果复用纪律（防重复纪律）'), '⑯ 防重复纪律段标题应在场');
-  const s16 = sectionBetween(MARKERS[15], undefined);
+  const s16 = sectionBetween(MARKERS[15], MARKERS[16]);
   assert.ok(s16.includes('复用'), '⑯ 防重复纪律段应含复用语义内容');
+});
+
+test('第⑰段：Fable sidecar 非第六席 + 入场原句 + T1 纪律级 + routing 不加档', () => {
+  const s17 = sectionBetween(MARKERS[16], undefined);
+  assert.ok(s17.includes('不进 `graph.json`'), '⑰段应声明不进 graph.json');
+  assert.ok(s17.includes('routing.json'), '⑰段应声明 routing 不加 decision 档');
+  assert.ok(s17.includes('fable-decision.json'), '⑰段应点名独立配置');
+  assert.ok(s17.includes('decision-broker.mjs'), '⑰段应点名 broker');
+  assert.ok(s17.includes('若无代理，grok 将停下来问用户的原句'), '⑰段应钉死唯一入场条件');
+  assert.ok(s17.includes('human_exclusive'), '⑰段应含人独占布尔');
+  assert.ok(s17.includes('handoff_hash'), '⑰段应含 handoff_hash');
+  assert.ok(s17.includes('context_hash'), '⑰段应含 context_hash');
+  assert.ok(s17.includes('decision_key'), '⑰段应含 decision_key');
+  assert.ok(s17.includes('tools_used'), '⑰段应含 T1 闸一 tools_used');
+  assert.ok(s17.includes('porcelain'), '⑰段应含 worktree 零 diff');
+  assert.ok(s17.includes('T1 纪律级，不是强制级'), '⑰段应如实声明隔离等级');
+  assert.ok(s17.includes('decision_opened'), '⑰段应声明配额只在 opened 计数');
+  assert.ok(s17.includes('DECISION_SUPERSEDED'), '⑰段应声明晚到不覆盖');
 });
 
 test('sc-p1b-⑥：三条 owner 硬指令在场——「硬指令」≥3 处，且分别与三个语义锚点同段共现', () => {

@@ -66,6 +66,12 @@ function validateGraph(g) {
       return { ok: false, reason: `缺席位 ${seat}` };
     }
   }
+  // 键集精确等于 E/R/V/T/P：决策 sidecar 不得冒充第六席（Fable 2026-08-24 裁定）
+  const phaseKeys = Object.keys(g.phases).sort();
+  const expectedKeys = [...SEATS].sort();
+  if (phaseKeys.join(',') !== expectedKeys.join(',')) {
+    return { ok: false, reason: `phases 键集必须精确等于 ${expectedKeys.join('/')}（当前 ${phaseKeys.join('/')}）` };
+  }
   // 全席位校验：遍历 phases 全部席位（含未来新增席位），不缩在白名单五席上 ——
   // 任何席位带模型 ID 都违反禁复述，多余席位同样必须满足席位约束。
   for (const [seat, s] of Object.entries(g.phases)) {
@@ -126,6 +132,15 @@ test('graph.json 可解析且含 schema_version 与五席 phases', () => {
   for (const seat of SEATS) {
     assert.ok(graph.phases[seat], `缺席位 ${seat}`);
   }
+});
+
+test('phases 键集精确等于 E/R/V/T/P（决策 sidecar 不得进 graph）', () => {
+  assert.deepEqual(Object.keys(graph.phases).sort(), [...SEATS].sort());
+  const extra = structuredClone(graph);
+  extra.phases.D = { route: 'e2e', dispatch: 'worker' };
+  const result = validateGraph(extra);
+  assert.equal(result.ok, false, '第六席 D 必须被拒');
+  assert.match(result.reason, /键集必须精确等于/);
 });
 
 test('route 值均为 routing.json 顶层 key 集的子集（subset 判定）', () => {
@@ -222,12 +237,15 @@ test('反证夹具：非 E/R 席 agent_pin 出现坏值（codex）→ 断言红'
 });
 
 test('反证夹具：phases 多余席位带模型 ID → 断言红', () => {
-  // 曾盲区：禁复述检测只遍历 SEATS 白名单，多余席位（X）带模型 ID 会静默通过。
+  // 键集已精确锁五席：多余席位先被键集闸拦住（不再依赖模型 ID 扫描兜底）。
   const bad = structuredClone(graph);
   bad.phases.X = { route: 'e2e', model: 'gpt-5.6-luna' };
   const result = validateGraph(bad);
-  assert.equal(result.ok, false, '多余席位内嵌模型 ID 必须被拒');
-  assert.ok(result.reason.includes('模型 ID'), `拒绝理由应指向禁复述，实际: ${result.reason}`);
+  assert.equal(result.ok, false, '多余席位必须被拒');
+  assert.ok(
+    result.reason.includes('键集必须精确等于') || result.reason.includes('模型 ID'),
+    `拒绝理由应指向键集或禁复述，实际: ${result.reason}`,
+  );
 });
 
 test('反证夹具：E 席 route 改到 agent=codex 的档（review）→ agent_pin 一致性红', () => {
