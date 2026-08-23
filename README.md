@@ -9,4 +9,4 @@ E(执行)→R(审查修复)→V(SC 验收)→T(e2e)→P(打包) 五阶段状态�
   平台侧 worker 硬上限不在此复述——由 Orca 运行时返回（create_worker 超限即拒），本仓只消费 config 里的执行档位
 - 状态全落 run 台账（~/.claude/.orca/approve-exec/），断点续跑 = `批准执行 --resume <run_id>`（skill 触发词参数，非脚本子命令，详见 SKILL.md §⑥）
 
-状态：实现收敛期——五阶段编排守则（SKILL.md）与 run-ledger / ready-check / selfcheck / mem-probe 四脚本已落地；run 台账在 ~/.claude/.orca/approve-exec/，支持 `批准执行 --resume <run_id>` 断点续跑
+状态：实现收敛期——五阶段编排守则（SKILL.md）与 run-ledger / ready-check / selfcheck / mem-probe 四脚本已落地；run 台账在 ~/.claude/.orca/approve-exec/，支持 `批准执行 --resume <run_id>` 断点续跑。Fable 决策是状态机外 sidecar（`config/fable-decision.json` + `scripts/decision-broker.mjs`），不能改变 group state，也不进 routing.json。

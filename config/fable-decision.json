@@ -1,0 +1,22 @@
+{
+  "_comments": {
+    "model": "决策 sidecar 独占钉死；不进 routing.json / graph.json / defaults.json",
+    "effort": "Fable 只做判断，low 足够；禁止升档",
+    "agent": "仅作派工说明字段；本仓不经 create_worker 调 Fable",
+    "journalDir": "独立 decision journal，仓外；与 runLedgerDir 分开，禁止写入执行台账 events",
+    "quotaPerWave": "只在 decision_opened 原子成功时计数",
+    "quotaPerRun": "只在 decision_opened 原子成功时计数",
+    "leaseTtlMs": "open lease 过期后晚到结果记 SUPERSEDED，不得覆盖",
+    "rationaleMaxChars": "裁决理由上限；长执行日志不得塞进 journal",
+    "isolationLevel": "T1 纪律级，不是强制工具隔离；三道事后闸见 SKILL.md ⑰"
+  },
+  "model": "claude-fable-5",
+  "effort": "low",
+  "agent": "claude-code",
+  "journalDir": "~/.claude/.orca/approve-exec-decisions",
+  "quotaPerWave": 2,
+  "quotaPerRun": 6,
+  "leaseTtlMs": 3600000,
+  "rationaleMaxChars": 2000,
+  "isolationLevel": "T1"
+}

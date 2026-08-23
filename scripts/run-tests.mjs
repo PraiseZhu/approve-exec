@@ -20,6 +20,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // 裸增文件会被方向 B 拦成 exit 2。本轮未新增独立测试文件（用例落在既有 run-ledger/ready-check）。
 export const TEST_FILES = [
   'config.test.mjs',
+  'decision-broker.test.mjs',
   'e2e-dryrun.test.mjs',
   'graph.test.mjs',
   'mem-probe.test.mjs',

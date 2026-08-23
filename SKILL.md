@@ -10,7 +10,7 @@ trigger: 批准执行
 五阶段状态机 E(执行)→R(审查修复)→V(波集成+SC 验收)→T(e2e)→P(打包)→READY。默认 **E / R / V / P 由当前 lead 自己跑**（E 走 goal 场景 C + `--until-sc`；R 先对本组 `allowed_paths` 做 simplify，再跑本会话 `/code-review high --fix`，不派 worker、不走 `/rc`），**worker 只派 T e2e**。
 生态链：task-priority（出 manifest）→ **本 skill（lead 自跑 E/R/V/P + 只把 T 派 worker）** → goal（lead 在本会话按场景 C 消费出包）→ submit-pr（三审收口）。
 
-本文是 lead 侧编排的**唯一守则**：换会话、换模型后按本文执行，编排行为不漂移（机器保障：`scripts/run-tests.mjs` 冻结枚举 + `tests/skill-doc.test.mjs` 结构断言，见第⑭段）。共十六段。
+本文是 lead 侧编排的**唯一守则**：换会话、换模型后按本文执行，编排行为不漂移（机器保障：`scripts/run-tests.mjs` 冻结枚举 + `tests/skill-doc.test.mjs` 结构断言，见第⑭段）。共十七段。
 
 ## ① 身份与触发
 
@@ -57,7 +57,7 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 
 配套纪律：
 
-- **禁确认句式**：不用 AskUserQuestion / 「要开始吗？」类确认，编排过程只出简报、不停顿。
+- **禁确认句式**：不用 AskUserQuestion / 「要开始吗？」类确认，编排过程只出简报、不停顿。本来会问用户拍板的题走第⑰段 Fable sidecar，不把确认句式改写成问人。
 - **防跑飞**：借 goal `--until-sc` 防跑飞纪律——**连续 3 轮零增量自报卡死**，摊开卡点，不得空转。
 - **worker 超时重派**：`workerTimeoutMinutes`（40min）无交卷 → 该轮按失败收束，归档该 worker 并重建、重派（台账走 timeout_redispatch 事件，rounds 归零、worktree 换新）。
 - **审查不收敛**：审查修复轮数超过 `reviewMaxRounds`（3 轮）仍未 unresolved==0 → 硬阻碍，**上报**（不是静默放行）。
@@ -158,3 +158,17 @@ E(执行) → R(审查修复) → V(波集成+SC验收) → T(e2e) → P(打包)
 - **复用共享的是原始 outcome**：同一展开后命令的同一 outcome 可被多 SC 引用，但各 SC 仍按自己的 expect 分别判定（不因共享而合并验收口径）。
 - **测试分层**：worker 轮内只跑动过文件的相关测试；全量 run-tests 只在集成点（V 阶段）与 T 阶段各跑一次。
 - **e2e 时机**：全链只在 phase=e2e 跑一次；R 修复轮只跑受影响文件；ready-check 已有 candidate_sha 绑定机器闸兜底（见第⑪段）。
+
+## ⑰ Fable 决策 sidecar（非第六席）
+
+grok 作为 lead **本来会停下来主动问用户拍板**时，才把题交给 Fable 代决策。这不是 E/R/V/T/P 的第六席，**不进 `graph.json`，不加 `routing.json` 的 decision 档，不进 `config/defaults.json`，不做第五类 `record-delivery`**。配置独占 `config/fable-decision.json`（`claude-fable-5` / `low` / isolationLevel=`T1`）；机器闸是 `scripts/decision-broker.mjs` + 独立 journal（默认 `~/.claude/.orca/approve-exec-decisions/<run_id>.json`）。
+
+**唯一入场条件**：lead 必须能写出「若无代理，grok 将停下来问用户的原句」。查资料、执行、审查、策略优化、规则已有唯一答案、「要开始吗 / 能不能并行」、机械故障（缺文件/缺 receipt）一律不得开 sidecar。人独占（autonomous-execution 硬停六条、A 类 routing fail-closed、预算暂停、800 行/三审/输入门豁免、密钥与组织配置）`human_exclusive=true`，停给用户，禁止进 Fable。
+
+**充分 handoff**：必须是六块 canonical object（现场 / 已改或 `no_changes` / 瓶颈与已排除 / 完整执行过程 / 原问句 / 选项+约束），broker 存 `handoff_hash` + `context_hash`。去重键 `decision_key` 含 run/manifest/phase/wave/groups/问句/选项/约束/`context_hash`，禁止裸问句去重。
+
+**Fable 只判断**：想要任何信息必须派只读 sub（`request-evidence` → `attach-evidence` 开新 revision）。自己不准查、不准改文件、不准推进 phase/组状态。交卷 schema 强制 `tools_used`；decision worktree `git status --porcelain` 必须空，非空记 `decision_abused` 并作废。无 `evidence_attached` 却声称已核实 → 作废（T1 闸三）。
+
+**隔离等级如实声明：T1 纪律级，不是强制级。** Cindy worker 没有 per-worker tool allowlist；本仓保证等级仍是第⑭段 T1（防疏忽/漂移，submit-pr 三审兜底）。不得把 Orca worker 包装成工具隔离。
+
+**配额 / CAS**：只在 `decision_opened` 原子成功时计数（每 wave 2 / 每 run 6，数从 `fable-decision.json` 读）。同 `decision_key` 同时一个 open lease；晚到或错 `lease_nonce` → `DECISION_SUPERSEDED`，不覆盖。ready-check 七门不读 sidecar journal，合法决策事件不得挡 READY。

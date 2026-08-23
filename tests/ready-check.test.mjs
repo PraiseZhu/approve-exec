@@ -201,6 +201,32 @@ function expectGaps(res, expected, msg = '') {
   assert.equal(res.stdout, '', `gap 态不应输出 READY 行（${msg}）: ${res.stdout}`);
 }
 
+test('sidecar decision journal 不影响七门：仓外 journal 有 opened/resolved，执行台账 events 不含 decision_*，READY 仍过', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, null);
+  const decisionDir = mkdtempSync(join(tmpdir(), 'ready-decision-'));
+  t.after(() => rmSync(decisionDir, { recursive: true, force: true }));
+  writeFileSync(join(decisionDir, 'journal.json'), `${JSON.stringify({
+    schema_version: 'decision-v1',
+    run_id: env.parsed.ledger.run_id,
+    version: 2,
+    quota: { per_wave: { 1: 1 }, per_run: 1 },
+    requests: [{ decision_id: 'dec_fixture', status: 'resolved', selected_option_id: 'A' }],
+    events: [
+      { type: 'decision_opened', at: FIXED_NOW, detail: { group_id: null, decision_id: 'dec_fixture' } },
+      { type: 'decision_resolved', at: FIXED_NOW, detail: { group_id: null, decision_id: 'dec_fixture', selected_option_id: 'A' } },
+    ],
+  }, null, 2)}\n`);
+  assert.equal(
+    env.parsed.ledger.events.some((e) => String(e.type).startsWith('decision_')),
+    false,
+    '执行台账不得含 decision_* 事件（独立 journal）',
+  );
+  const res = runReady(repo, env);
+  assert.equal(res.status, 0, `旁路 decision journal 不得让七门红\nstderr: ${res.stderr}`);
+  assert.match(res.stdout, /^READY_FOR_SUBMIT_PR /);
+});
+
 test('full: 七项全齐 → READY_FOR_SUBMIT_PR 含分支与 SHA，receipt 原子落盘（ledger_version=检查时 version），台账不被驱动', (t) => {
   const repo = makeRepo(t);
   const env = buildEnv(t, repo, null);
