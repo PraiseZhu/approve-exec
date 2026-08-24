@@ -274,25 +274,10 @@ test('resolve 缺 tools_used 拒；错 nonce 记 SUPERSEDED；过期不覆盖', 
   }
 });
 
-test('声称已核实但无 evidence_attached → ABUSE；有证据且零 diff 可 resolve', (t) => {
+test('声称已核实但无 evidence_attached → ABUSE；有证据且零 diff 可 resolve', () => {
   const { dir, path } = journalPath();
-  const repo = mkdtempSync(join(tmpdir(), 'decision-wt-'));
-  t.after(() => {
-    rmSync(dir, { recursive: true, force: true });
-    rmSync(repo, { recursive: true, force: true });
-  });
-  const git = (args) => {
-    const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8', env: buildChildEnv(process.env) });
-    assert.equal(r.status, 0, r.stderr);
-    return r;
-  };
-  git(['init', '-q', repo]);
-  git(['config', 'user.email', 'dec@test.local']);
-  git(['config', 'user.name', 'Dec']);
-  writeFileSync(join(repo, 'keep.txt'), 'ok\n');
-  git(['add', '-A']);
-  git(['commit', '-q', '-m', 'init']);
-
+  const repo = makeCleanRepo();
+  try {
   const opened = openDecision({ journalPath: path, now: NOW, request: sampleRequest() });
   assert.throws(
     () => resolveDecision({
@@ -349,26 +334,17 @@ test('声称已核实但无 evidence_attached → ABUSE；有证据且零 diff �
     journal.events.map((e) => e.type),
     ['decision_opened', 'evidence_requested', 'evidence_attached', 'decision_resolved'],
   );
-});
-
-test('worktree dirty → ABUSE 且交卷作废', (t) => {
-  const { dir, path } = journalPath();
-  const repo = mkdtempSync(join(tmpdir(), 'decision-dirty-'));
-  t.after(() => {
+  } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(repo, { recursive: true, force: true });
-  });
-  const git = (args) => {
-    const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8', env: buildChildEnv(process.env) });
-    assert.equal(r.status, 0, r.stderr);
-  };
-  git(['init', '-q', repo]);
-  git(['config', 'user.email', 'dec@test.local']);
-  git(['config', 'user.name', 'Dec']);
-  writeFileSync(join(repo, 'keep.txt'), 'ok\n');
-  git(['add', '-A']);
-  git(['commit', '-q', '-m', 'init']);
+  }
+});
+
+test('worktree dirty → ABUSE 且交卷作废', () => {
+  const { dir, path } = journalPath();
+  const repo = makeCleanRepo();
   writeFileSync(join(repo, 'dirty.txt'), 'nope\n');
+  try {
 
   const opened = openDecision({ journalPath: path, now: NOW, request: sampleRequest() });
   assert.throws(
@@ -391,6 +367,10 @@ test('worktree dirty → ABUSE 且交卷作废', (t) => {
   );
   const journal = JSON.parse(readFileSync(path, 'utf8'));
   assert.equal(journal.requests[0].status, 'abused');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
 });
 
 test('CLI check 绿；open/resolve 黑盒可用', () => {
