@@ -6,7 +6,7 @@
 //   open --run-id <id> --now <ts> --request <json|@file> [--journal <path>]
 //   request-evidence --journal <path> --decision-id <id> --now <ts> --query <json|@file>
 //   attach-evidence --journal <path> --decision-id <id> --now <ts> --bundle <json|@file>
-//   resolve --journal <path> --decision-id <id> --now <ts> --result <json|@file> [--worktree <path>]
+//   resolve --journal <path> --decision-id <id> --now <ts> --result <json|@file> --worktree <path>
 //   show --journal <path>
 //
 // 硬边界（Fable 2026-08-24 裁定 + GPT 架构纠正）：
@@ -15,7 +15,8 @@
 //   - 配额只在 decision_opened 原子成功时计数。
 //   - 同 decision_key 同时只允许一个 open lease（CAS）。
 //   - 晚到 / 错 nonce / context 变 → DECISION_SUPERSEDED，不覆盖。
-//   - 隔离是 T1 纪律级：交卷必须带 tools_used；worktree porcelain 非空 → ABUSE。
+//   - 隔离是 T1 纪律级：交卷必须带 tools_used；resolve 必传 worktree；porcelain 非空 → ABUSE。
+//   - handoff 六块非空；bundle_hash = sha256(canonical(items))；requests[] exact REQUEST_RECORD_KEYS。
 import { createHash, randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
@@ -211,6 +212,9 @@ export function assertDecisionJournalSchema(journal) {
   if (!Array.isArray(journal.requests) || !Array.isArray(journal.events)) {
     throw new LedgerError('SCHEMA', 'decision journal requests/events 必须是数组');
   }
+  for (const [i, req] of journal.requests.entries()) {
+    assertKeys(req, REQUEST_RECORD_KEYS, `decision requests[${i}]`);
+  }
   for (const ev of journal.events) {
     if (!EVENT_TYPES.includes(ev.type)) {
       throw new LedgerError('SCHEMA', `decision event.type 未知: ${ev.type}`);
@@ -301,6 +305,26 @@ export function computeHandoffHash(handoff) {
   return sha256Hex(canonical(handoff));
 }
 
+export function computeBundleHash(items) {
+  return sha256Hex(canonical(items));
+}
+
+function assertHandoffFilled(value, key) {
+  if (typeof value === 'string') {
+    if (value.trim().length === 0) {
+      throw new LedgerError('HANDOFF', `handoff.${key} 必须是非空字符串`);
+    }
+    return;
+  }
+  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    if (Object.keys(value).length === 0) {
+      throw new LedgerError('HANDOFF', `handoff.${key} 必须是非空对象`);
+    }
+    return;
+  }
+  throw new LedgerError('HANDOFF', `handoff.${key} 必须是非空字符串或非空对象`);
+}
+
 export function computeDecisionKey({
   runId, manifestCoreHash, phase, wave, groups, originalQuestion, options, constraints, contextHash,
 }) {
@@ -372,9 +396,7 @@ export function assertEligibility(request) {
   }
   assertKeys(request.handoff, HANDOFF_KEYS, 'handoff');
   for (const key of HANDOFF_KEYS) {
-    if (request.handoff[key] === null || request.handoff[key] === undefined) {
-      throw new LedgerError('HANDOFF', `handoff.${key} 缺失`);
-    }
+    assertHandoffFilled(request.handoff[key], key);
   }
   if (request.handoff.original_question !== request.original_question) {
     throw new LedgerError('HANDOFF', 'handoff.original_question 必须与 request.original_question 逐字一致');
@@ -574,11 +596,15 @@ export function attachEvidence({ journalPath, decisionId, now, bundle }) {
   if (!Number.isSafeInteger(bundle.revision) || bundle.revision < 1) {
     throw new LedgerError('EVIDENCE', 'bundle.revision 必须是 ≥1 的安全整数');
   }
-  if (typeof bundle.bundle_hash !== 'string' || bundle.bundle_hash.length === 0) {
-    throw new LedgerError('EVIDENCE', 'bundle.bundle_hash 必须是非空字符串');
-  }
   if (!Array.isArray(bundle.items)) {
     throw new LedgerError('EVIDENCE', 'bundle.items 必须是数组');
+  }
+  const expectedHash = computeBundleHash(bundle.items);
+  if (bundle.bundle_hash !== expectedHash) {
+    throw new LedgerError(
+      'EVIDENCE',
+      `bundle_hash 必须等于 sha256(canonical(items))（期望 ${expectedHash.slice(0, 12)}…）`
+    );
   }
   const journal = readJournal(journalPath);
   writeJournalAtomic(journalPath, journal.version, (cur) => {
@@ -635,6 +661,9 @@ export function resolveDecision({ journalPath, decisionId, now, result, worktree
   if (!Array.isArray(result.residual)) {
     throw new LedgerError('SCHEMA', 'residual 必须是数组');
   }
+  if (typeof worktree !== 'string' || worktree.trim().length === 0) {
+    throw new LedgerError('ABUSE', 'resolve 必须携带 worktree（T1 闸一，省略等于没有）');
+  }
   const journal = readJournal(journalPath);
   const req = findRequest(journal, decisionId);
   if (!req) throw new LedgerError('NOT_FOUND', `无此 decision_id: ${decisionId}`);
@@ -669,20 +698,18 @@ export function resolveDecision({ journalPath, decisionId, now, result, worktree
   if (!allowedOptions.includes(result.selected_option_id)) {
     throw new LedgerError('SCHEMA', `selected_option_id=${result.selected_option_id} 不在选项集`);
   }
-  if (worktree) {
-    const dirty = porcelain(worktree);
-    if (dirty.length > 0) {
-      writeJournalAtomic(journalPath, journal.version, (cur) => {
-        const live = findRequest(cur, decisionId);
-        live.status = 'abused';
-        pushEvent(cur, 'decision_abused', now, {
-          decision_id: decisionId,
-          reason: 'worktree porcelain 非空',
-        });
-        return { ...cur, version: journal.version + 1 };
+  const dirty = porcelain(worktree);
+  if (dirty.length > 0) {
+    writeJournalAtomic(journalPath, journal.version, (cur) => {
+      const live = findRequest(cur, decisionId);
+      live.status = 'abused';
+      pushEvent(cur, 'decision_abused', now, {
+        decision_id: decisionId,
+        reason: 'worktree porcelain 非空',
       });
-      throw new LedgerError('ABUSE', 'decision worker worktree 必须零 diff（T1 闸一）');
-    }
+      return { ...cur, version: journal.version + 1 };
+    });
+    throw new LedgerError('ABUSE', 'decision worker worktree 必须零 diff（T1 闸一）');
   }
   const claimedVerify = /已核实|已查证|我核实|核实过|查过了/.test(result.rationale)
     || result.tools_used.some((t) => typeof t === 'string' && /read|grep|bash|edit|write/i.test(t));
@@ -762,7 +789,7 @@ function usage() {
     '  open --run-id <id> --now <ts> --request <json|@file> [--journal <path>]',
     '  request-evidence --journal <path> --decision-id <id> --now <ts> --query <json|@file>',
     '  attach-evidence --journal <path> --decision-id <id> --now <ts> --bundle <json|@file>',
-    '  resolve --journal <path> --decision-id <id> --now <ts> --result <json|@file> [--worktree <path>]',
+    '  resolve --journal <path> --decision-id <id> --now <ts> --result <json|@file> --worktree <path>',
     '  show --journal <path>',
   ].join('\n');
 }
@@ -824,6 +851,9 @@ export function runCli(argv) {
         return 0;
       }
       case 'resolve': {
+        if (typeof flags.worktree !== 'string' || flags.worktree.trim().length === 0) {
+          throw new LedgerError('ARGS', 'resolve 必须携带 --worktree（T1 闸一，省略等于没有）');
+        }
         const result = parseJsonArg(flags.result, '--result');
         resolveDecision({
           journalPath: resolve(flags.journal),

@@ -165,9 +165,9 @@ grok 作为 lead **本来会停下来主动问用户拍板**时，才把题交�
 
 **唯一入场条件**：lead 必须能写出「若无代理，grok 将停下来问用户的原句」。查资料、执行、审查、策略优化、规则已有唯一答案、「要开始吗 / 能不能并行」、机械故障（缺文件/缺 receipt）一律不得开 sidecar。人独占（autonomous-execution 硬停六条、A 类 routing fail-closed、预算暂停、800 行/三审/输入门豁免、密钥与组织配置）`human_exclusive=true`，停给用户，禁止进 Fable。
 
-**充分 handoff**：必须是六块 canonical object（现场 / 已改或 `no_changes` / 瓶颈与已排除 / 完整执行过程 / 原问句 / 选项+约束），broker 存 `handoff_hash` + `context_hash`。去重键 `decision_key` 含 run/manifest/phase/wave/groups/问句/选项/约束/`context_hash`，禁止裸问句去重。
+**充分 handoff**：必须是六块 canonical object（现场 / 已改或 `no_changes` / 瓶颈与已排除 / 完整执行过程 / 原问句 / 选项+约束），每块必须是非空字符串或非空对象（空串/空对象拒），broker 存 `handoff_hash` + `context_hash`。去重键 `decision_key` 含 run/manifest/phase/wave/groups/问句/选项/约束/`context_hash`，禁止裸问句去重。
 
-**Fable 只判断**：想要任何信息必须派只读 sub（`request-evidence` → `attach-evidence` 开新 revision）。自己不准查、不准改文件、不准推进 phase/组状态。交卷 schema 强制 `tools_used`；decision worktree `git status --porcelain` 必须空，非空记 `decision_abused` 并作废。无 `evidence_attached` 却声称已核实 → 作废（T1 闸三）。
+**Fable 只判断**：想要任何信息必须派只读 sub（`request-evidence` → `attach-evidence` 开新 revision）。自己不准查、不准改文件、不准推进 phase/组状态。交卷 schema 强制 `tools_used`；`resolve` 必传 worktree（省略即 ABUSE）；decision worktree `git status --porcelain` 必须空，非空记 `decision_abused` 并作废。`attach-evidence` 的 `bundle_hash` 必须等于 `sha256(canonical(items))`，自报字符串拒。journal `requests[]` 按 `REQUEST_RECORD_KEYS` exact 校验。无 `evidence_attached` 却声称已核实 → 作废（T1 闸三）。
 
 **隔离等级如实声明：T1 纪律级，不是强制级。** Cindy worker 没有 per-worker tool allowlist；本仓保证等级仍是第⑭段 T1（防疏忽/漂移，submit-pr 三审兜底）。不得把 Orca worker 包装成工具隔离。
 
