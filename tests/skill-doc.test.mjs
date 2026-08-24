@@ -369,6 +369,10 @@ test('第⑰段：Fable sidecar 非第六席 + 入场原句 + T1 纪律级 + rou
   assert.ok(s17.includes('decision_key'), '⑰段应含 decision_key');
   assert.ok(s17.includes('tools_used'), '⑰段应含 T1 闸一 tools_used');
   assert.ok(s17.includes('porcelain'), '⑰段应含 worktree 零 diff');
+  assert.ok(s17.includes('非空字符串或非空对象'), '⑰段应钉死 handoff 非空');
+  assert.ok(s17.includes('必传 worktree'), '⑰段应钉死 resolve 必传 worktree');
+  assert.ok(s17.includes('bundle_hash'), '⑰段应钉死 bundle_hash 绑定 items');
+  assert.ok(s17.includes('REQUEST_RECORD_KEYS'), '⑰段应声明 journal requests exact 校验');
   assert.ok(s17.includes('T1 纪律级，不是强制级'), '⑰段应如实声明隔离等级');
   assert.ok(s17.includes('decision_opened'), '⑰段应声明配额只在 opened 计数');
   assert.ok(s17.includes('DECISION_SUPERSEDED'), '⑰段应声明晚到不覆盖');
