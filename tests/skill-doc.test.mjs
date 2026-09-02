@@ -27,11 +27,12 @@ const MARKERS = [
   '## ⑩ 交卷 schema',
   '## ⑪ 预算告警如实声明',
   '## ⑫ `--dry-run`',
-  '## ⑬ 不停机条款（仅四类停）',
+  '## ⑬ 不停机条款（仅五类停）',
   '## ⑭ 与提交 PR 的边界',
   '## ⑮ 保证等级声明',
   '## ⑯ 防越域与验收',
   '## ⑰ Fable 决策 sidecar（非第六席）',
+  '## ⑱ 偏航补救与自进化',
 ];
 
 function sectionBetween(marker, nextMarker) {
@@ -49,7 +50,7 @@ test('frontmatter：name=approve-exec、trigger=批准执行', () => {
   assert.ok(skillDoc.includes('批准执行'), '正文应含触发词「批准执行」');
 });
 
-test('十七段 marker 齐全且顺序固定', () => {
+test('十八段 marker 齐全且顺序固定', () => {
   let pos = -1;
   for (const m of MARKERS) {
     const idx = skillDoc.indexOf(m, pos + 1);
@@ -114,6 +115,7 @@ test('第③段：DISPATCH_MODES 含 session；E=session；LEAD_SELF=V/P；WORKE
     '③段应声明 WORKER_SEATS = R、T');
   assert.ok(s3.includes('不准把 PI 写进路由档') || s3.includes('不准把 PI 写进'),
     '③段应禁止把 PI 写进 routing.json');
+  assert.ok(s3.includes('0.7') && s3.includes('SiteScout'), '③段流程应含 0.7 SiteScout');
 });
 
 test('第⑥段：send_to_session create + Art 钉 + 标题正则', () => {
@@ -145,6 +147,8 @@ test('第⑧段：create_workers ≥2 禁连续 create_worker 单发', () => {
     '⑧段应含「≥2 worker 禁连续 create_worker 单发」纪律链',
   );
   assert.ok(s8.includes('mem-probe'), '⑧段应要求派 tester/reviewer 前跑 mem-probe');
+  assert.ok(s8.includes('这五种情况'), '⑧段应声明五类停');
+  assert.ok(s8.includes('假设破裂'), '⑧段应含第 5 类停：假设破裂');
 });
 
 test('第⑨段：新组状态机 + identity 五段 + PR_RECEIPT_KEYS', () => {
@@ -163,6 +167,8 @@ test('第⑨段：新组状态机 + identity 五段 + PR_RECEIPT_KEYS', () => {
   assert.ok(s9.includes('seq → worktree → branch → base → session_id'),
     '⑨段 identityDigest 顺序必须含 session_id');
   assert.ok(s9.includes('PR_RECEIPT_KEYS'), '⑨段应点名 PR_RECEIPT_KEYS');
+  assert.ok(s9.includes('site_report') && s9.includes('replan_note'), '⑨段 EVENT_TYPES 应含 site_report/replan_note');
+  assert.ok(s9.includes('note-event'), '⑨段应声明 note-event 入账通道');
   assert.ok(s9.includes('READY_FOR_LATER_SUBMIT_PR_SKILL'), '⑨段 run 级 ready 文案应保留 READY_FOR_LATER_SUBMIT_PR_SKILL 作为合入许可信号');
   assert.ok(s9.includes('workspace-triad-align') || skillDoc.includes('workspace-triad-align'),
     '正文应点名 workspace-triad-align 作为三机同步入口');
@@ -236,7 +242,7 @@ test('config 键名比对：SKILL.md 引用的 camelCase 键全部真实存在�
 });
 
 test('第⑰段：Fable sidecar 非第六席 + 禁止 create_worker 调 Fable', () => {
-  const s17 = sectionBetween(MARKERS[16], undefined);
+  const s17 = sectionBetween(MARKERS[16], MARKERS[17]);
   assert.ok(s17.includes('不进 `graph.json`'), '⑰段应声明不进 graph.json');
   assert.ok(s17.includes('routing.json'), '⑰段应声明 routing 不加 decision 档');
   assert.ok(s17.includes('fable-decision.json'), '⑰段应点名独立配置');
@@ -258,4 +264,16 @@ test('第⑰段：Fable sidecar 非第六席 + 禁止 create_worker 调 Fable', 
   assert.ok(s17.includes('禁止 `create_worker` 调 Fable') || s17.includes('禁止 create_worker 调 Fable'),
     '⑰段必须写明禁止 create_worker 调 Fable');
   assert.ok(s17.includes('claude-fable-5'), '⑰段应钉死 Fable 模型 id');
+  assert.ok(s17.includes('Fable 只判断（强制）'), '⑰段应强制 Fable 只判断');
+  assert.ok(s17.includes('任何落盘') && s17.includes('必须派 sub'), '⑰段应强制产出也派 sub');
+});
+
+test('第⑱段：replan 四类 + 自进化台账', () => {
+  const s18 = sectionBetween(MARKERS[17], undefined);
+  for (const a of ['repack', 'resplit', 'land-first', 'split-new']) {
+    assert.ok(s18.includes(a), `⑱段应含处置 ${a}`);
+  }
+  assert.ok(s18.includes('evolution-note.mjs'), '⑱段应点名 evolution-note.mjs');
+  assert.ok(s18.includes('ledger-triage.mjs'), '⑱段应点名每周自进化登记');
+  assert.ok(s18.includes('扩权'), '⑱段应声明扩权永不自动落地');
 });

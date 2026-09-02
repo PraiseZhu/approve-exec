@@ -41,6 +41,8 @@ test('render-pr-handoff: 0–10 段齐全，含开工闸与绝对路径', () => 
   assert.ok(out.includes('model-route show'));
   assert.ok(out.includes('子 session 不合入'), '开工包第 8 段应禁止子 session 合入');
   assert.ok(out.includes('合入由 lead'), '开工包应写明合入由 lead 执行');
+  assert.ok(out.includes('假设破裂必须 blocked 上报'), '开工包第 9 段应禁就地改方案');
+  assert.ok(out.includes('不得改总表'), '开工包第 9 段应禁改总表');
 });
 
 test('render-pr-handoff: 缺 allowed_paths 或乱序身份拒', () => {

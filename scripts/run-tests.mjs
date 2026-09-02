@@ -22,6 +22,7 @@ export const TEST_FILES = [
   'config.test.mjs',
   'decision-broker.test.mjs',
   'e2e-dryrun.test.mjs',
+  'evolution-note.test.mjs',
   'graph.test.mjs',
   'mem-probe.test.mjs',
   'ready-check.test.mjs',

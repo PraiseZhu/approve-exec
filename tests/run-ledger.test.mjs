@@ -810,6 +810,29 @@ test('F-C: 两个进程真实竞态——成功数 == version 增量，且每个
   assert.equal(disk.slug, oks[0].marker, `落盘值必须是报成功写者 ${oks[0].marker} 的值（读回绑定）`);
 });
 
+test('note-event: site_report / replan_note 入账；非法 action 拒', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  const sha = 'a'.repeat(64);
+  let r = cli('note-event', ledgerPath, '--event', 'site_report', '--detail', JSON.stringify({ report_sha256: sha }), '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('note-event', ledgerPath, '--event', 'replan_note', '--detail', JSON.stringify({
+    origin_group: 'g4', broke_assumption: 'helper 签名变了', affected_groups: ['g5'], action: 'land-first',
+  }), '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  const ledger = readLedger(ledgerPath);
+  const types = ledger.events.map((e) => e.type);
+  assert.ok(types.includes('site_report'));
+  assert.ok(types.includes('replan_note'));
+  assert.equal(ledger.events.find((e) => e.type === 'site_report').detail.group_id, null);
+  r = cli('note-event', ledgerPath, '--event', 'replan_note', '--detail', JSON.stringify({
+    origin_group: 'g4', broke_assumption: 'x', affected_groups: ['g5'], action: 'rewrite',
+  }), '--now', T);
+  assert.equal(r.status, 2, '非法 action 必须 exit 2');
+  r = cli('note-event', ledgerPath, '--event', 'dispatch', '--detail', JSON.stringify({ group_id: 'g4' }), '--now', T);
+  assert.equal(r.status, 2, '成功流事件不得经 note-event 入账');
+});
+
 test('sc-p1c: 未知 event type 拒', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);

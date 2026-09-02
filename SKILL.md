@@ -62,6 +62,7 @@ Lead 只做五件事：拆 PR、写开工包、派/收回独立 session、验收
 task-priority final manifest
   → 0. 输入门
   → 0.5 可选：批准执行 --dry-run
+  → 0.7 SiteScout（只读探查，产出 site-report.json；冲突图吃真实写入路径）
   → 1. 拆 PR（估计 ≤800 行；冲突图定并行/串行；写合并顺序）
   → 2. 每个 PR 写开工包（render-pr-handoff.mjs）
   → 3. send_to_session 派独立 PI session → 立刻钉 Art
@@ -89,7 +90,7 @@ task-priority final manifest
 
 ## ④ 拆 PR、并行与合并顺序
 
-沿用 `orca-fanout` 已写死的算法，不另发明：
+沿用 `orca-fanout` 已写死的算法，不另发明。**拆之前必须先 SiteScout**（第 0.7 步）：lead 派只读探查，产物 `site-report.json`（per-SC `real_write_paths`、`cross_sc_edges`、`landmines`、`est_lines`、`open_unknowns`≤5）。冲突图吃 `real_write_paths`，不吃 manifest 里估计的 `allowed_paths`。与 manifest `allowed_paths` 差集过大（新增文件 >30%，或出现跨组共享文件）→ fail-closed 停，指路「汇总任务优先级」修 manifest，lead 不得现场改 `allowed_paths`。`open_unknowns` 非空且涉及组间依赖 → 不拆全量，先切一条串行探路 PR（wave 0 单组）。现有 `prewalk` 只作执行期增量发现，不再是唯一现场来源。台账用 `note-event --event site_report` 记下报告 sha256，不另建状态机。探查 session 无写权限。
 
 1. **隐藏依赖先分波**。波与波串行；后波的 base = 前波已合入或已 rebase 的 tip。
 2. **同一波内按精确写入路径建冲突图**，连通分量 = 一个 PR。路径不相交才能并行开工。
@@ -107,13 +108,13 @@ task-priority final manifest
 **0. 开工闸** — 第①段代码块全文，逐字。  
 **1. 身份**：仓、对照树（只读）、开发基线 SHA、新分支名、lead session id、本 PR 在总表里的序号。  
 **2. 为什么改**：人话，一条用户能看见的失败。  
-**3. 不要重读也能开工的现场**：每个洞一段已证实摘录（文件 + 行号 + 行为）。没有摘录 = 子 session 会 Grep 整模块。  
+**3. 不要重读也能开工的现场（假设收据）**：每个洞一段已证实摘录（文件 + 行号 + 行为/接口签名）。子 session 开工即承诺这些假设。发现不符 → 第 5 类停，禁止就地改方案。没有摘录 = 子 session 会 Grep 整模块。  
 **4. 具体改法**：函数/类型/控制流；兼容旧调用的硬约束。  
 **5. allowed_paths**：只列文件，禁止目录。点名不可改的文件。  
 **6. SC 全文**：每条 `id` + `change` + `holds` + `expect` + `anchor_paths`。禁止「去 ~/.claude/.goal 自己找」。  
 **7. 验证命令**：可复制的真实命令。禁止 `console.log` 占位，禁止「先读 AGENTS.md 再决定跑什么」。  
 **8. 做完之后（自动，不要问 lead）**：开 ready PR → mem-probe → **现读同一份 routing.json 再派** e2e / GPT 单审 → 按第⑩节 schema jump 回报 → 停等验收。子 session 不合入。  
-**9. 禁做**：硬停六条 + 本 PR 产品禁令 + 「未读 goal / 未读 routing.json 不得开工」。  
+**9. 禁做**：硬停六条 + 本 PR 产品禁令 + 「未读 goal / 未读 routing.json 不得开工」+ 不得改总表 / `allowed_paths` / `base` + 假设破裂必须 blocked 上报，禁止就地改方案。  
 **10. 回报格式**：第⑩节 exact JSON。
 
 总表（一份，每个子 session 也带上自己那一行）：并行/串行、合并顺序、全局禁做、lead id。
@@ -179,12 +180,13 @@ Lead 验收时现读 live routing.json：交卷 `e2e.model` / `review.model` 既
 
 ## ⑧ 子 session 闭环与 lead 指挥
 
-子 session 只许在这四种情况下停：
+子 session 只许在这五种情况下停：
 
 1. 本 PR：SC 全 PASS + e2e worker PASS + GPT 单审 unresolved==0 + size-gate ≠ STOP + 已开 ready PR + 已按第⑩节 schema 回报 lead。
 2. 硬停六条。
 3. **本 session 自报**累计打到 `budgetPauseUsd`（可 `--no-budget-pause`）。不是 lead 跨 session 加总。
 4. **未读 goal skill 或未读 routing.json**：不得开工。停，jump 回报 lead，写明卡在开工闸第 1 步还是第 2 步。
+5. **假设破裂**：第 3 段摘录的接口/行为与实际不符，或必须偏离第 4 段改法。立刻 `blocked` + jump 回报 lead：哪条假设破了、影响哪些文件、是否波及别组。禁止就地改方案继续写。无权改总表、无权改 `allowed_paths`、无权换 `base`——这三件事只能 lead 走第⑱节 replan。
 
 连续 3 轮零增量：不得空转，也不得收工。必须 jump 回 lead，摊开卡点。Lead 给可执行的下一刀，再 jump 回去。
 
@@ -204,7 +206,7 @@ Lead 在全部 PR 合入并完成三机同步前不得结束。子 session `get_
 
 `set-state --identity` 允许键：`{worktree, branch, base, session_id, title}`。`identityDigest` 输入段顺序：`seq → worktree → branch → base → session_id`（session_id 未定时用空串，create 后必须重写 identity 再记 dispatch）。
 
-`EVENT_TYPES` 新增：`session_created`、`session_steer`、`gate_goal`、`gate_routing`、`pr_opened`、`accepted`。旧 `delivery` 仍是子 session 终态交卷的唯一真写入口（`record-delivery`）。`gate_goal` / `gate_routing` 的 detail 必须含 `group_id` + 对应 sha256；缺 sha256 拒。
+`EVENT_TYPES` 新增：`session_created`、`session_steer`、`gate_goal`、`gate_routing`、`pr_opened`、`accepted`、`site_report`、`replan_note`。旧 `delivery` 仍是子 session 终态交卷的唯一真写入口（`record-delivery`）。`gate_goal` / `gate_routing` 的 detail 必须含 `group_id` + 对应 sha256；缺 sha256 拒。`site_report` / `replan_note` 只经 `note-event` 入账，不进 set-state 成功流。
 
 `PHASE_ORDER` 改成 run 级：`splitting | dispatching | running | accepting | ready`。组级状态机在 group 上。
 
@@ -254,9 +256,9 @@ size_gate       {result: 非空字符串, candidate_sha: 40hex}
 
 `批准执行`（无 flag）：真派。触发词表仍是「直接执行不确认」，不强制用户第一次必须 dry-run；实现后上线先 dry-run 给用户过目。
 
-## ⑬ 不停机条款（仅四类停）
+## ⑬ 不停机条款（仅五类停）
 
-仅第⑧节四类停。硬停六条（autonomous-execution）仍是人独占，禁止进 Fable、禁止豁免 800 行/输入门。size-gate `STOP` 只能再拆 PR，不能进 sidecar。
+仅第⑧节五类停。硬停六条（autonomous-execution）仍是人独占，禁止进 Fable、禁止豁免 800 行/输入门。size-gate `STOP` 只能再拆 PR，不能进 sidecar。假设破裂走第 5 类停 + 第⑱节 replan，不进 sidecar。
 
 ## ⑭ 与提交 PR 的边界
 
@@ -270,7 +272,7 @@ size_gate       {result: 非空字符串, candidate_sha: 40hex}
 
 ## ⑯ 防越域与验收
 
-Lead 允许：读码、写开工包、派/收回 session、跑验收命令、改台账、该 PR 的 e2e 与 GPT 单审通过后按总表合入、跑 `workspace-triad-align`。不允许：改产品代码、替子 session 修 bug、替子 session 开 PR。越域 commit 验收失败。`gate_goal` 过账后才允许 worktree 出现本 PR 的新 commit。
+Lead 允许：读码、写开工包、派/收回 session、跑验收命令、改台账、该 PR 的 e2e 与 GPT 单审通过后按总表合入、跑 `workspace-triad-align`、按第⑱节 replan。不允许：改产品代码、替子 session 修 bug、替子 session 开 PR。越域 commit 验收失败。`gate_goal` 过账后才允许 worktree 出现本 PR 的新 commit。该 PR diff 触碰了别组 site-report 里的 read 依赖文件 → 即使在自己 `allowed_paths` 内也标「需重协调」，下游不得开工直到 lead 重发包。
 
 ## ⑰ Fable 决策 sidecar（非第六席）
 
@@ -282,8 +284,23 @@ grok 作为 lead **本来会停下来主动问用户拍板**时，才把题交�
 
 **充分 handoff**：必须是六块 canonical object（现场 / 已改或 `no_changes` / 瓶颈与已排除 / 完整执行过程 / 原问句 / 选项+约束），每块必须是非空字符串或非空对象（空串/空对象拒），broker 存 `handoff_hash` + `context_hash`。去重键 `decision_key` 含 run/manifest/phase/wave/groups/问句/选项/约束/`context_hash`，禁止裸问句去重。
 
-**Fable 只判断**：想要任何信息必须派只读 sub（`request-evidence` → `attach-evidence` 开新 revision）。自己不准查、不准改文件、不准推进 phase/组状态。交卷 schema 强制 `tools_used`；`resolve` 必传 worktree（省略即 ABUSE）；decision worktree `git status --porcelain` 必须空，非空记 `decision_abused` 并作废。`attach-evidence` 的 `bundle_hash` 必须等于 `sha256(canonical(items))`，自报字符串拒。journal `requests[]` 按 `REQUEST_RECORD_KEYS` exact 校验。无 `evidence_attached` 却声称已核实 → 作废（T1 闸三）。
+**Fable 只判断（强制）**：lead 判不了才交给 Fable。Fable 自己不准查、不准写、不准改文件、不准推进 phase/组状态。要任何信息必须派只读 sub（`request-evidence` → `attach-evidence` 开新 revision）；任何落盘 / 改文件 / 出包 / 写台账也必须派 sub。交卷 schema 强制 `tools_used`；`resolve` 必传 worktree（省略即 ABUSE）；decision worktree `git status --porcelain` 必须空，非空记 `decision_abused` 并作废。`attach-evidence` 的 `bundle_hash` 必须等于 `sha256(canonical(items))`，自报字符串拒。journal `requests[]` 按 `REQUEST_RECORD_KEYS` exact 校验。无 `evidence_attached` 却声称已核实 → 作废（T1 闸三）。拆错 / 假设破裂是程序题，按第⑱节四类走，不进 sidecar。
 
 **隔离等级如实声明：T1 纪律级，不是强制级。** Cindy worker 没有 per-worker tool allowlist。不得把 Orca worker 包装成工具隔离。
 
 **配额 / CAS**：只在 `decision_opened` 原子成功时计数（每 wave 2 / 每 run 6，数从 `fable-decision.json` 读）。同 `decision_key` 同时一个 open lease；晚到或错 `lease_nonce` → `DECISION_SUPERSEDED`，不覆盖。ready-check 不读 sidecar journal，合法决策事件不得挡 READY。
+
+## ⑱ 偏航补救与自进化
+
+**replan（不加新状态机）**：现有 `failed→pending`（清身份与计数、`assignment_seq+1`、旧 `identityDigest` 失配）是唯一重派通道。因果记在 `replan_note`（`note-event`，不驱动状态）。detail exact：`origin_group`、`broke_assumption`、`affected_groups`、`action` ∈ `{repack|resplit|land-first|split-new}`。
+
+Lead 按四类选，不自由发挥：
+
+- **repack**：只影响本组 → 重出包，同 session `steer` 或 `failed→pending` 重派。
+- **resplit**：拆错（路径撞 / 漏依赖）→ 停同波未 `accepted` 的下游，按新冲突图重切；废组 `failed→pending` 后不再派。
+- **land-first**：方案变更且下游依赖 → 该组先落地或作废重做；下游全部 `failed→pending` 换 base 重出包，禁止在旧 base 上继续。
+- **split-new**：超 800 行 → 现有 size-gate `STOP` 路径不变。
+
+下游冻结：任一组因假设破裂 `blocked` → 依赖它的同波 / 后波组不得 `gate_goal` 放行。前波 tip 变化 → 后波未开工组必须换 base 重出包。已合入才发现偏航：不回滚 main，开修正 PR，`replan_note` 记因果。
+
+**自进化**：每轮 run 收尾、摘要之前，把拆错 / 假设破裂 / 补救不对记进 `evolution/ledger.json`（唯一写通道 `scripts/evolution-note.mjs`）。三档 `by-design` / `proposal` / `auto`；扩权与拿不准永不自动落地。默认不 git push。登记进 Cindy「每周自进化 Skills」（`ledger-triage.mjs` `SOURCES`）。

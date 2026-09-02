@@ -69,6 +69,8 @@ export const EVENT_TYPES = Object.freeze([
   'gate_routing',
   'pr_opened',
   'accepted',
+  'site_report',
+  'replan_note',
 ]);
 // set-state --to failed 的 --event 白名单（窄事件集）：只允许「失败原因类」事件。
 // dispatch/delivery/review_round/integrate 是成功流事件——ready-check ①③ 消费它们做分区
@@ -98,9 +100,12 @@ const GROUP_SCOPED_EVENT_TYPES = new Set([
   'dispatch', 'delivery', 'review_round', 'packet_rendered', 'timeout_redispatch',
   'overreach_rejected', 'overlap_replan', 'budget_note',
   'session_created', 'session_steer', 'gate_goal', 'gate_routing', 'pr_opened', 'accepted',
+  'replan_note',
 ]);
 const GATE_EVENT_TYPES = Object.freeze(['gate_goal', 'gate_routing']);
 const SESSION_EVENT_TYPES = Object.freeze(['session_created', 'session_steer', 'pr_opened', 'accepted']);
+const NOTE_EVENT_TYPES = Object.freeze(['site_report', 'replan_note']);
+const REPLAN_ACTIONS = Object.freeze(['repack', 'resplit', 'land-first', 'split-new']);
 const EXEC_DELIVERY_STATUS = Object.freeze(['done', 'partial', 'blocked']);
 const SC_RESULT_STATUS = Object.freeze(['pass', 'fail', 'not_run']);
 
@@ -211,6 +216,28 @@ export function assertEventSchema(ev) {
     const sha = ev.detail.routing_sha256;
     if (typeof sha !== 'string' || !SHA256_RE.test(sha)) {
       throw new LedgerError('SCHEMA', 'gate_routing 的 detail.routing_sha256 必须是 64 位十六进制（缺 sha256 拒）');
+    }
+  }
+  if (ev.type === 'site_report') {
+    if (ev.detail.group_id !== null) {
+      throw new LedgerError('SCHEMA', 'site_report 的 detail.group_id 必须是 null（run 级，不挂组）');
+    }
+    const sha = ev.detail.report_sha256;
+    if (typeof sha !== 'string' || !SHA256_RE.test(sha)) {
+      throw new LedgerError('SCHEMA', 'site_report 的 detail.report_sha256 必须是 64 位十六进制');
+    }
+  }
+  if (ev.type === 'replan_note') {
+    for (const k of ['origin_group', 'broke_assumption', 'action']) {
+      if (typeof ev.detail[k] !== 'string' || ev.detail[k].length === 0) {
+        throw new LedgerError('SCHEMA', `replan_note 的 detail.${k} 必须是非空字符串`);
+      }
+    }
+    if (!REPLAN_ACTIONS.includes(ev.detail.action)) {
+      throw new LedgerError('SCHEMA', `replan_note.action 必须是 ${REPLAN_ACTIONS.join('/')}（收到: ${ev.detail.action}）`);
+    }
+    if (!Array.isArray(ev.detail.affected_groups) || ev.detail.affected_groups.some((g) => typeof g !== 'string' || g.length === 0)) {
+      throw new LedgerError('SCHEMA', 'replan_note 的 detail.affected_groups 必须是非空字符串数组');
     }
   }
 }
@@ -1025,6 +1052,39 @@ const DELIVERY_LIFECYCLE = Object.freeze({
   prewalk: ['dispatched'],
   'pr-handoff': ['review'],
 });
+
+export function noteEvent({ ledgerPath, now, event, detail }) {
+  requireNow(now, 'note-event');
+  if (!NOTE_EVENT_TYPES.includes(event)) {
+    throw new LedgerError('ARGS', `note-event --event 必须是 ${NOTE_EVENT_TYPES.join('/')}（收到: ${event ?? '无'}）`);
+  }
+  let parsed;
+  try {
+    parsed = typeof detail === 'string' ? JSON.parse(detail) : detail;
+  } catch (err) {
+    throw new LedgerError('ARGS', `--detail 不是合法 JSON: ${err.message}`);
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new LedgerError('ARGS', '--detail 必须是 JSON 对象');
+  }
+  const ledger = readLedger(ledgerPath);
+  if (ledger.phase === 'ready') {
+    throw new LedgerError('FROZEN', `台账已 ready（phase=${ledger.phase}），冻结只读，拒绝写操作`);
+  }
+  const expected = ledger.version;
+  const ev = { type: event, at: now, detail: { ...parsed } };
+  if (event === 'site_report' && !('group_id' in parsed)) {
+    ev.detail.group_id = null;
+  }
+  if (event === 'replan_note' && !('group_id' in parsed) && typeof parsed.origin_group === 'string') {
+    ev.detail.group_id = parsed.origin_group;
+  }
+  assertEventSchema(ev);
+  return writeLedgerAtomic(ledgerPath, expected, (cur) => {
+    cur.events.push(ev);
+    return { ...cur, version: expected + 1 };
+  });
+}
 
 export function setState({
   ledgerPath, now, group, to, workerLabel, tipSha, event, detail,
@@ -2250,6 +2310,7 @@ function usage() {
     '  set-state <ledger> --wave <n> --integrate <hex40> --now <ts>',
     '  render-packet <ledger> --group <gid> [--manifest <path>]',
     '  record-delivery <ledger> --group <gid> --payload <json|@file> --now <ts>',
+    '  note-event <ledger> --event site_report|replan_note --detail <json> --now <ts>',
     '  staleness <ledger> [--now <iso>]',
     '退出码：0 成功 / 1 用法错误 / 2 fail-closed（schema/CAS/前置/hash 不匹配等，点名原因）',
   ].join('\n');
@@ -2303,6 +2364,7 @@ const SUBCOMMAND_FLAGS = Object.freeze({
   'set-state': ['group', 'to', 'now', 'worker-label', 'tip-sha', 'event', 'identity', 'phase', 'wave', 'integrate', 'ready-receipt', 'mem-snapshot', 'detail'],
   'render-packet': ['group', 'manifest', 'now'],
   'record-delivery': ['group', 'payload', 'now'],
+  'note-event': ['event', 'detail', 'now'],
   staleness: ['now'],
 });
 
@@ -2453,6 +2515,17 @@ export function runCli(argv) {
           now: flags.now,
         });
         console.log(`record-delivery: group ${flags.group} 交卷已入账（version+1）`);
+        return 0;
+      }
+      case 'note-event': {
+        assertKnownFlags('note-event', flags);
+        noteEvent({
+          ledgerPath,
+          now: flags.now,
+          event: flags.event,
+          detail: flags.detail,
+        });
+        console.log(`note-event: ${flags.event} 已入账（version+1）`);
         return 0;
       }
       case 'staleness': {

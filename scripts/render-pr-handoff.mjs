@@ -85,7 +85,13 @@ export function renderPrHandoff({
     ? excerpts
     : ['（本包未附摘录：子 session 仍须按 allowed_paths 开工，禁止 Grep 整模块。）'];
   const howLine = how ?? packet.instruction ?? '';
-  const forbidden = [...(packet.forbidden ?? []), ...(forbiddenExtra ?? []), '未读 goal / 未读 routing.json 不得开工'];
+  const forbidden = [
+    ...(packet.forbidden ?? []),
+    ...(forbiddenExtra ?? []),
+    '未读 goal / 未读 routing.json 不得开工',
+    '不得改总表 / allowed_paths / base（只能 lead 走 replan）',
+    '假设破裂必须 blocked 上报，禁止就地改方案',
+  ];
 
   const scLines = packet.scs_inline.map((sc) => {
     const id = sc.id;
