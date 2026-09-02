@@ -1,16 +1,16 @@
 ---
 name: approve-exec
-description: 批准执行——只吃 task-priority final manifest；lead 拆 PR、写开工包、派独立 PI session、验收；E 由子 session 走 goal 场景 C；R/T 由子 session 现读 routing.json 派 worker；lead 不改产品代码、本 skill 不合入。触发词：批准执行。
+description: 批准执行——只吃 task-priority final manifest；lead 拆 PR、写开工包、派独立 PI session、验收；E 由子 session 走 goal 场景 C；R/T 由子 session 现读 routing.json 派 worker；lead 不改产品代码；e2e 与 GPT 单审通过后 lead 按总表合入并同步三机。触发词：批准执行。
 trigger: 批准执行
 ---
 
 # approve-exec — lead 编排守则
 
-**lead 按本文编排**：把 task-priority 产出的 `task-manifest.json` 拆成每 PR 一个独立 PI session，推进到 GitHub 上 ready（非 draft）+ 该 PR receipt 绑在当前 HEAD。不合入。不改「提交 PR」。
+**lead 按本文编排**：把 task-priority 产出的 `task-manifest.json` 拆成每 PR 一个独立 PI session，推进到 GitHub 上 ready（非 draft）+ 该 PR receipt 绑在当前 HEAD。e2e 与 GPT 单审通过后，lead 按总表合入，再跑 `workspace-triad-align` 同步本机 / Mini / Air。不改「提交 PR」skill。子 session 不得自行 merge。
 
-Lead 只做四件事：拆 PR、写开工包、派/收回独立 session、验收整合。功能代码、SC 执行、e2e、GPT 单审都在子 session。全部 PR ready 之前 lead 不停。Fable 只走第⑰ sidecar，禁止 `create_worker` 调 Fable。
+Lead 只做五件事：拆 PR、写开工包、派/收回独立 session、验收、按总表合入并同步三机。功能代码、SC 执行、e2e、GPT 单审都在子 session。全部 PR ready 且合入+三机同步完成之前 lead 不停。Fable 只走第⑰ sidecar，禁止 `create_worker` 调 Fable。
 
-生态链：task-priority（出 manifest）→ **本 skill（拆 PR + 派独立 session + 验收）** → 子 session 调它自己的 goal 场景 C → 以后的提交 PR skill（三审收口）。
+生态链：task-priority（出 manifest）→ **本 skill（拆 PR + 派独立 session + 验收 + 合入 + 同步三机）** → 子 session 调它自己的 goal 场景 C。三审仍不在本 skill。
 
 本文是 lead 侧编排的**唯一守则**。机器保障：`scripts/run-tests.mjs` 冻结枚举 + `tests/skill-doc.test.mjs` 结构断言。
 
@@ -69,9 +69,10 @@ task-priority final manifest
   → 4. 子 session：自己的 goal 场景 C 把本 PR 的 SC 跑绿
         → mem-probe → 现读 routing.json 派 tester（e2e 档）
         → 现读 routing.json 派 reviewer（review 档 = GPT 单审）
-        → 开 ready PR（不合入）→ jump 按交卷 schema 回报
+        → 开 ready PR（子 session 不合入）→ jump 按交卷 schema 回报
   → 5. Lead 按每 PR receipt 验收
-  → 6. 全部 PR 各自 ready 才停
+  → 6. 该 PR 的 e2e 与 GPT 单审通过后，lead 按总表合入
+  → 7. 全部合入后跑 workspace-triad-align，同步本机 / Mini / Air
 ```
 
 席位真相源是 `graph.json`（五席，精确键集 E/R/V/T/P；Fable 不是第六席）：
@@ -82,7 +83,7 @@ task-priority final manifest
 | R | `worker` | **子 session** 现读 review 档派 GPT 单审 |
 | T | `worker` | **子 session** 现读 e2e 档派 tester |
 | V | `lead-self` | lead 只读验收（ready-check / receipt），不改产品代码 |
-| P | `lead-self` | lead 写台账 + `.pr-intent.md`，不开合入 |
+| P | `lead-self` | lead 写台账 + `.pr-intent.md`；e2e 与 GPT 单审通过后按总表合入，再同步三机 |
 
 `DISPATCH_MODES` = `lead-self` / `worker` / `session`。LEAD_SELF_SEATS = V、P。WORKER_SEATS = R、T。E 不是 lead-self。graph 内不出现具体模型 ID；R 不钉 `model`/`pre_command`/`command`。routing.json 的 agent 枚举仍是 `codex` | `claude-code`，**不准把 PI 写进路由档**。PI 只出现在 `send_to_session.agent_kind`。
 
@@ -95,7 +96,7 @@ task-priority final manifest
 3. **跨仓默认可并行**。
 4. **规模**：计划期只能估计。估计会超 800 行（`size-gate.mjs`：相对 `origin/main` 的非测试 added+deleted）必须再拆。真实判定在子 session 的 candidate 上；`result=STOP` 的唯一出路是拆出新 session，不许豁免、不许丢给 Fable。
 
-合并顺序单独写进总表，和「能不能并行写代码」分开。子 session **不得自行 merge**。合入等以后的提交 PR skill / 用户点头。
+合并顺序单独写进总表，和「能不能并行写代码」分开。子 session **不得自行 merge**。合入由 lead 在该 PR 的 e2e 与 GPT 单审通过后按总表执行。
 
 ## ⑤ 开工包
 
@@ -111,7 +112,7 @@ task-priority final manifest
 **5. allowed_paths**：只列文件，禁止目录。点名不可改的文件。  
 **6. SC 全文**：每条 `id` + `change` + `holds` + `expect` + `anchor_paths`。禁止「去 ~/.claude/.goal 自己找」。  
 **7. 验证命令**：可复制的真实命令。禁止 `console.log` 占位，禁止「先读 AGENTS.md 再决定跑什么」。  
-**8. 做完之后（自动，不要问 lead）**：开 ready PR → mem-probe → **现读同一份 routing.json 再派** e2e / GPT 单审 → 按第⑩节 schema jump 回报 → 停等验收。不合入。  
+**8. 做完之后（自动，不要问 lead）**：开 ready PR → mem-probe → **现读同一份 routing.json 再派** e2e / GPT 单审 → 按第⑩节 schema jump 回报 → 停等验收。子 session 不合入。  
 **9. 禁做**：硬停六条 + 本 PR 产品禁令 + 「未读 goal / 未读 routing.json 不得开工」。  
 **10. 回报格式**：第⑩节 exact JSON。
 
@@ -187,9 +188,9 @@ Lead 验收时现读 live routing.json：交卷 `e2e.model` / `review.model` 既
 
 连续 3 轮零增量：不得空转，也不得收工。必须 jump 回 lead，摊开卡点。Lead 给可执行的下一刀，再 jump 回去。
 
-Lead 在全部 PR ready 前不得结束。子 session `get_session_runtime` 变 idle 且没有合格交卷 → `steer_session` 或 jump：「未到停点，继续；卡点报我」。子 session 问「要开始吗 / 能不能并行」→ 驳回，这些不是决策题。越域 / 改了别人的 PR → 验收失败，指令撤回越域 commit，不准扩 scope。
+Lead 在全部 PR 合入并完成三机同步前不得结束。子 session `get_session_runtime` 变 idle 且没有合格交卷 → `steer_session` 或 jump：「未到停点，继续；卡点报我」。子 session 问「要开始吗 / 能不能并行」→ 驳回，这些不是决策题。越域 / 改了别人的 PR → 验收失败，指令撤回越域 commit，不准扩 scope。
 
-「PR ready」= GitHub 上已存在 **ready（非 draft）PR** + 该 PR 的 receipt 绑在当前 HEAD。合入不是本 skill 的停点。
+「PR ready」= GitHub 上已存在 **ready（非 draft）PR** + 该 PR 的 receipt 绑在当前 HEAD。合入是 lead 收尾，不是子 session 停点。该 PR 的 e2e 与 GPT 单审通过后，lead 按总表 merge；全部合入后跑 `/Users/praise/AI-Agent/Claude/capabilities/source/scripts/workspace-triad-align.mjs`，同步本机 / Mini / Air。
 
 子 session 派 tester/reviewer **之前**自己跑 `mem-probe.mjs`。Lead 在同一波并行 create 多个 session 前也跑一次 mem-probe，按 `pending = 本波 PR 数 × 2` 估槽。同批 ≥2 worker 用 `create_workers` 批量派发，禁连续 `create_worker` 单发。
 
@@ -209,7 +210,7 @@ Lead 在全部 PR ready 前不得结束。子 session `get_session_runtime` 变 
 
 `PR_RECEIPT_KEYS` exact：`pr_id, session_id, candidate_sha, pr_url, e2e_status, review_unresolved, size_result, ledger_version, checked_at`。缺键 → `RECORD` 拒，状态不得标 `pr-open`。缺 `gate_goal` / `gate_routing` 事件的组，ready-check 直接 GAP，不得 accepted。
 
-ready-check 先每 PR、再 run：对每个 group 用该组 worktree 跑门；写出每 PR 一份 PR receipt；全部 group `state==accepted` 且每份 receipt 合法 → 写 run 级 `READY_FOR_LATER_SUBMIT_PR_SKILL`。七门按 PR 各算一遍，不再用一个 `baseline_tip` 罩全仓。L2 相对该 PR 的 `identity.base`。run 级 ready 额外一条：总表里的合并顺序已记录，但 **没有任何 merge**。
+ready-check 先每 PR、再 run：对每个 group 用该组 worktree 跑门；写出每 PR 一份 PR receipt；全部 group `state==accepted` 且每份 receipt 合法 → 写 run 级 `READY_FOR_LATER_SUBMIT_PR_SKILL`。这行是验收门过了的机器信号，意思是 lead 可以按总表合入，再同步三机；不是「交给以后的提交 PR skill」。七门按 PR 各算一遍，不再用一个 `baseline_tip` 罩全仓。L2 相对该 PR 的 `identity.base`。run 级 ready 额外一条：总表里的合并顺序已记录；真正 git merge 由 lead 执行，不由 `run-ledger` 执行。
 
 Lock+tmp+rename+CAS 与 `LedgerError` 码沿用。`budget_note` 事件可留，但 lead 不跨 session 加总账单。
 
@@ -259,17 +260,17 @@ size_gate       {result: 非空字符串, candidate_sha: 40hex}
 
 ## ⑭ 与提交 PR 的边界
 
-本 skill 做：拆 PR、派 session、内联执行、e2e worker、GPT 单审、开 ready PR、每 PR 的 size/format/intent 闸（真实 candidate）、写 `.pr-intent.md` 给以后的提交 PR 用。
+本 skill 做：拆 PR、派 session、内联执行、e2e worker、GPT 单审、开 ready PR、每 PR 的 size/format/intent 闸（真实 candidate）、写 `.pr-intent.md`、e2e 与 GPT 单审通过后按总表合入、跑 `workspace-triad-align` 同步本机 / Mini / Air。
 
-本 skill 不做：三审、改 submit-pr skill、merge / 合入。三审交给以后的提交 PR skill。
+本 skill 不做：三审、改 submit-pr skill。子 session 不得自行 merge。三审仍不在本 skill。
 
 ## ⑮ 保证等级声明
 
-编排契约（席位、开工闸原文、交卷 schema、标题正则、Art 钉、routing 现读）由本仓测试冻结，等级 T1：防疏忽/漂移。不夸大成宿主强制拦截 `create_worker` 参数。Cindy 没有 per-worker tool allowlist。submit-pr 三审是后续 skill，不是本 skill 的兜底句。
+编排契约（席位、开工闸原文、交卷 schema、标题正则、Art 钉、routing 现读）由本仓测试冻结，等级 T1：防疏忽/漂移。不夸大成宿主强制拦截 `create_worker` 参数。Cindy 没有 per-worker tool allowlist。submit-pr 三审不是本 skill 的兜底句。
 
 ## ⑯ 防越域与验收
 
-Lead 允许：读码、写开工包、派/收回 session、跑验收命令、改台账。不允许：改产品代码、替子 session 修 bug、替子 session 开 PR。越域 commit 验收失败。`gate_goal` 过账后才允许 worktree 出现本 PR 的新 commit。
+Lead 允许：读码、写开工包、派/收回 session、跑验收命令、改台账、该 PR 的 e2e 与 GPT 单审通过后按总表合入、跑 `workspace-triad-align`。不允许：改产品代码、替子 session 修 bug、替子 session 开 PR。越域 commit 验收失败。`gate_goal` 过账后才允许 worktree 出现本 PR 的新 commit。
 
 ## ⑰ Fable 决策 sidecar（非第六席）
 

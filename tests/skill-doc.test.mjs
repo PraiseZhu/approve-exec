@@ -163,7 +163,9 @@ test('第⑨段：新组状态机 + identity 五段 + PR_RECEIPT_KEYS', () => {
   assert.ok(s9.includes('seq → worktree → branch → base → session_id'),
     '⑨段 identityDigest 顺序必须含 session_id');
   assert.ok(s9.includes('PR_RECEIPT_KEYS'), '⑨段应点名 PR_RECEIPT_KEYS');
-  assert.ok(s9.includes('READY_FOR_LATER_SUBMIT_PR_SKILL'), '⑨段 run 级 ready 文案应改名');
+  assert.ok(s9.includes('READY_FOR_LATER_SUBMIT_PR_SKILL'), '⑨段 run 级 ready 文案应保留 READY_FOR_LATER_SUBMIT_PR_SKILL 作为合入许可信号');
+  assert.ok(s9.includes('workspace-triad-align') || skillDoc.includes('workspace-triad-align'),
+    '正文应点名 workspace-triad-align 作为三机同步入口');
   assert.ok(s9.includes('splitting') && s9.includes('dispatching') && s9.includes('running') && s9.includes('accepting'),
     '⑨段 PHASE_ORDER 应为 splitting/dispatching/running/accepting/ready');
 });
@@ -192,11 +194,26 @@ test('第⑫段：--dry-run 不调 send_to_session', () => {
   assert.ok(s12.includes('不') && s12.includes('send_to_session'), '⑫段应声明不调 send_to_session');
 });
 
-test('第⑭段：本 skill 不合入、不改 submit-pr', () => {
+test('第⑤段：开工包第 8 步禁止子 session 合入', () => {
+  const s5 = sectionBetween(MARKERS[4], MARKERS[5]);
+  assert.ok(s5.includes('子 session 不合入'), '⑤段应写明子 session 不合入');
+});
+
+test('第⑭段：e2e 与 GPT 单审通过后 lead 合入并同步三机，不改 submit-pr', () => {
   const s14 = sectionBetween(MARKERS[13], MARKERS[14]);
   assert.ok(s14.includes('三审'), '⑭段应声明三审不在本 skill');
   assert.ok(s14.includes('submit-pr') || s14.includes('提交 PR'), '⑭段应点名提交 PR skill');
-  assert.ok(s14.includes('合入') || s14.includes('merge'), '⑭段应声明不合入');
+  assert.ok(s14.includes('合入'), '⑭段应声明 lead 合入');
+  assert.ok(s14.includes('workspace-triad-align'), '⑭段应点名 workspace-triad-align');
+  assert.ok(s14.includes('子 session 不得自行 merge'), '⑭段应禁止子 session 自行 merge');
+  assert.equal(s14.includes('本 skill 不合入'), false, '⑭段不得再写本 skill 不合入');
+});
+
+test('第⑯段：lead 允许合入与三机同步，禁止改产品代码', () => {
+  const s16 = sectionBetween(MARKERS[15], MARKERS[16]);
+  assert.ok(s16.includes('按总表合入'), '⑯段应允许 lead 按总表合入');
+  assert.ok(s16.includes('workspace-triad-align'), '⑯段应允许跑 workspace-triad-align');
+  assert.ok(s16.includes('不允许：改产品代码'), '⑯段仍禁止改产品代码');
 });
 
 test('第⑮段：保证等级 T1，不夸大成宿主拦截', () => {

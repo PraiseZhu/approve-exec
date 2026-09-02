@@ -39,6 +39,8 @@ test('render-pr-handoff: 0–10 段齐全，含开工闸与绝对路径', () => 
   assert.ok(out.includes('/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json'));
   assert.ok(out.includes('丨 0902'));
   assert.ok(out.includes('model-route show'));
+  assert.ok(out.includes('子 session 不合入'), '开工包第 8 段应禁止子 session 合入');
+  assert.ok(out.includes('合入由 lead'), '开工包应写明合入由 lead 执行');
 });
 
 test('render-pr-handoff: 缺 allowed_paths 或乱序身份拒', () => {

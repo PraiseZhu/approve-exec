@@ -675,7 +675,7 @@ export function initLedger({ ledgerPath, manifestPath, runId, now, baseline }) {
     }
     return {
       wave: w.wave,
-      integrated_tip: null, // 集成前 null；本波全组 accepted 后只记合并顺序，不合入
+      integrated_tip: null, // 集成前 null；本波全组 accepted 后只记合并顺序，真正 merge 由 lead 执行
       groups: w.groups.map((g) => {
         if (!Array.isArray(g.sc_ids) || g.sc_ids.length === 0) {
           throw new LedgerError('MANIFEST', `wave ${w.wave} 的组 ${g.group_id} 缺少 sc_ids 数组或为空（禁止空 SC 集，F-E fail-closed）`);
@@ -754,7 +754,7 @@ const GROUP_TRANSITIONS = Object.freeze({
 });
 
 // phase 单向前进（波次顺序门 F-E）：→accepting 及后续 phase 要求——
-//   ① 所有前波已 integrated（integrated_tip != null；只记合并顺序，不合入）；
+//   ① 所有前波已 integrated（integrated_tip != null；只记合并顺序，真正 merge 由 lead 执行）；
 //   ② 当前波非空且全组 pr-open 或 accepted；
 //   →ready 额外要求全部组 accepted + 全部波已记录合并顺序。
 // →ready 的凭据 = ready-check 写入的 receipt（见 READY_RECEIPT_KEYS 契约），此处只查波次前置。
@@ -793,7 +793,7 @@ function phaseTransitionAllowed(ledger, targetPhase) {
       }
       const unintegratedAll = ledger.waves.filter((w) => w.integrated_tip === null);
       if (unintegratedAll.length > 0) {
-        return `缺失前置：→ready 要求全部波已记录合并顺序（不合入），未记录: wave ${unintegratedAll.map((w) => w.wave).join(', ')}`;
+        return `缺失前置：→ready 要求全部波已记录合并顺序（真正 merge 由 lead 执行），未记录: wave ${unintegratedAll.map((w) => w.wave).join(', ')}`;
       }
     }
   }
@@ -1140,9 +1140,9 @@ export function setState({
       const pending = w.groups.filter((g) => g.state !== 'accepted').map((g) => g.group_id);
       rejectWithEvent({
         ledgerPath, expected, now, group: null,
-        reason: `缺失前置：wave ${wave} 记录合并顺序要求全组 accepted（不合入），未 accepted: ${pending.join(', ')}`,
+        reason: `缺失前置：wave ${wave} 记录合并顺序要求全组 accepted（真正 merge 由 lead 执行），未 accepted: ${pending.join(', ')}`,
         code: 'PRECONDITION',
-        message: `缺失前置：wave ${wave} 记录合并顺序要求全组 accepted（不合入），未 accepted: ${pending.join(', ')}`,
+        message: `缺失前置：wave ${wave} 记录合并顺序要求全组 accepted（真正 merge 由 lead 执行），未 accepted: ${pending.join(', ')}`,
       });
     }
     return writeLedgerAtomic(ledgerPath, expected, (cur) => {

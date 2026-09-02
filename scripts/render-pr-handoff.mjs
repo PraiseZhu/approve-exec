@@ -122,7 +122,7 @@ export function renderPrHandoff({
       `绝对路径: ${ROUTING_LIVE}`,
       '先跑 model-route show',
       snapshotNote,
-      '按第⑩节 schema jump 回报 → 停等验收。不合入。',
+      '按第⑩节 schema jump 回报 → 停等验收。子 session 不合入。合入由 lead 在 e2e 与 GPT 单审通过后按总表执行。',
     ].join('\n')],
     ['9. 禁做', forbidden.map((f) => `- ${f}`).join('\n')],
     ['10. 回报格式', [
