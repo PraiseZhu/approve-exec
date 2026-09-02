@@ -217,12 +217,14 @@ function forgeG4Verified(ledgerPath) {
 }
 
 function injectGateEvents(ledger, groupId) {
-  const hasGoal = ledger.events.some((e) => e.type === 'gate_goal' && e.detail?.group_id === groupId);
-  const hasRouting = ledger.events.some((e) => e.type === 'gate_routing' && e.detail?.group_id === groupId);
+  const g = ledger.waves.flatMap((w) => w.groups).find((x) => x.group_id === groupId);
+  const seq = g?.assignment_seq ?? 0;
+  const hasGoal = ledger.events.some((e) => e.type === 'gate_goal' && e.detail?.group_id === groupId && e.detail?.assignment_seq === seq);
+  const hasRouting = ledger.events.some((e) => e.type === 'gate_routing' && e.detail?.group_id === groupId && e.detail?.assignment_seq === seq);
   if (!hasGoal) {
     ledger.events.push({
       type: 'gate_goal', at: T,
-      detail: { group_id: groupId, goal_skill_path: GOAL_SKILL_PI, goal_skill_sha256: GATE_GOAL_SHA },
+      detail: { group_id: groupId, goal_skill_path: GOAL_SKILL_PI, goal_skill_sha256: GATE_GOAL_SHA, assignment_seq: seq },
     });
   }
   if (!hasRouting) {
@@ -231,6 +233,7 @@ function injectGateEvents(ledger, groupId) {
       detail: {
         group_id: groupId, route_source: ROUTING_LIVE, routing_sha256: GATE_ROUTING_SHA,
         e2e_model: 'codex/gpt-5.6-luna', review_model: 'codex/gpt-5.6-sol',
+        assignment_seq: seq,
       },
     });
   }
@@ -1034,6 +1037,35 @@ test('sc-p1d: failed→pending 后 rounds==0 且 tip_sha/worker_label/身份三�
   r = cli('render-packet', ledgerPath, '--group', g);
   assert.equal(r.status, 0, `重派后重新分配身份，render-packet 应 exit 0: ${r.stderr}`);
   assert.match(r.stdout, /feat\/run-ledger-v2/);
+});
+
+test('sc-p1d: 重派后旧代 gate 收据不得让新代跳过开工闸', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  const g = 'g4';
+  assignIdentity(ledgerPath, g, 'feat/run-ledger');
+  renderGroup(ledgerPath, g);
+  let r = cli('set-state', ledgerPath, '--group', g, '--to', 'dispatched', '--worker-label', 'w1', '--mem-snapshot', memSnapshotJson(), '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'executing', '--detail', gateGoalDetail(), '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'failed', '--event', 'timeout_redispatch', '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'pending', '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  assignIdentity(ledgerPath, g, 'feat/run-ledger-v2');
+  renderGroup(ledgerPath, g);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'dispatched', '--worker-label', 'w2', '--mem-snapshot', memSnapshotJson(), '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'executing', '--now', T);
+  assert.equal(r.status, 2, '新代缺本代 gate_goal 必须拒');
+  assert.match(r.stderr, /gate_goal/);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'executing', '--detail', gateGoalDetail(), '--now', T);
+  assert.equal(r.status, 0, `新代重交 gate_goal 应 exit 0: ${r.stderr}`);
+  const events = readLedger(ledgerPath).events.filter((e) => e.type === 'gate_goal');
+  assert.equal(events.length, 2, '两代各一张 gate_goal');
+  assert.equal(events[0].detail.assignment_seq, 0);
+  assert.equal(events[1].detail.assignment_seq, 1);
 });
 
 test('sc-p1d: set-state --unresolved 一律拒（unresolved 唯一通道是审查交卷，无手工填数通道）', () => {

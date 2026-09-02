@@ -211,11 +211,17 @@ export function assertEventSchema(ev) {
     if (typeof sha !== 'string' || !SHA256_RE.test(sha)) {
       throw new LedgerError('SCHEMA', 'gate_goal 的 detail.goal_skill_sha256 必须是 64 位十六进制（缺 sha256 拒）');
     }
+    if (!Number.isSafeInteger(ev.detail.assignment_seq) || ev.detail.assignment_seq < 0) {
+      throw new LedgerError('SCHEMA', 'gate_goal 的 detail.assignment_seq 必须是非负安全整数（代际隔离）');
+    }
   }
   if (ev.type === 'gate_routing') {
     const sha = ev.detail.routing_sha256;
     if (typeof sha !== 'string' || !SHA256_RE.test(sha)) {
       throw new LedgerError('SCHEMA', 'gate_routing 的 detail.routing_sha256 必须是 64 位十六进制（缺 sha256 拒）');
+    }
+    if (!Number.isSafeInteger(ev.detail.assignment_seq) || ev.detail.assignment_seq < 0) {
+      throw new LedgerError('SCHEMA', 'gate_routing 的 detail.assignment_seq 必须是非负安全整数（代际隔离）');
     }
   }
   if (ev.type === 'site_report') {
@@ -945,23 +951,30 @@ export function latestPacketRendered(ledger, groupId) {
   return null;
 }
 
-/** 组最近一条指定 type 事件（无则 null）。开工闸 / 交卷前置消费。 */
+/** 组最近一条指定 type 事件（无则 null）。开工闸 / 交卷前置消费。
+ *  代际隔离：组对象带 assignment_seq 时，只认 detail.assignment_seq 同代的事件。 */
 export function latestGroupEvent(ledger, groupId, type) {
+  const g = findGroup(ledger, groupId);
+  const seq = g?.assignment_seq;
   for (let i = ledger.events.length - 1; i >= 0; i -= 1) {
     const ev = ledger.events[i];
-    if (ev.type === type && ev.detail?.group_id === groupId) return ev;
+    if (ev.type !== type || ev.detail?.group_id !== groupId) continue;
+    if (seq !== undefined && ev.detail?.assignment_seq !== seq) continue;
+    return ev;
   }
   return null;
 }
 
-/** 组最近一条 pr-handoff 终态交卷（无则 null）。→pr-open 前置消费。 */
+/** 组最近一条 pr-handoff 终态交卷（无则 null）。→pr-open 前置消费。同代才算。 */
 export function latestPrHandoffDelivery(ledger, groupId) {
+  const g = findGroup(ledger, groupId);
+  const seq = g?.assignment_seq;
   for (let i = ledger.events.length - 1; i >= 0; i -= 1) {
     const ev = ledger.events[i];
     if (ev.type !== 'delivery' || ev.detail?.group_id !== groupId) continue;
-    if (ev.detail?.pr_url && ev.detail?.e2e && ev.detail?.review && ev.detail?.size_gate) {
-      return ev.detail;
-    }
+    if (!(ev.detail?.pr_url && ev.detail?.e2e && ev.detail?.review && ev.detail?.size_gate)) continue;
+    if (seq !== undefined && ev.detail?.assignment_seq !== seq) continue;
+    return ev.detail;
   }
   return null;
 }
@@ -1452,6 +1465,7 @@ export function setState({
             group_id: group,
             goal_skill_path: parsedDetail?.goal_skill_path ?? GOAL_SKILL_PATHS[0],
             goal_skill_sha256: sha,
+            assignment_seq: g.assignment_seq ?? 0,
           },
         });
       }
@@ -1470,6 +1484,7 @@ export function setState({
             routing_sha256: sha,
             e2e_model: parsedDetail?.e2e_model ?? null,
             review_model: parsedDetail?.review_model ?? null,
+            assignment_seq: g.assignment_seq ?? 0,
           },
         });
       }
@@ -2238,6 +2253,7 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
           size_result: data.size_gate.result,
           ledger_version: expected,
           checked_at: now,
+          assignment_seq: g.assignment_seq ?? 0,
         },
       });
     } else {

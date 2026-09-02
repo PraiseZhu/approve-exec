@@ -188,7 +188,8 @@
       "detail": {
         "group_id": "g1",
         "goal_skill_path": "/Users/praise/.agents/skills/goal/SKILL.md",
-        "goal_skill_sha256": "7d7b9d9b97c99b39de5cbbd6b20e4869afe4cb16dab1dc91833a94a29dca356e"
+        "goal_skill_sha256": "7d7b9d9b97c99b39de5cbbd6b20e4869afe4cb16dab1dc91833a94a29dca356e",
+        "assignment_seq": 0
       }
     },
     {
@@ -199,7 +200,8 @@
         "route_source": "/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json",
         "routing_sha256": "e88009fec5d61472d41554b8c0238c6eedd1395d8b301cbc1524d121dc386c23",
         "e2e_model": "codex/gpt-5.6-luna",
-        "review_model": "codex/gpt-5.6-sol"
+        "review_model": "codex/gpt-5.6-sol",
+        "assignment_seq": 0
       }
     },
     {
@@ -217,7 +219,8 @@
       "detail": {
         "group_id": "g2",
         "goal_skill_path": "/Users/praise/.agents/skills/goal/SKILL.md",
-        "goal_skill_sha256": "7d7b9d9b97c99b39de5cbbd6b20e4869afe4cb16dab1dc91833a94a29dca356e"
+        "goal_skill_sha256": "7d7b9d9b97c99b39de5cbbd6b20e4869afe4cb16dab1dc91833a94a29dca356e",
+        "assignment_seq": 0
       }
     },
     {
@@ -228,7 +231,8 @@
         "route_source": "/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json",
         "routing_sha256": "e88009fec5d61472d41554b8c0238c6eedd1395d8b301cbc1524d121dc386c23",
         "e2e_model": "codex/gpt-5.6-luna",
-        "review_model": "codex/gpt-5.6-sol"
+        "review_model": "codex/gpt-5.6-sol",
+        "assignment_seq": 0
       }
     },
     {
