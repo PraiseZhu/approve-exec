@@ -3,24 +3,17 @@
   "phases": {
     "E": {
       "route": "execute",
-      "agent_pin": "claude-code",
-      "dispatch": "lead-self",
+      "dispatch": "session",
       "goal": "goal-scenario-c"
     },
     "R": {
-      "route": "execute",
-      "agent_pin": "claude-code",
-      "dispatch": "lead-self",
-      "pre_command": "simplify-inline",
-      "command": "/code-review high --fix",
-      "max_rounds_key": "reviewMaxRounds",
-      "model": "x-ai/grok-4.6",
-      "effort": "high"
+      "route": "review",
+      "dispatch": "worker"
     },
     "V": {
       "route": "e2e",
       "dispatch": "lead-self",
-      "independence": "same-session-not-author-worker"
+      "independence": "accept-receipts-no-product-edit"
     },
     "T": {
       "route": "e2e",

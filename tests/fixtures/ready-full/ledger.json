@@ -5,7 +5,7 @@
   "manifest_path": "tests/fixtures/ready-full/manifest.json",
   "manifest_core_hash": "0be1c7b975189f91a6d7af7c7ff0ef480c494050c7ef64eb84e221a5a853eb72",
   "version": 3,
-  "phase": "validating",
+  "phase": "accepting",
   "baseline_tip": "__HEAD_SHA__",
   "waves": [
     {
@@ -14,7 +14,7 @@
       "groups": [
         {
           "group_id": "g1",
-          "state": "verified",
+          "state": "accepted",
           "sc_ids": [
             "sc-p0a"
           ],
@@ -31,7 +31,12 @@
           },
           "worktree": null,
           "branch": null,
-          "base": null
+          "base": null,
+          "assignment_seq": 0,
+          "session_id": "sess-g1",
+          "title": "Skills-g1丨 0902",
+          "pr_url": "https://github.com/xindong/mivo-canvas-plugin/pull/1",
+          "provider_id": "art"
         }
       ]
     },
@@ -41,7 +46,7 @@
       "groups": [
         {
           "group_id": "g2",
-          "state": "verified",
+          "state": "accepted",
           "sc_ids": [
             "sc-p1f",
             "sc-p1g"
@@ -59,7 +64,12 @@
           },
           "worktree": null,
           "branch": null,
-          "base": null
+          "base": null,
+          "assignment_seq": 0,
+          "session_id": "sess-g2",
+          "title": "Skills-g2丨 0902",
+          "pr_url": "https://github.com/xindong/mivo-canvas-plugin/pull/2",
+          "provider_id": "art"
         }
       ]
     }
@@ -170,6 +180,68 @@
         "integration_review_status": "pass",
         "notes": "fixture verify",
         "candidate_sha": "__HEAD_SHA__"
+      }
+    },
+    {
+      "type": "gate_goal",
+      "at": "2026-08-09T00:10:00.000Z",
+      "detail": {
+        "group_id": "g1",
+        "goal_skill_path": "/Users/praise/.agents/skills/goal/SKILL.md",
+        "goal_skill_sha256": "7d7b9d9b97c99b39de5cbbd6b20e4869afe4cb16dab1dc91833a94a29dca356e",
+        "assignment_seq": 0
+      }
+    },
+    {
+      "type": "gate_routing",
+      "at": "2026-08-09T00:20:00.000Z",
+      "detail": {
+        "group_id": "g1",
+        "route_source": "/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json",
+        "routing_sha256": "e88009fec5d61472d41554b8c0238c6eedd1395d8b301cbc1524d121dc386c23",
+        "e2e_model": "codex/gpt-5.6-luna",
+        "review_model": "codex/gpt-5.6-sol",
+        "assignment_seq": 0
+      }
+    },
+    {
+      "type": "accepted",
+      "at": "2026-08-09T03:30:00.000Z",
+      "detail": {
+        "group_id": "g1",
+        "pr_url": "https://github.com/xindong/mivo-canvas-plugin/pull/1",
+        "session_id": "sess-g1"
+      }
+    },
+    {
+      "type": "gate_goal",
+      "at": "2026-08-09T00:10:00.000Z",
+      "detail": {
+        "group_id": "g2",
+        "goal_skill_path": "/Users/praise/.agents/skills/goal/SKILL.md",
+        "goal_skill_sha256": "7d7b9d9b97c99b39de5cbbd6b20e4869afe4cb16dab1dc91833a94a29dca356e",
+        "assignment_seq": 0
+      }
+    },
+    {
+      "type": "gate_routing",
+      "at": "2026-08-09T00:20:00.000Z",
+      "detail": {
+        "group_id": "g2",
+        "route_source": "/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json",
+        "routing_sha256": "e88009fec5d61472d41554b8c0238c6eedd1395d8b301cbc1524d121dc386c23",
+        "e2e_model": "codex/gpt-5.6-luna",
+        "review_model": "codex/gpt-5.6-sol",
+        "assignment_seq": 0
+      }
+    },
+    {
+      "type": "accepted",
+      "at": "2026-08-09T03:30:00.000Z",
+      "detail": {
+        "group_id": "g2",
+        "pr_url": "https://github.com/xindong/mivo-canvas-plugin/pull/2",
+        "session_id": "sess-g2"
       }
     }
   ]

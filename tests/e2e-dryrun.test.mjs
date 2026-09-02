@@ -3,7 +3,7 @@
 // 链：run-ledger init → 槽位对账 → 执行组派工 → render-packet（断言「用 goal skill 执行。」三要素）
 //     → set-state 合法链推进到全组 verified（含审查/验收交卷 candidate_sha 绑定）→ 双账本比对
 //     → wave 集成 → phase 推进 → ready-check **先红**（缺 e2e 报告与 presubmit 三闸，gap 恰含两项）
-//     → 补齐夹具 → **READY_FOR_SUBMIT_PR**（含夹具分支名）→ 链尾 run-ledger validate（F2 回归）。
+//     → 补齐夹具 → **READY_FOR_LATER_SUBMIT_PR_SKILL**（含夹具分支名）→ 链尾 run-ledger validate（F2 回归）。
 //
 // 反证 dry-run 非空转：红态与绿态都要断言（只断言绿态 = 红态也可能被静默放行，等于没测）。
 // 两条交叉断言：
@@ -147,63 +147,103 @@ function waveIntegrate(env, wave) {
   return { ok: true };
 }
 
-// 组派工：identity + dispatched + delivered（tip_sha=候选 HEAD）
+const GATE_GOAL_SHA = '7d7b9d9b97c99b39de5cbbd6b20e4869afe4cb16dab1dc91833a94a29dca356e';
+const GATE_ROUTING_SHA = 'e88009fec5d61472d41554b8c0238c6eedd1395d8b301cbc1524d121dc386c23';
+const GOAL_SKILL_PI = '/Users/praise/.agents/skills/goal/SKILL.md';
+const ROUTING_LIVE = '/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json';
+
+function gateGoalDetail() {
+  return JSON.stringify({ goal_skill_path: GOAL_SKILL_PI, goal_skill_sha256: GATE_GOAL_SHA });
+}
+function gateRoutingDetail() {
+  return JSON.stringify({
+    route_source: ROUTING_LIVE, routing_sha256: GATE_ROUTING_SHA,
+    e2e_model: 'codex/gpt-5.6-luna', review_model: 'codex/gpt-5.6-sol',
+  });
+}
+
+function prHandoffFor(env, group, branch) {
+  const manifest = JSON.parse(readFileSync(env.manifestPath, 'utf8'));
+  const packet = manifest.dispatch.packets.find((p) => p.group_id === group);
+  const tip = env.headSha;
+  return {
+    pr_url: `https://github.com/xindong/mivo-canvas-plugin/pull/${group === 'v1' ? 2 : 1}`,
+    branch,
+    tip_sha: tip,
+    scs: packet.scs_inline.map((s) => ({ id: s.id, status: 'pass' })),
+    goal_skill_path: GOAL_SKILL_PI,
+    e2e: { status: 'pass', candidate_sha: tip, model: 'codex/gpt-5.6-luna', route_source: ROUTING_LIVE },
+    review: { unresolved: 0, candidate_sha: tip, model: 'codex/gpt-5.6-sol', route_source: ROUTING_LIVE },
+    size_gate: { result: 'PASS', candidate_sha: tip },
+  };
+}
+
+// 组派工：identity 含 session_id + dispatched（兼容模式跳过 render/mem-snapshot）
 function dispatchGroup(env, group, workerLabel) {
   let r = cliLedger('set-state', env.ledgerPath, '--group', group, '--identity',
-    JSON.stringify({ worktree: `/wt/${group}`, branch: `feat/${group}`, base: env.headSha }), '--now', FIXED_NOW);
+    JSON.stringify({ worktree: `/wt/${group}`, branch: `feat/${group}`, base: env.headSha, session_id: `sess-${group}` }), '--now', FIXED_NOW);
   assert.equal(r.status, 0, `--identity ${group} 应 exit 0: ${r.stderr}`);
   r = cliLedger('set-state', env.ledgerPath, '--group', group, '--to', 'dispatched', '--worker-label', workerLabel, '--now', FIXED_NOW);
   assert.equal(r.status, 0, `派工 ${group} 应 exit 0: ${r.stderr}`);
-  r = cliLedger('set-state', env.ledgerPath, '--group', group, '--to', 'delivered', '--tip-sha', env.headSha, '--now', FIXED_NOW);
-  assert.equal(r.status, 0, `交付 ${group} 应 exit 0: ${r.stderr}`);
 }
 
-// 执行组（g4）到 verified：render-packet 三要素断言 + 审查交卷（candidate_sha 绑定）
+function walkGroupToAccepted(env, group, workerLabel) {
+  dispatchGroup(env, group, workerLabel);
+  if (group === 'g4') {
+    const r = cliLedger('render-packet', env.ledgerPath, '--group', 'g4');
+    assert.equal(r.status, 0, `render-packet 应 exit 0: ${r.stderr}`);
+    const lines = r.stdout.split('\n');
+    assert.equal(lines[0], '用 goal skill 执行。', '首行必须逐字等于「用 goal skill 执行。」');
+    assert.equal(lines[1], '--until-sc', '--until-sc 必须独占一行');
+    assert.match(lines[2], /^worktree=\/wt\/g4 /, '身份行必须以台账 worktree 开头');
+  }
+  const packet = JSON.parse(readFileSync(env.manifestPath, 'utf8')).dispatch.packets
+    .find((p) => p.group_id === group);
+  const isVerify = Array.isArray(packet.scs_inline) && packet.scs_inline.length > 0
+    && packet.scs_inline.every((s) => s.kind === 'verify');
+  let rr = cliLedger('set-state', env.ledgerPath, '--group', group, '--to', 'executing', '--detail', gateGoalDetail(), '--now', FIXED_NOW);
+  assert.equal(rr.status, 0, `${group} →executing 应 exit 0: ${rr.stderr}`);
+  if (!isVerify) {
+    rr = cliLedger('record-delivery', env.ledgerPath, '--group', group, '--payload', JSON.stringify({
+      status: 'done', tip_sha: env.headSha,
+      scs: packet.scs_inline.map((s) => ({ sc_id: s.id, status: 'pass', evidence: `verify 通过：${s.id}` })),
+    }), '--now', FIXED_NOW);
+    assert.equal(rr.status, 0, `${group} exec 交卷应 exit 0: ${rr.stderr}`);
+  }
+  rr = cliLedger('set-state', env.ledgerPath, '--group', group, '--to', 'e2e', '--detail', gateRoutingDetail(), '--now', FIXED_NOW);
+  assert.equal(rr.status, 0, `${group} →e2e 应 exit 0: ${rr.stderr}`);
+  if (!isVerify) {
+    rr = cliLedger('record-delivery', env.ledgerPath, '--group', group, '--payload', JSON.stringify({
+      rounds: 1, findings_total: 0, unresolved: 0, fix_commits: [], candidate_sha: env.headSha,
+    }), '--now', FIXED_NOW);
+    assert.equal(rr.status, 0, `${group} 审查交卷应 exit 0: ${rr.stderr}`);
+  }
+  rr = cliLedger('set-state', env.ledgerPath, '--group', group, '--to', 'review', '--now', FIXED_NOW);
+  assert.equal(rr.status, 0, `${group} →review 应 exit 0: ${rr.stderr}`);
+  if (isVerify) {
+    rr = cliLedger('record-delivery', env.ledgerPath, '--group', group, '--payload', JSON.stringify({
+      scs: packet.scs_inline.map((s) => ({ sc_id: s.id, status: 'pass', evidence: `verify 通过：${s.id}` })),
+      integration_review: { status: 'pass', notes: 'dry-run 验收通过' },
+      candidate_sha: env.headSha,
+    }), '--now', FIXED_NOW);
+    assert.equal(rr.status, 0, `${group} verify 交卷应 exit 0: ${rr.stderr}`);
+  }
+  rr = cliLedger('record-delivery', env.ledgerPath, '--group', group, '--payload', JSON.stringify(prHandoffFor(env, group, `feat/${group}`)), '--now', FIXED_NOW);
+  assert.equal(rr.status, 0, `${group} pr-handoff 应 exit 0: ${rr.stderr}`);
+  rr = cliLedger('set-state', env.ledgerPath, '--group', group, '--to', 'pr-open', '--now', FIXED_NOW);
+  assert.equal(rr.status, 0, `${group} →pr-open 应 exit 0: ${rr.stderr}`);
+  rr = cliLedger('set-state', env.ledgerPath, '--group', group, '--to', 'accepted', '--now', FIXED_NOW);
+  assert.equal(rr.status, 0, `${group} →accepted 应 exit 0: ${rr.stderr}`);
+}
+
 function execGroupToVerified(env) {
-  dispatchGroup(env, 'g4', 'w1');
-  // render-packet：执行组三要素（首行逐字 + --until-sc 独占一行 + 身份行只认台账值）
-  const r = cliLedger('render-packet', env.ledgerPath, '--group', 'g4');
-  assert.equal(r.status, 0, `render-packet 应 exit 0: ${r.stderr}`);
-  const lines = r.stdout.split('\n');
-  assert.equal(lines[0], '用 goal skill 执行。', '首行必须逐字等于「用 goal skill 执行。」');
-  assert.equal(lines[1], '--until-sc', '--until-sc 必须独占一行');
-  assert.match(lines[2], /^worktree=\/wt\/g4 /, '身份行必须以台账 worktree 开头');
-  assert.match(lines[2], /branch=feat\/g4/, '身份行必须含台账 branch');
-  assert.match(lines[2], new RegExp(`base=${env.headSha}`), '身份行必须含台账 base');
-  // 审查交卷：unresolved=0 入账 + candidate_sha 绑定（ready-check ③ 的读取点）
-  let rr = cliLedger('record-delivery', env.ledgerPath, '--group', 'g4', '--payload', JSON.stringify({
-    rounds: 1, findings_total: 0, unresolved: 0, fix_commits: [], candidate_sha: env.headSha,
-  }), '--now', FIXED_NOW);
-  assert.equal(rr.status, 0, `g4 审查交卷应 exit 0: ${rr.stderr}`);
-  rr = cliLedger('set-state', env.ledgerPath, '--group', 'g4', '--to', 'review_pass', '--now', FIXED_NOW);
-  assert.equal(rr.status, 0, rr.stderr);
-  // F-H：pass 凭据唯一通道 = 验收 record-delivery（--verify-status 手工入口已移除）
-  const manifest = JSON.parse(readFileSync(env.manifestPath, 'utf8'));
-  const g4Pkt = manifest.dispatch.packets.find((p) => p.group_id === 'g4');
-  rr = cliLedger('record-delivery', env.ledgerPath, '--group', 'g4', '--payload', JSON.stringify({
-    scs: g4Pkt.scs_inline.map((s) => ({ sc_id: s.id, status: 'pass', evidence: `verify 通过：${s.id}` })),
-    integration_review: { status: 'pass', notes: 'dry-run 验收通过' },
-    candidate_sha: env.headSha,
-  }), '--now', FIXED_NOW);
-  assert.equal(rr.status, 0, `g4 验收交卷应 exit 0: ${rr.stderr}`);
-  rr = cliLedger('set-state', env.ledgerPath, '--group', 'g4', '--to', 'verified', '--now', FIXED_NOW);
-  assert.equal(rr.status, 0, `g4 →verified 应 exit 0: ${rr.stderr}`);
+  walkGroupToAccepted(env, 'g4', 'w1');
 }
 
 // 验收组（v1）到 verified：验收交卷（candidate_sha 绑定）——它是 v1 的 verify 类最后一条
 // delivery，ready-check ③ 按类别消费（验收组绑 verify 类最后一条）从它读 candidate_sha
 function verifyGroupToVerified(env) {
-  dispatchGroup(env, 'v1', 'w2');
-  const rr = cliLedger('record-delivery', env.ledgerPath, '--group', 'v1', '--payload', JSON.stringify({
-    scs: [{ sc_id: 'sc-dry-2', status: 'pass', evidence: 'dry-run verdict' }],
-    integration_review: { status: 'pass', notes: 'squash diff 复查无越域' },
-    candidate_sha: env.headSha,
-  }), '--now', FIXED_NOW);
-  assert.equal(rr.status, 0, `v1 验收交卷应 exit 0: ${rr.stderr}`);
-  let r = cliLedger('set-state', env.ledgerPath, '--group', 'v1', '--to', 'review_pass', '--now', FIXED_NOW);
-  assert.equal(r.status, 0, r.stderr);
-  r = cliLedger('set-state', env.ledgerPath, '--group', 'v1', '--to', 'verified', '--now', FIXED_NOW);
-  assert.equal(r.status, 0, `v1 →verified 应 exit 0: ${r.stderr}`);
+  walkGroupToAccepted(env, 'v1', 'w2');
 }
 
 // 全链推进到 packaging（波序执行 → 双账本比对 → 集成 → phase 推进）
@@ -218,7 +258,7 @@ function runChainToPackaging(env, log = []) {
   verifyGroupToVerified(env);
   const i2 = waveIntegrate(env, 2);
   assert.equal(i2.ok, true, `wave 2 集成应成功: ${JSON.stringify(i2.mismatches ?? i2.reason)}`);
-  for (const ph of ['reviewing', 'validating', 'e2e', 'packaging']) {
+  for (const ph of ['dispatching', 'running', 'accepting']) {
     r = cliLedger('set-state', env.ledgerPath, '--phase', ph, '--now', FIXED_NOW);
     assert.equal(r.status, 0, `→${ph} 应 exit 0: ${r.stderr}`);
   }
@@ -236,7 +276,7 @@ function runReadyCheck(env, repo, { withNow = true } = {}) {
 // =====================================================================
 // 全链 dry-run：先红后绿
 // =====================================================================
-test('sc-p2d: 全链 dry-run——先红（缺 e2e 报告与 presubmit 三闸）后绿（READY_FOR_SUBMIT_PR + 台账 phase→ready + 链尾 validate exit 0）', (t) => {
+test('sc-p2d: 全链 dry-run——先红（缺 e2e 报告与 presubmit 三闸）后绿（READY_FOR_LATER_SUBMIT_PR_SKILL + 台账 phase→ready + 链尾 validate exit 0）', (t) => {
   const repo = makeRepo(t);
   const env = makeEnv(t, repo);
   const log = [];
@@ -256,16 +296,16 @@ test('sc-p2d: 全链 dry-run——先红（缺 e2e 报告与 presubmit 三闸）
   assert.equal(red.stdout, '', '红态不得输出 READY 行');
   let ledger = JSON.parse(readFileSync(env.ledgerPath, 'utf8'));
   const versionBefore = ledger.version;
-  assert.equal(ledger.phase, 'packaging', '红态不得驱动台账 phase');
+  assert.equal(ledger.phase, 'accepting', '红态不得驱动台账 phase');
 
   // ---- 绿态：补齐夹具 ----
   fillGreenFixtures(env, repo);
   const green = runReadyCheck(env, repo);
   assert.equal(green.status, 0, `全齐应 exit 0\nstdout: ${green.stdout}\nstderr: ${green.stderr}`);
-  assert.equal(green.stdout, `READY_FOR_SUBMIT_PR ${BRANCH} ${repo.sha}`, 'READY 行必须单行含夹具分支名与 HEAD SHA');
+  assert.equal(green.stdout, `READY_FOR_LATER_SUBMIT_PR_SKILL ${BRANCH} ${repo.sha}`, 'READY 行必须单行含夹具分支名与 HEAD SHA');
   // ready-check 只写 receipt 不驱动台账（写入权在 run-ledger）——台账此刻仍未被驱动
   ledger = JSON.parse(readFileSync(env.ledgerPath, 'utf8'));
-  assert.equal(ledger.phase, 'packaging', 'ready-check 不得驱动台账 phase（只检查）');
+  assert.equal(ledger.phase, 'accepting', 'ready-check 不得驱动台账 phase（只检查）');
   assert.equal(ledger.version, versionBefore, 'ready-check 不得递增台账 version');
   // phase→ready 由 run-ledger set-state --phase ready --ready-receipt 驱动（锁/CAS/状态机）
   const receiptPath = join(env.dir, 'ready-receipt.json');
@@ -344,7 +384,7 @@ test('sc-p2d: 槽位对账——used_slots 与 dispatched 未归档组数一致�
 
   // 在途 1（只派工不交付）：声明 1 → 一致无告警；声明 0 → 新增一条告警
   r = cliLedger('set-state', env.ledgerPath, '--group', 'g4', '--identity',
-    JSON.stringify({ worktree: '/wt/g4', branch: 'feat/g4', base: env.headSha }), '--now', FIXED_NOW);
+    JSON.stringify({ worktree: '/wt/g4', branch: 'feat/g4', base: env.headSha, session_id: 'sess-g4' }), '--now', FIXED_NOW);
   assert.equal(r.status, 0, r.stderr);
   r = cliLedger('set-state', env.ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--now', FIXED_NOW);
   assert.equal(r.status, 0, r.stderr);

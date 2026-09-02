@@ -22,12 +22,15 @@ export const TEST_FILES = [
   'config.test.mjs',
   'decision-broker.test.mjs',
   'e2e-dryrun.test.mjs',
+  'evolution-note.test.mjs',
   'graph.test.mjs',
   'mem-probe.test.mjs',
   'ready-check.test.mjs',
+  'render-pr-handoff.test.mjs',
   'run-ledger.test.mjs',
   'run-tests.test.mjs',
   'selfcheck.test.mjs',
+  'session-dispatch.test.mjs',
   'skill-doc.test.mjs',
 ];
 

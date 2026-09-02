@@ -46,7 +46,7 @@ function sampleRequest(overrides = {}) {
     constraints: ['不得改 CI', '不得越域'],
     active_scope: {
       run_id: 'run-dec-1',
-      phase: 'executing',
+      phase: 'running',
       wave: 1,
       groups: ['g4'],
       manifest_core_hash: MANIFEST,
@@ -657,7 +657,7 @@ test('decision_key 含 context，不只是问句', () => {
   const a = computeDecisionKey({
     runId: 'r',
     manifestCoreHash: MANIFEST,
-    phase: 'executing',
+    phase: 'running',
     wave: 1,
     groups: ['g4'],
     originalQuestion: 'Q',
@@ -668,7 +668,7 @@ test('decision_key 含 context，不只是问句', () => {
   const b = computeDecisionKey({
     runId: 'r',
     manifestCoreHash: MANIFEST,
-    phase: 'executing',
+    phase: 'running',
     wave: 1,
     groups: ['g4'],
     originalQuestion: 'Q',
