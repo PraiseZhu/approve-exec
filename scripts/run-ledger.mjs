@@ -63,6 +63,12 @@ export const EVENT_TYPES = Object.freeze([
   'overreach_rejected',
   'overlap_replan',
   'budget_note',
+  'session_created',
+  'session_steer',
+  'gate_goal',
+  'gate_routing',
+  'pr_opened',
+  'accepted',
 ]);
 // set-state --to failed 的 --event 白名单（窄事件集）：只允许「失败原因类」事件。
 // dispatch/delivery/review_round/integrate 是成功流事件——ready-check ①③ 消费它们做分区
@@ -77,12 +83,13 @@ export const FAILED_EVENT_TYPES = Object.freeze([
   'budget_note',         // 预算耗尽
 ]);
 export const GROUP_STATES = Object.freeze([
-  'pending', 'dispatched', 'delivered', 'review_pass', 'verified', 'failed',
+  'pending', 'dispatched', 'executing', 'blocked', 'e2e', 'review', 'pr-open', 'accepted', 'failed',
 ]);
 export const PHASE_ORDER = Object.freeze([
-  'executing', 'reviewing', 'validating', 'e2e', 'packaging', 'ready',
+  'splitting', 'dispatching', 'running', 'accepting', 'ready',
 ]);
 export const TIP_SHA_RE = /^[0-9a-f]{40}$/;
+export const SHA256_RE = /^[0-9a-f]{64}$/;
 
 // detail 契约的组上下文事件：ready-check 的分区对账与 delivery 绑定读取 detail.group_id 的
 // 事件类型（F1 修复点）。wave 级（integrate）与相位级（illegal_transition 的 group_id: null）
@@ -90,7 +97,10 @@ export const TIP_SHA_RE = /^[0-9a-f]{40}$/;
 const GROUP_SCOPED_EVENT_TYPES = new Set([
   'dispatch', 'delivery', 'review_round', 'packet_rendered', 'timeout_redispatch',
   'overreach_rejected', 'overlap_replan', 'budget_note',
+  'session_created', 'session_steer', 'gate_goal', 'gate_routing', 'pr_opened', 'accepted',
 ]);
+const GATE_EVENT_TYPES = Object.freeze(['gate_goal', 'gate_routing']);
+const SESSION_EVENT_TYPES = Object.freeze(['session_created', 'session_steer', 'pr_opened', 'accepted']);
 const EXEC_DELIVERY_STATUS = Object.freeze(['done', 'partial', 'blocked']);
 const SC_RESULT_STATUS = Object.freeze(['pass', 'fail', 'not_run']);
 
@@ -152,6 +162,7 @@ const WAVE_KEYS = Object.freeze(['wave', 'integrated_tip', 'groups']);
 const GROUP_KEYS = Object.freeze([
   'group_id', 'state', 'sc_ids', 'worker_label', 'dispatched_at', 'tip_sha',
   'review', 'verify', 'worktree', 'branch', 'base', 'assignment_seq',
+  'session_id', 'title', 'pr_url', 'provider_id',
 ]);
 const REVIEW_KEYS = Object.freeze(['rounds', 'unresolved']);
 const VERIFY_KEYS = Object.freeze(['status', 'evidence_ref']);
@@ -189,6 +200,18 @@ export function assertEventSchema(ev) {
   if (GROUP_SCOPED_EVENT_TYPES.has(ev.type)
     && (typeof ev.detail.group_id !== 'string' || ev.detail.group_id.length === 0)) {
     throw new LedgerError('SCHEMA', 'event.type=' + ev.type + ' 的 detail.group_id 必须是非空字符串（ready-check 分区对账/delivery 绑定的读取点）');
+  }
+  if (ev.type === 'gate_goal') {
+    const sha = ev.detail.goal_skill_sha256;
+    if (typeof sha !== 'string' || !SHA256_RE.test(sha)) {
+      throw new LedgerError('SCHEMA', 'gate_goal 的 detail.goal_skill_sha256 必须是 64 位十六进制（缺 sha256 拒）');
+    }
+  }
+  if (ev.type === 'gate_routing') {
+    const sha = ev.detail.routing_sha256;
+    if (typeof sha !== 'string' || !SHA256_RE.test(sha)) {
+      throw new LedgerError('SCHEMA', 'gate_routing 的 detail.routing_sha256 必须是 64 位十六进制（缺 sha256 拒）');
+    }
   }
 }
 
@@ -262,7 +285,8 @@ export function assertLedgerSchema(ledger) {
           throw new LedgerError('SCHEMA', `group ${g.group_id} 的 sc_ids 元素必须是非空字符串`);
         }
       }
-      for (const nullable of ['worker_label', 'dispatched_at', 'tip_sha', 'worktree', 'branch', 'base']) {
+      for (const nullable of ['worker_label', 'dispatched_at', 'tip_sha', 'worktree', 'branch', 'base', 'session_id', 'title', 'pr_url', 'provider_id']) {
+        if (!(nullable in g)) g[nullable] = null;
         if (g[nullable] !== null && typeof g[nullable] !== 'string') {
           throw new LedgerError('SCHEMA', `group ${g.group_id} 的 ${nullable} 必须是字符串或 null`);
         }
@@ -651,7 +675,7 @@ export function initLedger({ ledgerPath, manifestPath, runId, now, baseline }) {
     }
     return {
       wave: w.wave,
-      integrated_tip: null, // 集成前 null，本波全组 verified 后允许写入
+      integrated_tip: null, // 集成前 null；本波全组 accepted 后只记合并顺序，不合入
       groups: w.groups.map((g) => {
         if (!Array.isArray(g.sc_ids) || g.sc_ids.length === 0) {
           throw new LedgerError('MANIFEST', `wave ${w.wave} 的组 ${g.group_id} 缺少 sc_ids 数组或为空（禁止空 SC 集，F-E fail-closed）`);
@@ -665,10 +689,14 @@ export function initLedger({ ledgerPath, manifestPath, runId, now, baseline }) {
           tip_sha: null,
           review: { rounds: 0, unresolved: 0 },
           verify: { status: null, evidence_ref: null },
-          // 身份三键：集成期由 lead 经 set-state --identity 分配（初始 null）
+          // 身份：worktree/branch/base + session_id/title；create 后经 --identity 一次写齐
           worktree: null,
           branch: null,
           base: null,
+          session_id: null,
+          title: null,
+          pr_url: null,
+          provider_id: null,
           // 派发代际计数器（sc-p0c）：init 时赋 0，failed→pending 重派递增 +1
           assignment_seq: 0,
         };
@@ -682,7 +710,7 @@ export function initLedger({ ledgerPath, manifestPath, runId, now, baseline }) {
     manifest_path: resolve(manifestPath),
     manifest_core_hash: manifest.manifest_core_hash,
     version: 0,
-    phase: 'executing', // E(执行) 起步
+    phase: 'splitting', // run 级起步：拆 PR
     baseline_tip: baseline, // sc-p0a：init 基线（40hex=严格模式 / null=兼容模式）
     waves,
     events: [],
@@ -715,17 +743,20 @@ export function validateLedger({ ledgerPath }) {
 // ---------- set-state ----------
 const GROUP_TRANSITIONS = Object.freeze({
   pending: ['dispatched', 'failed'],
-  dispatched: ['delivered', 'failed'],
-  delivered: ['delivered', 'review_pass', 'failed'],
-  review_pass: ['verified', 'failed'],
+  dispatched: ['executing', 'blocked', 'failed'],
+  executing: ['blocked', 'e2e', 'failed'],
+  blocked: ['executing', 'failed'],
+  e2e: ['review', 'failed'],
+  review: ['pr-open', 'failed'],
+  'pr-open': ['accepted', 'failed'],
   failed: ['pending'],
-  verified: [], // 组级终态，不可回退：任何跳转拒（重放攻击）
+  accepted: [], // 组级终态，不可回退：任何跳转拒（重放攻击）
 });
 
-// phase 单向前进（波次顺序门 F-E）：→validating 及后续 phase 要求——
-//   ① 所有前波已 integrated（integrated_tip != null）；
-//   ② 当前波非空且全组 review_pass（或更终态 verified）；
-//   →ready 额外要求全部波已集成（最终树 = wave 数值最大的波 integrated_tip，与 ready receipt 绑定）。
+// phase 单向前进（波次顺序门 F-E）：→accepting 及后续 phase 要求——
+//   ① 所有前波已 integrated（integrated_tip != null；只记合并顺序，不合入）；
+//   ② 当前波非空且全组 pr-open 或 accepted；
+//   →ready 额外要求全部组 accepted + 全部波已记录合并顺序。
 // →ready 的凭据 = ready-check 写入的 receipt（见 READY_RECEIPT_KEYS 契约），此处只查波次前置。
 // 返回 null = 允许；返回字符串 = 拒绝原因（非法跳转/缺失前置）。
 function phaseTransitionAllowed(ledger, targetPhase) {
@@ -734,11 +765,9 @@ function phaseTransitionAllowed(ledger, targetPhase) {
   if (targetIdx !== idx + 1) {
     return `phase 非法跳转：${ledger.phase} → ${targetPhase}（须依次经过 ${PHASE_ORDER.slice(idx + 1, targetIdx).join(' → ') || '无'} 前进）`;
   }
-  if (targetIdx >= PHASE_ORDER.indexOf('validating')) {
+  if (targetIdx >= PHASE_ORDER.indexOf('accepting')) {
     // 本波 = wave 数值最大的包含非 pending 组的 wave（run 逐波推进，派过工的波才算在途；
     // 全 pending 时取 wave 数值最小的波——此时前置天然不满足，fail-closed）。
-    // 按数值取不依赖数组顺序（同族：renderPacket/latestIntegratedTip 已按数值取最大；
-    // waves 数组有序性无处强制，末位 ≠ 数值最大；重复 wave 已由 schema 拒）。
     const activeCandidates = ledger.waves.filter((w) => w.groups.some((g) => g.state !== 'pending'));
     const activeWave = activeCandidates.length > 0
       ? activeCandidates.reduce((max, w) => (w.wave > max.wave ? w : max))
@@ -748,22 +777,23 @@ function phaseTransitionAllowed(ledger, targetPhase) {
     if (!activeWave) {
       return `缺失前置：→${targetPhase} 要求存在在途波（waves 为空，F-E fail-closed）`;
     }
-    // ① 所有前波必须已集成（F-E：禁止跳过未完成前波推进 phase）
     const unintegratedPrev = ledger.waves
       .filter((w) => w.wave < activeWave.wave && w.integrated_tip === null);
     if (unintegratedPrev.length > 0) {
-      return `缺失前置：→${targetPhase} 要求所有前波已集成，未集成前波: wave ${unintegratedPrev.map((w) => w.wave).join(', ')}`;
+      return `缺失前置：→${targetPhase} 要求所有前波已记录合并顺序，未记录前波: wave ${unintegratedPrev.map((w) => w.wave).join(', ')}`;
     }
-    // ② 当前波非空（schema 已保证）且全组 review_pass（或更终态）
-    const allReviewPass = activeWave.groups.every((g) => g.state === 'review_pass' || g.state === 'verified');
-    if (!allReviewPass) {
-      return `缺失前置：→${targetPhase} 要求当前波全组 review_pass（当前未满足）`;
+    const allPrOpen = activeWave.groups.every((g) => g.state === 'pr-open' || g.state === 'accepted');
+    if (!allPrOpen) {
+      return `缺失前置：→${targetPhase} 要求当前波全组 pr-open 或 accepted（当前未满足）`;
     }
-    // →ready 额外要求全波已集成（最终树必须真实存在，ready receipt 的 candidate_sha 才有绑定对象）
     if (targetPhase === 'ready') {
+      const notAccepted = ledger.waves.flatMap((w) => w.groups).filter((g) => g.state !== 'accepted');
+      if (notAccepted.length > 0) {
+        return `缺失前置：→ready 要求全部组 accepted，未 accepted: ${notAccepted.map((g) => g.group_id).join(', ')}`;
+      }
       const unintegratedAll = ledger.waves.filter((w) => w.integrated_tip === null);
       if (unintegratedAll.length > 0) {
-        return `缺失前置：→ready 要求全部波已集成，未集成: wave ${unintegratedAll.map((w) => w.wave).join(', ')}`;
+        return `缺失前置：→ready 要求全部波已记录合并顺序（不合入），未记录: wave ${unintegratedAll.map((w) => w.wave).join(', ')}`;
       }
     }
   }
@@ -789,6 +819,25 @@ function phaseTransitionAllowed(ledger, targetPhase) {
 //     5. 校验全过才允许 phase→ready；通过后台账冻结（既有逻辑，只读）。
 //   测试用夹具模拟 receipt 文件即可（writeFileSync 后经 CLI --ready-receipt 传入）。
 const READY_RECEIPT_KEYS = Object.freeze(['candidate_sha', 'ledger_version', 'checked_at']);
+export const PR_RECEIPT_KEYS = Object.freeze([
+  'pr_id', 'session_id', 'candidate_sha', 'pr_url', 'e2e_status',
+  'review_unresolved', 'size_result', 'ledger_version', 'checked_at',
+]);
+const GOAL_SKILL_PATHS = Object.freeze([
+  '/Users/praise/.agents/skills/goal/SKILL.md',
+  '/Users/praise/.claude/skills/goal/SKILL.md',
+  '/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/goal/SKILL.md',
+]);
+const ROUTING_PATH_LIVE = '/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json';
+const ROUTING_PATH_LINK = '/Users/praise/.agents/skills/orca-fanout/routing.json';
+const PR_HANDOFF_DELIVERY_KEYS = Object.freeze([
+  'pr_url', 'branch', 'tip_sha', 'scs', 'goal_skill_path', 'e2e', 'review', 'size_gate',
+]);
+const PR_HANDOFF_E2E_KEYS = Object.freeze(['status', 'candidate_sha', 'model', 'route_source']);
+const PR_HANDOFF_REVIEW_KEYS = Object.freeze(['unresolved', 'candidate_sha', 'model', 'route_source']);
+const PR_HANDOFF_SIZE_KEYS = Object.freeze(['result', 'candidate_sha']);
+const PR_HANDOFF_SC_KEYS = Object.freeze(['id', 'status']);
+const GITHUB_PR_URL_RE = /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+/;
 
 /** 读取 + exact 校验 receipt（文件级/形状级错误 → READY_RECEIPT；语义绑定由调用方对台账校验）。 */
 export function readReadyReceipt(receiptPath) {
@@ -848,10 +897,15 @@ export function isStrictMode(ledger) {
 
 /** 组身份 digest（sc-p0c）：长度前缀编码防拼接歧义——裸 '|' 拼接下
  *  "ab|cd" 与 "a|bcd" 碰撞，长度前缀把每段边界钉死。
- *  输入段顺序（与 SC 字面一致）：seq → worktree → branch → base。 */
-export function identityDigest({ worktree, branch, base, assignmentSeq }) {
+ *  输入段顺序（与 SKILL ⑨ 字面一致）：seq → worktree → branch → base → session_id。
+ *  session_id 未定时用空串（出包在 create 之前）；create 后 --identity 写入真实 id。 */
+export function identityDigest({ worktree, branch, base, session_id, assignmentSeq }) {
   const seq = String(assignmentSeq);
-  const canonical = `${seq.length}:${seq}:${worktree.length}:${worktree}:${branch.length}:${branch}:${base.length}:${base}`;
+  const sid = session_id == null ? '' : String(session_id);
+  const wt = worktree == null ? '' : String(worktree);
+  const br = branch == null ? '' : String(branch);
+  const bs = base == null ? '' : String(base);
+  const canonical = `${seq.length}:${seq}:${wt.length}:${wt}:${br.length}:${br}:${bs.length}:${bs}:${sid.length}:${sid}`;
   return createHash('sha256').update(canonical, 'utf8').digest('hex').slice(0, 16);
 }
 
@@ -860,6 +914,27 @@ export function latestPacketRendered(ledger, groupId) {
   for (let i = ledger.events.length - 1; i >= 0; i -= 1) {
     const ev = ledger.events[i];
     if (ev.type === 'packet_rendered' && ev.detail?.group_id === groupId) return ev;
+  }
+  return null;
+}
+
+/** 组最近一条指定 type 事件（无则 null）。开工闸 / 交卷前置消费。 */
+export function latestGroupEvent(ledger, groupId, type) {
+  for (let i = ledger.events.length - 1; i >= 0; i -= 1) {
+    const ev = ledger.events[i];
+    if (ev.type === type && ev.detail?.group_id === groupId) return ev;
+  }
+  return null;
+}
+
+/** 组最近一条 pr-handoff 终态交卷（无则 null）。→pr-open 前置消费。 */
+export function latestPrHandoffDelivery(ledger, groupId) {
+  for (let i = ledger.events.length - 1; i >= 0; i -= 1) {
+    const ev = ledger.events[i];
+    if (ev.type !== 'delivery' || ev.detail?.group_id !== groupId) continue;
+    if (ev.detail?.pr_url && ev.detail?.e2e && ev.detail?.review && ev.detail?.size_gate) {
+      return ev.detail;
+    }
   }
   return null;
 }
@@ -915,12 +990,10 @@ function rejectWithEvent({ ledgerPath, expected, now, group, reason, code, messa
 
 /**
  * 组级可写性守卫（① 修复点）：非状态写入口之一——身份写入（--identity）。
- * 只允许 pending 态：组一旦 dispatched 及之后（dispatched/delivered/review_pass/
- * verified/failed），身份写入一律拒——派发后改身份会让台账审计成新身份，而唯一
- * packet_rendered 凭证仍是旧身份的 identity_digest，失配却无人拦（F3：派发后改身份
- * 凭证可伪造，伪身份可一路走到 verified）。verified 仅是其中不可回退的终态特例，
- * 收紧为 pending-only 后自然覆盖。重派链 failed→pending 清空身份 + assignment_seq+1
- * 回到 pending 后方可重写身份（代际隔离天然接续）。
+ * 只允许 pending 态：组一旦 dispatched 及之后，身份写入一律拒——派发后改身份会让
+ * 台账审计成新身份，而唯一 packet_rendered 凭证仍是旧身份的 identity_digest。
+ * 收紧为 pending-only 后自然覆盖 accepted 终态。重派链 failed→pending 清空身份
+ * + assignment_seq+1 回到 pending 后方可重写身份（代际隔离天然接续）。
  * 与 rejectWithEvent 不同：拒写不落事件（纯 throw）——验收口径要求被拒后台账字节不变
  * （同 phase=ready 冻结的 FROZEN 路径：冻结后不落事件）。
  */
@@ -945,15 +1018,16 @@ function assertGroupWritable(g, what) {
 // 存在性校验挡不住），随后状态机一路走绿——验收证据可在组派工前预写。
 // 故校验必须从「事件存在性」升级为「时序合法性」：类别 × 组状态矩阵，verified/failed 一律拒。
 const DELIVERY_LIFECYCLE = Object.freeze({
-  exec: ['dispatched', 'delivered'],
-  review: ['delivered'],
-  verify: ['delivered', 'review_pass'],
+  exec: ['dispatched', 'executing'],
+  review: ['e2e', 'review'],
+  verify: ['review', 'pr-open'],
   // prewalk：只允许 dispatched；入账不改组状态。组级次数/波 0 门在 recordDelivery 锁内另判。
   prewalk: ['dispatched'],
+  'pr-handoff': ['review'],
 });
 
 export function setState({
-  ledgerPath, now, group, to, workerLabel, tipSha, event,
+  ledgerPath, now, group, to, workerLabel, tipSha, event, detail,
   identity, phase, wave, integrate, readyReceipt, memSnapshot,
 }) {
   requireNow(now, 'set-state');
@@ -973,21 +1047,29 @@ export function setState({
     } catch (err) {
       throw new LedgerError('ARGS', `--identity 不是合法 JSON: ${err.message}`);
     }
-    const allowed = Object.freeze(['worktree', 'branch', 'base']);
+    const allowed = Object.freeze(['worktree', 'branch', 'base', 'session_id', 'title']);
+    const required = Object.freeze(['worktree', 'branch', 'base']);
+    const noWhitespace = Object.freeze(['worktree', 'branch', 'base', 'session_id']);
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new LedgerError('ARGS', '--identity 必须是 {worktree, branch, base} 对象');
+      throw new LedgerError('ARGS', '--identity 必须是 {worktree, branch, base, session_id?, title?} 对象');
     }
     for (const k of Object.keys(parsed)) {
       if (!allowed.includes(k)) {
-        throw new LedgerError('ARGS', `--identity 含未列键: ${k}（只允许 worktree/branch/base）`);
+        throw new LedgerError('ARGS', `--identity 含未列键: ${k}（只允许 worktree/branch/base/session_id/title）`);
       }
     }
-    for (const k of allowed) {
+    for (const k of required) {
       if (typeof parsed[k] !== 'string' || parsed[k].length === 0) {
         throw new LedgerError('ARGS', `--identity.${k} 必须是非空字符串`);
       }
-      // 身份行渲染为空格分隔（worktree=.. branch=.. base=..），含空白会破坏解析，拒
-      if (/\s/.test(parsed[k])) {
+    }
+    for (const k of ['session_id', 'title']) {
+      if (parsed[k] !== undefined && (typeof parsed[k] !== 'string' || parsed[k].length === 0)) {
+        throw new LedgerError('ARGS', `--identity.${k} 必须是非空字符串`);
+      }
+    }
+    for (const k of noWhitespace) {
+      if (parsed[k] !== undefined && /\s/.test(parsed[k])) {
         throw new LedgerError('ARGS', `--identity.${k} 不得含空白字符: ${parsed[k]}`);
       }
     }
@@ -1021,6 +1103,8 @@ export function setState({
       g.worktree = parsed.worktree;
       g.branch = parsed.branch;
       g.base = parsed.base;
+      if (parsed.session_id !== undefined) g.session_id = parsed.session_id;
+      if (parsed.title !== undefined) g.title = parsed.title;
       return { ...cur, version: expected + 1 };
     });
   }
@@ -1051,14 +1135,14 @@ export function setState({
         message: `wave ${wave} 已集成（integrated_tip=${w.integrated_tip}），不可重复集成`,
       });
     }
-    const allVerified = w.groups.every((g) => g.state === 'verified');
-    if (!allVerified) {
-      const pending = w.groups.filter((g) => g.state !== 'verified').map((g) => g.group_id);
+    const allAccepted = w.groups.every((g) => g.state === 'accepted');
+    if (!allAccepted) {
+      const pending = w.groups.filter((g) => g.state !== 'accepted').map((g) => g.group_id);
       rejectWithEvent({
         ledgerPath, expected, now, group: null,
-        reason: `缺失前置：wave ${wave} 集成要求全组 verified，未 verified: ${pending.join(', ')}`,
+        reason: `缺失前置：wave ${wave} 记录合并顺序要求全组 accepted（不合入），未 accepted: ${pending.join(', ')}`,
         code: 'PRECONDITION',
-        message: `缺失前置：wave ${wave} 集成要求全组 verified，未 verified: ${pending.join(', ')}`,
+        message: `缺失前置：wave ${wave} 记录合并顺序要求全组 accepted（不合入），未 accepted: ${pending.join(', ')}`,
       });
     }
     return writeLedgerAtomic(ledgerPath, expected, (cur) => {
@@ -1153,16 +1237,26 @@ export function setState({
       throw new LedgerError('ARGS', `--mem-snapshot 不是合法 JSON: ${err.message}`);
     }
   }
+  let parsedDetail;
+  if (detail !== undefined) {
+    try {
+      parsedDetail = typeof detail === 'string' ? JSON.parse(detail) : detail;
+    } catch (err) {
+      throw new LedgerError('ARGS', `--detail 不是合法 JSON: ${err.message}`);
+    }
+    if (parsedDetail === null || typeof parsedDetail !== 'object' || Array.isArray(parsedDetail)) {
+      throw new LedgerError('ARGS', '--detail 必须是 JSON 对象');
+    }
+  }
 
   // 前置机器判（基于读到的台账版本；从 = 当前态）
   const preconditionProblem = () => {
     const g = curGroup;
     const from = g.state;
     if (to === 'dispatched' && from === 'pending') {
-      if (!workerLabel) return '缺失前置：pending→dispatched 必须携带 --worker-label';
-      // F-E ② 波次顺序门：只允许最早未集成 wave 的组被派工（禁止跳过未完成前波开工）
-      // 最早未集成 = wave 数值最小，不按数组位置（同族：乱序台账下 find 取数组首位会
-      // 误拒数值更小未集成波的合法派工；重复 wave 已由 schema 拒，按数值取 min 无歧义）。
+      if (typeof g.session_id !== 'string' || g.session_id.length === 0) {
+        return '缺失前置：pending→dispatched 要求 identity 已含 session_id（先 create + 钉 Art + --identity）';
+      }
       const wave = ledger.waves.find((w) => w.groups.some((x) => x.group_id === group));
       const unintegrated = ledger.waves.filter((w) => w.integrated_tip === null);
       const firstUnintegrated = unintegrated.length > 0
@@ -1171,9 +1265,6 @@ export function setState({
       if (wave !== firstUnintegrated) {
         return `缺失前置：组 ${group} 所在 wave ${wave.wave} 不是最早未集成 wave（wave ${firstUnintegrated.wave} 仍在途），不可跳过未完成前波派工`;
       }
-      // sc-p0c 凭证闸（严格模式）：组必须存在 packet_rendered 事件，且最近一条的
-      // identity_digest === 当前组身份现算 digest（含 assignment_seq——代际隔离：
-      // 重派递增 seq 后旧代凭证 digest 不再匹配，自然失配拒绝派发）。
       if (isStrictMode(ledger)) {
         const latest = latestPacketRendered(ledger, group);
         if (!latest) {
@@ -1181,16 +1272,11 @@ export function setState({
         }
         const curDigest = identityDigest({
           worktree: g.worktree, branch: g.branch, base: g.base,
-          assignmentSeq: g.assignment_seq ?? 0,
+          session_id: g.session_id, assignmentSeq: g.assignment_seq ?? 0,
         });
         if (latest.detail.identity_digest !== curDigest) {
           return `缺失前置：组 ${group} 未经 render-packet 出包（或身份已变更未重出包），拒绝派发`;
         }
-        // sc-p0b 快照闸（严格模式）：--mem-snapshot 必填 + exact 四键 + 跨字段一致性。
-        // 缺失/非法一律走前置拒绝（落 illegal_transition 事件 + exit 2），与既有前置同风格。
-        // 缺失检查与形状检查职责分离：undefined =「缺失」语义（独立拒绝消息），
-        // 非 undefined 才进 assertMemSnapshot（形状/跨字段校验）——变异反证挖「缺失拒绝」
-        // 时形状检查不兜底接住（否则变异等价存活，P0B 变异无意义）。
         if (parsedMemSnapshot === undefined) {
           return '缺失前置：→dispatched 必须携带 --mem-snapshot \'<json>\'（四键 used_slots/platform_cap/concurrency/available_bytes，lead 从 mem-probe --json 提取）';
         }
@@ -1204,52 +1290,41 @@ export function setState({
         }
       }
     }
-    if (to === 'delivered' && from === 'dispatched') {
-      if (typeof tipSha !== 'string' || !TIP_SHA_RE.test(tipSha)) {
-        return `缺失前置：dispatched→delivered 必须携带 40hex --tip-sha（当前: ${tipSha ?? '无'}）`;
+    if (to === 'executing' && from === 'dispatched') {
+      const sha = parsedDetail?.goal_skill_sha256 ?? latestGroupEvent(ledger, group, 'gate_goal')?.detail?.goal_skill_sha256;
+      if (typeof sha !== 'string' || !SHA256_RE.test(sha)) {
+        return '缺失前置：dispatched→executing 要求本组成立的 gate_goal（detail.goal_skill_sha256 64hex）';
       }
     }
-    if (to === 'delivered' && from === 'delivered') {
-      // 审查轮自环：仅 rounds+1，且受 reviewMaxRounds 上限约束（F-G：达上限拒自环，
-      // 防 rounds 无限膨胀——否则自环可以一直刷到任意值，收敛门形同虚设）。
-      // unresolved 的唯一写入通道是 record-delivery 审查交卷
-      // （CLI 层已拒 --unresolved，防手工填数绕过审查机器的计量）。
-      const maxRounds = readDefaults().reviewMaxRounds;
-      if (g.review.rounds >= maxRounds) {
-        return `缺失前置：审查自环达上限（rounds=${g.review.rounds} ≥ reviewMaxRounds=${maxRounds}，审查不收敛，拒自环）`;
+    if (to === 'executing' && from === 'blocked') {
+      // 卡点恢复：不重跑开工闸
+    }
+    if (to === 'e2e' && from === 'executing') {
+      const sha = parsedDetail?.routing_sha256 ?? latestGroupEvent(ledger, group, 'gate_routing')?.detail?.routing_sha256;
+      if (typeof sha !== 'string' || !SHA256_RE.test(sha)) {
+        return '缺失前置：executing→e2e 要求本组成立的 gate_routing（detail.routing_sha256 64hex）；create_worker 前必须现读 routing.json';
       }
     }
-    if (to === 'review_pass' && from === 'delivered') {
+    if (to === 'pr-open' && from === 'review') {
+      if (!latestGroupEvent(ledger, group, 'gate_goal')) {
+        return '缺失前置：→pr-open 要求本组成立的 gate_goal';
+      }
+      if (!latestGroupEvent(ledger, group, 'gate_routing')) {
+        return '缺失前置：→pr-open 要求本组成立的 gate_routing';
+      }
+      const handoff = latestPrHandoffDelivery(ledger, group);
+      if (!handoff) {
+        return '缺失前置：→pr-open 要求终态 record-delivery（pr-handoff exact schema）已入账';
+      }
+      for (const k of PR_RECEIPT_KEYS) {
+        if (handoff[k] === undefined || handoff[k] === null || handoff[k] === '') {
+          return `缺失前置：→pr-open 要求 PR_RECEIPT_KEYS 齐全（缺 ${k}）`;
+        }
+      }
+    }
+    if (to === 'accepted' && from === 'pr-open') {
       if (g.review.unresolved !== 0) {
-        return `缺失前置：→review_pass 要求 unresolved==0（当前 ${g.review.unresolved}）`;
-      }
-      const maxRounds = readDefaults().reviewMaxRounds;
-      if (g.review.rounds > maxRounds) {
-        return `缺失前置：→review_pass 要求 rounds≤${maxRounds}（当前 ${g.review.rounds}，审查不收敛）`;
-      }
-    }
-    if (to === 'verified' && from === 'review_pass') {
-      if (g.verify.status !== 'pass') {
-        return `缺失前置：→verified 要求 verify.status=pass（当前 ${g.verify.status ?? 'null'}）`;
-      }
-      // F-H：pass 凭据必须绑定可解析的验收交付证据——evidence_ref 为 delivery#<n>，
-      // 且必须能解析到 events 中真实存在的 delivery 事件（凭据只能由验收组
-      // record-delivery 写入；手工改 verify.status 而没有交付证据 = 伪造，拒）。
-      if (typeof g.verify.evidence_ref !== 'string' || !/^delivery#\d+$/.test(g.verify.evidence_ref)) {
-        return `缺失前置：→verified 要求 verify.evidence_ref 为 delivery#<n>（当前 ${g.verify.evidence_ref ?? 'null'}，pass 凭据只能由验收组 record-delivery 写入）`;
-      }
-      const refIdx = Number(g.verify.evidence_ref.slice('delivery#'.length)) - 1;
-      const refEvent = ledger.events[refIdx];
-      if (!refEvent || refEvent.type !== 'delivery') {
-        return `缺失前置：→verified 要求 evidence_ref ${g.verify.evidence_ref} 可解析到 delivery 事件（事件 ${refIdx} 不存在或非 delivery，凭据伪造拒）`;
-      }
-      // ① 升级加固：凭据必须绑定同组、同类的 verify delivery——存在性校验挡不住
-      // 「他组 delivery 事件 / 非验收类 delivery」被引用为凭据（方向 B 家族变体）。
-      if (refEvent.detail?.group_id !== group) {
-        return `缺失前置：→verified 要求 evidence_ref ${g.verify.evidence_ref} 指向本组（${group}）的 delivery 事件（当前指向组 ${refEvent.detail?.group_id ?? '?'}，凭据伪造拒）`;
-      }
-      if (typeof refEvent.detail?.integration_review_status !== 'string') {
-        return `缺失前置：→verified 要求 evidence_ref ${g.verify.evidence_ref} 指向验收（verify）类 delivery 事件（detail 缺 integration_review_status，凭据伪造拒）`;
+        return `缺失前置：→accepted 要求 unresolved==0（当前 ${g.review.unresolved}）`;
       }
     }
     if (to === 'failed') {
@@ -1293,30 +1368,71 @@ export function setState({
     const from = g.state;
     if (to === 'dispatched') {
       g.state = 'dispatched';
-      g.worker_label = workerLabel;
+      g.worker_label = workerLabel ?? g.session_id;
       g.dispatched_at = now;
-      // F1 修复：detail 统一结构化对象（ready-check 读 detail.group_id 做分区对账）
-      cur.events.push({ type: 'dispatch', at: now, detail: { group_id: group, worker_label: workerLabel } });
-    } else if (to === 'delivered' && from === 'dispatched') {
-      g.state = 'delivered';
-      g.tip_sha = tipSha;
-      // F1 修复：detail.tip_sha 是 ready-check ① 与台账 tip_sha 对账的读取点。
-      // delivery detail 契约 {group_id, tip_sha, candidate_sha}：派发时刻候选即所交 tip，candidate_sha 与 tip_sha 同值
-      cur.events.push({ type: 'delivery', at: now, detail: { group_id: group, tip_sha: tipSha, candidate_sha: tipSha } });
-    } else if (to === 'delivered' && from === 'delivered') {
-      g.review.rounds += 1;
-      // unresolved 不在此更新：唯一通道是 record-delivery 审查交卷（CLI --unresolved 已拒）
+      if (parsedDetail?.provider_id) g.provider_id = parsedDetail.provider_id;
       cur.events.push({
-        type: 'review_round',
+        type: 'dispatch',
         at: now,
-        detail: { group_id: group, rounds: g.review.rounds, unresolved: g.review.unresolved },
+        detail: { group_id: group, worker_label: g.worker_label, session_id: g.session_id },
       });
-    } else if (to === 'review_pass') {
-      g.state = 'review_pass';
-    } else if (to === 'verified') {
-      g.state = 'verified';
+      cur.events.push({
+        type: 'session_created',
+        at: now,
+        detail: { group_id: group, session_id: g.session_id, provider_id: g.provider_id },
+      });
+    } else if (to === 'executing') {
+      g.state = 'executing';
+      const sha = parsedDetail?.goal_skill_sha256 ?? latestGroupEvent(cur, group, 'gate_goal')?.detail?.goal_skill_sha256;
+      if (!latestGroupEvent(cur, group, 'gate_goal') && sha) {
+        cur.events.push({
+          type: 'gate_goal',
+          at: now,
+          detail: {
+            group_id: group,
+            goal_skill_path: parsedDetail?.goal_skill_path ?? GOAL_SKILL_PATHS[0],
+            goal_skill_sha256: sha,
+          },
+        });
+      }
+    } else if (to === 'blocked') {
+      g.state = 'blocked';
+    } else if (to === 'e2e') {
+      g.state = 'e2e';
+      const sha = parsedDetail?.routing_sha256 ?? latestGroupEvent(cur, group, 'gate_routing')?.detail?.routing_sha256;
+      if (!latestGroupEvent(cur, group, 'gate_routing') && sha) {
+        cur.events.push({
+          type: 'gate_routing',
+          at: now,
+          detail: {
+            group_id: group,
+            route_source: parsedDetail?.route_source ?? ROUTING_PATH_LIVE,
+            routing_sha256: sha,
+            e2e_model: parsedDetail?.e2e_model ?? null,
+            review_model: parsedDetail?.review_model ?? null,
+          },
+        });
+      }
+    } else if (to === 'review') {
+      g.state = 'review';
+    } else if (to === 'pr-open') {
+      g.state = 'pr-open';
+      const handoff = latestPrHandoffDelivery(cur, group);
+      if (handoff?.pr_url) g.pr_url = handoff.pr_url;
+      if (handoff?.tip_sha) g.tip_sha = handoff.tip_sha;
+      cur.events.push({
+        type: 'pr_opened',
+        at: now,
+        detail: { group_id: group, pr_url: g.pr_url, session_id: g.session_id, tip_sha: g.tip_sha },
+      });
+    } else if (to === 'accepted') {
+      g.state = 'accepted';
+      cur.events.push({
+        type: 'accepted',
+        at: now,
+        detail: { group_id: group, pr_url: g.pr_url, session_id: g.session_id },
+      });
     } else if (to === 'failed') {
-      // 纵深防御：写盘闭包内再断言白名单（前置机判已校验；防未来新增写入口绕过前置）
       if (!event || !FAILED_EVENT_TYPES.includes(event)) {
         throw new LedgerError('SCHEMA', `→failed 落盘事件非失败原因白名单（白名单: ${FAILED_EVENT_TYPES.join('/')}，收到: ${event ?? '无'}）`);
       }
@@ -1330,13 +1446,13 @@ export function setState({
       g.worker_label = null;
       g.dispatched_at = null;
       g.verify = { status: null, evidence_ref: null };
-      // F-I：身份三键一并清空——重派语义 = 新 worktree 新一轮，lead 须重新分配身份；
-      // 不置 null 则 render-packet 仍会拿旧 worktree/branch/base 出包（旧身份残留漏洞）
       g.worktree = null;
       g.branch = null;
       g.base = null;
-      // sc-p0c 代际隔离：重派递增 assignment_seq——旧代 packet_rendered 凭证保留在
-      // events 中供审计，但 seq 已变、identity_digest 不再匹配，派发前置自然失配拒绝。
+      g.session_id = null;
+      g.title = null;
+      g.pr_url = null;
+      g.provider_id = null;
       g.assignment_seq = (g.assignment_seq ?? 0) + 1;
       cur.events.push({ type: 'timeout_redispatch', at: now, detail: { group_id: group, reason: '重派链重置（新 worktree 新一轮）' } });
     }
@@ -1455,7 +1571,8 @@ function renderPacketWithCredential({ ledgerPath, group, ledger, out, now }) {
       detail: {
         group_id: group,
         identity_digest: identityDigest({
-          worktree: wg2.worktree, branch: wg2.branch, base: wg2.base, assignmentSeq: seq,
+          worktree: wg2.worktree, branch: wg2.branch, base: wg2.base,
+          session_id: wg2.session_id, assignmentSeq: seq,
         }),
         packet_sha256: createHash('sha256').update(out, 'utf8').digest('hex').slice(0, 16),
         assignment_seq: seq,
@@ -1565,17 +1682,94 @@ function classifyDelivery(data) {
   const hasReview = REVIEW_DELIVERY_KEYS.every((k) => keys.includes(k)) && keys.length === REVIEW_DELIVERY_KEYS.length;
   const hasVerify = VERIFY_DELIVERY_KEYS.every((k) => keys.includes(k)) && keys.length === VERIFY_DELIVERY_KEYS.length;
   const hasPrewalk = PREWALK_DELIVERY_KEYS.every((k) => keys.includes(k)) && keys.length === PREWALK_DELIVERY_KEYS.length;
-  const hits = [hasExec, hasReview, hasVerify, hasPrewalk].filter(Boolean).length;
+  const hasPrHandoff = PR_HANDOFF_DELIVERY_KEYS.every((k) => keys.includes(k)) && keys.length === PR_HANDOFF_DELIVERY_KEYS.length;
+  const hits = [hasExec, hasReview, hasVerify, hasPrewalk, hasPrHandoff].filter(Boolean).length;
   if (hits !== 1) {
     throw new LedgerError(
       'DELIVERY_SCHEMA',
-      `交卷 schema 无法唯一识别（exec/review/verify/prewalk 四类命中 ${hits} 类）；exact 契约，多余键或缺失键都拒`
+      `交卷 schema 无法唯一识别（exec/review/verify/prewalk/pr-handoff 五类命中 ${hits} 类）；exact 契约，多余键或缺失键都拒`
     );
   }
   if (hasExec) return 'exec';
   if (hasReview) return 'review';
   if (hasVerify) return 'verify';
+  if (hasPrHandoff) return 'pr-handoff';
   return 'prewalk';
+}
+
+function assertRouteSource(value, what) {
+  if (value === 'model-route show') return;
+  if (value === ROUTING_PATH_LIVE || value === ROUTING_PATH_LINK) return;
+  throw new LedgerError('DELIVERY_SCHEMA', `${what} 必须是 live routing.json 绝对路径、其 ~/.agents 软链、或字面量 model-route show（当前: ${value}）`);
+}
+
+function validatePrHandoffDelivery(data, packet) {
+  if (typeof data.pr_url !== 'string' || !GITHUB_PR_URL_RE.test(data.pr_url)) {
+    throw new LedgerError('DELIVERY_SCHEMA', `终态交卷 pr_url 必须是非空 GitHub PR URL（当前: ${data.pr_url ?? '缺失'}）`);
+  }
+  if (typeof data.branch !== 'string' || data.branch.length === 0) {
+    throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 branch 必须是非空字符串');
+  }
+  if (typeof data.tip_sha !== 'string' || !TIP_SHA_RE.test(data.tip_sha)) {
+    throw new LedgerError('DELIVERY_SCHEMA', `终态交卷 tip_sha 非 40 位十六进制（当前: ${data.tip_sha ?? '缺失'}）`);
+  }
+  if (!GOAL_SKILL_PATHS.includes(data.goal_skill_path)) {
+    throw new LedgerError(
+      'DELIVERY_SCHEMA',
+      `终态交卷 goal_skill_path 必须是 PI 自己的 goal skill 三路径之一（当前: ${data.goal_skill_path ?? '缺失'}）`
+    );
+  }
+  if (!Array.isArray(data.scs) || data.scs.length === 0) {
+    throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 scs 必须是非空数组');
+  }
+  for (const sc of data.scs) {
+    assertKeys(sc, PR_HANDOFF_SC_KEYS, '终态交卷 sc 条目');
+    if (typeof sc.id !== 'string' || sc.id.length === 0) {
+      throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 sc.id 必须是非空字符串');
+    }
+    if (!SC_RESULT_STATUS.includes(sc.status)) {
+      throw new LedgerError('DELIVERY_SCHEMA', `终态交卷 sc ${sc.id} 的 status 非法: ${sc.status}`);
+    }
+  }
+  assertScIdSet(data.scs.map((s) => ({ sc_id: s.id })), packet, '终态交卷');
+  if (data.e2e === null || typeof data.e2e !== 'object' || Array.isArray(data.e2e)) {
+    throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 e2e 必须是对象');
+  }
+  assertKeys(data.e2e, PR_HANDOFF_E2E_KEYS, '终态交卷 e2e');
+  if (typeof data.e2e.status !== 'string' || data.e2e.status.length === 0) {
+    throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 e2e.status 必须是非空字符串');
+  }
+  if (typeof data.e2e.candidate_sha !== 'string' || !TIP_SHA_RE.test(data.e2e.candidate_sha)) {
+    throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 e2e.candidate_sha 非 40 位十六进制');
+  }
+  if (typeof data.e2e.model !== 'string' || data.e2e.model.length === 0) {
+    throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 e2e.model 必须是非空字符串');
+  }
+  assertRouteSource(data.e2e.route_source, '终态交卷 e2e.route_source');
+  if (data.review === null || typeof data.review !== 'object' || Array.isArray(data.review)) {
+    throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 review 必须是对象');
+  }
+  assertKeys(data.review, PR_HANDOFF_REVIEW_KEYS, '终态交卷 review');
+  if (!Number.isSafeInteger(data.review.unresolved) || data.review.unresolved < 0) {
+    throw new LedgerError('DELIVERY_SCHEMA', `终态交卷 review.unresolved 必须是非负安全整数（当前: ${data.review.unresolved}）`);
+  }
+  if (typeof data.review.candidate_sha !== 'string' || !TIP_SHA_RE.test(data.review.candidate_sha)) {
+    throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 review.candidate_sha 非 40 位十六进制');
+  }
+  if (typeof data.review.model !== 'string' || data.review.model.length === 0) {
+    throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 review.model 必须是非空字符串');
+  }
+  assertRouteSource(data.review.route_source, '终态交卷 review.route_source');
+  if (data.size_gate === null || typeof data.size_gate !== 'object' || Array.isArray(data.size_gate)) {
+    throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 size_gate 必须是对象');
+  }
+  assertKeys(data.size_gate, PR_HANDOFF_SIZE_KEYS, '终态交卷 size_gate');
+  if (typeof data.size_gate.result !== 'string' || data.size_gate.result.length === 0) {
+    throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 size_gate.result 必须是非空字符串');
+  }
+  if (typeof data.size_gate.candidate_sha !== 'string' || !TIP_SHA_RE.test(data.size_gate.candidate_sha)) {
+    throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 size_gate.candidate_sha 非 40 位十六进制');
+  }
 }
 
 function assertPrewalkSentence(value, what) {
@@ -1860,6 +2054,7 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
   if (kind === 'exec') validateExecDelivery(data, packet);
   if (kind === 'review') validateReviewDelivery(data);
   if (kind === 'verify') validateVerifyDelivery(data, packet);
+  if (kind === 'pr-handoff') validatePrHandoffDelivery(data, packet);
   if (kind === 'prewalk') {
     validatePrewalkDelivery(data);
     // 存在性放到锁内、生命周期门之后：pending/非波0 组应先 ILLEGAL_TRANSITION，
@@ -1951,6 +2146,40 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
           fix_commits: data.fix_commits.length,
         },
       });
+    } else if (kind === 'pr-handoff') {
+      if (!latestGroupEvent(cur, group, 'gate_goal') || !latestGroupEvent(cur, group, 'gate_routing')) {
+        throw new LedgerError(
+          'PRECONDITION',
+          `组 ${group} 终态交卷要求本组成立的 gate_goal + gate_routing（视为未执行开工闸，拒，不得 pr-open）`
+        );
+      }
+      g.tip_sha = data.tip_sha;
+      g.pr_url = data.pr_url;
+      g.review.unresolved = data.review.unresolved;
+      const prId = (typeof data.pr_url === 'string' && data.pr_url.match(/\/pull\/(\d+)/)?.[1]) || data.pr_url;
+      cur.events.push({
+        type: 'delivery',
+        at: now,
+        detail: {
+          group_id: group,
+          pr_url: data.pr_url,
+          branch: data.branch,
+          tip_sha: data.tip_sha,
+          scs: data.scs,
+          goal_skill_path: data.goal_skill_path,
+          e2e: data.e2e,
+          review: data.review,
+          size_gate: data.size_gate,
+          pr_id: prId,
+          session_id: g.session_id,
+          candidate_sha: data.tip_sha,
+          e2e_status: data.e2e.status,
+          review_unresolved: data.review.unresolved,
+          size_result: data.size_gate.result,
+          ledger_version: expected,
+          checked_at: now,
+        },
+      });
     } else {
       g.verify.status = data.integration_review.status;
       g.verify.evidence_ref = `delivery#${cur.events.length + 1}`;
@@ -1975,11 +2204,8 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
 // last_event_at = 台账最后一条事件的 at（events 数组按写入顺序追加，末位即最新）。
 // 无事件时 last_event_at/minutes_since_last_event 输出 null——不伪造 0（0 会被看成
 // 「刚刚有活动」，掩盖「自 init 起就无事件」的停摆事实）。
-// in_flight_groups 按「未完成集成」语义过滤：state ∈ dispatched/delivered/review_pass
-// 三态（组已派工但尚未 verified/集成）。**这与落不落事件无关**：review_pass 态组不落
-// 事件照样被 state 过滤捕获；「给 review_pass 补落事件」是伪修复（修的是症状不是判据）。
-// review_pass 不落事件的真实后果：last_event_at 不被推进（组已 review_pass 但 events
-// 停在更早时点，minutes_since_last_event 虚高）。
+// in_flight_groups 按「未完成验收」语义过滤：state ∈ dispatched/executing/blocked/e2e/review/pr-open
+// （组已派工但尚未 accepted）。**这与落不落事件无关**：pr-open 态组不落事件照样被 state 过滤捕获。
 // 导出函数与 CLI 同实现：只读（readLedger，ready 冻结不拦读——冻结只拦写路径）；
 // --now 注入供确定性测试，缺省取系统时钟。
 export function staleness({ ledgerPath, now }) {
@@ -2000,7 +2226,7 @@ export function staleness({ ledgerPath, now }) {
   }
   const inFlight = ledger.waves
     .flatMap((w) => w.groups)
-    .filter((g) => ['dispatched', 'delivered', 'review_pass'].includes(g.state))
+    .filter((g) => ['dispatched', 'executing', 'blocked', 'e2e', 'review', 'pr-open'].includes(g.state))
     .map((g) => ({ group_id: g.group_id, state: g.state, dispatched_at: g.dispatched_at }));
   return {
     phase: ledger.phase,
@@ -2074,7 +2300,7 @@ function removedFlagMessage(flag) {
 const SUBCOMMAND_FLAGS = Object.freeze({
   init: ['manifest', 'run-id', 'now', 'baseline'],
   validate: [],
-  'set-state': ['group', 'to', 'now', 'worker-label', 'tip-sha', 'event', 'identity', 'phase', 'wave', 'integrate', 'ready-receipt', 'mem-snapshot'],
+  'set-state': ['group', 'to', 'now', 'worker-label', 'tip-sha', 'event', 'identity', 'phase', 'wave', 'integrate', 'ready-receipt', 'mem-snapshot', 'detail'],
   'render-packet': ['group', 'manifest', 'now'],
   'record-delivery': ['group', 'payload', 'now'],
   staleness: ['now'],
@@ -2136,7 +2362,7 @@ export function runCli(argv) {
           now: flags.now,
           baseline: flags.baseline ?? null,
         });
-        console.log(`init: 台账已创建 ${ledgerPath}（version=0, phase=executing, baseline=${flags.baseline ?? 'null（兼容模式）'}）`);
+        console.log(`init: 台账已创建 ${ledgerPath}（version=0, phase=splitting, baseline=${flags.baseline ?? 'null（兼容模式）'}）`);
         return 0;
       }
       case 'validate': {
@@ -2182,6 +2408,7 @@ export function runCli(argv) {
           workerLabel: flags['worker-label'],
           tipSha: flags['tip-sha'],
           event: flags.event,
+          detail: flags.detail,
           identity: usedIdentity ? flags.identity ?? undefined : undefined,
           phase: flags.phase,
           wave: flags.wave === undefined ? undefined : Number(flags.wave),

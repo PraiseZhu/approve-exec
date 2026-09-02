@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// ready-check.mjs — approve-exec 出口门：七项 exact 合取，全过才输出 READY_FOR_SUBMIT_PR。
+// ready-check.mjs — approve-exec 出口门：七项 exact 合取，全过才输出 READY_FOR_LATER_SUBMIT_PR_SKILL。
 //
 // 消费契约（g4 run-ledger 后续对齐；形状见 tests/fixtures/ready-full/ 与 ready-gaps/README.md）：
 //   --ledger 台账（g4 run-ledger schema）：schema_version/run_id/slug/manifest_path/manifest_core_hash/
@@ -14,7 +14,7 @@
 //   --repo 候选仓（git status / HEAD 分支 / SHA 的真实来源）
 //
 // 七项判据（逐项独立报告，不因前项失败跳过后项）：
-//   ① ledger-partition  全部组 ∈ {verified}；组数 == manifest dispatch.packets 数 == 派出记录数；
+//   ① ledger-partition  全部组 ∈ {accepted}；组数 == manifest dispatch.packets 数 == 派出记录数；
 //                        ledger groups / manifest packets / dispatch 事件三方的 group_id 集合严格相等
 //                        （只比数量会被「换成未知 gX 数量仍相同」蒙混）；各组 tip_sha 与台账 delivery 事件对账；
 //                        零组（零工作运行）直接拒绝——空集全分区恒真，不能当 READY 放行
@@ -45,7 +45,7 @@
 // 输出与退出：
 //   全过（且 --now/--receipt 已传）→ 原子写入 →ready receipt（exact schema 见 run-ledger.mjs
 //   READY_RECEIPT_KEYS 契约；ledger_version = 检查时读到的台账 version，非 +1），随后 stdout 单行
-//   `READY_FOR_SUBMIT_PR <branch> <HEAD_SHA>`。receipt 未落盘时不得输出 READY 行（写失败 → exit 2 点名）。
+//   `READY_FOR_LATER_SUBMIT_PR_SKILL <branch> <HEAD_SHA>`。receipt 未落盘时不得输出 READY 行（写失败 → exit 2 点名）。
 //   ready-check 只检查不写台账：phase→ready 的唯一写入者是 run-ledger set-state --phase ready
 //   --ready-receipt <path>（锁/CAS/phase 单步/全波集成/manifest hash 绑定都在它那边，本脚本不复制）。
 //   任一缺 → exit 2，每行 `GAP: <gate>: <detail>`（全部 gap 列出）
@@ -150,9 +150,19 @@ function checkLedgerPartition(ledger, manifest, manifestError, gaps) {
     gaps.push({ gate: 'ledger-partition', detail: '台账无任何组（零工作运行，拒绝 READY）' });
   }
 
-  const notVerified = groups.filter((g) => g.state !== 'verified');
-  if (notVerified.length > 0) {
-    gaps.push({ gate: 'ledger-partition', detail: `组非 verified: ${notVerified.map((g) => `${g.group_id}=${g.state}`).join(', ')}` });
+  const notAccepted = groups.filter((g) => g.state !== 'accepted');
+  if (notAccepted.length > 0) {
+    gaps.push({ gate: 'ledger-partition', detail: `组非 accepted: ${notAccepted.map((g) => `${g.group_id}=${g.state}`).join(', ')}` });
+  }
+  for (const g of groups) {
+    const hasGoal = events.some((e) => e.type === 'gate_goal' && e.detail?.group_id === g.group_id);
+    const hasRouting = events.some((e) => e.type === 'gate_routing' && e.detail?.group_id === g.group_id);
+    if (!hasGoal) {
+      gaps.push({ gate: 'ledger-partition', detail: `${g.group_id} 缺 gate_goal` });
+    }
+    if (!hasRouting) {
+      gaps.push({ gate: 'ledger-partition', detail: `${g.group_id} 缺 gate_routing` });
+    }
   }
 
   // 组数对账：组数 == manifest dispatch.packets 数（sc-p1g 变异②挖掉点）
@@ -272,6 +282,7 @@ function checkVerdictAnchors(verdict, manifest, manifestError, ledger, repoRoot,
 // 五者互斥；其余形状一律 unknown（fail-closed 点名，不猜测）。
 function deliveryCategory(d) {
   const detail = d?.detail || {};
+  if (detail.pr_url && detail.e2e && detail.review && detail.size_gate) return 'pr-handoff';
   if (typeof detail.rounds === 'number') return 'review';
   if (typeof detail.integration_review_status === 'string') return 'verify';
   if (
@@ -527,7 +538,7 @@ function main() {
 
   const branchResult = runGit(args.repo, ['rev-parse', '--abbrev-ref', 'HEAD']);
   const branch = branchResult.status === 0 ? branchResult.stdout : 'unknown';
-  console.log(`READY_FOR_SUBMIT_PR ${branch} ${headSha}`);
+  console.log(`READY_FOR_LATER_SUBMIT_PR_SKILL ${branch} ${headSha}`);
   process.exit(0);
 }
 

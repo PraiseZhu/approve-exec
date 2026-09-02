@@ -26,7 +26,7 @@ import {
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
-  acquireLedgerLock, releaseLedgerLock, writeTmp, renameTmp, LedgerError,
+  acquireLedgerLock, releaseLedgerLock, writeTmp, renameTmp, LedgerError, PHASE_ORDER,
 } from './run-ledger.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -44,7 +44,7 @@ const HANDOFF_KEYS = Object.freeze([
   'scene', 'changes', 'bottleneck', 'process', 'original_question', 'choice',
 ]);
 const OPTION_KEYS = Object.freeze(['id', 'summary', 'consequences']);
-const PHASES = Object.freeze(['executing', 'reviewing', 'validating', 'e2e', 'packaging', 'ready']);
+const PHASES = PHASE_ORDER;
 const EVENT_TYPES = Object.freeze([
   'decision_opened',
   'evidence_requested',

@@ -1,3 +1,4 @@
 # 依赖与临时产物（sc-p0a 脚手架基线）
 node_modules/
 _tmp/
+.worktrees/
