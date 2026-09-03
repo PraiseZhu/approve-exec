@@ -73,9 +73,9 @@ task-priority final manifest
         → 不开远端 PR，按第⑩节 candidate 交卷 jump 回报
   → 5. Lead 按每 PR receipt 验收（失败则充分交接重派，直到 accepted）
   → 6. 验收通过后 jump 各 session 开远端 ready PR（非 draft）；`confirm-pr-open.mjs` 确认
-  → 7. ssh Mini 跑 register.mjs 写入盯梢名册（不要 `--verify` 去查旧班车）→ 把 stdout 回执落盘 → `note-event watch_registered`（`--detail.receipt` = 该回执文件；不要传本机假 state_file）
+  → 7. `confirm-watch-registered.mjs` ssh Mini 跑 register.mjs（不要 `--verify` 去查旧班车），把 `REGISTERED/ALREADY <abs>` stdout 封成回执 → `note-event watch_registered --detail.receipt`
   → 8. 各 session `wrapup-cleanup.mjs` 清本地 worktree/分支（不删远端）→ 回报
-  → 9. lead `archive_sessions` 只归档这些 PI session（lead 自己由用户归档）
+  → 9. lead `archive_sessions` 归档 PI session 后，用 `confirm-session-archived.mjs --result <工具 JSON>` 出回执再入账（lead 自己由用户归档）
 ```
 
 席位真相源是 `graph.json`（五席，精确键集 E/R/V/T/P；Fable 不是第六席）：
@@ -208,7 +208,7 @@ Lead 在全部 PI session 归档、Mini 名册写完之前不得结束。子 ses
 
 `set-state --identity` 允许键：`{worktree, branch, base, session_id, title}`。`identityDigest` 输入段顺序：`seq → worktree → branch → base → session_id`（session_id 未定时用空串，create 后必须重写 identity 再记 dispatch）。
 
-`EVENT_TYPES` 新增：`session_created`、`session_steer`、`gate_goal`、`gate_routing`、`pr_opened`、`accepted`、`local_cleaned`、`session_archived`、`watch_registered`、`site_report`、`replan_note`。旧 `delivery` 仍是子 session candidate 交卷的唯一真写入口（`record-delivery`）。`gate_goal` / `gate_routing` 的 detail 必须含 `group_id` + 对应 sha256；缺 sha256 拒。`site_report` / `replan_note` / `watch_registered` 只经 `note-event` 入账，不进 set-state 成功流。`watch_registered` 只允许在 `pr-open` 入账，必须消费 Mini `register.mjs` 成功回执（`--detail.receipt`：ok、owner/repo/pr_number/branch 对上台账 GitHub URL、`session_id=null`、`state_file` 为 Mini 绝对路径）。不得本机 `existsSync` 读 Mini 路径，不得只核 pr 号。不得引用旧班车 id。run 级 `phase=ready` 是验收门过了的冻结；组级 `pr-open` / `local-cleaned` / `archived` 与 `watch_registered` 仍可在 ready 之后写入，但必须带对应脚本回执，禁止只填 URL / 只报事件名。
+`EVENT_TYPES` 新增：`session_created`、`session_steer`、`gate_goal`、`gate_routing`、`pr_opened`、`accepted`、`local_cleaned`、`session_archived`、`watch_registered`、`site_report`、`replan_note`。旧 `delivery` 仍是子 session candidate 交卷的唯一真写入口（`record-delivery`）。`gate_goal` / `gate_routing` 的 detail 必须含 `group_id` + 对应 sha256；缺 sha256 拒。`site_report` / `replan_note` / `watch_registered` 只经 `note-event` 入账，不进 set-state 成功流。`watch_registered` 只允许在 `pr-open` 入账，必须消费 `confirm-watch-registered.mjs` 产出的回执（该脚本只认 Mini `register.mjs` 的 `REGISTERED/ALREADY <abs.json>` stdout）。不得本机 `existsSync` 读 Mini 路径，不得只核 pr 号。不得引用旧班车 id。`local-cleaned→archived` 必须消费 `confirm-session-archived.mjs` 产出的回执（输入是 `archive_sessions` 工具 JSON，不是手写 archived=true）。run 级 `phase=ready` 是验收门过了的冻结；组级 `pr-open` / `local-cleaned` / `archived` 与 `watch_registered` 仍可在 ready 之后写入，但必须带对应脚本回执，禁止只填 URL / 只报事件名。
 
 `PHASE_ORDER` 改成 run 级：`splitting | dispatching | running | accepting | ready`。组级状态机在 group 上。
 

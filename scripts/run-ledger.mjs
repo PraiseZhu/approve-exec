@@ -1686,11 +1686,7 @@ export function setState({
       }
       try {
         assertReceiptBoundToLedger(prOpenReceipt, ledger, group, 'pr-open receipt');
-        const acceptedEv = latestGroupEvent(ledger, group, 'accepted');
-        if (!acceptedEv) return '缺失前置：accepted→pr-open 要求本组成立的 accepted 事件';
-        if (prOpenReceipt.checked_at <= acceptedEv.at) {
-          return `缺失前置：pr-open receipt.checked_at=${prOpenReceipt.checked_at} 不得早于或等于 accepted.at=${acceptedEv.at}`;
-        }
+        assertReceiptAfterEvent(prOpenReceipt, ledger, group, 'accepted', 'pr-open receipt');
       } catch (err) {
         if (err instanceof LedgerError) return `缺失前置：${err.message}`;
         throw err;

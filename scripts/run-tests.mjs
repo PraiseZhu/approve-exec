@@ -34,6 +34,7 @@ export const TEST_FILES = [
   'skill-doc.test.mjs',
   'wrapup-cleanup.test.mjs',
 ];
+// confirm-watch-registered / confirm-session-archived 的用例落在 wrapup-cleanup.test.mjs，不另开文件。
 
 // 双向校验（纯函数，可单测）：
 //   missing —— 枚举中存在、磁盘上缺失的文件（方向 A：测试被删 → 变硬错）

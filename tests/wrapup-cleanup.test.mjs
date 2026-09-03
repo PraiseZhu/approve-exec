@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { assertReadyPr, confirmPrOpen } from '../scripts/confirm-pr-open.mjs';
 import { wrapupCleanup } from '../scripts/wrapup-cleanup.mjs';
+import { confirmWatchRegistered, parseRegisterStdout } from '../scripts/confirm-watch-registered.mjs';
+import { confirmSessionArchived, extractArchiveResult } from '../scripts/confirm-session-archived.mjs';
 import {
   LedgerError,
   PR_OPEN_RECEIPT_KEYS,
@@ -205,18 +207,14 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
     state_file: fakeLocalWatch,
   }), '--now', T);
   assert.equal(r.status, 2, '本机假名册不得冒充 Mini register 回执');
+  const minted = stamp();
+  const watchReceiptBody = confirmWatchRegistered({
+    stdout: 'REGISTERED /mini/runtime/state/xindong__mivo-canvas-plugin__1.json\n',
+    owner: 'xindong', repo: 'mivo-canvas-plugin', prNumber: 1, branch: 'feat/run-ledger',
+    now: LATER, ledgerVersion: minted.ledger_version, assignmentSeq: minted.assignment_seq,
+  });
   const watchReceipt = join(dir, 'watch-receipt.json');
-  writeFileSync(watchReceipt, `${JSON.stringify({
-    ok: true,
-    owner: 'xindong',
-    repo: 'mivo-canvas-plugin',
-    pr_number: 1,
-    branch: 'feat/run-ledger',
-    state_file: '/mini/runtime/state/xindong__mivo-canvas-plugin__1.json',
-    session_id: null,
-    checked_at: LATER,
-    ...stamp(),
-  })}\n`);
+  writeFileSync(watchReceipt, `${JSON.stringify(watchReceiptBody)}\n`);
   r = cli('note-event', ledgerPath, '--event', 'watch_registered', '--detail', JSON.stringify({
     group_id: g,
     pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
@@ -265,13 +263,14 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'archived', '--now', T);
   assert.equal(r.status, 2, 'local-cleaned→archived 缺 archive_sessions 回执必须拒');
   assert.match(r.stderr, /archive-receipt|archive_sessions/);
+  const archiveMinted = stamp();
+  const archiveReceiptBody = confirmSessionArchived({
+    sessionId: 'sess-g4',
+    archiveResult: { archived_session_ids: ['sess-g4'] },
+    now: LATER, ledgerVersion: archiveMinted.ledger_version, assignmentSeq: archiveMinted.assignment_seq,
+  });
   const archiveReceipt = join(dir, 'archive-receipt.json');
-  writeFileSync(archiveReceipt, `${JSON.stringify({
-    session_id: 'sess-g4',
-    archived: true,
-    checked_at: LATER,
-    ...stamp(),
-  })}\n`);
+  writeFileSync(archiveReceipt, `${JSON.stringify(archiveReceiptBody)}\n`);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'archived', '--now', T, '--archive-receipt', archiveReceipt);
   assert.equal(r.status, 0, r.stderr);
 });
@@ -403,6 +402,99 @@ test('confirm-pr-open / wrapup-cleanup stdout 必须能被台账回执闸直接�
   const cleanupPath = join(dir, 'cleanup.json');
   writeFileSync(cleanupPath, `${JSON.stringify(cleaned)}\n`);
   assert.equal(readCleanupReceipt(cleanupPath).ok, true);
+});
+
+test('pr-open 时区偏移不得绕过晚于 accepted 的 epoch 比较', () => {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const dir = mkdtempSync(join(tmpdir(), 'pr-open-tz-'));
+  const ledgerPath = join(dir, 'ledger.json');
+  const T = '2026-08-08T16:00:00Z';
+  const SHA1 = 'a'.repeat(40);
+  const SHA3 = 'c'.repeat(40);
+  const GATE_GOAL_SHA = '7d7b9d9b97c99b39de5cbbd6b20e4869afe4cb16dab1dc91833a94a29dca356e';
+  const GATE_ROUTING_SHA = 'e88009fec5d61472d41554b8c0238c6eedd1395d8b301cbc1524d121dc386c23';
+  const ROUTING_LIVE = '/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json';
+  const GOAL_SKILL_PI = '/Users/praise/.agents/skills/goal/SKILL.md';
+  const cli = (...args) => spawnSync(process.execPath, [join(root, 'scripts/run-ledger.mjs'), ...args], { encoding: 'utf8' });
+  const manifestPath = join(dir, 'sample-manifest.json');
+  copyFileSync(join(root, 'tests/fixtures/sample-manifest.json'), manifestPath);
+  let r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'tz-pr-open', '--now', T, '--baseline', SHA3);
+  assert.equal(r.status, 0, r.stderr);
+  const g = 'g4';
+  r = cli('set-state', ledgerPath, '--group', g, '--identity', JSON.stringify({
+    worktree: '/wt/g4', branch: 'feat/run-ledger', base: SHA3, session_id: 'sess-g4',
+  }), '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('render-packet', ledgerPath, '--group', g);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'dispatched', '--worker-label', 'w1', '--now', T,
+    '--mem-snapshot', JSON.stringify({ used_slots: 0, platform_cap: 8, concurrency: 8, available_bytes: 34359738368 }));
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'executing', '--now', T, '--detail', JSON.stringify({
+    goal_skill_path: GOAL_SKILL_PI, goal_skill_sha256: GATE_GOAL_SHA,
+  }));
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'e2e', '--now', T, '--detail', JSON.stringify({
+    route_source: ROUTING_LIVE, routing_sha256: GATE_ROUTING_SHA,
+    e2e_model: 'codex/gpt-5.6-luna', review_model: 'codex/gpt-5.6-sol',
+  }));
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'review', '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  const packet = manifest.dispatch.packets.find((p) => p.group_id === g);
+  r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify({
+    branch: 'feat/run-ledger', tip_sha: SHA1,
+    scs: packet.scs_inline.map((s) => ({ id: s.id, status: 'pass' })),
+    goal_skill_path: GOAL_SKILL_PI,
+    e2e: { status: 'pass', candidate_sha: SHA1, model: 'codex/gpt-5.6-luna', route_source: ROUTING_LIVE },
+    review: { unresolved: 0, candidate_sha: SHA1, model: 'codex/gpt-5.6-sol', route_source: ROUTING_LIVE },
+    size_gate: { result: 'PASS', candidate_sha: SHA1 },
+  }), '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'accepted', '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  const frozen = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  frozen.phase = 'ready';
+  frozen.phase_at = T;
+  writeFileSync(ledgerPath, `${JSON.stringify(frozen, null, 2)}\n`);
+  const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  const tzEarlier = join(dir, 'pr-open-tz.json');
+  writeFileSync(tzEarlier, `${JSON.stringify({
+    url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
+    number: 1, headRefOid: SHA1, isDraft: false, state: 'OPEN', branch: 'feat/run-ledger',
+    checked_at: '2026-08-09T00:00:00+09:00',
+    ledger_version: ledger.version, assignment_seq: 0,
+  })}\n`);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', T, '--pr-open-receipt', tzEarlier);
+  assert.equal(r.status, 2, '时区偏移后实际更早的 pr-open 回执必须拒');
+  assert.match(r.stderr, /不得早于或等于/);
+});
+
+test('confirm-watch-registered 只吃 register.mjs 真实 stdout', () => {
+  const parsed = parseRegisterStdout('REGISTERED /mini/runtime/state/xindong__mivo-canvas-plugin__1.json\n');
+  assert.equal(parsed.kind, 'REGISTERED');
+  const receipt = confirmWatchRegistered({
+    stdout: 'ALREADY /mini/runtime/state/xindong__mivo-canvas-plugin__1.json\n',
+    owner: 'xindong', repo: 'mivo-canvas-plugin', prNumber: 1, branch: 'feat/run-ledger',
+    now: LATER, ledgerVersion: 12, assignmentSeq: 0,
+  });
+  assert.equal(receipt.ok, true);
+  assert.equal(receipt.pr_number, 1);
+  assert.equal(receipt.session_id, null);
+  assert.throws(() => parseRegisterStdout('ok true\n'), LedgerError);
+});
+
+test('confirm-session-archived 只吃 archive_sessions 工具结果', () => {
+  const extracted = extractArchiveResult({ session_ids: ['sess-g4'], status: 'archived' }, 'sess-g4');
+  assert.equal(extracted.archived, true);
+  const receipt = confirmSessionArchived({
+    sessionId: 'sess-g4',
+    archiveResult: JSON.stringify({ archived_session_ids: ['sess-g4'] }),
+    now: LATER, ledgerVersion: 13, assignmentSeq: 0,
+  });
+  assert.equal(receipt.archived, true);
+  assert.throws(() => extractArchiveResult({ archived_session_ids: ['other'] }, 'sess-g4'), LedgerError);
 });
 
 test('confirm-pr-open / wrapup-cleanup 缺 --now 拒', () => {
