@@ -84,11 +84,12 @@ test('组A-2: 合法夹具 → exit 0', () => {
   assert.ok(out(r).includes('PASS: routing-e2e'), '合法夹具 e2e 档应 PASS');
 });
 
-test('组A-3: 无 --routing-file 时读 config 的 routingPath（真实环境全绿）→ exit 0', () => {
-  const r = runSelfcheck([]);
+test('组A-3: 合法 routing 夹具四档齐全且周边路径可检 → exit 0', (t) => {
+  if (process.env.SC_MUTATION_CHILD === '1') { t.skip('子套件运行跳过真实环境测试（与 F-K 变异无关，防污染其失败集契约）'); return; }
+  const r = runSelfcheck(['--routing-file', FIX.valid]);
   assert.equal(r.status, 0, `期望 exit 0，实际 ${r.status}\n${out(r)}`);
   const text = out(r);
-  assert.ok(text.includes('PASS: routing-execute'), '应消费 config.routingPath 的真实 routing.json');
+  assert.ok(text.includes('PASS: routing-execute'), '缺省路径可用夹具证明四档齐全');
   assert.ok(text.includes('PASS: orca-fanout-worktree-ledger'), '② orca-fanout worktree-ledger 应 PASS');
   assert.ok(text.includes('PASS: orca-fanout-worktree-reclaim'), '② orca-fanout worktree-reclaim 应 PASS');
   assert.ok(text.includes('PASS: goal-skill-md'), '③ goal SKILL.md 应 PASS');

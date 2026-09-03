@@ -32,6 +32,7 @@ export const TEST_FILES = [
   'selfcheck.test.mjs',
   'session-dispatch.test.mjs',
   'skill-doc.test.mjs',
+  'wrapup-cleanup.test.mjs',
 ];
 
 // 双向校验（纯函数，可单测）：

@@ -167,7 +167,6 @@ function prHandoffFor(env, group, branch) {
   const packet = manifest.dispatch.packets.find((p) => p.group_id === group);
   const tip = env.headSha;
   return {
-    pr_url: `https://github.com/xindong/mivo-canvas-plugin/pull/${group === 'v1' ? 2 : 1}`,
     branch,
     tip_sha: tip,
     scs: packet.scs_inline.map((s) => ({ id: s.id, status: 'pass' })),
@@ -229,9 +228,7 @@ function walkGroupToAccepted(env, group, workerLabel) {
     assert.equal(rr.status, 0, `${group} verify 交卷应 exit 0: ${rr.stderr}`);
   }
   rr = cliLedger('record-delivery', env.ledgerPath, '--group', group, '--payload', JSON.stringify(prHandoffFor(env, group, `feat/${group}`)), '--now', FIXED_NOW);
-  assert.equal(rr.status, 0, `${group} pr-handoff 应 exit 0: ${rr.stderr}`);
-  rr = cliLedger('set-state', env.ledgerPath, '--group', group, '--to', 'pr-open', '--now', FIXED_NOW);
-  assert.equal(rr.status, 0, `${group} →pr-open 应 exit 0: ${rr.stderr}`);
+  assert.equal(rr.status, 0, `${group} candidate 交卷应 exit 0: ${rr.stderr}`);
   rr = cliLedger('set-state', env.ledgerPath, '--group', group, '--to', 'accepted', '--now', FIXED_NOW);
   assert.equal(rr.status, 0, `${group} →accepted 应 exit 0: ${rr.stderr}`);
 }

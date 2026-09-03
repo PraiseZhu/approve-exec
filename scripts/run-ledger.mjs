@@ -69,6 +69,9 @@ export const EVENT_TYPES = Object.freeze([
   'gate_routing',
   'pr_opened',
   'accepted',
+  'local_cleaned',
+  'session_archived',
+  'watch_registered',
   'site_report',
   'replan_note',
 ]);
@@ -85,13 +88,14 @@ export const FAILED_EVENT_TYPES = Object.freeze([
   'budget_note',         // 预算耗尽
 ]);
 export const GROUP_STATES = Object.freeze([
-  'pending', 'dispatched', 'executing', 'blocked', 'e2e', 'review', 'pr-open', 'accepted', 'failed',
+  'pending', 'dispatched', 'executing', 'blocked', 'e2e', 'review', 'accepted', 'pr-open', 'local-cleaned', 'archived', 'failed',
 ]);
 export const PHASE_ORDER = Object.freeze([
   'splitting', 'dispatching', 'running', 'accepting', 'ready',
 ]);
 export const TIP_SHA_RE = /^[0-9a-f]{40}$/;
 export const SHA256_RE = /^[0-9a-f]{64}$/;
+const GITHUB_PR_URL_RE = /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+/;
 
 // detail 契约的组上下文事件：ready-check 的分区对账与 delivery 绑定读取 detail.group_id 的
 // 事件类型（F1 修复点）。wave 级（integrate）与相位级（illegal_transition 的 group_id: null）
@@ -100,11 +104,19 @@ const GROUP_SCOPED_EVENT_TYPES = new Set([
   'dispatch', 'delivery', 'review_round', 'packet_rendered', 'timeout_redispatch',
   'overreach_rejected', 'overlap_replan', 'budget_note',
   'session_created', 'session_steer', 'gate_goal', 'gate_routing', 'pr_opened', 'accepted',
+  'local_cleaned', 'session_archived', 'watch_registered',
   'replan_note',
 ]);
 const GATE_EVENT_TYPES = Object.freeze(['gate_goal', 'gate_routing']);
-const SESSION_EVENT_TYPES = Object.freeze(['session_created', 'session_steer', 'pr_opened', 'accepted']);
-const NOTE_EVENT_TYPES = Object.freeze(['site_report', 'replan_note']);
+const SESSION_EVENT_TYPES = Object.freeze([
+  'session_created', 'session_steer', 'pr_opened', 'accepted',
+  'local_cleaned', 'session_archived', 'watch_registered',
+]);
+const NOTE_EVENT_TYPES = Object.freeze(['site_report', 'replan_note', 'watch_registered']);
+const OLD_WATCH_SCHEDULE_IDS = Object.freeze([
+  '031c7ffd-86a8-4f16-9404-1550181da4f3',
+  'c692c1a7-a4cf-4201-b9e2-f9dbea35aba2',
+]);
 const REPLAN_ACTIONS = Object.freeze(['repack', 'resplit', 'land-first', 'split-new']);
 const EXEC_DELIVERY_STATUS = Object.freeze(['done', 'partial', 'blocked']);
 const SC_RESULT_STATUS = Object.freeze(['pass', 'fail', 'not_run']);
@@ -244,6 +256,24 @@ export function assertEventSchema(ev) {
     }
     if (!Array.isArray(ev.detail.affected_groups) || ev.detail.affected_groups.some((g) => typeof g !== 'string' || g.length === 0)) {
       throw new LedgerError('SCHEMA', 'replan_note 的 detail.affected_groups 必须是非空字符串数组');
+    }
+  }
+  if (ev.type === 'watch_registered') {
+    const url = ev.detail.pr_url;
+    if (typeof url !== 'string' || !GITHUB_PR_URL_RE.test(url)) {
+      throw new LedgerError('SCHEMA', 'watch_registered 的 detail.pr_url 必须是 GitHub PR URL');
+    }
+    if (typeof ev.detail.state_file !== 'string' || ev.detail.state_file.length === 0) {
+      throw new LedgerError('SCHEMA', 'watch_registered 的 detail.state_file 必须是非空字符串');
+    }
+    if (!Number.isSafeInteger(ev.detail.assignment_seq) || ev.detail.assignment_seq < 0) {
+      throw new LedgerError('SCHEMA', 'watch_registered 的 detail.assignment_seq 必须是非负安全整数（代际隔离）');
+    }
+    const blob = JSON.stringify(ev.detail);
+    for (const id of OLD_WATCH_SCHEDULE_IDS) {
+      if (blob.includes(id)) {
+        throw new LedgerError('SCHEMA', `watch_registered 不得引用旧班车 id ${id}`);
+      }
     }
   }
 }
@@ -780,10 +810,12 @@ const GROUP_TRANSITIONS = Object.freeze({
   executing: ['blocked', 'e2e', 'failed'],
   blocked: ['executing', 'failed'],
   e2e: ['review', 'failed'],
-  review: ['pr-open', 'failed'],
-  'pr-open': ['accepted', 'failed'],
+  review: ['accepted', 'failed'],
+  accepted: ['pr-open', 'failed'],
+  'pr-open': ['local-cleaned', 'failed'],
+  'local-cleaned': ['archived', 'failed'],
+  archived: [],
   failed: ['pending'],
-  accepted: [], // 组级终态，不可回退：任何跳转拒（重放攻击）
 });
 
 // phase 单向前进（波次顺序门 F-E）：→accepting 及后续 phase 要求——
@@ -815,14 +847,18 @@ function phaseTransitionAllowed(ledger, targetPhase) {
     if (unintegratedPrev.length > 0) {
       return `缺失前置：→${targetPhase} 要求所有前波已记录合并顺序，未记录前波: wave ${unintegratedPrev.map((w) => w.wave).join(', ')}`;
     }
-    const allPrOpen = activeWave.groups.every((g) => g.state === 'pr-open' || g.state === 'accepted');
-    if (!allPrOpen) {
-      return `缺失前置：→${targetPhase} 要求当前波全组 pr-open 或 accepted（当前未满足）`;
+    const allAccepted = activeWave.groups.every((g) => (
+      g.state === 'accepted' || g.state === 'pr-open' || g.state === 'local-cleaned' || g.state === 'archived'
+    ));
+    if (!allAccepted) {
+      return `缺失前置：→${targetPhase} 要求当前波全组 accepted 或之后的收尾态（当前未满足）`;
     }
     if (targetPhase === 'ready') {
-      const notAccepted = ledger.waves.flatMap((w) => w.groups).filter((g) => g.state !== 'accepted');
+      const notAccepted = ledger.waves.flatMap((w) => w.groups).filter((g) => (
+        g.state !== 'accepted' && g.state !== 'pr-open' && g.state !== 'local-cleaned' && g.state !== 'archived'
+      ));
       if (notAccepted.length > 0) {
-        return `缺失前置：→ready 要求全部组 accepted，未 accepted: ${notAccepted.map((g) => g.group_id).join(', ')}`;
+        return `缺失前置：→ready 要求全部组至少 accepted，未 accepted: ${notAccepted.map((g) => g.group_id).join(', ')}`;
       }
       const unintegratedAll = ledger.waves.filter((w) => w.integrated_tip === null);
       if (unintegratedAll.length > 0) {
@@ -856,6 +892,15 @@ export const PR_RECEIPT_KEYS = Object.freeze([
   'pr_id', 'session_id', 'candidate_sha', 'pr_url', 'e2e_status',
   'review_unresolved', 'size_result', 'ledger_version', 'checked_at',
 ]);
+export const PR_OPEN_RECEIPT_KEYS = Object.freeze([
+  'url', 'number', 'headRefOid', 'isDraft', 'state', 'branch', 'checked_at',
+]);
+export const CLEANUP_RECEIPT_KEYS = Object.freeze([
+  'ok', 'skipped', 'branch', 'worktree', 'sha', 'remoteDeleted', 'checked_at',
+]);
+export const ARCHIVE_RECEIPT_KEYS = Object.freeze([
+  'session_id', 'archived', 'checked_at',
+]);
 const GOAL_SKILL_PATHS = Object.freeze([
   '/Users/praise/.agents/skills/goal/SKILL.md',
   '/Users/praise/.claude/skills/goal/SKILL.md',
@@ -864,13 +909,12 @@ const GOAL_SKILL_PATHS = Object.freeze([
 const ROUTING_PATH_LIVE = '/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json';
 const ROUTING_PATH_LINK = '/Users/praise/.agents/skills/orca-fanout/routing.json';
 const PR_HANDOFF_DELIVERY_KEYS = Object.freeze([
-  'pr_url', 'branch', 'tip_sha', 'scs', 'goal_skill_path', 'e2e', 'review', 'size_gate',
+  'branch', 'tip_sha', 'scs', 'goal_skill_path', 'e2e', 'review', 'size_gate',
 ]);
 const PR_HANDOFF_E2E_KEYS = Object.freeze(['status', 'candidate_sha', 'model', 'route_source']);
 const PR_HANDOFF_REVIEW_KEYS = Object.freeze(['unresolved', 'candidate_sha', 'model', 'route_source']);
 const PR_HANDOFF_SIZE_KEYS = Object.freeze(['result', 'candidate_sha']);
 const PR_HANDOFF_SC_KEYS = Object.freeze(['id', 'status']);
-const GITHUB_PR_URL_RE = /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+/;
 
 /** 读取 + exact 校验 receipt（文件级/形状级错误 → READY_RECEIPT；语义绑定由调用方对台账校验）。 */
 export function readReadyReceipt(receiptPath) {
@@ -889,6 +933,88 @@ export function readReadyReceipt(receiptPath) {
   }
   if (typeof parsed.checked_at !== 'string' || parsed.checked_at.length === 0) {
     throw new LedgerError('READY_RECEIPT', '→ready receipt.checked_at 必须是非空字符串');
+  }
+  return parsed;
+}
+
+function readExactReceipt(receiptPath, keys, what) {
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(receiptPath, 'utf8'));
+  } catch (err) {
+    throw new LedgerError('WRAPUP_RECEIPT', `${what} 读取/解析失败（${receiptPath}）: ${err.message}`);
+  }
+  try {
+    assertKeys(parsed, keys, what);
+  } catch (err) {
+    if (err instanceof LedgerError && err.code === 'SCHEMA') {
+      throw new LedgerError('WRAPUP_RECEIPT', err.message);
+    }
+    throw err;
+  }
+  if (typeof parsed.checked_at !== 'string' || parsed.checked_at.length === 0) {
+    throw new LedgerError('WRAPUP_RECEIPT', `${what}.checked_at 必须是非空字符串`);
+  }
+  return parsed;
+}
+
+export function readPrOpenReceipt(receiptPath) {
+  const parsed = readExactReceipt(receiptPath, PR_OPEN_RECEIPT_KEYS, '→pr-open receipt');
+  if (typeof parsed.url !== 'string' || !GITHUB_PR_URL_RE.test(parsed.url)) {
+    throw new LedgerError('WRAPUP_RECEIPT', `→pr-open receipt.url 非法（当前: ${parsed.url ?? '缺失'}）`);
+  }
+  if (parsed.state !== 'OPEN') {
+    throw new LedgerError('WRAPUP_RECEIPT', `→pr-open receipt.state 必须是 OPEN（当前: ${parsed.state}）`);
+  }
+  if (parsed.isDraft !== false) {
+    throw new LedgerError('WRAPUP_RECEIPT', '→pr-open receipt.isDraft 必须是 false（验收后不得仍是 draft）');
+  }
+  if (!Number.isSafeInteger(parsed.number) || parsed.number <= 0) {
+    throw new LedgerError('WRAPUP_RECEIPT', `→pr-open receipt.number 必须是正整数（当前: ${parsed.number}）`);
+  }
+  const urlNumber = Number(parsed.url.match(/\/pull\/(\d+)/)[1]);
+  if (urlNumber !== parsed.number) {
+    throw new LedgerError('WRAPUP_RECEIPT', `→pr-open receipt.number=${parsed.number} 对不上 URL #${urlNumber}`);
+  }
+  if (typeof parsed.headRefOid !== 'string' || !TIP_SHA_RE.test(parsed.headRefOid)) {
+    throw new LedgerError('WRAPUP_RECEIPT', '→pr-open receipt.headRefOid 非 40 位十六进制');
+  }
+  if (typeof parsed.branch !== 'string' || parsed.branch.length === 0) {
+    throw new LedgerError('WRAPUP_RECEIPT', '→pr-open receipt.branch 必须是非空字符串');
+  }
+  return parsed;
+}
+
+export function readCleanupReceipt(receiptPath) {
+  const parsed = readExactReceipt(receiptPath, CLEANUP_RECEIPT_KEYS, '→local-cleaned receipt');
+  if (parsed.ok !== true) {
+    throw new LedgerError('WRAPUP_RECEIPT', `→local-cleaned receipt.ok 必须是 true（当前: ${parsed.ok}）`);
+  }
+  if (parsed.skipped !== false) {
+    throw new LedgerError('WRAPUP_RECEIPT', '→local-cleaned receipt.skipped 必须是 false（跳过删除不得入账）');
+  }
+  if (parsed.remoteDeleted !== false) {
+    throw new LedgerError('WRAPUP_RECEIPT', '→local-cleaned receipt.remoteDeleted 必须是 false（禁止删远端）');
+  }
+  if (typeof parsed.branch !== 'string' || parsed.branch.length === 0) {
+    throw new LedgerError('WRAPUP_RECEIPT', '→local-cleaned receipt.branch 必须是非空字符串');
+  }
+  if (typeof parsed.worktree !== 'string' || !parsed.worktree.startsWith('/')) {
+    throw new LedgerError('WRAPUP_RECEIPT', '→local-cleaned receipt.worktree 必须是绝对路径');
+  }
+  if (typeof parsed.sha !== 'string' || !TIP_SHA_RE.test(parsed.sha)) {
+    throw new LedgerError('WRAPUP_RECEIPT', '→local-cleaned receipt.sha 非 40 位十六进制');
+  }
+  return parsed;
+}
+
+export function readArchiveReceipt(receiptPath) {
+  const parsed = readExactReceipt(receiptPath, ARCHIVE_RECEIPT_KEYS, '→archived receipt');
+  if (parsed.archived !== true) {
+    throw new LedgerError('WRAPUP_RECEIPT', `→archived receipt.archived 必须是 true（当前: ${parsed.archived}）`);
+  }
+  if (typeof parsed.session_id !== 'string' || parsed.session_id.length === 0) {
+    throw new LedgerError('WRAPUP_RECEIPT', '→archived receipt.session_id 必须是非空字符串');
   }
   return parsed;
 }
@@ -965,14 +1091,15 @@ export function latestGroupEvent(ledger, groupId, type) {
   return null;
 }
 
-/** 组最近一条 pr-handoff 终态交卷（无则 null）。→pr-open 前置消费。同代才算。 */
+/** 组最近一条 candidate 交卷（无则 null）。→accepted 前置消费。同代才算。 */
 export function latestPrHandoffDelivery(ledger, groupId) {
   const g = findGroup(ledger, groupId);
   const seq = g?.assignment_seq;
   for (let i = ledger.events.length - 1; i >= 0; i -= 1) {
     const ev = ledger.events[i];
     if (ev.type !== 'delivery' || ev.detail?.group_id !== groupId) continue;
-    if (!(ev.detail?.pr_url && ev.detail?.e2e && ev.detail?.review && ev.detail?.size_gate)) continue;
+    if (!(ev.detail?.e2e && ev.detail?.review && ev.detail?.size_gate && ev.detail?.branch && ev.detail?.tip_sha)) continue;
+    if (ev.detail?.pr_url) continue;
     if (seq !== undefined && ev.detail?.assignment_seq !== seq) continue;
     return ev.detail;
   }
@@ -1060,7 +1187,7 @@ function assertGroupWritable(g, what) {
 const DELIVERY_LIFECYCLE = Object.freeze({
   exec: ['dispatched', 'executing'],
   review: ['e2e', 'review'],
-  verify: ['review', 'pr-open'],
+  verify: ['review', 'accepted'],
   // prewalk：只允许 dispatched；入账不改组状态。组级次数/波 0 门在 recordDelivery 锁内另判。
   prewalk: ['dispatched'],
   'pr-handoff': ['review'],
@@ -1081,7 +1208,7 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
     throw new LedgerError('ARGS', '--detail 必须是 JSON 对象');
   }
   const ledger = readLedger(ledgerPath);
-  if (ledger.phase === 'ready') {
+  if (ledger.phase === 'ready' && event !== 'watch_registered') {
     throw new LedgerError('FROZEN', `台账已 ready（phase=${ledger.phase}），冻结只读，拒绝写操作`);
   }
   const expected = ledger.version;
@@ -1091,6 +1218,39 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
   }
   if (event === 'replan_note' && !('group_id' in parsed) && typeof parsed.origin_group === 'string') {
     ev.detail.group_id = parsed.origin_group;
+  }
+  if (event === 'watch_registered') {
+    if (typeof parsed.group_id !== 'string' || parsed.group_id.length === 0) {
+      throw new LedgerError('ARGS', 'watch_registered 的 --detail.group_id 必须是非空字符串');
+    }
+    const g = findGroup(ledger, parsed.group_id);
+    if (g.state !== 'pr-open') {
+      throw new LedgerError('PRECONDITION', `watch_registered 只允许在 pr-open 入账（组 ${parsed.group_id} 当前 ${g.state}）`);
+    }
+    if (typeof parsed.pr_url !== 'string' || parsed.pr_url !== g.pr_url) {
+      throw new LedgerError('PRECONDITION', `watch_registered.pr_url 必须等于组上已开的 GitHub URL`);
+    }
+    if (typeof parsed.state_file !== 'string' || !parsed.state_file.startsWith('/') || !existsSync(parsed.state_file)) {
+      throw new LedgerError('PRECONDITION', 'watch_registered 的 state_file 必须是已存在的绝对路径（Mini 名册文件，先 register 再入账）');
+    }
+    let roster;
+    try {
+      roster = JSON.parse(readFileSync(parsed.state_file, 'utf8'));
+    } catch (err) {
+      throw new LedgerError('PRECONDITION', `watch_registered 名册文件不可解析: ${err.message}`);
+    }
+    const rosterPr = Number(roster?.pr_number ?? roster?.pr);
+    const urlMatch = typeof g.pr_url === 'string' ? g.pr_url.match(/\/pull\/(\d+)/) : null;
+    const expectedPr = urlMatch ? Number(urlMatch[1]) : null;
+    if (!Number.isInteger(rosterPr) || rosterPr !== expectedPr) {
+      throw new LedgerError('PRECONDITION', `watch_registered 名册身份不符（文件 pr=${roster?.pr_number ?? roster?.pr}，组 PR=${expectedPr}）`);
+    }
+    if (roster.session_id) {
+      throw new LedgerError('PRECONDITION', 'watch_registered 名册此时不得已有 Mini session_id（盯梢会话由 Mini 首次信号 create，不是本机代填）');
+    }
+    if (!('assignment_seq' in parsed)) {
+      ev.detail.assignment_seq = g.assignment_seq ?? 0;
+    }
   }
   assertEventSchema(ev);
   return writeLedgerAtomic(ledgerPath, expected, (cur) => {
@@ -1102,11 +1262,17 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
 export function setState({
   ledgerPath, now, group, to, workerLabel, tipSha, event, detail,
   identity, phase, wave, integrate, readyReceipt, memSnapshot,
+  prOpenReceipt, cleanupReceipt, archiveReceipt,
 }) {
   requireNow(now, 'set-state');
   const ledger = readLedger(ledgerPath);
-  if (ledger.phase === 'ready') {
-    // ready 相位达成后台账冻结（只读）：任何写操作拒（含非法尝试，冻结后不落事件）
+  const wrapupAfterReady = ledger.phase === 'ready'
+    && identity === undefined
+    && phase === undefined
+    && integrate === undefined
+    && ['pr-open', 'local-cleaned', 'archived'].includes(to);
+  if (ledger.phase === 'ready' && !wrapupAfterReady) {
+    // ready 相位达成后台账冻结（只读）：验收后收尾（pr-open / local-cleaned / archived）例外
     throw new LedgerError('FROZEN', `台账已 ready（phase=${ledger.phase}），冻结只读，拒绝写操作`);
   }
   const expected = ledger.version;
@@ -1378,26 +1544,95 @@ export function setState({
         return '缺失前置：executing→e2e 要求本组成立的 gate_routing（detail.routing_sha256 64hex）；create_worker 前必须现读 routing.json';
       }
     }
-    if (to === 'pr-open' && from === 'review') {
+    if (to === 'accepted' && from === 'review') {
       if (!latestGroupEvent(ledger, group, 'gate_goal')) {
-        return '缺失前置：→pr-open 要求本组成立的 gate_goal';
+        return '缺失前置：→accepted 要求本组成立的 gate_goal';
       }
       if (!latestGroupEvent(ledger, group, 'gate_routing')) {
-        return '缺失前置：→pr-open 要求本组成立的 gate_routing';
+        return '缺失前置：→accepted 要求本组成立的 gate_routing';
       }
       const handoff = latestPrHandoffDelivery(ledger, group);
       if (!handoff) {
-        return '缺失前置：→pr-open 要求终态 record-delivery（pr-handoff exact schema）已入账';
+        return '缺失前置：→accepted 要求 candidate record-delivery（pr-handoff exact schema，不得含 pr_url）已入账';
       }
-      for (const k of PR_RECEIPT_KEYS) {
-        if (handoff[k] === undefined || handoff[k] === null || handoff[k] === '') {
-          return `缺失前置：→pr-open 要求 PR_RECEIPT_KEYS 齐全（缺 ${k}）`;
-        }
+      // accepted 是 lead 的验收闸，不只是「有一张交卷」：candidate 必须是可提交
+      // 的完整绿证据。record-delivery 仍允许把失败/未跑结果交上来供 lead 诊断，
+      // 但不能借 accepted 状态把它们当成已验收。所有 candidate SHA 也必须绑定同一
+      // 树，避免 e2e/review/size 各自验了不同候选后拼成一张假绿交卷。
+      const badScs = Array.isArray(handoff.scs)
+        ? handoff.scs.filter((sc) => sc?.status !== 'pass').map((sc) => sc?.id ?? '<missing>')
+        : ['<missing>'];
+      if (badScs.length > 0) {
+        return `缺失前置：→accepted 要求全部 SC status=pass（未通过: ${badScs.join(', ')}）`;
+      }
+      if (handoff.e2e?.status !== 'pass') {
+        return `缺失前置：→accepted 要求 e2e.status=pass（当前 ${handoff.e2e?.status ?? '缺失'}）`;
+      }
+      if (handoff.review?.unresolved !== 0 || g.review.unresolved !== 0) {
+        const unresolved = handoff.review?.unresolved ?? g.review.unresolved;
+        return `缺失前置：→accepted 要求 unresolved==0（当前 ${unresolved}）`;
+      }
+      if (handoff.size_gate?.result === 'STOP') {
+        return '缺失前置：→accepted 要求 size_gate.result != STOP（当前 STOP）';
+      }
+      if (typeof g.branch !== 'string' || g.branch.length === 0 || handoff.branch !== g.branch) {
+        return `缺失前置：→accepted 要求 candidate branch 对上台账身份（candidate=${handoff.branch ?? '缺失'}，台账=${g.branch ?? '缺失'}）`;
+      }
+      const tip = handoff.tip_sha;
+      const mismatched = [
+        ['tip_sha', tip],
+        ['ledger.tip_sha', g.tip_sha],
+        ['e2e.candidate_sha', handoff.e2e?.candidate_sha],
+        ['review.candidate_sha', handoff.review?.candidate_sha],
+        ['size_gate.candidate_sha', handoff.size_gate?.candidate_sha],
+      ].filter(([, sha]) => sha !== tip).map(([name, sha]) => `${name}=${sha ?? '缺失'}`);
+      if (mismatched.length > 0) {
+        return `缺失前置：→accepted 要求 e2e/review/size candidate_sha 全部等于 tip_sha=${tip}（不一致: ${mismatched.join(', ')}）`;
       }
     }
-    if (to === 'accepted' && from === 'pr-open') {
-      if (g.review.unresolved !== 0) {
-        return `缺失前置：→accepted 要求 unresolved==0（当前 ${g.review.unresolved}）`;
+    if (to === 'pr-open' && from === 'accepted') {
+      if (ledger.phase !== 'ready') {
+        return `缺失前置：accepted→pr-open 要求 run phase=ready（当前 ${ledger.phase}；先由 ready-check receipt 驱动 →ready，再开远端 PR）`;
+      }
+      if (prOpenReceipt === undefined) {
+        return '缺失前置：accepted→pr-open 要求 confirm-pr-open 成功回执（--pr-open-receipt <path>）';
+      }
+      if (prOpenReceipt.branch !== g.branch) {
+        return `缺失前置：pr-open receipt.branch=${prOpenReceipt.branch} 对不上组分支 ${g.branch ?? '缺失'}`;
+      }
+      if (prOpenReceipt.headRefOid !== g.tip_sha) {
+        return `缺失前置：pr-open receipt.headRefOid=${prOpenReceipt.headRefOid} 对不上组 tip_sha=${g.tip_sha ?? '缺失'}`;
+      }
+    }
+    if (to === 'local-cleaned' && from === 'pr-open') {
+      if (typeof g.pr_url !== 'string' || !GITHUB_PR_URL_RE.test(g.pr_url)) {
+        return '缺失前置：→local-cleaned 要求组上已有 GitHub PR URL';
+      }
+      if (!latestGroupEvent(ledger, group, 'watch_registered')) {
+        return '缺失前置：→local-cleaned 要求本组成立的 watch_registered（Mini 名册先于清场）';
+      }
+      if (cleanupReceipt === undefined) {
+        return '缺失前置：→local-cleaned 要求 wrapup-cleanup 成功回执（--cleanup-receipt <path>）';
+      }
+      if (cleanupReceipt.branch !== g.branch) {
+        return `缺失前置：cleanup receipt.branch=${cleanupReceipt.branch} 对不上组分支 ${g.branch ?? '缺失'}`;
+      }
+      if (cleanupReceipt.sha !== g.tip_sha) {
+        return `缺失前置：cleanup receipt.sha=${cleanupReceipt.sha} 对不上组 tip_sha=${g.tip_sha ?? '缺失'}`;
+      }
+      if (typeof g.worktree === 'string' && cleanupReceipt.worktree !== g.worktree) {
+        return `缺失前置：cleanup receipt.worktree=${cleanupReceipt.worktree} 对不上组 worktree=${g.worktree}`;
+      }
+    }
+    if (to === 'archived' && from === 'local-cleaned') {
+      if (typeof g.session_id !== 'string' || g.session_id.length === 0) {
+        return '缺失前置：→archived 要求 session_id（只归档 PI session）';
+      }
+      if (archiveReceipt === undefined) {
+        return '缺失前置：→archived 要求 archive_sessions 成功回执（--archive-receipt <path>）';
+      }
+      if (archiveReceipt.session_id !== g.session_id) {
+        return `缺失前置：archive receipt.session_id=${archiveReceipt.session_id} 对不上组 session_id=${g.session_id}`;
       }
     }
     if (to === 'failed') {
@@ -1490,22 +1725,56 @@ export function setState({
       }
     } else if (to === 'review') {
       g.state = 'review';
-    } else if (to === 'pr-open') {
-      g.state = 'pr-open';
-      const handoff = latestPrHandoffDelivery(cur, group);
-      if (handoff?.pr_url) g.pr_url = handoff.pr_url;
-      if (handoff?.tip_sha) g.tip_sha = handoff.tip_sha;
-      cur.events.push({
-        type: 'pr_opened',
-        at: now,
-        detail: { group_id: group, pr_url: g.pr_url, session_id: g.session_id, tip_sha: g.tip_sha },
-      });
     } else if (to === 'accepted') {
       g.state = 'accepted';
+      const handoff = latestPrHandoffDelivery(cur, group);
+      if (handoff?.tip_sha) g.tip_sha = handoff.tip_sha;
       cur.events.push({
         type: 'accepted',
         at: now,
-        detail: { group_id: group, pr_url: g.pr_url, session_id: g.session_id },
+        detail: { group_id: group, session_id: g.session_id, tip_sha: g.tip_sha },
+      });
+    } else if (to === 'pr-open') {
+      g.state = 'pr-open';
+      g.pr_url = prOpenReceipt.url;
+      cur.events.push({
+        type: 'pr_opened',
+        at: now,
+        detail: {
+          group_id: group,
+          pr_url: g.pr_url,
+          pr_number: prOpenReceipt.number,
+          headRefOid: prOpenReceipt.headRefOid,
+          session_id: g.session_id,
+          tip_sha: g.tip_sha,
+        },
+      });
+    } else if (to === 'local-cleaned') {
+      g.state = 'local-cleaned';
+      cur.events.push({
+        type: 'local_cleaned',
+        at: now,
+        detail: {
+          group_id: group,
+          branch: cleanupReceipt.branch,
+          worktree: cleanupReceipt.worktree,
+          sha: cleanupReceipt.sha,
+          remoteDeleted: false,
+          session_id: g.session_id,
+          pr_url: g.pr_url,
+        },
+      });
+    } else if (to === 'archived') {
+      g.state = 'archived';
+      cur.events.push({
+        type: 'session_archived',
+        at: now,
+        detail: {
+          group_id: group,
+          session_id: archiveReceipt.session_id,
+          archived: true,
+          pr_url: g.pr_url,
+        },
       });
     } else if (to === 'failed') {
       if (!event || !FAILED_EVENT_TYPES.includes(event)) {
@@ -1779,8 +2048,8 @@ function assertRouteSource(value, what) {
 }
 
 function validatePrHandoffDelivery(data, packet) {
-  if (typeof data.pr_url !== 'string' || !GITHUB_PR_URL_RE.test(data.pr_url)) {
-    throw new LedgerError('DELIVERY_SCHEMA', `终态交卷 pr_url 必须是非空 GitHub PR URL（当前: ${data.pr_url ?? '缺失'}）`);
+  if (Object.prototype.hasOwnProperty.call(data, 'pr_url')) {
+    throw new LedgerError('DELIVERY_SCHEMA', 'candidate 交卷不得含 pr_url（验收前不开远端 PR）');
   }
   if (typeof data.branch !== 'string' || data.branch.length === 0) {
     throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 branch 必须是非空字符串');
@@ -2225,19 +2494,16 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
       if (!latestGroupEvent(cur, group, 'gate_goal') || !latestGroupEvent(cur, group, 'gate_routing')) {
         throw new LedgerError(
           'PRECONDITION',
-          `组 ${group} 终态交卷要求本组成立的 gate_goal + gate_routing（视为未执行开工闸，拒，不得 pr-open）`
+          `组 ${group} candidate 交卷要求本组成立的 gate_goal + gate_routing（视为未执行开工闸，拒，不得 accepted）`
         );
       }
       g.tip_sha = data.tip_sha;
-      g.pr_url = data.pr_url;
       g.review.unresolved = data.review.unresolved;
-      const prId = (typeof data.pr_url === 'string' && data.pr_url.match(/\/pull\/(\d+)/)?.[1]) || data.pr_url;
       cur.events.push({
         type: 'delivery',
         at: now,
         detail: {
           group_id: group,
-          pr_url: data.pr_url,
           branch: data.branch,
           tip_sha: data.tip_sha,
           scs: data.scs,
@@ -2245,7 +2511,6 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
           e2e: data.e2e,
           review: data.review,
           size_gate: data.size_gate,
-          pr_id: prId,
           session_id: g.session_id,
           candidate_sha: data.tip_sha,
           e2e_status: data.e2e.status,
@@ -2280,8 +2545,8 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
 // last_event_at = 台账最后一条事件的 at（events 数组按写入顺序追加，末位即最新）。
 // 无事件时 last_event_at/minutes_since_last_event 输出 null——不伪造 0（0 会被看成
 // 「刚刚有活动」，掩盖「自 init 起就无事件」的停摆事实）。
-// in_flight_groups 按「未完成验收」语义过滤：state ∈ dispatched/executing/blocked/e2e/review/pr-open
-// （组已派工但尚未 accepted）。**这与落不落事件无关**：pr-open 态组不落事件照样被 state 过滤捕获。
+// in_flight_groups 按「未完成验收」语义过滤：state ∈ dispatched/executing/blocked/e2e/review
+// （组已派工但尚未 accepted）。accepted 及之后的收尾态不算在途。
 // 导出函数与 CLI 同实现：只读（readLedger，ready 冻结不拦读——冻结只拦写路径）；
 // --now 注入供确定性测试，缺省取系统时钟。
 export function staleness({ ledgerPath, now }) {
@@ -2302,7 +2567,7 @@ export function staleness({ ledgerPath, now }) {
   }
   const inFlight = ledger.waves
     .flatMap((w) => w.groups)
-    .filter((g) => ['dispatched', 'executing', 'blocked', 'e2e', 'review', 'pr-open'].includes(g.state))
+    .filter((g) => ['dispatched', 'executing', 'blocked', 'e2e', 'review'].includes(g.state))
     .map((g) => ({ group_id: g.group_id, state: g.state, dispatched_at: g.dispatched_at }));
   return {
     phase: ledger.phase,
@@ -2320,13 +2585,13 @@ function usage() {
     'run-ledger <sub> <ledger> [flags]',
     '  init <ledger> --manifest <path> --run-id <id> --now <ts> [--baseline <sha>]',
     '  validate <ledger>',
-    '  set-state <ledger> --group <gid> --to <state> --now <ts> [--worker-label <l>] [--tip-sha <hex40>] [--event <type>] [--mem-snapshot <json>]',
+    '  set-state <ledger> --group <gid> --to <state> --now <ts> [--worker-label <l>] [--tip-sha <hex40>] [--event <type>] [--mem-snapshot <json>] [--pr-open-receipt <path>] [--cleanup-receipt <path>] [--archive-receipt <path>]',
     '  set-state <ledger> --identity <json> --group <gid> --now <ts>',
     '  set-state <ledger> --phase <phase> --now <ts> [--ready-receipt <path>]',
     '  set-state <ledger> --wave <n> --integrate <hex40> --now <ts>',
     '  render-packet <ledger> --group <gid> [--manifest <path>]',
     '  record-delivery <ledger> --group <gid> --payload <json|@file> --now <ts>',
-    '  note-event <ledger> --event site_report|replan_note --detail <json> --now <ts>',
+    '  note-event <ledger> --event site_report|replan_note|watch_registered --detail <json> --now <ts>',
     '  staleness <ledger> [--now <iso>]',
     '退出码：0 成功 / 1 用法错误 / 2 fail-closed（schema/CAS/前置/hash 不匹配等，点名原因）',
   ].join('\n');
@@ -2377,7 +2642,7 @@ function removedFlagMessage(flag) {
 const SUBCOMMAND_FLAGS = Object.freeze({
   init: ['manifest', 'run-id', 'now', 'baseline'],
   validate: [],
-  'set-state': ['group', 'to', 'now', 'worker-label', 'tip-sha', 'event', 'identity', 'phase', 'wave', 'integrate', 'ready-receipt', 'mem-snapshot', 'detail'],
+  'set-state': ['group', 'to', 'now', 'worker-label', 'tip-sha', 'event', 'identity', 'phase', 'wave', 'integrate', 'ready-receipt', 'mem-snapshot', 'detail', 'pr-open-receipt', 'cleanup-receipt', 'archive-receipt'],
   'render-packet': ['group', 'manifest', 'now'],
   'record-delivery': ['group', 'payload', 'now'],
   'note-event': ['event', 'detail', 'now'],
@@ -2478,6 +2743,18 @@ export function runCli(argv) {
         if (flags['ready-receipt'] !== undefined) {
           readyReceipt = readReadyReceipt(resolve(flags['ready-receipt']));
         }
+        let prOpenReceipt;
+        if (flags['pr-open-receipt'] !== undefined) {
+          prOpenReceipt = readPrOpenReceipt(resolve(flags['pr-open-receipt']));
+        }
+        let cleanupReceipt;
+        if (flags['cleanup-receipt'] !== undefined) {
+          cleanupReceipt = readCleanupReceipt(resolve(flags['cleanup-receipt']));
+        }
+        let archiveReceipt;
+        if (flags['archive-receipt'] !== undefined) {
+          archiveReceipt = readArchiveReceipt(resolve(flags['archive-receipt']));
+        }
         setState({
           ledgerPath,
           now: flags.now,
@@ -2493,6 +2770,9 @@ export function runCli(argv) {
           integrate: flags.integrate,
           readyReceipt,
           memSnapshot: flags['mem-snapshot'],
+          prOpenReceipt,
+          cleanupReceipt,
+          archiveReceipt,
         });
         if (flags.phase !== undefined) {
           console.log(`set-state: phase → ${flags.phase}（version+1）`);

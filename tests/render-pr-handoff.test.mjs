@@ -40,7 +40,8 @@ test('render-pr-handoff: 0–10 段齐全，含开工闸与绝对路径', () => 
   assert.ok(out.includes('丨 0902'));
   assert.ok(out.includes('model-route show'));
   assert.ok(out.includes('子 session 不合入'), '开工包第 8 段应禁止子 session 合入');
-  assert.ok(out.includes('合入由 lead'), '开工包应写明合入由 lead 执行');
+  assert.ok(out.includes('验收前不开远端 PR'), '开工包应写明验收前不开远端 PR');
+  assert.ok(out.includes('先注册 Mini 名册'), '开工包第 8 段应要求 Mini 名册先于 wrapup-cleanup');
   assert.ok(out.includes('假设破裂必须 blocked 上报'), '开工包第 9 段应禁就地改方案');
   assert.ok(out.includes('不得改总表'), '开工包第 9 段应禁改总表');
 });
