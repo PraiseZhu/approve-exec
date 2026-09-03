@@ -8,6 +8,9 @@ import { LedgerError, parseTimestamp, WATCH_RECEIPT_KEYS } from './run-ledger.mj
 
 const STATE_NAME_RE = /^([A-Za-z0-9.%!~*'()-]+)__([A-Za-z0-9.%!~*'()-]+)__(\d+)\.json$/;
 const REGISTER_LINE_RE = /^(REGISTERED|ALREADY)\s+(\/\S+\.json)\s*$/;
+export const MINI_WATCH_STATE_DIR = '/Users/praise/pr-autopilot-runtime/state';
+export const MINI_REGISTER_BIN = '/Users/praise/AI-Agent/Claude/capabilities/source/pr-autopilot/scripts/pr-watch/register.mjs';
+export const MINI_HOST = 'Praise-Mini';
 
 export function parseWatchArgs(argv) {
   const flags = {};
@@ -92,7 +95,27 @@ export function confirmWatchRegistered({
   return receipt;
 }
 
-function runRegister({ host, registerBin, stateDir, owner, repo, pr, branch, pushRemote }) {
+export function assertMiniWatchStateDir(stateDir) {
+  if (typeof stateDir !== 'string' || !stateDir.startsWith('/')) {
+    throw new LedgerError('ARGS', `state-dir 必须是 Mini 绝对路径（当前: ${stateDir ?? '缺失'}）`);
+  }
+  const normalized = stateDir.replace(/\/+$/, '');
+  if (normalized !== MINI_WATCH_STATE_DIR) {
+    throw new LedgerError('ARGS', `state-dir 必须是 ${MINI_WATCH_STATE_DIR}（当前: ${stateDir}）`);
+  }
+  return normalized;
+}
+
+export function assertMiniRegisterBin(registerBin) {
+  const bin = registerBin ?? MINI_REGISTER_BIN;
+  if (bin !== MINI_REGISTER_BIN) {
+    throw new LedgerError('ARGS', `register-bin 必须是 ${MINI_REGISTER_BIN}（当前: ${bin}）`);
+  }
+  return bin;
+}
+
+function runRegister({ host, registerBin, stateDir, owner, repo, pr, branch, pushRemote, sshRunner }) {
+  const ssh = sshRunner ?? ((args) => spawnSync('ssh', args, { encoding: 'utf8' }));
   const remoteCmd = [
     'node', registerBin,
     '--state-dir', stateDir,
@@ -102,36 +125,47 @@ function runRegister({ host, registerBin, stateDir, owner, repo, pr, branch, pus
     '--branch', branch,
     '--push-remote', pushRemote,
   ].map((part) => `'${String(part).replace(/'/g, `'\\''`)}'`).join(' ');
-  const r = spawnSync('ssh', ['-o', 'BatchMode=yes', host, remoteCmd], { encoding: 'utf8' });
+  const r = ssh(['-o', 'BatchMode=yes', host, remoteCmd]);
   if (r.status !== 0) {
     throw new LedgerError('PRECONDITION', `ssh register.mjs 失败: ${(r.stderr || r.stdout || '').trim()}`);
   }
   return r.stdout;
 }
 
+export function runWatchCli(argv, { sshRunner } = {}) {
+  const flags = parseWatchArgs(argv);
+  if (flags.stdout !== undefined) {
+    throw new LedgerError('ARGS', '--stdout 不是生产 CLI 参数；测试请直接调 confirmWatchRegistered()');
+  }
+  const stateDir = assertMiniWatchStateDir(flags['state-dir'] ?? MINI_WATCH_STATE_DIR);
+  const registerBin = assertMiniRegisterBin(flags['register-bin']);
+  const stdout = runRegister({
+    host: flags.host ?? MINI_HOST,
+    registerBin,
+    stateDir,
+    owner: flags.owner,
+    repo: flags.repo,
+    pr: flags.pr,
+    branch: flags.branch,
+    pushRemote: flags['push-remote'] ?? 'origin',
+    sshRunner,
+  });
+  const out = confirmWatchRegistered({
+    stdout,
+    owner: flags.owner,
+    repo: flags.repo,
+    prNumber: flags.pr,
+    branch: flags.branch,
+    now: flags.now,
+    ledgerVersion: flags['ledger-version'],
+    assignmentSeq: flags['assignment-seq'],
+  });
+  return out;
+}
+
 function runCli(argv) {
   try {
-    const flags = parseWatchArgs(argv);
-    const stdout = flags.stdout ?? runRegister({
-      host: flags.host ?? 'Praise-Mini',
-      registerBin: flags['register-bin'] ?? '/Users/praise/AI-Agent/Claude/capabilities/source/pr-autopilot/scripts/pr-watch/register.mjs',
-      stateDir: flags['state-dir'],
-      owner: flags.owner,
-      repo: flags.repo,
-      pr: flags.pr,
-      branch: flags.branch,
-      pushRemote: flags['push-remote'] ?? 'origin',
-    });
-    const out = confirmWatchRegistered({
-      stdout,
-      owner: flags.owner,
-      repo: flags.repo,
-      prNumber: flags.pr,
-      branch: flags.branch,
-      now: flags.now,
-      ledgerVersion: flags['ledger-version'],
-      assignmentSeq: flags['assignment-seq'],
-    });
+    const out = runWatchCli(argv);
     process.stdout.write(`${JSON.stringify(out)}\n`);
     return 0;
   } catch (err) {

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { assertReadyPr, confirmPrOpen } from '../scripts/confirm-pr-open.mjs';
 import { wrapupCleanup } from '../scripts/wrapup-cleanup.mjs';
-import { confirmWatchRegistered, parseRegisterStdout } from '../scripts/confirm-watch-registered.mjs';
+import { confirmWatchRegistered, parseRegisterStdout, runWatchCli, MINI_WATCH_STATE_DIR } from '../scripts/confirm-watch-registered.mjs';
 import { confirmSessionArchived, extractArchiveResult } from '../scripts/confirm-session-archived.mjs';
 import {
   LedgerError,
@@ -266,7 +266,12 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
   const archiveMinted = stamp();
   const archiveReceiptBody = confirmSessionArchived({
     sessionId: 'sess-g4',
-    archiveResult: { archived_session_ids: ['sess-g4'] },
+    archiveResult: {
+      ok: true,
+      status: 'archived',
+      count: 1,
+      changed: [{ session_id: 'sess-g4', status: 'archived' }],
+    },
     now: LATER, ledgerVersion: archiveMinted.ledger_version, assignmentSeq: archiveMinted.assignment_seq,
   });
   const archiveReceipt = join(dir, 'archive-receipt.json');
@@ -486,15 +491,51 @@ test('confirm-watch-registered 只吃 register.mjs 真实 stdout', () => {
 });
 
 test('confirm-session-archived 只吃 archive_sessions 工具结果', () => {
-  const extracted = extractArchiveResult({ session_ids: ['sess-g4'], status: 'archived' }, 'sess-g4');
+  const payload = {
+    ok: true,
+    status: 'archived',
+    count: 1,
+    changed: [{ session_id: 'sess-g4', status: 'archived' }],
+  };
+  const extracted = extractArchiveResult(payload, 'sess-g4');
   assert.equal(extracted.archived, true);
   const receipt = confirmSessionArchived({
     sessionId: 'sess-g4',
-    archiveResult: JSON.stringify({ archived_session_ids: ['sess-g4'] }),
+    archiveResult: JSON.stringify(payload),
     now: LATER, ledgerVersion: 13, assignmentSeq: 0,
   });
   assert.equal(receipt.archived, true);
-  assert.throws(() => extractArchiveResult({ archived_session_ids: ['other'] }, 'sess-g4'), LedgerError);
+  assert.throws(() => extractArchiveResult({ ok: true, archived: true }, 'never-archived'), LedgerError);
+  assert.throws(() => extractArchiveResult({
+    ok: true, status: 'archived', changed: [{ session_id: 'other', status: 'archived' }],
+  }, 'target-not-in-changed'), LedgerError);
+});
+
+test('confirm-watch-registered CLI 拒 --stdout，state-dir 必须钉 Mini 名册', () => {
+  assert.throws(() => runWatchCli([
+    '--stdout', 'REGISTERED /fake/xindong__mivo-canvas-plugin__22.json',
+    '--owner', 'xindong', '--repo', 'mivo-canvas-plugin', '--pr', '22',
+    '--branch', 'feat/x', '--now', LATER, '--ledger-version', '1', '--assignment-seq', '0',
+  ]), LedgerError);
+  assert.throws(() => runWatchCli([
+    '--state-dir', '/tmp/not-watch-state',
+    '--owner', 'xindong', '--repo', 'mivo-canvas-plugin', '--pr', '22',
+    '--branch', 'feat/x', '--now', LATER, '--ledger-version', '1', '--assignment-seq', '0',
+  ]), LedgerError);
+  const sshCalls = [];
+  const out = runWatchCli([
+    '--state-dir', MINI_WATCH_STATE_DIR,
+    '--owner', 'xindong', '--repo', 'mivo-canvas-plugin', '--pr', '1',
+    '--branch', 'feat/run-ledger', '--now', LATER, '--ledger-version', '1', '--assignment-seq', '0',
+  ], {
+    sshRunner: (args) => {
+      sshCalls.push(args);
+      return { status: 0, stdout: 'REGISTERED /Users/praise/pr-autopilot-runtime/state/xindong__mivo-canvas-plugin__1.json\n', stderr: '' };
+    },
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.pr_number, 1);
+  assert.ok(JSON.stringify(sshCalls[0]).includes(MINI_WATCH_STATE_DIR));
 });
 
 test('confirm-pr-open / wrapup-cleanup 缺 --now 拒', () => {

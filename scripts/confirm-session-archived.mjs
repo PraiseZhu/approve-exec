@@ -37,16 +37,18 @@ function asRecord(raw) {
 export function extractArchiveResult(raw, sessionId) {
   const rec = asRecord(raw);
   const payload = rec.result && typeof rec.result === 'object' ? rec.result : rec;
-  const ids = []
-    .concat(payload.archived_session_ids ?? [])
-    .concat(payload.session_ids ?? [])
-    .concat(payload.ids ?? [])
-    .concat(payload.archived ?? []);
-  const status = payload.status ?? payload.sessions?.[sessionId]?.status ?? payload[sessionId]?.status;
-  const listed = ids.map(String).includes(sessionId);
-  const marked = status === 'archived' || payload.archived === true;
-  if (!listed && !marked) {
-    throw new LedgerError('PRECONDITION', `archive_sessions 回执未证明 ${sessionId} 已 archived`);
+  if (payload.ok !== true) {
+    throw new LedgerError('PRECONDITION', `archive_sessions 回执 ok 必须是 true（当前: ${payload.ok ?? '缺失'}）`);
+  }
+  if (!Array.isArray(payload.changed) || payload.changed.length === 0) {
+    throw new LedgerError('PRECONDITION', 'archive_sessions 回执必须含非空 changed[]');
+  }
+  const hit = payload.changed.find((item) => item && item.session_id === sessionId);
+  if (!hit) {
+    throw new LedgerError('PRECONDITION', `archive_sessions.changed 未包含 ${sessionId}`);
+  }
+  if (hit.status !== 'archived') {
+    throw new LedgerError('PRECONDITION', `archive_sessions.changed[${sessionId}].status 必须是 archived（当前: ${hit.status}）`);
   }
   return { session_id: sessionId, archived: true };
 }
