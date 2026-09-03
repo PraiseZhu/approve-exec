@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { LedgerError, parseTimestamp, WATCH_RECEIPT_KEYS } from './run-ledger.mjs';
-import { loadMiniWatchConfig, miniHost } from './lib/mini-watch-config.mjs';
+import { loadMiniWatchConfig, miniHost, miniWatchConfigSha256 } from './lib/mini-watch-config.mjs';
 
 const STATE_NAME_RE = /^([A-Za-z0-9.%!~*'()-]+)__([A-Za-z0-9.%!~*'()-]+)__(\d+)\.json$/;
 const REGISTER_LINE_RE = /^(REGISTERED|ALREADY)\s+(\/\S+\.json)\s*$/;
@@ -101,6 +101,7 @@ export function confirmWatchRegistered({
     checked_at: now,
     ledger_version: requireStamp(ledgerVersion, 'ledger-version'),
     assignment_seq: requireStamp(assignmentSeq, 'assignment-seq'),
+    mini_watch_config_sha256: miniWatchConfigSha256(),
   };
   const keys = Object.keys(receipt).sort();
   if (keys.join(',') !== [...WATCH_RECEIPT_KEYS].sort().join(',')) {

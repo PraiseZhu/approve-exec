@@ -16,6 +16,7 @@ import {
   readPrOpenReceipt,
   readCleanupReceipt,
 } from '../scripts/run-ledger.mjs';
+import { miniWatchConfigSha256 } from '../scripts/lib/mini-watch-config.mjs';
 
 const SHA = 'a'.repeat(40);
 const SHA2 = 'b'.repeat(40);
@@ -352,7 +353,7 @@ test('cleanup 回执在其它写入先推高 version 后仍可消费（不绑全
   writeFileSync(watchReceipt, `${JSON.stringify({
     ok: true, owner: 'xindong', repo: 'mivo-canvas-plugin', pr_number: 1, branch: 'feat/run-ledger',
     state_file: '/mini/runtime/state/xindong__mivo-canvas-plugin__1.json',
-    session_id: null, checked_at: LATER, ...stamp(),
+    session_id: null, checked_at: LATER, mini_watch_config_sha256: miniWatchConfigSha256(), ...stamp(),
   })}\n`);
   r = cli('note-event', ledgerPath, '--event', 'watch_registered', '--detail', JSON.stringify({
     group_id: g,
@@ -488,6 +489,7 @@ test('confirm-watch-registered 只吃 register.mjs 真实 stdout', () => {
   assert.equal(receipt.ok, true);
   assert.equal(receipt.pr_number, 1);
   assert.equal(receipt.session_id, null);
+  assert.equal(receipt.mini_watch_config_sha256, miniWatchConfigSha256());
   assert.throws(() => parseRegisterStdout('ok true\n'), LedgerError);
 });
 

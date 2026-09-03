@@ -62,7 +62,8 @@ function runSnapshot(snapshotCmd, owner, repo, pr) {
   return JSON.parse(execFileSync(parts[0], parts.slice(1), { encoding: 'utf8' }));
 }
 
-export function planDispatch({ decision, state, signals, newItems }) {
+export function planDispatch({ decision, state, signals, newItems, watchConfig } = {}) {
+  assertAutoMergeDisabled(watchConfig);
   if (decision === 'none' || decision === 'blocked-external') return null;
   if (decision === 'terminal') {
     return { action: 'unregister', owner: state.owner, repo: state.repo, pr: state.pr_number };
@@ -71,7 +72,6 @@ export function planDispatch({ decision, state, signals, newItems }) {
   const sessionId = typeof state.session_id === 'string' && state.session_id.length > 0
     ? state.session_id
     : null;
-  assertAutoMergeDisabled();
   const mini = miniHost();
   return {
     action: sessionId ? 'jump' : 'create',

@@ -34,6 +34,48 @@ function tmpState() {
   return dir;
 }
 
+const AUTO_MERGE_TRUE = { ...CFG, auto_merge: true };
+const AUTO_MERGE_STATE = { owner: 'o', repo: 'r', pr_number: 1, session_id: 'sess-1' };
+
+test('planDispatch: auto_merge=true 时 decision=none 必须抛，不得返回 null', () => {
+  let returned;
+  assert.throws(
+    () => {
+      returned = planDispatch({
+        decision: 'none', state: AUTO_MERGE_STATE, signals: [], newItems: {}, watchConfig: AUTO_MERGE_TRUE,
+      });
+    },
+    /auto_merge=true/,
+  );
+  assert.equal(returned, undefined);
+});
+
+test('planDispatch: auto_merge=true 时 decision=blocked-external 必须抛，不得返回 null', () => {
+  let returned;
+  assert.throws(
+    () => {
+      returned = planDispatch({
+        decision: 'blocked-external', state: AUTO_MERGE_STATE, signals: ['hold-label'], newItems: {}, watchConfig: AUTO_MERGE_TRUE,
+      });
+    },
+    /auto_merge=true/,
+  );
+  assert.equal(returned, undefined);
+});
+
+test('planDispatch: auto_merge=true 时 decision=terminal 必须抛，不得返回 unregister', () => {
+  let returned;
+  assert.throws(
+    () => {
+      returned = planDispatch({
+        decision: 'terminal', state: AUTO_MERGE_STATE, signals: ['merged'], newItems: {}, watchConfig: AUTO_MERGE_TRUE,
+      });
+    },
+    /auto_merge=true/,
+  );
+  assert.equal(returned, undefined);
+});
+
 test('planDispatch: none / hold 不派；actionable 无 session_id 则 create', () => {
   const state = { owner: 'o', repo: 'r', pr_number: 1, session_id: null };
   assert.equal(planDispatch({ decision: 'none', state, signals: [], newItems: {} }), null);

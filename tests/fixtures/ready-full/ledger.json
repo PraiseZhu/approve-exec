@@ -7,6 +7,7 @@
   "version": 3,
   "phase": "accepting",
   "baseline_tip": "__HEAD_SHA__",
+  "mini_watch_config_sha256": "681044716562b77e42263bca8119565596d137002a153bbb00e6950842d5f988",
   "waves": [
     {
       "wave": 1,
