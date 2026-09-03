@@ -131,7 +131,6 @@ function prHandoffPayload(group, extras = {}) {
   const packet = manifest.dispatch.packets.find((p) => p.group_id === group);
   const tip = extras.tip_sha ?? SHA1;
   return {
-    pr_url: extras.pr_url ?? `https://github.com/xindong/mivo-canvas-plugin/pull/${extras.pr_id ?? 1}`,
     branch: extras.branch ?? 'feat/run-ledger',
     tip_sha: tip,
     scs: packet.scs_inline.map((s) => ({ id: s.id, status: 'pass' })),
@@ -158,6 +157,99 @@ function memSnapshotJson({ usedSlots = 0, platformCap = 8, concurrency = 8, avai
   return JSON.stringify({ used_slots: usedSlots, platform_cap: platformCap, concurrency, available_bytes: availableBytes });
 }
 
+function writeWrapupReceipt(dir, name, body) {
+  const path = join(dir, name);
+  writeFileSync(path, `${JSON.stringify(body)}\n`);
+  return path;
+}
+
+function later(ts) {
+  const ms = Date.parse(ts);
+  return new Date(ms + 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+function stampFromLedger(ledgerPath, extras = {}) {
+  const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  const groupId = extras.group ?? 'g4';
+  const group = ledger.waves.flatMap((w) => w.groups).find((g) => g.group_id === groupId);
+  return {
+    ledger_version: extras.ledger_version ?? ledger.version,
+    assignment_seq: extras.assignment_seq ?? group?.assignment_seq ?? 0,
+  };
+}
+
+function prOpenReceiptPath(dir, extras = {}) {
+  const stamp = extras.ledgerPath ? stampFromLedger(extras.ledgerPath, extras) : {
+    ledger_version: extras.ledger_version ?? 0,
+    assignment_seq: extras.assignment_seq ?? 0,
+  };
+  return writeWrapupReceipt(dir, extras.file ?? 'pr-open-receipt.json', {
+    url: extras.url ?? 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
+    number: extras.number ?? 1,
+    headRefOid: extras.headRefOid ?? SHA1,
+    isDraft: extras.isDraft ?? false,
+    state: extras.state ?? 'OPEN',
+    branch: extras.branch ?? 'feat/run-ledger',
+    checked_at: extras.checked_at ?? later(T),
+    ...stamp,
+  });
+}
+
+function cleanupReceiptPath(dir, extras = {}) {
+  const stamp = extras.ledgerPath ? stampFromLedger(extras.ledgerPath, extras) : {
+    ledger_version: extras.ledger_version ?? 0,
+    assignment_seq: extras.assignment_seq ?? 0,
+  };
+  return writeWrapupReceipt(dir, extras.file ?? 'cleanup-receipt.json', {
+    ok: extras.ok ?? true,
+    skipped: extras.skipped ?? false,
+    branch: extras.branch ?? 'feat/run-ledger',
+    worktree: extras.worktree ?? '/wt/g4',
+    sha: extras.sha ?? SHA1,
+    remoteDeleted: extras.remoteDeleted ?? false,
+    checked_at: extras.checked_at ?? later(T),
+    ...stamp,
+  });
+}
+
+function archiveReceiptPath(dir, extras = {}) {
+  const stamp = extras.ledgerPath ? stampFromLedger(extras.ledgerPath, extras) : {
+    ledger_version: extras.ledger_version ?? 0,
+    assignment_seq: extras.assignment_seq ?? 0,
+  };
+  return writeWrapupReceipt(dir, extras.file ?? 'archive-receipt.json', {
+    session_id: extras.session_id ?? 'sess-g4',
+    archived: extras.archived ?? true,
+    checked_at: extras.checked_at ?? later(T),
+    ...stamp,
+  });
+}
+
+function watchReceiptPath(dir, extras = {}) {
+  const stamp = extras.ledgerPath ? stampFromLedger(extras.ledgerPath, extras) : {
+    ledger_version: extras.ledger_version ?? 0,
+    assignment_seq: extras.assignment_seq ?? 0,
+  };
+  return writeWrapupReceipt(dir, extras.file ?? 'watch-receipt.json', {
+    ok: extras.ok ?? true,
+    owner: extras.owner ?? 'xindong',
+    repo: extras.repo ?? 'mivo-canvas-plugin',
+    pr_number: extras.pr_number ?? 1,
+    branch: extras.branch ?? 'feat/run-ledger',
+    state_file: extras.state_file ?? '/mini/runtime/state/xindong__mivo-canvas-plugin__1.json',
+    session_id: extras.session_id ?? null,
+    checked_at: extras.checked_at ?? later(T),
+    ...stamp,
+  });
+}
+
+function markReady(ledgerPath) {
+  const frozen = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  frozen.phase = 'ready';
+  frozen.phase_at = T;
+  writeFileSync(ledgerPath, `${JSON.stringify(frozen, null, 2)}\n`);
+}
+
 /** render-packet 成功出包（断言 exit 0），返回 stdout。sc-p0c 凭证闸的前置步骤。 */
 function renderGroup(ledgerPath, group) {
   const r = cli('render-packet', ledgerPath, '--group', group);
@@ -182,7 +274,7 @@ function grantVerifyPass(ledgerPath, group) {
 
 /** 把组 g4 走完到 accepted 的合法链。
  *  dispatched 前：身份含 session_id + render-packet + --mem-snapshot。
- *  executing 要 gate_goal；e2e 要 gate_routing；pr-open 要终态 pr-handoff 交卷。 */
+ *  executing 要 gate_goal；e2e 要 gate_routing；accepted 要 candidate 交卷（无 pr_url）。 */
 function runG4ToAccepted(ledgerPath) {
   const g = 'g4';
   assignIdentity(ledgerPath, g, 'feat/run-ledger');
@@ -198,9 +290,7 @@ function runG4ToAccepted(ledgerPath) {
   }
   const handoff = prHandoffPayload(g, { ledgerPath, branch: 'feat/run-ledger' });
   let r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify(handoff), '--now', T);
-  assert.equal(r.status, 0, `pr-handoff 交卷应 exit 0: ${r.stderr}`);
-  r = cli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', T);
-  assert.equal(r.status, 0, `→pr-open 应 exit 0: ${r.stderr}`);
+  assert.equal(r.status, 0, `candidate 交卷应 exit 0: ${r.stderr}`);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'accepted', '--now', T);
   assert.equal(r.status, 0, `→accepted 应 exit 0: ${r.stderr}`);
 }
@@ -252,7 +342,7 @@ function forgeG4Accepted(ledgerPath) {
   g.base = SHA3;
   g.session_id = 'sess-g4';
   g.title = 'Skills-g4丨 0902';
-  g.pr_url = 'https://github.com/xindong/mivo-canvas-plugin/pull/1';
+  g.pr_url = null;
   g.provider_id = 'art';
   injectGateEvents(ledger, 'g4');
   writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
@@ -268,21 +358,23 @@ function forgeG4State(ledgerPath, state) {
   g.branch = g.branch ?? 'feat/run-ledger';
   g.base = g.base ?? SHA3;
   g.session_id = g.session_id ?? 'sess-g4';
-  if (['dispatched', 'executing', 'blocked', 'e2e', 'review', 'pr-open', 'failed'].includes(state)) {
+  if (['dispatched', 'executing', 'blocked', 'e2e', 'review', 'pr-open', 'local-cleaned', 'archived', 'failed'].includes(state)) {
     g.worker_label = 'w1';
   }
-  if (['e2e', 'review', 'pr-open', 'accepted', 'failed'].includes(state)) {
+  if (['e2e', 'review', 'accepted', 'pr-open', 'local-cleaned', 'archived', 'failed'].includes(state)) {
     g.tip_sha = SHA1;
   }
-  if (state === 'pr-open' || state === 'accepted') {
+  if (['pr-open', 'local-cleaned', 'archived'].includes(state)) {
     g.pr_url = 'https://github.com/xindong/mivo-canvas-plugin/pull/1';
     g.review = { rounds: 0, unresolved: 0 };
   }
   if (state === 'accepted') {
+    g.pr_url = null;
+    g.review = { rounds: 0, unresolved: 0 };
     g.provider_id = 'art';
     g.title = 'Skills-g4丨 0902';
   }
-  if (['executing', 'e2e', 'review', 'pr-open', 'accepted'].includes(state)) {
+  if (['executing', 'e2e', 'review', 'accepted', 'pr-open', 'local-cleaned', 'archived'].includes(state)) {
     injectGateEvents(ledger, g.group_id);
   }
   writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
@@ -303,11 +395,9 @@ function runGroupToAccepted(ledgerPath, group, branch, base = SHA3) {
     const r = cli('set-state', ledgerPath, '--group', group, '--to', to, ...extra, '--now', T);
     assert.equal(r.status, 0, `${group} 合法链 ${to} 应 exit 0: ${r.stderr}`);
   }
-  const handoff = prHandoffPayload(group, { ledgerPath, branch, pr_id: group === 'v1' ? 2 : 1 });
+  const handoff = prHandoffPayload(group, { ledgerPath, branch });
   let r = cli('record-delivery', ledgerPath, '--group', group, '--payload', JSON.stringify(handoff), '--now', T);
-  assert.equal(r.status, 0, `${group} pr-handoff 交卷应 exit 0: ${r.stderr}`);
-  r = cli('set-state', ledgerPath, '--group', group, '--to', 'pr-open', '--now', T);
-  assert.equal(r.status, 0, `${group} →pr-open 应 exit 0: ${r.stderr}`);
+  assert.equal(r.status, 0, `${group} candidate 交卷应 exit 0: ${r.stderr}`);
   r = cli('set-state', ledgerPath, '--group', group, '--to', 'accepted', '--now', T);
   assert.equal(r.status, 0, `${group} →accepted 应 exit 0: ${r.stderr}`);
 }
@@ -834,6 +924,13 @@ test('note-event: site_report / replan_note 入账；非法 action 拒', () => {
   assert.equal(r.status, 2, '非法 action 必须 exit 2');
   r = cli('note-event', ledgerPath, '--event', 'dispatch', '--detail', JSON.stringify({ group_id: 'g4' }), '--now', T);
   assert.equal(r.status, 2, '成功流事件不得经 note-event 入账');
+  r = cli('note-event', ledgerPath, '--event', 'watch_registered', '--detail', JSON.stringify({
+    group_id: 'g4',
+    pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
+    state_file: 'acme__app__1.json',
+  }), '--now', T);
+  assert.equal(r.status, 2, '未 pr-open 不得 watch_registered');
+  assert.match(r.stderr, /pr-open/);
 });
 
 test('sc-p1c: 未知 event type 拒', () => {
@@ -872,7 +969,7 @@ test('sc-p1c: 无 --now 的写操作拒绝（init/set-state/record-delivery 全�
 // =====================================================================
 // sc-p1d：set-state 组状态机 + phase 状态机 + wave 集成
 // =====================================================================
-test('sc-p1d: 合法链全通（dispatched→executing→e2e→review→pr-open→accepted）', () => {
+test('sc-p1d: 合法链全通（dispatched→executing→e2e→review→accepted）', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
   runG4ToAccepted(ledgerPath);
@@ -882,15 +979,15 @@ test('sc-p1d: 合法链全通（dispatched→executing→e2e→review→pr-open�
   assert.equal(g4.worker_label, 'w1');
   assert.equal(g4.session_id, 'sess-g4');
   assert.equal(g4.tip_sha, SHA1);
-  assert.match(g4.pr_url, /github\.com/);
+  assert.equal(g4.pr_url, null, 'accepted 前不得有 GitHub URL');
   const types = ledger.events.map((e) => e.type);
   assert.ok(types.includes('dispatch'));
   assert.ok(types.includes('session_created'));
   assert.ok(types.includes('gate_goal'));
   assert.ok(types.includes('gate_routing'));
   assert.ok(types.includes('delivery'));
-  assert.ok(types.includes('pr_opened'));
   assert.ok(types.includes('accepted'));
+  assert.equal(types.includes('pr_opened'), false, '验收前不得落 pr_opened');
 });
 
 test('sc-p1d: dispatched→executing 缺 gate_goal 拒', () => {
@@ -942,12 +1039,66 @@ test('sc-p1d: unresolved>0 时 accepted 拒', () => {
   }
   const handoff = prHandoffPayload(g, { ledgerPath, unresolved: 2 });
   let r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify(handoff), '--now', T);
-  assert.equal(r.status, 0, `pr-handoff 交卷应 exit 0: ${r.stderr}`);
-  r = cli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', T);
-  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.status, 0, `candidate 交卷应 exit 0: ${r.stderr}`);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'accepted', '--now', T);
   assert.equal(r.status, 2, 'unresolved>0 时 accepted 必须 exit 2');
   assert.match(r.stderr, /unresolved==0/);
+});
+
+test('sc-p1d: accepted 拒绝非绿 candidate（SC/e2e/size/branch/SHA 未闭环）', () => {
+  const cases = [
+    {
+      name: 'SC 非 pass',
+      extras: { scStatus: 'fail' },
+      message: /全部 SC status=pass/,
+    },
+    {
+      name: 'e2e 非 pass',
+      extras: { e2e_status: 'not_run' },
+      message: /e2e\.status=pass/,
+    },
+    {
+      name: 'size STOP',
+      extras: { size_result: 'STOP' },
+      message: /size_gate\.result != STOP/,
+    },
+    {
+      name: 'branch 不一致',
+      extras: { branch: 'feat/other' },
+      message: /candidate branch 对上台账身份/,
+    },
+    {
+      name: 'e2e candidate SHA 不一致',
+      extras: { e2e_candidate_sha: SHA2 },
+      message: /candidate_sha 全部等于 tip_sha/,
+    },
+  ];
+  for (const { name, extras, message } of cases) {
+    const dir = newTmpDir();
+    const { ledgerPath } = initLedgerFor(dir);
+    const g = 'g4';
+    assignIdentity(ledgerPath, g, 'feat/run-ledger');
+    renderGroup(ledgerPath, g);
+    for (const [to, extra] of [
+      ['dispatched', ['--worker-label', 'w1', '--mem-snapshot', memSnapshotJson()]],
+      ['executing', ['--detail', gateGoalDetail()]],
+      ['e2e', ['--detail', gateRoutingDetail()]],
+      ['review', []],
+    ]) {
+      const r = cli('set-state', ledgerPath, '--group', g, '--to', to, ...extra, '--now', T);
+      assert.equal(r.status, 0, `${name}: ${to} 应 exit 0: ${r.stderr}`);
+    }
+    const handoff = prHandoffPayload(g, { ledgerPath, branch: extras.branch ?? 'feat/run-ledger' });
+    if (extras.scStatus) handoff.scs[0].status = extras.scStatus;
+    if (extras.e2e_status) handoff.e2e.status = extras.e2e_status;
+    if (extras.size_result) handoff.size_gate.result = extras.size_result;
+    if (extras.e2e_candidate_sha) handoff.e2e.candidate_sha = extras.e2e_candidate_sha;
+    let r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify(handoff), '--now', T);
+    assert.equal(r.status, 0, `${name}: candidate 交卷应先允许入账供 lead 诊断: ${r.stderr}`);
+    r = cli('set-state', ledgerPath, '--group', g, '--to', 'accepted', '--now', T);
+    assert.equal(r.status, 2, `${name}: 非绿 candidate 不得 accepted`);
+    assert.match(r.stderr, message, `${name}: 应点名具体未闭环凭据: ${r.stderr}`);
+  }
 });
 
 test('sc-p1d: 非法跳转矩阵全部 exit 2 且落 illegal_transition 事件', () => {
@@ -970,7 +1121,7 @@ test('sc-p1d: 非法跳转矩阵全部 exit 2 且落 illegal_transition 事件',
     r = cli('set-state', ledgerPath, '--group', g, '--to', to, '--now', T);
     assert.equal(r.status, 2, `dispatched→${to} 必须 exit 2`);
   }
-  // 阶段 C：走完到 accepted 后终态只读
+  // 阶段 C：走完到 archived 后终态只读
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'executing', '--detail', gateGoalDetail(), '--now', T);
   assert.equal(r.status, 0, r.stderr);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'e2e', '--detail', gateRoutingDetail(), '--now', T);
@@ -980,10 +1131,15 @@ test('sc-p1d: 非法跳转矩阵全部 exit 2 且落 illegal_transition 事件',
   const handoff = prHandoffPayload(g, { ledgerPath });
   r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify(handoff), '--now', T);
   assert.equal(r.status, 0, r.stderr);
-  r = cli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', T);
-  assert.equal(r.status, 0, r.stderr);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'accepted', '--now', T);
   assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', T, '--pr-open-receipt', prOpenReceiptPath(dir, { ledgerPath }));
+  assert.equal(r.status, 2, 'accepted→pr-open 缺 phase=ready 必须 exit 2');
+  assert.match(r.stderr, /phase=ready/);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'local-cleaned', '--now', T, '--cleanup-receipt', cleanupReceiptPath(dir, { ledgerPath }));
+  assert.equal(r.status, 2, 'accepted 不得直接 local-cleaned');
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'archived', '--now', T, '--archive-receipt', archiveReceiptPath(dir, { ledgerPath }));
+  assert.equal(r.status, 2, 'accepted 不得直接 archived');
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'dispatched', '--worker-label', 'evil', '--now', T);
   assert.equal(r.status, 2, 'accepted→dispatched 重放攻击必须 exit 2');
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'pending', '--now', T);
@@ -1679,8 +1835,6 @@ test('sc-p1e: 验收组模板无 goal 触发行、含整合树复查项（integr
   }
   r = cli('record-delivery', ledgerPath, '--group', v, '--payload', JSON.stringify(prHandoffPayload(v, { ledgerPath, branch: 'feat/verify' })), '--now', T);
   assert.equal(r.status, 0, r.stderr);
-  r = cli('set-state', ledgerPath, '--group', v, '--to', 'pr-open', '--now', T);
-  assert.equal(r.status, 0, r.stderr);
   r = cli('set-state', ledgerPath, '--group', v, '--to', 'accepted', '--now', T);
   assert.equal(r.status, 0, r.stderr);
   r = cli('set-state', ledgerPath, '--wave', '2', '--integrate', SHA1, '--now', T);
@@ -1848,8 +2002,6 @@ test('sc-p1e: T 阶段包 verify_cmds 与夹具 manifest 尾波逐条一致', ()
     assert.equal(r.status, 0, r.stderr);
   }
   r = cli('record-delivery', ledgerPath, '--group', v, '--payload', JSON.stringify(prHandoffPayload(v, { ledgerPath, branch: 'feat/verify' })), '--now', T);
-  assert.equal(r.status, 0, r.stderr);
-  r = cli('set-state', ledgerPath, '--group', v, '--to', 'pr-open', '--now', T);
   assert.equal(r.status, 0, r.stderr);
   r = cli('set-state', ledgerPath, '--group', v, '--to', 'accepted', '--now', T);
   assert.equal(r.status, 0, r.stderr);
@@ -2178,29 +2330,15 @@ test('F-H: set-state --verify-status/--verify-evidence-ref 手工写入口必拒
 test('F-H: →verified 无 pass 凭据拒（verify.status=null 或手工伪造的 evidence_ref 均拒）', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
-  // sc-p0a/b/c 迁移：合法派工前先身份+render（凭证闸前置）
-  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
-  renderGroup(ledgerPath, 'g4');
-
   const g = 'g4';
-  // 走到 review_pass（无 verify 凭据）
-  for (const [to, extra] of [
-    ['dispatched', ['--worker-label', 'w1', '--mem-snapshot', memSnapshotJson()]],
-    ['executing', ['--detail', gateGoalDetail()]],
-    ['e2e', ['--detail', gateRoutingDetail()]],
-    ['review', []],
-  ]) {
-    const r = cli('set-state', ledgerPath, '--group', g, '--to', to, ...extra, '--now', T);
-    assert.equal(r.status, 0, r.stderr);
-  }
-  let r = cli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', T);
-  assert.equal(r.status, 2, '无 pr-handoff 交卷的 →pr-open 必须 exit 2');
-  assert.match(r.stderr, /pr-handoff|gate_goal|gate_routing|PR_RECEIPT/);
-  const handoff = prHandoffPayload(g, { ledgerPath });
-  r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify(handoff), '--now', T);
-  assert.equal(r.status, 0, `pr-handoff 交卷应 exit 0: ${r.stderr}`);
-  r = cli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', T);
-  assert.equal(r.status, 0, `合法 pr-handoff →pr-open 应 exit 0: ${r.stderr}`);
+  forgeG4State(ledgerPath, 'review');
+  let r = cli('set-state', ledgerPath, '--group', g, '--to', 'accepted', '--now', T);
+  assert.equal(r.status, 2, '无 candidate 交卷的 →accepted 必须 exit 2');
+  assert.match(r.stderr, /candidate|pr-handoff|gate_goal|gate_routing/);
+  const withUrl = { ...prHandoffPayload(g, { ledgerPath }), pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1' };
+  r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify(withUrl), '--now', T);
+  assert.equal(r.status, 2, '带 pr_url 的 candidate 交卷必须 exit 2');
+  assert.match(r.stderr, /pr_url|无法唯一识别/);
 });
 
 // =====================================================================
@@ -2491,7 +2629,7 @@ test('①: verified 组 record-delivery 拒（exec/review/verify 三类交卷全
   const payloads = [
     execDeliveryPayload(), // exec 类（改写 tip_sha）
     { rounds: 1, findings_total: 1, unresolved: 0, fix_commits: [], candidate_sha: SHA1 }, // review 类（改写 review.rounds）
-    g4VerifyPayload(), // verify 类（改写 verify.status；sc_ids 取 g4 派工包，保证命中生命周期门而非 SC_ID_MISMATCH）
+    prHandoffPayload('g4', { ledgerPath }), // candidate 交卷不得在 accepted 后再写
   ];
   for (const payload of payloads) {
     const before = readFileSync(ledgerPath, 'utf8');
@@ -2520,11 +2658,11 @@ test('①: 方向 B——pending 组提交合法 verify payload 拒（验收证�
 });
 
 test('①: 交卷生命周期矩阵——每类交卷在每个非法状态 exit 2 + 字节不变，合法状态放行', () => {
-  const ALL_STATES = ['pending', 'dispatched', 'executing', 'blocked', 'e2e', 'review', 'pr-open', 'accepted', 'failed'];
+  const ALL_STATES = ['pending', 'dispatched', 'executing', 'blocked', 'e2e', 'review', 'accepted', 'pr-open', 'local-cleaned', 'archived', 'failed'];
   const allowedByKind = {
     exec: ['dispatched', 'executing'],
     review: ['e2e', 'review'],
-    verify: ['review', 'pr-open'],
+    verify: ['review', 'accepted'],
     'pr-handoff': ['review'],
   };
   const payloadByKind = {
@@ -2586,15 +2724,10 @@ test('①: evidence_ref 同组同类加固——指向他组 delivery / 非验�
   let l = readLedger(ledgerPath);
   l.waves[0].groups[0].verify = { status: 'pass', evidence_ref: 'delivery#1' };
   writeFileSync(ledgerPath, `${JSON.stringify(l, null, 2)}\n`);
-  let r = cli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', T);
-  assert.equal(r.status, 2, '无 pr-handoff 终态交卷的 →pr-open 必须 exit 2');
-  assert.match(r.stderr, /pr-handoff|PR_RECEIPT|gate_goal|gate_routing/);
+  let r = cli('set-state', ledgerPath, '--group', g, '--to', 'accepted', '--now', T);
+  assert.equal(r.status, 2, '无 candidate 交卷的 →accepted 必须 exit 2');
+  assert.match(r.stderr, /candidate|pr-handoff|gate_goal|gate_routing/);
   assert.equal(g4Group().state, 'review', '拒写不得改变组状态');
-  const handoff = prHandoffPayload(g, { ledgerPath });
-  r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify(handoff), '--now', T);
-  assert.equal(r.status, 0, `pr-handoff 交卷应 exit 0: ${r.stderr}`);
-  r = cli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', T);
-  assert.equal(r.status, 0, `终态交卷后 →pr-open 应 exit 0: ${r.stderr}`);
 });
 
 test('①: 重派链 failed→pending 后 exec 重新交卷放行（生命周期门不挡重派正常链路）', () => {
@@ -3080,15 +3213,15 @@ test('sc-p0d: in_flight_groups 按「未完成集成」语义过滤——dispatc
   const { ledgerPath } = initLedgerFor(dir);
   // 手工构造六态组（各 wave 一组；verified 组带身份字段保持 schema 合法）
   const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
-  const states = ['pending', 'dispatched', 'executing', 'blocked', 'e2e', 'review', 'pr-open', 'accepted', 'failed'];
+  const states = ['pending', 'dispatched', 'executing', 'blocked', 'e2e', 'review', 'accepted', 'pr-open', 'failed'];
   const base = ledger.waves[0].groups[0];
-  const inFlight = ['dispatched', 'executing', 'blocked', 'e2e', 'review', 'pr-open'];
+  const inFlight = ['dispatched', 'executing', 'blocked', 'e2e', 'review'];
   ledger.waves = states.map((s, i) => ({
     wave: i + 1, integrated_tip: null,
     groups: [{
       ...base, group_id: `g-${s}`, state: s, sc_ids: [`sc-${s}`],
       worker_label: s === 'pending' ? null : 'w',
-      tip_sha: ['e2e', 'review', 'pr-open', 'accepted'].includes(s) ? SHA1 : null,
+      tip_sha: ['e2e', 'review', 'accepted', 'pr-open'].includes(s) ? SHA1 : null,
       dispatched_at: s === 'pending' ? null : T,
       review: { rounds: 0, unresolved: 0 },
       verify: { status: null, evidence_ref: null },
@@ -3097,7 +3230,7 @@ test('sc-p0d: in_flight_groups 按「未完成集成」语义过滤——dispatc
       base: s === 'accepted' ? SHA3 : (base.base ?? null),
       session_id: s === 'pending' ? null : `sess-${s}`,
       title: s === 'accepted' ? 'Skills-x丨 0902' : null,
-      pr_url: ['pr-open', 'accepted'].includes(s) ? 'https://github.com/xindong/mivo-canvas-plugin/pull/1' : null,
+      pr_url: s === 'pr-open' ? 'https://github.com/xindong/mivo-canvas-plugin/pull/1' : null,
       provider_id: s === 'accepted' ? 'art' : null,
       assignment_seq: 0,
     }],
@@ -3105,7 +3238,7 @@ test('sc-p0d: in_flight_groups 按「未完成集成」语义过滤——dispatc
   writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
   const out = staleness({ ledgerPath, now: '2026-08-09T01:30:00Z' });
   const visible = out.in_flight_groups.map((g) => g.state).sort();
-  assert.deepEqual(visible, [...inFlight].sort(), 'in_flight 必须恰含 dispatched/executing/blocked/e2e/review/pr-open');
+  assert.deepEqual(visible, [...inFlight].sort(), 'in_flight 必须恰含 dispatched/executing/blocked/e2e/review');
   for (const g of out.in_flight_groups) {
     assert.equal(typeof g.group_id, 'string', 'in_flight 条目必须含 group_id');
     assert.equal(typeof g.state, 'string', 'in_flight 条目必须含 state');
@@ -3257,10 +3390,11 @@ const RL_MUTATION_PREDICTIONS = [
         'detail: `group=${group} worker_label=${g.worker_label}`,',
       ),
     red: [
-      'sc-p1d: 合法链全通（dispatched→executing→e2e→review→pr-open→accepted）',
+      'sc-p1d: 合法链全通（dispatched→executing→e2e→review→accepted）',
       'sc-p1d: dispatched→executing 缺 gate_goal 拒',
       'sc-p1d: executing→e2e 缺 gate_routing 拒',
       'sc-p1d: unresolved>0 时 accepted 拒',
+      'sc-p1d: accepted 拒绝非绿 candidate（SC/e2e/size/branch/SHA 未闭环）',
       'sc-p1d: 非法跳转矩阵全部 exit 2 且落 illegal_transition 事件',
       'sc-p1d: failed→pending 后 rounds==0 且 tip_sha/worker_label/身份三键清空（重派不继承旧计数/旧身份）',
       'sc-p1d: 重派后旧代 gate 收据不得让新代跳过开工闸',
@@ -3273,7 +3407,6 @@ const RL_MUTATION_PREDICTIONS = [
       'sc-p2d: 全链 dry-run——先红（缺 e2e 报告与 presubmit 三闸）后绿（READY_FOR_LATER_SUBMIT_PR_SKILL + 台账 phase→ready + 链尾 validate exit 0）',
       'sc-p2d: 双账本一致性——collected_tip 与 tip_sha 不一致时链路中断于 integrate 前',
       'sc-p2d: 槽位对账——used_slots 与 dispatched 未归档组数一致无告警、不符出告警行',
-      'F-H: →verified 无 pass 凭据拒（verify.status=null 或手工伪造的 evidence_ref 均拒）',
       'P2: 对照——delivery 事件合法通道仍工作（record-delivery 交卷）',
       // ① 升级后改造的测试含 set-state dispatch/delivered 步骤（走 dispatch/delivery 写路径）：
       // F1 变异字符串化 detail → schema 拒 → 这些测试的 set-state 步骤红（确定性，语义合法扩展）

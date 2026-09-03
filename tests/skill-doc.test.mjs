@@ -116,6 +116,16 @@ test('第③段：DISPATCH_MODES 含 session；E=session；LEAD_SELF=V/P；WORKE
   assert.ok(s3.includes('不准把 PI 写进路由档') || s3.includes('不准把 PI 写进'),
     '③段应禁止把 PI 写进 routing.json');
   assert.ok(s3.includes('0.7') && s3.includes('SiteScout'), '③段流程应含 0.7 SiteScout');
+  const flow = s3.slice(s3.indexOf('→ 6.'), s3.indexOf('席位真相源'));
+  const registerAt = flow.indexOf('register.mjs');
+  const wrapupAt = flow.indexOf('wrapup-cleanup.mjs');
+  const archiveAt = flow.indexOf('archive_sessions');
+  assert.ok(registerAt >= 0 && wrapupAt >= 0 && archiveAt >= 0, '③段收尾应含 register / wrapup / archive');
+  assert.ok(registerAt < wrapupAt && wrapupAt < archiveAt, '③段必须先 Mini 名册、再清本地、最后归档 PI');
+  assert.ok(s3.includes('detail.receipt') || s3.includes('--detail.receipt'),
+    '③段 watch_registered 必须传 register 回执文件，不得只传本机 state_file');
+  assert.ok(s3.includes('confirm-watch-registered.mjs') && s3.includes('confirm-session-archived.mjs'),
+    '③段应收口 Mini register stdout 适配脚本与 archive_sessions 回执脚本');
 });
 
 test('第⑥段：send_to_session create + Art 钉 + 标题正则', () => {
@@ -153,7 +163,7 @@ test('第⑧段：create_workers ≥2 禁连续 create_worker 单发', () => {
 
 test('第⑨段：新组状态机 + identity 五段 + PR_RECEIPT_KEYS', () => {
   const s9 = sectionBetween(MARKERS[8], MARKERS[9]);
-  for (const st of ['pending', 'dispatched', 'executing', 'blocked', 'e2e', 'review', 'pr-open', 'accepted', 'failed']) {
+  for (const st of ['pending', 'dispatched', 'executing', 'blocked', 'e2e', 'review', 'accepted', 'pr-open', 'local-cleaned', 'archived', 'failed']) {
     assert.ok(s9.includes(st), `⑨段 GROUP_STATES 应含 ${st}`);
   }
   if (s9.includes('review_pass')) {
@@ -169,9 +179,18 @@ test('第⑨段：新组状态机 + identity 五段 + PR_RECEIPT_KEYS', () => {
   assert.ok(s9.includes('PR_RECEIPT_KEYS'), '⑨段应点名 PR_RECEIPT_KEYS');
   assert.ok(s9.includes('site_report') && s9.includes('replan_note'), '⑨段 EVENT_TYPES 应含 site_report/replan_note');
   assert.ok(s9.includes('note-event'), '⑨段应声明 note-event 入账通道');
-  assert.ok(s9.includes('READY_FOR_LATER_SUBMIT_PR_SKILL'), '⑨段 run 级 ready 文案应保留 READY_FOR_LATER_SUBMIT_PR_SKILL 作为合入许可信号');
-  assert.ok(s9.includes('workspace-triad-align') || skillDoc.includes('workspace-triad-align'),
-    '正文应点名 workspace-triad-align 作为三机同步入口');
+  assert.ok(s9.includes('watch_registered'), '⑨段应点名 watch_registered');
+  assert.ok(s9.includes('phase=ready') && s9.includes('仍可在 ready 之后写入'),
+    '⑨段应声明验收后收尾不受 run 级 ready 冻结挡住');
+  assert.ok(s9.includes('Mini 名册先于清场') || s9.includes('watch_registered'),
+    '⑨段应声明 Mini 名册先于清场');
+  assert.ok(s9.includes('pr-open-receipt') && s9.includes('cleanup-receipt') && s9.includes('archive-receipt'),
+    '⑨段应收口开 PR / 清本地 / 归档的真实回执');
+  assert.ok(s9.includes('register.mjs') && s9.includes('ledger_version') && s9.includes('assignment_seq'),
+    '⑨段 Mini 名册应吃 register 回执，并绑定 ledger_version/assignment_seq');
+  assert.ok(s9.includes('READY_FOR_LATER_SUBMIT_PR_SKILL'), '⑨段 run 级 ready 文案应保留 READY_FOR_LATER_SUBMIT_PR_SKILL 作为验收许可信号');
+  assert.ok(s9.includes('archive_sessions') || skillDoc.includes('archive_sessions'),
+    '正文应点名 archive_sessions 归档 PI session');
   assert.ok(s9.includes('splitting') && s9.includes('dispatching') && s9.includes('running') && s9.includes('accepting'),
     '⑨段 PHASE_ORDER 应为 splitting/dispatching/running/accepting/ready');
 });
@@ -180,9 +199,10 @@ test('第⑩段：开工闸收据 + 终态交卷 exact schema', () => {
   const s10 = sectionBetween(MARKERS[9], MARKERS[10]);
   assert.ok(s10.includes('gate_goal') && s10.includes('gate_routing'), '⑩段应给出两类开工闸收据');
   assert.ok(s10.includes('goal_skill_sha256') && s10.includes('routing_sha256'), '⑩段收据必须含 sha256');
-  for (const key of ['pr_url', 'branch', 'tip_sha', 'scs', 'goal_skill_path', 'e2e', 'review', 'size_gate']) {
-    assert.ok(s10.includes(key), `终态交卷应含键 ${key}`);
+  for (const key of ['branch', 'tip_sha', 'scs', 'goal_skill_path', 'e2e', 'review', 'size_gate']) {
+    assert.ok(s10.includes(key), `candidate 交卷应含键 ${key}`);
   }
+  assert.ok(s10.includes('不得含 pr_url'), '⑩段应禁止 candidate 交卷带 pr_url');
   assert.ok(s10.includes('/Users/praise/.agents/skills/goal/SKILL.md'), 'goal_skill_path 必须钉 PI 自己的 goal');
 });
 
@@ -205,21 +225,23 @@ test('第⑤段：开工包第 8 步禁止子 session 合入', () => {
   assert.ok(s5.includes('子 session 不合入'), '⑤段应写明子 session 不合入');
 });
 
-test('第⑭段：e2e 与 GPT 单审通过后 lead 合入并同步三机，不改 submit-pr', () => {
+test('第⑭段：本 skill 不合入、不跑三机同步，不改 submit-pr', () => {
   const s14 = sectionBetween(MARKERS[13], MARKERS[14]);
   assert.ok(s14.includes('三审'), '⑭段应声明三审不在本 skill');
   assert.ok(s14.includes('submit-pr') || s14.includes('提交 PR'), '⑭段应点名提交 PR skill');
-  assert.ok(s14.includes('合入'), '⑭段应声明 lead 合入');
-  assert.ok(s14.includes('workspace-triad-align'), '⑭段应点名 workspace-triad-align');
+  assert.ok(s14.includes('本 skill 不合入'), '⑭段应声明本 skill 不合入');
+  assert.ok(s14.includes('不跑三机同步') || s14.includes('不跑三机'), '⑭段应声明不跑三机同步');
   assert.ok(s14.includes('子 session 不得自行 merge'), '⑭段应禁止子 session 自行 merge');
-  assert.equal(s14.includes('本 skill 不合入'), false, '⑭段不得再写本 skill 不合入');
+  assert.ok(s14.includes('archive_sessions'), '⑭段应点名归档 PI session');
 });
 
-test('第⑯段：lead 允许合入与三机同步，禁止改产品代码', () => {
+test('第⑯段：lead 允许验收后开远端并归档 PI，禁止改产品代码', () => {
   const s16 = sectionBetween(MARKERS[15], MARKERS[16]);
-  assert.ok(s16.includes('按总表合入'), '⑯段应允许 lead 按总表合入');
-  assert.ok(s16.includes('workspace-triad-align'), '⑯段应允许跑 workspace-triad-align');
+  assert.ok(s16.includes('archive_sessions'), '⑯段应允许归档 PI session');
   assert.ok(s16.includes('不允许：改产品代码'), '⑯段仍禁止改产品代码');
+  assert.ok(s16.includes('git merge') || s16.includes('不合入'), '⑯段应禁止 lead git merge');
+  assert.ok(s16.includes('Mini 名册未写就清本地') || s16.includes('先注册 Mini'),
+    '⑯段应禁止 Mini 名册未写就清本地');
 });
 
 test('第⑮段：保证等级 T1，不夸大成宿主拦截', () => {

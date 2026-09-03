@@ -124,15 +124,15 @@ export function renderPrHandoff({
     ['6. SC 全文', scLines.join('\n')],
     ['7. 验证命令', packet.verify_cmds.join('\n')],
     ['8. 做完之后（自动，不要问 lead）', [
-      '开 ready PR（非 draft）→ mem-probe → 现读同一份 routing.json 再派 e2e / GPT 单审',
+      'mem-probe → 现读同一份 routing.json 再派 e2e / GPT 单审',
       `绝对路径: ${ROUTING_LIVE}`,
       '先跑 model-route show',
       snapshotNote,
-      '按第⑩节 schema jump 回报 → 停等验收。子 session 不合入。合入由 lead 在 e2e 与 GPT 单审通过后按总表执行。',
+      '按第⑩节 candidate 交卷 jump 回报 → 停等验收。验收前不开远端 PR。子 session 不合入。lead jump 开远端之后先注册 Mini 名册，再 wrapup-cleanup。',
     ].join('\n')],
     ['9. 禁做', forbidden.map((f) => `- ${f}`).join('\n')],
     ['10. 回报格式', [
-      '终态 record-delivery exact: pr_url, branch, tip_sha, scs, goal_skill_path, e2e, review, size_gate',
+      'candidate record-delivery exact: branch, tip_sha, scs, goal_skill_path, e2e, review, size_gate（不得含 pr_url）',
       `goal_skill_path 必须是 ${GOAL_SKILL}`,
     ].join('\n')],
   ];
