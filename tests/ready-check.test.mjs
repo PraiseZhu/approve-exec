@@ -939,6 +939,9 @@ function copyTreeForMutation(t, mutateScript) {
   writeFileSync(join(dir, 'scripts/ready-check.mjs'), scriptMutated);
   // full 测试的链尾 run-ledger validate（F2 回归锚点）需要真实 run-ledger.mjs 副本
   writeFileSync(join(dir, 'scripts/run-ledger.mjs'), readFileSync(join(root, 'scripts/run-ledger.mjs'), 'utf8'));
+  mkdirSync(join(dir, 'scripts/lib'), { recursive: true });
+  writeFileSync(join(dir, 'scripts/lib/mini-watch-config.mjs'), readFileSync(join(root, 'scripts/lib/mini-watch-config.mjs'), 'utf8'));
+  writeFileSync(join(dir, 'config/mini-watch.json'), readFileSync(join(root, 'config/mini-watch.json'), 'utf8'));
   // ready-check.test.mjs import 了 run-tests.mjs 的 buildChildEnv（变异子套件 git 隔离唯一实现）：
   // 复制树必须带上该文件，否则子套件加载失败（失败集解析成文件路径，恰红契约被破坏）
   writeFileSync(join(dir, 'scripts/run-tests.mjs'), readFileSync(join(root, 'scripts/run-tests.mjs'), 'utf8'));

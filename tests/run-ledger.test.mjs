@@ -12,6 +12,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 import {
   readLedger, writeLedgerAtomic, writeTmp, renameTmp, initLedger,
   tmpPath, acquireLedgerLock, releaseLedgerLock, manifestCoreHash, LedgerError,
@@ -21,6 +22,7 @@ import {
 // 子套件在复制树里跑（含 ready-check/e2e-dryrun 的 git makeRepo），缺隔离会继承机器全局
 // commit.gpgsign=true，负载下 gpg 失败让夹具 commit 红——失败集比对随之漂移。
 import { buildChildEnv } from '../scripts/run-tests.mjs';
+import { miniWatchConfigSha256 } from '../scripts/lib/mini-watch-config.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPT = join(ROOT, 'scripts', 'run-ledger.mjs');
@@ -239,6 +241,7 @@ function watchReceiptPath(dir, extras = {}) {
     state_file: extras.state_file ?? '/mini/runtime/state/xindong__mivo-canvas-plugin__1.json',
     session_id: extras.session_id ?? null,
     checked_at: extras.checked_at ?? later(T),
+    mini_watch_config_sha256: extras.mini_watch_config_sha256 ?? miniWatchConfigSha256(),
     ...stamp,
   });
 }
@@ -3321,6 +3324,105 @@ test('④: --identity.worktree 相对路径拒（强制绝对路径，exit 2 点
   assert.equal(r.status, 0, `绝对 worktree 应 exit 0: ${r.stderr}`);
 });
 
+test('watch_registered: init 后改夹具副本 mini-watch.json 必须拒（三方等值闸）', (t) => {
+  if (process.env.RL_MUTATION_CHILD === '1') {
+    t.skip('变异子套件运行跳过本用例（与 F1/F2/G1/G2 变异无关，防污染其失败集契约）');
+    return;
+  }
+  const tree = mkdtempSync(join(tmpdir(), 'watch-cfg-drift-'));
+  t.after(() => rmSync(tree, { recursive: true, force: true }));
+  mkdirSync(join(tree, 'scripts/lib'), { recursive: true });
+  mkdirSync(join(tree, 'config'), { recursive: true });
+  mkdirSync(join(tree, 'tests/fixtures'), { recursive: true });
+  cpSync(join(ROOT, 'scripts/run-ledger.mjs'), join(tree, 'scripts/run-ledger.mjs'));
+  cpSync(join(ROOT, 'scripts/lib/mini-watch-config.mjs'), join(tree, 'scripts/lib/mini-watch-config.mjs'));
+  writeFileSync(join(tree, 'config/defaults.json'), readFileSync(join(ROOT, 'config/defaults.json'), 'utf8'));
+  const cfgPath = join(tree, 'config/mini-watch.json');
+  writeFileSync(cfgPath, readFileSync(join(ROOT, 'config/mini-watch.json'), 'utf8'));
+  copyFileSync(FIXTURE, join(tree, 'tests/fixtures/sample-manifest.json'));
+  const script = join(tree, 'scripts/run-ledger.mjs');
+  const runDir = mkdtempSync(join(tmpdir(), 'watch-cfg-drift-run-'));
+  t.after(() => rmSync(runDir, { recursive: true, force: true }));
+  const ledgerPath = join(runDir, 'ledger.json');
+  const manifestPath = join(runDir, 'sample-manifest.json');
+  copyFileSync(FIXTURE, manifestPath);
+  const treeCli = (...args) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8' });
+  let r = treeCli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'cfg-drift', '--now', T, '--baseline', SHA3);
+  assert.equal(r.status, 0, r.stderr);
+  const pinned = JSON.parse(readFileSync(ledgerPath, 'utf8')).mini_watch_config_sha256;
+  assert.match(pinned, /^[0-9a-f]{64}$/);
+  const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
+  cfg.ssh_bin = '/usr/bin/ssh-alt';
+  writeFileSync(cfgPath, `${JSON.stringify(cfg, null, 2)}\n`);
+  const g = 'g4';
+  const steps = [
+    ['set-state', ledgerPath, '--group', g, '--identity', JSON.stringify({
+      worktree: '/wt/g4', branch: 'feat/run-ledger', base: SHA3, session_id: 'sess-g4',
+    }), '--now', T],
+    ['render-packet', ledgerPath, '--group', g],
+    ['set-state', ledgerPath, '--group', g, '--to', 'dispatched', '--worker-label', 'w1', '--now', T,
+      '--mem-snapshot', JSON.stringify({ used_slots: 0, platform_cap: 8, concurrency: 8, available_bytes: 34359738368 })],
+    ['set-state', ledgerPath, '--group', g, '--to', 'executing', '--now', T, '--detail', JSON.stringify({
+      goal_skill_path: GOAL_SKILL_PI, goal_skill_sha256: GATE_GOAL_SHA,
+    })],
+    ['set-state', ledgerPath, '--group', g, '--to', 'e2e', '--now', T, '--detail', JSON.stringify({
+      route_source: ROUTING_LIVE, routing_sha256: GATE_ROUTING_SHA,
+      e2e_model: 'codex/gpt-5.6-luna', review_model: 'codex/gpt-5.6-sol',
+    })],
+    ['set-state', ledgerPath, '--group', g, '--to', 'review', '--now', T],
+  ];
+  for (const args of steps) {
+    r = treeCli(...args);
+    assert.equal(r.status, 0, r.stderr);
+  }
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  const packet = manifest.dispatch.packets.find((p) => p.group_id === g);
+  r = treeCli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify({
+    branch: 'feat/run-ledger', tip_sha: SHA1,
+    scs: packet.scs_inline.map((s) => ({ id: s.id, status: 'pass' })),
+    goal_skill_path: GOAL_SKILL_PI,
+    e2e: { status: 'pass', candidate_sha: SHA1, model: 'codex/gpt-5.6-luna', route_source: ROUTING_LIVE },
+    review: { unresolved: 0, candidate_sha: SHA1, model: 'codex/gpt-5.6-sol', route_source: ROUTING_LIVE },
+    size_gate: { result: 'PASS', candidate_sha: SHA1 },
+  }), '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  r = treeCli('set-state', ledgerPath, '--group', g, '--to', 'accepted', '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  const frozen = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  frozen.phase = 'ready';
+  frozen.phase_at = T;
+  writeFileSync(ledgerPath, `${JSON.stringify(frozen, null, 2)}\n`);
+  const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  const prOpen = join(runDir, 'pr-open-receipt.json');
+  writeFileSync(prOpen, `${JSON.stringify({
+    url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
+    number: 1, headRefOid: SHA1, isDraft: false, state: 'OPEN', branch: 'feat/run-ledger',
+    checked_at: later(T), ledger_version: ledger.version, assignment_seq: 0,
+  })}\n`);
+  r = treeCli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', T, '--pr-open-receipt', prOpen);
+  assert.equal(r.status, 0, r.stderr);
+  const driftedHash = createHash('sha256').update(readFileSync(cfgPath)).digest('hex');
+  assert.notEqual(driftedHash, pinned);
+  const afterOpen = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  const watchReceipt = join(runDir, 'watch-receipt.json');
+  writeFileSync(watchReceipt, `${JSON.stringify({
+    ok: true, owner: 'xindong', repo: 'mivo-canvas-plugin', pr_number: 1, branch: 'feat/run-ledger',
+    state_file: '/mini/runtime/state/xindong__mivo-canvas-plugin__1.json',
+    session_id: null, checked_at: later(T),
+    ledger_version: afterOpen.version, assignment_seq: 0,
+    mini_watch_config_sha256: driftedHash,
+  })}\n`);
+  r = treeCli('note-event', ledgerPath, '--event', 'watch_registered', '--detail', JSON.stringify({
+    group_id: g,
+    pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
+    receipt: watchReceipt,
+  }), '--now', T);
+  assert.equal(r.status, 2, `改夹具副本后 watch_registered 必须拒: ${r.stderr}`);
+  assert.match(r.stderr, /盯梢配置闸三方不等值/);
+  assert.equal(JSON.parse(readFileSync(join(ROOT, 'config/mini-watch.json'), 'utf8')).ssh_bin, '/usr/bin/ssh',
+    '仓内 mini-watch.json 不得被本用例改写');
+});
+
 // ============ 组 F：main guard realpath 归一（与 selfcheck 组F-1 / mem-probe 组F-1 同型） ============
 // 前提：import.meta.url 已被 ESM loader 规范化（realpath 后的真实路径），而 process.argv[1] 是调用方
 // 原样路径。macOS 上 os.tmpdir() 落在 /var/folders/...（/var → /private/var symlink），以逻辑 /var 路径
@@ -3332,10 +3434,12 @@ test('组F-1: 非规范化路径调用必须实际执行 init 并创建台账（
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   // 保持 <root>/scripts/run-ledger.mjs 布局：脚本 root = dirname(import.meta.url) + '..'，
   // config/defaults.json 按 root 解析（缺了会让命令与 guard 无关地失败）
-  mkdirSync(join(dir, 'scripts'), { recursive: true });
+  mkdirSync(join(dir, 'scripts/lib'), { recursive: true });
   mkdirSync(join(dir, 'config'), { recursive: true });
   cpSync(join(ROOT, 'scripts/run-ledger.mjs'), join(dir, 'scripts/run-ledger.mjs'));
+  cpSync(join(ROOT, 'scripts/lib/mini-watch-config.mjs'), join(dir, 'scripts/lib/mini-watch-config.mjs'));
   writeFileSync(join(dir, 'config/defaults.json'), readFileSync(join(ROOT, 'config/defaults.json'), 'utf8'));
+  writeFileSync(join(dir, 'config/mini-watch.json'), readFileSync(join(ROOT, 'config/mini-watch.json'), 'utf8'));
   // link 名必须唯一：历史用 process.pid，进程被杀时 t.after 未注册 → link-<PID> 残留；
   // 宿主并发下 PID 复用即撞名 EEXIST（mem-probe/selfcheck 组F-1 同款，tmpdir 曾积上千残留）。
   // dir 名来自 mkdtemp 唯一，用它派生 link 名——残留永不撞名，非规范化语义不变。

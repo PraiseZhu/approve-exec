@@ -73,7 +73,7 @@ task-priority final manifest
         → 不开远端 PR，按第⑩节 candidate 交卷 jump 回报
   → 5. Lead 按每 PR receipt 验收（失败则充分交接重派，直到 accepted）
   → 6. 验收通过后 jump 各 session 开远端 ready PR（非 draft）；`confirm-pr-open.mjs` 确认
-  → 7. `confirm-watch-registered.mjs` ssh Mini 跑 register.mjs（不要 `--verify` 去查旧班车），把 `REGISTERED/ALREADY <abs>` stdout 封成回执 → `note-event watch_registered --detail.receipt`
+  → 7. `confirm-watch-registered.mjs` ssh Mini 跑本仓 `scripts/pr-watch/register.mjs`（按 `config/mini-watch.json`，不要 `--verify` 去查旧班车），把 `REGISTERED/ALREADY <abs>` stdout 封成回执 → `note-event watch_registered --detail.receipt`
   → 8. 各 session `wrapup-cleanup.mjs` 清本地 worktree/分支（不删远端）→ 回报
   → 9. lead `archive_sessions` 归档 PI session 后，用 `confirm-session-archived.mjs --result <工具 JSON>` 出回执再入账（lead 自己由用户归档）
 ```
@@ -194,7 +194,7 @@ Lead 验收时现读 live routing.json：交卷 `e2e.model` / `review.model` 既
 
 Lead 在全部 PI session 归档、Mini 名册写完之前不得结束。子 session `get_session_runtime` 变 idle 且没有合格交卷 → `steer_session` 或 jump：「未到停点，继续；卡点报我」。子 session 问「要开始吗 / 能不能并行」→ 驳回，这些不是决策题。越域 / 改了别人的 PR → 验收失败，给予充分交接（现场 / 已改 / 卡点 / 要改什么 / 不要改什么 / 验证命令）后 `failed→pending` 重派，直到 accepted。
 
-「可验收」= candidate 交卷合法 + e2e PASS + GPT 单审 unresolved==0 + size-gate ≠ STOP，**还没有** GitHub URL。验收通过后 lead jump 开远端 ready PR；`confirm-pr-open.mjs` 确认非 draft 且 head 对得上。然后先注册 Mini 名册并 `note-event watch_registered`，再清本地，最后归档这些 PI session。合入不是本 skill 的收尾。
+「可验收」= candidate 交卷合法 + e2e PASS + GPT 单审 unresolved==0 + size-gate ≠ STOP，**还没有** GitHub URL。验收通过后 lead jump 开远端 ready PR；`confirm-pr-open.mjs` 确认非 draft 且 head 对得上。然后先注册 Mini 名册并 `note-event watch_registered`，再清本地，最后归档这些 PI session。合入不是本 skill 的收尾。Mini 被叫醒后走 goal skill 场景 E（盯梢 pr-fix）：拉 PR 反馈 → 在名册指定 clone 里 `git worktree add` → 修 → push → 回帖。CI 全绿且 review 无未解决项时，Mini 只发「可合并」通知，merge 由人点；`config/mini-watch.json` 的 `auto_merge` 本轮只读，false 时零影响。
 
 子 session 派 tester/reviewer **之前**自己跑 `mem-probe.mjs`。Lead 在同一波并行 create 多个 session 前也跑一次 mem-probe，按 `pending = 本波 PR 数 × 2` 估槽。同批 ≥2 worker 用 `create_workers` 批量派发，禁连续 `create_worker` 单发。
 
@@ -208,7 +208,7 @@ Lead 在全部 PI session 归档、Mini 名册写完之前不得结束。子 ses
 
 `set-state --identity` 允许键：`{worktree, branch, base, session_id, title}`。`identityDigest` 输入段顺序：`seq → worktree → branch → base → session_id`（session_id 未定时用空串，create 后必须重写 identity 再记 dispatch）。
 
-`EVENT_TYPES` 新增：`session_created`、`session_steer`、`gate_goal`、`gate_routing`、`pr_opened`、`accepted`、`local_cleaned`、`session_archived`、`watch_registered`、`site_report`、`replan_note`。旧 `delivery` 仍是子 session candidate 交卷的唯一真写入口（`record-delivery`）。`gate_goal` / `gate_routing` 的 detail 必须含 `group_id` + 对应 sha256；缺 sha256 拒。`site_report` / `replan_note` / `watch_registered` 只经 `note-event` 入账，不进 set-state 成功流。`watch_registered` 只允许在 `pr-open` 入账，必须消费 `confirm-watch-registered.mjs` 产出的回执（该脚本只认 Mini `register.mjs` 的 `REGISTERED/ALREADY <abs.json>` stdout）。不得本机 `existsSync` 读 Mini 路径，不得只核 pr 号。不得引用旧班车 id。`local-cleaned→archived` 必须消费 `confirm-session-archived.mjs` 产出的回执（输入是 `archive_sessions` 工具 JSON，不是手写 archived=true）。run 级 `phase=ready` 是验收门过了的冻结；组级 `pr-open` / `local-cleaned` / `archived` 与 `watch_registered` 仍可在 ready 之后写入，但必须带对应脚本回执，禁止只填 URL / 只报事件名。
+`EVENT_TYPES` 新增：`session_created`、`session_steer`、`gate_goal`、`gate_routing`、`pr_opened`、`accepted`、`local_cleaned`、`session_archived`、`watch_registered`、`site_report`、`replan_note`。旧 `delivery` 仍是子 session candidate 交卷的唯一真写入口（`record-delivery`）。`gate_goal` / `gate_routing` 的 detail 必须含 `group_id` + 对应 sha256；缺 sha256 拒。`site_report` / `replan_note` / `watch_registered` 只经 `note-event` 入账，不进 set-state 成功流。`watch_registered` 只允许在 `pr-open` 入账，必须消费 `confirm-watch-registered.mjs` 产出的回执（该脚本只认本仓 `scripts/pr-watch/register.mjs` 的 `REGISTERED/ALREADY <abs.json>` stdout，主机 / state_dir / register_bin / ssh_bin 按 `config/mini-watch.json` 断言实际值 === 配置值）。不得本机 `existsSync` 读 Mini 路径，不得只核 pr 号。不得引用 `config/mini-watch.json` `old_schedule_ids_blocklist` 里的旧班车 id。`local-cleaned→archived` 必须消费 `confirm-session-archived.mjs` 产出的回执（输入是 `archive_sessions` 工具 JSON，不是手写 archived=true）。run 级 `phase=ready` 是验收门过了的冻结；组级 `pr-open` / `local-cleaned` / `archived` 与 `watch_registered` 仍可在 ready 之后写入，但必须带对应脚本回执，禁止只填 URL / 只报事件名。
 
 `PHASE_ORDER` 改成 run 级：`splitting | dispatching | running | accepting | ready`。组级状态机在 group 上。
 
@@ -263,7 +263,7 @@ size_gate       {result: 非空字符串, candidate_sha: 40hex}
 
 ## ⑭ 与提交 PR 的边界
 
-本 skill 做：拆 PR、派 session、内联执行、e2e worker、GPT 单审、验收后再开远端 ready PR、每 PR 的 size/format/intent 闸（真实 candidate）、写 `.pr-intent.md`、ssh Mini 注册盯梢名册、`watch_registered`、wrapup-cleanup、`archive_sessions`（只归档 PI session）。
+本 skill 做：拆 PR、派 session、内联执行、e2e worker、GPT 单审、验收后再开远端 ready PR、每 PR 的 size/format/intent 闸（真实 candidate）、写 `.pr-intent.md`、ssh Mini 跑本仓 `scripts/pr-watch/register.mjs`（按 `config/mini-watch.json`）注册盯梢名册、`watch_registered`、wrapup-cleanup、`archive_sessions`（只归档 PI session）。
 
 本 skill 不合入，不跑三机同步。本 skill 不做：三审、改 submit-pr skill、resume 旧 Mini 盯梢班车、自动 `gh pr merge`。子 session 不得自行 merge。三审仍不在本 skill。
 
@@ -273,7 +273,7 @@ size_gate       {result: 非空字符串, candidate_sha: 40hex}
 
 ## ⑯ 防越域与验收
 
-Lead 允许：读码、写开工包、派/收回 session、跑验收命令、改台账、验收后 jump 开远端 PR、ssh Mini 注册盯梢、wrapup-cleanup、`archive_sessions` 归档 PI session、按第⑱节 replan。不允许：改产品代码、替子 session 修 bug、在验收前替子 session 开 PR、git merge、resume 旧盯梢班车、Mini 名册未写就清本地。越域 commit 验收失败。`gate_goal` 过账后才允许 worktree 出现本 PR 的新 commit。该 PR diff 触碰了别组 site-report 里的 read 依赖文件 → 即使在自己 `allowed_paths` 内也标「需重协调」，下游不得开工直到 lead 重发包。
+Lead 允许：读码、写开工包、派/收回 session、跑验收命令、改台账、验收后 jump 开远端 PR、ssh Mini 跑本仓 `scripts/pr-watch/register.mjs` 注册盯梢（按 `config/mini-watch.json`）、wrapup-cleanup、`archive_sessions` 归档 PI session、按第⑱节 replan。不允许：改产品代码、替子 session 修 bug、在验收前替子 session 开 PR、git merge、resume 旧盯梢班车、Mini 名册未写就清本地。越域 commit 验收失败。`gate_goal` 过账后才允许 worktree 出现本 PR 的新 commit。该 PR diff 触碰了别组 site-report 里的 read 依赖文件 → 即使在自己 `allowed_paths` 内也标「需重协调」，下游不得开工直到 lead 重发包。
 
 ## ⑰ Fable 决策 sidecar（非第六席）
 
@@ -305,3 +305,13 @@ Lead 按四类选，不自由发挥：
 下游冻结：任一组因假设破裂 `blocked` → 依赖它的同波 / 后波组不得 `gate_goal` 放行。前波 tip 变化 → 后波未开工组必须换 base 重出包。已合入才发现偏航：不回滚 main，开修正 PR，`replan_note` 记因果。
 
 **自进化**：每轮 run 收尾、摘要之前，把拆错 / 假设破裂 / 补救不对记进 `evolution/ledger.json`（唯一写通道 `scripts/evolution-note.mjs`）。三档 `by-design` / `proposal` / `auto`；扩权与拿不准永不自动落地。默认不 git push。登记进 Cindy「每周自进化 Skills」（`ledger-triage.mjs` `SOURCES`）。
+
+## Mini 运维前置（人手一次，不写进本轮代码）
+
+- 在 Mini 新建一条 **script 模式**调度，名字用 `config/mini-watch.json` `hosts.mini.schedule_name`，不得与旧班车重名。
+- 四元组取自 `config/mini-watch.json` `hosts.mini` 的 `agent_kind` / `model` / `effort` / `provider_id`（不要再手抄进脚本或本文其它段）。
+- capabilities 含 `sessions.dispatch`。
+- 命令指向本仓 `scripts/pr-watch/session-watch-script.py`。
+- 调度 env：`PATH` 含 `/opt/homebrew/bin`（非交互 ssh 下 `gh` 必须找得到）；`AE_WATCH_STATE_DIR` / `AE_WATCH_SNAPSHOT_CMD` 按配置的 `state_dir` 与本仓 `deploy/wrappers/gh-snapshot.mjs`。
+- Mini 被叫醒后走 goal skill 场景 E（盯梢 pr-fix）。CI 绿 + review 清零时只发「可合并」通知，merge 由人点。
+- `config/mini-watch.json` `old_schedule_ids_blocklist` 里的旧两条调度保持 paused 不动，禁止 resume。

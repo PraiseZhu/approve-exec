@@ -1,0 +1,24 @@
+{
+  "_readme": "盯梢配置真相源；ledger 记本文件 sha256 当闸。scripts/ 与 SKILL.md 禁止再写机器/班车字面量。",
+  "ssh_bin": "/usr/bin/ssh",
+  "hosts": {
+    "mini": {
+      "ssh_host": "Praise-Mini",
+      "state_dir": "/Users/praise/pr-autopilot-runtime/state",
+      "register_bin": "/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/approve-exec/scripts/pr-watch/register.mjs",
+      "provider_id": "super-grok",
+      "schedule_name": "approve-exec PR 盯梢",
+      "agent_kind": "pi",
+      "model": "grok-4.6",
+      "effort": "high"
+    },
+    "local": {
+      "provider_id": "art"
+    }
+  },
+  "old_schedule_ids_blocklist": [
+    "031c7ffd-86a8-4f16-9404-1550181da4f3",
+    "c692c1a7-a4cf-4201-b9e2-f9dbea35aba2"
+  ],
+  "auto_merge": false
+}

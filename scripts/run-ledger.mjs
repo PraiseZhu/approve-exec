@@ -31,6 +31,7 @@ import {
 } from 'node:fs';
 import { resolve, dirname, join, isAbsolute } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { loadMiniWatchConfig, miniWatchConfigSha256 } from './lib/mini-watch-config.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -114,8 +115,7 @@ const SESSION_EVENT_TYPES = Object.freeze([
 ]);
 const NOTE_EVENT_TYPES = Object.freeze(['site_report', 'replan_note', 'watch_registered']);
 const OLD_WATCH_SCHEDULE_IDS = Object.freeze([
-  '031c7ffd-86a8-4f16-9404-1550181da4f3',
-  'c692c1a7-a4cf-4201-b9e2-f9dbea35aba2',
+  ...loadMiniWatchConfig().old_schedule_ids_blocklist,
 ]);
 const REPLAN_ACTIONS = Object.freeze(['repack', 'resplit', 'land-first', 'split-new']);
 const EXEC_DELIVERY_STATUS = Object.freeze(['done', 'partial', 'blocked']);
@@ -168,6 +168,7 @@ const LEDGER_TOP_KEYS = Object.freeze([
   'schema_version', 'run_id', 'slug', 'manifest_path', 'manifest_core_hash',
   'version', 'phase', 'phase_at',
   'baseline_tip', // 独立成行：F2 变异锚点只挖 phase_at 行，baseline_tip 保持白名单成员
+  'mini_watch_config_sha256', // 独立成行：init 钉死盯梢配置，watch_registered 三方等值
   'waves', 'events',
 ]);
 const WAVE_KEYS = Object.freeze(['wave', 'integrated_tip', 'groups']);
@@ -321,6 +322,9 @@ export function assertLedgerSchema(ledger) {
   }
   if (ledger.baseline_tip !== null && !TIP_SHA_RE.test(ledger.baseline_tip)) {
     throw new LedgerError('SCHEMA', `台账 baseline_tip 非 40 位十六进制或 null: ${ledger.baseline_tip}`);
+  }
+  if (typeof ledger.mini_watch_config_sha256 !== 'string' || !SHA256_RE.test(ledger.mini_watch_config_sha256)) {
+    throw new LedgerError('SCHEMA', `台账 mini_watch_config_sha256 必须是 64 位十六进制（init 钉死的盯梢配置闸；缺/空/非 hex 拒），当前: ${ledger.mini_watch_config_sha256}`);
   }
   if (!Array.isArray(ledger.waves) || ledger.waves.length === 0) {
     throw new LedgerError('SCHEMA', '台账 waves 必须是非空数组（禁止空波次计划，F-E fail-closed）');
@@ -795,6 +799,7 @@ export function initLedger({ ledgerPath, manifestPath, runId, now, baseline }) {
     version: 0,
     phase: 'splitting', // run 级起步：拆 PR
     baseline_tip: baseline, // sc-p0a：init 基线（40hex=严格模式 / null=兼容模式）
+    mini_watch_config_sha256: miniWatchConfigSha256(), // init 当下盯梢配置闸；watch_registered 三方等值
     waves,
     events: [],
   };
@@ -925,7 +930,7 @@ export const ARCHIVE_RECEIPT_KEYS = Object.freeze([
 ]);
 export const WATCH_RECEIPT_KEYS = Object.freeze([
   'ok', 'owner', 'repo', 'pr_number', 'branch', 'state_file', 'session_id',
-  'checked_at', 'ledger_version', 'assignment_seq',
+  'checked_at', 'ledger_version', 'assignment_seq', 'mini_watch_config_sha256',
 ]);
 const GOAL_SKILL_PATHS = Object.freeze([
   '/Users/praise/.agents/skills/goal/SKILL.md',
@@ -1095,6 +1100,9 @@ export function readWatchReceipt(receiptPath) {
   }
   if (parsed.session_id !== null) {
     throw new LedgerError('WRAPUP_RECEIPT', 'watch_registered receipt.session_id 必须是 null（盯梢会话由 Mini 首次信号 create，不是本机代填）');
+  }
+  if (typeof parsed.mini_watch_config_sha256 !== 'string' || !SHA256_RE.test(parsed.mini_watch_config_sha256)) {
+    throw new LedgerError('WRAPUP_RECEIPT', `watch_registered receipt.mini_watch_config_sha256 必须是 64 位十六进制（当前: ${parsed.mini_watch_config_sha256}）`);
   }
   return parsed;
 }
@@ -1325,6 +1333,14 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
     }
     if (typeof g.branch === 'string' && watchReceipt.branch !== g.branch) {
       throw new LedgerError('PRECONDITION', `watch_registered receipt.branch=${watchReceipt.branch} 对不上组分支 ${g.branch}`);
+    }
+    const liveHash = miniWatchConfigSha256();
+    if (watchReceipt.mini_watch_config_sha256 !== ledger.mini_watch_config_sha256
+      || watchReceipt.mini_watch_config_sha256 !== liveHash) {
+      throw new LedgerError(
+        'PRECONDITION',
+        `watch_registered 盯梢配置闸三方不等值：receipt=${watchReceipt.mini_watch_config_sha256} ledger=${ledger.mini_watch_config_sha256} live=${liveHash}`,
+      );
     }
     ev.detail.state_file = watchReceipt.state_file;
     ev.detail.owner = watchReceipt.owner;

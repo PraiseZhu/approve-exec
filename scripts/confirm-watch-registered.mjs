@@ -5,16 +5,26 @@ import { spawnSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { LedgerError, parseTimestamp, WATCH_RECEIPT_KEYS } from './run-ledger.mjs';
+import { loadMiniWatchConfig, miniHost, miniWatchConfigSha256 } from './lib/mini-watch-config.mjs';
 
 const STATE_NAME_RE = /^([A-Za-z0-9.%!~*'()-]+)__([A-Za-z0-9.%!~*'()-]+)__(\d+)\.json$/;
 const REGISTER_LINE_RE = /^(REGISTERED|ALREADY)\s+(\/\S+\.json)\s*$/;
-export const MINI_WATCH_STATE_DIR = '/Users/praise/pr-autopilot-runtime/state';
-export const MINI_REGISTER_BIN = '/Users/praise/AI-Agent/Claude/capabilities/source/pr-autopilot/scripts/pr-watch/register.mjs';
-export const MINI_HOST = 'Praise-Mini';
-// SSH_BIN 钉绝对路径：spawnSync('ssh') 裸命令名经 PATH 解析，PATH 前置伪 ssh 可在
-// 未连接 Mini 的情况下铸出 ok:true watch 回执。/usr/bin/ssh 是 macOS 系统级稳定路径，
-// 不受调用方 PATH 劫持。测试注入只走函数层 sshRunner，不开 CLI flag / env 口子。
-export const SSH_BIN = '/usr/bin/ssh';
+
+function watchCfg() {
+  return loadMiniWatchConfig();
+}
+function mini() {
+  return miniHost(watchCfg());
+}
+
+// 兼容既有测试：导出值来自 config/mini-watch.json，不是源码字面量。
+export const MINI_WATCH_STATE_DIR = mini().state_dir;
+export const MINI_REGISTER_BIN = mini().register_bin;
+export const MINI_HOST = mini().ssh_host;
+// SSH_BIN 必须是配置里的绝对路径：spawnSync('ssh') 裸命令名经 PATH 解析，PATH 前置伪 ssh
+// 可在未连接 Mini 的情况下铸出 ok:true watch 回执。防劫持靠「必须绝对路径」校验，不靠字面量。
+// 测试注入只走函数层 sshRunner，不开 CLI flag / env 口子。
+export const SSH_BIN = watchCfg().ssh_bin;
 
 export function parseWatchArgs(argv) {
   const flags = {};
@@ -91,6 +101,7 @@ export function confirmWatchRegistered({
     checked_at: now,
     ledger_version: requireStamp(ledgerVersion, 'ledger-version'),
     assignment_seq: requireStamp(assignmentSeq, 'assignment-seq'),
+    mini_watch_config_sha256: miniWatchConfigSha256(),
   };
   const keys = Object.keys(receipt).sort();
   if (keys.join(',') !== [...WATCH_RECEIPT_KEYS].sort().join(',')) {
@@ -100,26 +111,29 @@ export function confirmWatchRegistered({
 }
 
 export function assertMiniWatchStateDir(stateDir) {
+  const expected = mini().state_dir;
   if (typeof stateDir !== 'string' || !stateDir.startsWith('/')) {
     throw new LedgerError('ARGS', `state-dir 必须是 Mini 绝对路径（当前: ${stateDir ?? '缺失'}）`);
   }
   const normalized = stateDir.replace(/\/+$/, '');
-  if (normalized !== MINI_WATCH_STATE_DIR) {
-    throw new LedgerError('ARGS', `state-dir 必须是 ${MINI_WATCH_STATE_DIR}（当前: ${stateDir}）`);
+  if (normalized !== expected) {
+    throw new LedgerError('ARGS', `state-dir 必须是配置值 ${expected}（当前: ${stateDir}）`);
   }
   return normalized;
 }
 
 export function assertMiniRegisterBin(registerBin) {
-  const bin = registerBin ?? MINI_REGISTER_BIN;
-  if (bin !== MINI_REGISTER_BIN) {
-    throw new LedgerError('ARGS', `register-bin 必须是 ${MINI_REGISTER_BIN}（当前: ${bin}）`);
+  const expected = mini().register_bin;
+  const bin = registerBin ?? expected;
+  if (bin !== expected) {
+    throw new LedgerError('ARGS', `register-bin 必须是配置值 ${expected}（当前: ${bin}）`);
   }
   return bin;
 }
 
 function runRegister({ host, registerBin, stateDir, owner, repo, pr, branch, pushRemote, sshRunner }) {
-  const ssh = sshRunner ?? ((args) => spawnSync(SSH_BIN, args, { encoding: 'utf8' }));
+  const sshBin = watchCfg().ssh_bin;
+  const ssh = sshRunner ?? ((args) => spawnSync(sshBin, args, { encoding: 'utf8' }));
   const remoteCmd = [
     'node', registerBin,
     '--state-dir', stateDir,
@@ -137,9 +151,10 @@ function runRegister({ host, registerBin, stateDir, owner, repo, pr, branch, pus
 }
 
 export function assertMiniHost(host) {
-  const value = host ?? MINI_HOST;
-  if (value !== MINI_HOST) {
-    throw new LedgerError('ARGS', `host 必须是 ${MINI_HOST}（当前: ${value}）`);
+  const expected = mini().ssh_host;
+  const value = host ?? expected;
+  if (value !== expected) {
+    throw new LedgerError('ARGS', `host 必须是配置值 ${expected}（当前: ${value}）`);
   }
   return value;
 }
@@ -149,7 +164,7 @@ export function runWatchCli(argv, { sshRunner } = {}) {
   if (flags.stdout !== undefined) {
     throw new LedgerError('ARGS', '--stdout 不是生产 CLI 参数；测试请直接调 confirmWatchRegistered()');
   }
-  const stateDir = assertMiniWatchStateDir(flags['state-dir'] ?? MINI_WATCH_STATE_DIR);
+  const stateDir = assertMiniWatchStateDir(flags['state-dir'] ?? mini().state_dir);
   const registerBin = assertMiniRegisterBin(flags['register-bin']);
   const host = assertMiniHost(flags.host);
   const stdout = runRegister({
