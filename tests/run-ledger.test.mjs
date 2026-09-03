@@ -3263,6 +3263,7 @@ const RL_MUTATION_PREDICTIONS = [
       'sc-p1d: unresolved>0 时 accepted 拒',
       'sc-p1d: 非法跳转矩阵全部 exit 2 且落 illegal_transition 事件',
       'sc-p1d: failed→pending 后 rounds==0 且 tip_sha/worker_label/身份三键清空（重派不继承旧计数/旧身份）',
+      'sc-p1d: 重派后旧代 gate 收据不得让新代跳过开工闸',
       'sc-p1d: tip_sha 非 40hex 拒（任意字符串拒，格式校验）',
       'sc-p1d: phase 单向前进合法链 + 波次顺序门（F-E）+ →ready receipt 凭据（F-F）',
       'sc-p1d: F-E ② 波次顺序门——wave1 未集成时 wave2 组派工必拒（跳过未完成前波开工）',
@@ -3714,8 +3715,8 @@ test('ae-prewalk-handoff: 后续执行组出包含波0组的 first_edit.path/lan
 });
 
 // 变异子套件要跑的测试文件集（含 e2e-dryrun 与 ready-check，证明「其余绿」覆盖到消费侧单测，
-// 不只是生产侧）。不含 selfcheck.test.mjs：其组B-1/组B-3 的 --live 接线检查依赖「真实仓库」
-// （symlink 目标与 git common dir 同源），在变异复制树中天然 FAIL，与本三缺陷的变异无关。
+// 不只是生产侧）。不含 selfcheck.test.mjs：其组B-1/组B-3 的 --live 接线检查依赖真实 live
+// 接线位点，在变异复制树中天然 FAIL，与本三缺陷的变异无关。
 const RL_MUTATION_TEST_FILES = [
   'tests/config.test.mjs', 'tests/e2e-dryrun.test.mjs', 'tests/graph.test.mjs',
   'tests/mem-probe.test.mjs', 'tests/ready-check.test.mjs', 'tests/run-ledger.test.mjs',
