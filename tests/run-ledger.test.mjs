@@ -163,7 +163,26 @@ function writeWrapupReceipt(dir, name, body) {
   return path;
 }
 
+function later(ts) {
+  const ms = Date.parse(ts);
+  return new Date(ms + 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+function stampFromLedger(ledgerPath, extras = {}) {
+  const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  const groupId = extras.group ?? 'g4';
+  const group = ledger.waves.flatMap((w) => w.groups).find((g) => g.group_id === groupId);
+  return {
+    ledger_version: extras.ledger_version ?? ledger.version,
+    assignment_seq: extras.assignment_seq ?? group?.assignment_seq ?? 0,
+  };
+}
+
 function prOpenReceiptPath(dir, extras = {}) {
+  const stamp = extras.ledgerPath ? stampFromLedger(extras.ledgerPath, extras) : {
+    ledger_version: extras.ledger_version ?? 0,
+    assignment_seq: extras.assignment_seq ?? 0,
+  };
   return writeWrapupReceipt(dir, extras.file ?? 'pr-open-receipt.json', {
     url: extras.url ?? 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
     number: extras.number ?? 1,
@@ -171,11 +190,16 @@ function prOpenReceiptPath(dir, extras = {}) {
     isDraft: extras.isDraft ?? false,
     state: extras.state ?? 'OPEN',
     branch: extras.branch ?? 'feat/run-ledger',
-    checked_at: extras.checked_at ?? T,
+    checked_at: extras.checked_at ?? later(T),
+    ...stamp,
   });
 }
 
 function cleanupReceiptPath(dir, extras = {}) {
+  const stamp = extras.ledgerPath ? stampFromLedger(extras.ledgerPath, extras) : {
+    ledger_version: extras.ledger_version ?? 0,
+    assignment_seq: extras.assignment_seq ?? 0,
+  };
   return writeWrapupReceipt(dir, extras.file ?? 'cleanup-receipt.json', {
     ok: extras.ok ?? true,
     skipped: extras.skipped ?? false,
@@ -183,15 +207,39 @@ function cleanupReceiptPath(dir, extras = {}) {
     worktree: extras.worktree ?? '/wt/g4',
     sha: extras.sha ?? SHA1,
     remoteDeleted: extras.remoteDeleted ?? false,
-    checked_at: extras.checked_at ?? T,
+    checked_at: extras.checked_at ?? later(T),
+    ...stamp,
   });
 }
 
 function archiveReceiptPath(dir, extras = {}) {
+  const stamp = extras.ledgerPath ? stampFromLedger(extras.ledgerPath, extras) : {
+    ledger_version: extras.ledger_version ?? 0,
+    assignment_seq: extras.assignment_seq ?? 0,
+  };
   return writeWrapupReceipt(dir, extras.file ?? 'archive-receipt.json', {
     session_id: extras.session_id ?? 'sess-g4',
     archived: extras.archived ?? true,
-    checked_at: extras.checked_at ?? T,
+    checked_at: extras.checked_at ?? later(T),
+    ...stamp,
+  });
+}
+
+function watchReceiptPath(dir, extras = {}) {
+  const stamp = extras.ledgerPath ? stampFromLedger(extras.ledgerPath, extras) : {
+    ledger_version: extras.ledger_version ?? 0,
+    assignment_seq: extras.assignment_seq ?? 0,
+  };
+  return writeWrapupReceipt(dir, extras.file ?? 'watch-receipt.json', {
+    ok: extras.ok ?? true,
+    owner: extras.owner ?? 'xindong',
+    repo: extras.repo ?? 'mivo-canvas-plugin',
+    pr_number: extras.pr_number ?? 1,
+    branch: extras.branch ?? 'feat/run-ledger',
+    state_file: extras.state_file ?? '/mini/runtime/state/xindong__mivo-canvas-plugin__1.json',
+    session_id: extras.session_id ?? null,
+    checked_at: extras.checked_at ?? later(T),
+    ...stamp,
   });
 }
 
@@ -1085,12 +1133,12 @@ test('sc-p1d: 非法跳转矩阵全部 exit 2 且落 illegal_transition 事件',
   assert.equal(r.status, 0, r.stderr);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'accepted', '--now', T);
   assert.equal(r.status, 0, r.stderr);
-  r = cli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', T, '--pr-open-receipt', prOpenReceiptPath(dir));
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', T, '--pr-open-receipt', prOpenReceiptPath(dir, { ledgerPath }));
   assert.equal(r.status, 2, 'accepted→pr-open 缺 phase=ready 必须 exit 2');
   assert.match(r.stderr, /phase=ready/);
-  r = cli('set-state', ledgerPath, '--group', g, '--to', 'local-cleaned', '--now', T, '--cleanup-receipt', cleanupReceiptPath(dir));
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'local-cleaned', '--now', T, '--cleanup-receipt', cleanupReceiptPath(dir, { ledgerPath }));
   assert.equal(r.status, 2, 'accepted 不得直接 local-cleaned');
-  r = cli('set-state', ledgerPath, '--group', g, '--to', 'archived', '--now', T, '--archive-receipt', archiveReceiptPath(dir));
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'archived', '--now', T, '--archive-receipt', archiveReceiptPath(dir, { ledgerPath }));
   assert.equal(r.status, 2, 'accepted 不得直接 archived');
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'dispatched', '--worker-label', 'evil', '--now', T);
   assert.equal(r.status, 2, 'accepted→dispatched 重放攻击必须 exit 2');

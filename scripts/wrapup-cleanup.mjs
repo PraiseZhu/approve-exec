@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // wrapup-cleanup.mjs — 远端 PR 已 open 后只清本地 worktree/分支。不删远端。不用 cleanup-branch。
 import { spawnSync } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { LedgerError } from './run-ledger.mjs';
 
@@ -29,7 +29,15 @@ function git(args, { cwd, allowFailure = false } = {}) {
   return (r.stdout || '').trim();
 }
 
-export function wrapupCleanup({ worktree, branch, remote = 'origin', gitRunner = git, now } = {}) {
+function requireStamp(value, name) {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isSafeInteger(n) || n < 0) {
+    throw new LedgerError('ARGS', `${name} 必须是非负安全整数（当前: ${value}）`);
+  }
+  return n;
+}
+
+export function wrapupCleanup({ worktree, branch, remote = 'origin', gitRunner = git, now, ledgerVersion, assignmentSeq } = {}) {
   if (typeof worktree !== 'string' || !worktree.startsWith('/')) {
     throw new LedgerError('ARGS', `worktree 必须是绝对路径（当前: ${worktree}）`);
   }
@@ -41,6 +49,16 @@ export function wrapupCleanup({ worktree, branch, remote = 'origin', gitRunner =
   }
   if (typeof now !== 'string' || now.length === 0) {
     throw new LedgerError('ARGS', 'now 必须是非空时间戳（--now；写入 cleanup-receipt.checked_at）');
+  }
+  const version = requireStamp(ledgerVersion, 'ledger-version');
+  const seq = requireStamp(assignmentSeq, 'assignment-seq');
+  const currentBranch = gitRunner(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: worktree });
+  if (currentBranch !== branch) {
+    throw new LedgerError('PRECONDITION', `worktree 当前分支 ${currentBranch} 对不上 ${branch}`);
+  }
+  const porcelain = gitRunner(['status', '--porcelain'], { cwd: worktree });
+  if (porcelain.length > 0) {
+    throw new LedgerError('PRECONDITION', `worktree dirty，拒绝清理（${porcelain.split('\n')[0]}）`);
   }
   const localSha = gitRunner(['rev-parse', 'HEAD'], { cwd: worktree });
   if (!SHA_RE.test(localSha)) {
@@ -59,12 +77,25 @@ export function wrapupCleanup({ worktree, branch, remote = 'origin', gitRunner =
       branch,
       worktree,
       checked_at: now,
+      ledger_version: version,
+      assignment_seq: seq,
     };
   }
   const commonDir = gitRunner(['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: worktree });
   const mainRepo = commonDir.replace(/\/\.git$/, '');
-  gitRunner(['worktree', 'remove', '--force', worktree], { cwd: mainRepo });
-  gitRunner(['branch', '-D', branch], { cwd: mainRepo, allowFailure: true });
+  gitRunner(['worktree', 'remove', worktree], { cwd: mainRepo });
+  gitRunner(['branch', '-D', branch], { cwd: mainRepo });
+  const remainingTrees = gitRunner(['worktree', 'list', '--porcelain'], { cwd: mainRepo });
+  if (remainingTrees.split('\n').some((line) => line === `worktree ${worktree}`)) {
+    throw new LedgerError('PRECONDITION', `worktree 删除后仍在 git worktree list：${worktree}`);
+  }
+  const remainingBranch = gitRunner(['branch', '--list', branch], { cwd: mainRepo });
+  if (remainingBranch.length > 0) {
+    throw new LedgerError('PRECONDITION', `本地分支删除后仍在：${remainingBranch}`);
+  }
+  if (existsSync(worktree)) {
+    throw new LedgerError('PRECONDITION', `worktree 路径删除后仍存在：${worktree}`);
+  }
   return {
     ok: true,
     skipped: false,
@@ -73,6 +104,8 @@ export function wrapupCleanup({ worktree, branch, remote = 'origin', gitRunner =
     sha: localSha,
     remoteDeleted: false,
     checked_at: now,
+    ledger_version: version,
+    assignment_seq: seq,
   };
 }
 
@@ -84,6 +117,8 @@ function runCli(argv) {
       branch: flags.branch,
       remote: flags.remote ?? 'origin',
       now: flags.now,
+      ledgerVersion: flags['ledger-version'],
+      assignmentSeq: flags['assignment-seq'],
     });
     process.stdout.write(`${JSON.stringify(out)}\n`);
     return out.ok ? 0 : 2;

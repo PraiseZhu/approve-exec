@@ -182,6 +182,8 @@ test('第⑨段：新组状态机 + identity 五段 + PR_RECEIPT_KEYS', () => {
     '⑨段应声明 Mini 名册先于清场');
   assert.ok(s9.includes('pr-open-receipt') && s9.includes('cleanup-receipt') && s9.includes('archive-receipt'),
     '⑨段应收口开 PR / 清本地 / 归档的真实回执');
+  assert.ok(s9.includes('register.mjs') && s9.includes('ledger_version') && s9.includes('assignment_seq'),
+    '⑨段 Mini 名册应吃 register 回执，并绑定 ledger_version/assignment_seq');
   assert.ok(s9.includes('READY_FOR_LATER_SUBMIT_PR_SKILL'), '⑨段 run 级 ready 文案应保留 READY_FOR_LATER_SUBMIT_PR_SKILL 作为验收许可信号');
   assert.ok(s9.includes('archive_sessions') || skillDoc.includes('archive_sessions'),
     '正文应点名 archive_sessions 归档 PI session');

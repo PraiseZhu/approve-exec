@@ -29,8 +29,8 @@ export function assertReadyPr({ url, state, isDraft, headRefOid, expectedHead, b
   if (state !== 'OPEN') {
     throw new LedgerError('PRECONDITION', `PR 不是 OPEN（当前: ${state}）`);
   }
-  if (isDraft === true) {
-    throw new LedgerError('PRECONDITION', 'PR 仍是 draft，验收后必须是 ready');
+  if (isDraft !== false) {
+    throw new LedgerError('PRECONDITION', `PR isDraft 必须是 false（当前: ${isDraft ?? '缺失'}）`);
   }
   if (typeof expectedHead === 'string' && SHA_RE.test(expectedHead) && headRefOid !== expectedHead) {
     throw new LedgerError('PRECONDITION', `PR head ${headRefOid} 对不上本地 ${expectedHead}`);
@@ -51,7 +51,15 @@ function runGh(repo, branch, ghBin = process.env.GH_BIN ?? 'gh') {
   return JSON.parse(r.stdout);
 }
 
-export function confirmPrOpen({ repo, branch, head, ghBin, now } = {}) {
+function requireStamp(value, name) {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isSafeInteger(n) || n < 0) {
+    throw new LedgerError('ARGS', `${name} 必须是非负安全整数（当前: ${value}）`);
+  }
+  return n;
+}
+
+export function confirmPrOpen({ repo, branch, head, ghBin, now, ledgerVersion, assignmentSeq } = {}) {
   if (typeof repo !== 'string' || !repo.includes('/')) {
     throw new LedgerError('ARGS', `repo 必须是 owner/name（当前: ${repo}）`);
   }
@@ -62,15 +70,19 @@ export function confirmPrOpen({ repo, branch, head, ghBin, now } = {}) {
     throw new LedgerError('ARGS', 'now 必须是非空时间戳（--now；写入 pr-open-receipt.checked_at）');
   }
   const raw = runGh(repo, branch, ghBin);
-  return assertReadyPr({
-    url: raw.url,
-    state: raw.state,
-    isDraft: raw.isDraft,
-    headRefOid: raw.headRefOid,
-    expectedHead: head,
-    branch,
-    checkedAt: now,
-  });
+  return {
+    ...assertReadyPr({
+      url: raw.url,
+      state: raw.state,
+      isDraft: raw.isDraft,
+      headRefOid: raw.headRefOid,
+      expectedHead: head,
+      branch,
+      checkedAt: now,
+    }),
+    ledger_version: requireStamp(ledgerVersion, 'ledger-version'),
+    assignment_seq: requireStamp(assignmentSeq, 'assignment-seq'),
+  };
 }
 
 function runCli(argv) {
@@ -81,6 +93,8 @@ function runCli(argv) {
       branch: flags.branch,
       head: flags.head,
       now: flags.now,
+      ledgerVersion: flags['ledger-version'],
+      assignmentSeq: flags['assignment-seq'],
     });
     process.stdout.write(`${JSON.stringify(out)}\n`);
     return 0;

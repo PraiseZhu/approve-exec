@@ -18,6 +18,8 @@ import {
 const SHA = 'a'.repeat(40);
 const SHA2 = 'b'.repeat(40);
 const NOW = '2026-08-09T00:00:00Z';
+const LATER = '2026-08-09T00:00:01Z';
+const STAMP = { ledgerVersion: 0, assignmentSeq: 0 };
 
 test('confirm-pr-open: draft 拒、OPEN ready 过', () => {
   assert.throws(
@@ -25,6 +27,15 @@ test('confirm-pr-open: draft 拒、OPEN ready 过', () => {
       url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
       state: 'OPEN',
       isDraft: true,
+      headRefOid: SHA,
+      expectedHead: SHA,
+    }),
+    LedgerError,
+  );
+  assert.throws(
+    () => assertReadyPr({
+      url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
+      state: 'OPEN',
       headRefOid: SHA,
       expectedHead: SHA,
     }),
@@ -45,6 +56,8 @@ test('wrapup-cleanup: 远端 SHA 不对则跳过且不删 remote', () => {
   const calls = [];
   const gitRunner = (args) => {
     calls.push(args);
+    if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/x';
+    if (args[0] === 'status') return '';
     if (args[0] === 'rev-parse' && args[1] === 'HEAD') return SHA;
     if (args[0] === 'ls-remote') return `${SHA2}\trefs/heads/feat/x`;
     return '';
@@ -55,6 +68,7 @@ test('wrapup-cleanup: 远端 SHA 不对则跳过且不删 remote', () => {
     remote: 'origin',
     gitRunner,
     now: NOW,
+    ...STAMP,
   });
   assert.equal(out.ok, false);
   assert.equal(out.skipped, true);
@@ -70,7 +84,7 @@ test('confirm-pr-open: gh pr view 用分支名，不用 --head', () => {
   const log = join(binDir, 'args.txt');
   writeFileSync(gh, `#!/bin/sh\nprintf '%s\\n' "$@" > "${log}"\nprintf '{"url":"https://github.com/acme/app/pull/9","state":"OPEN","isDraft":false,"headRefOid":"${SHA}","number":9}\\n'\n`);
   chmodSync(gh, 0o755);
-  const out = confirmPrOpen({ repo: 'acme/app', branch: 'feat/x', head: SHA, ghBin: gh, now: NOW });
+  const out = confirmPrOpen({ repo: 'acme/app', branch: 'feat/x', head: SHA, ghBin: gh, now: NOW, ...STAMP });
   assert.equal(out.number, 9);
   assert.equal(out.branch, 'feat/x');
   assert.equal(out.checked_at, NOW);
@@ -139,6 +153,11 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', T);
   assert.equal(r.status, 2, 'ready 后 pr-open 缺 confirm-pr-open 回执必须拒');
   assert.match(r.stderr, /pr-open-receipt|confirm-pr-open/);
+  const stamp = () => {
+    const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+    const group = ledger.waves.flatMap((w) => w.groups).find((item) => item.group_id === g);
+    return { ledger_version: ledger.version, assignment_seq: group?.assignment_seq ?? 0 };
+  };
   const draftReceipt = join(dir, 'pr-open-draft.json');
   writeFileSync(draftReceipt, `${JSON.stringify({
     url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
@@ -147,10 +166,24 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
     isDraft: true,
     state: 'OPEN',
     branch: 'feat/run-ledger',
-    checked_at: T,
+    checked_at: LATER,
+    ...stamp(),
   })}\n`);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', T, '--pr-open-receipt', draftReceipt);
   assert.equal(r.status, 2, 'draft PR 回执不得入账');
+  const stalePrOpen = join(dir, 'pr-open-stale.json');
+  writeFileSync(stalePrOpen, `${JSON.stringify({
+    url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
+    number: 1,
+    headRefOid: SHA1,
+    isDraft: false,
+    state: 'OPEN',
+    branch: 'feat/run-ledger',
+    checked_at: T,
+    ...stamp(),
+  })}\n`);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', T, '--pr-open-receipt', stalePrOpen);
+  assert.equal(r.status, 2, '早于 accepted 的 pr-open 回执不得入账');
   const prOpenReceipt = join(dir, 'pr-open-receipt.json');
   writeFileSync(prOpenReceipt, `${JSON.stringify({
     url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
@@ -159,16 +192,35 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
     isDraft: false,
     state: 'OPEN',
     branch: 'feat/run-ledger',
-    checked_at: T,
+    checked_at: LATER,
+    ...stamp(),
   })}\n`);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', T, '--pr-open-receipt', prOpenReceipt);
   assert.equal(r.status, 0, r.stderr);
-  const watchState = join(dir, 'acme__app__1.json');
-  writeFileSync(watchState, `${JSON.stringify({ owner: 'acme', repo: 'app', pr_number: 1, session_id: null })}\n`);
+  const fakeLocalWatch = join(dir, 'acme__app__1.json');
+  writeFileSync(fakeLocalWatch, `${JSON.stringify({ owner: 'acme', repo: 'app', pr_number: 1, session_id: null })}\n`);
   r = cli('note-event', ledgerPath, '--event', 'watch_registered', '--detail', JSON.stringify({
     group_id: g,
     pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
-    state_file: watchState,
+    state_file: fakeLocalWatch,
+  }), '--now', T);
+  assert.equal(r.status, 2, '本机假名册不得冒充 Mini register 回执');
+  const watchReceipt = join(dir, 'watch-receipt.json');
+  writeFileSync(watchReceipt, `${JSON.stringify({
+    ok: true,
+    owner: 'xindong',
+    repo: 'mivo-canvas-plugin',
+    pr_number: 1,
+    branch: 'feat/run-ledger',
+    state_file: '/mini/runtime/state/xindong__mivo-canvas-plugin__1.json',
+    session_id: null,
+    checked_at: LATER,
+    ...stamp(),
+  })}\n`);
+  r = cli('note-event', ledgerPath, '--event', 'watch_registered', '--detail', JSON.stringify({
+    group_id: g,
+    pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
+    receipt: watchReceipt,
   }), '--now', T);
   assert.equal(r.status, 0, r.stderr);
   const cleanupReceipt = join(dir, 'cleanup-receipt.json');
@@ -179,7 +231,8 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
     worktree: '/wt/g4',
     sha: SHA1,
     remoteDeleted: false,
-    checked_at: T,
+    checked_at: LATER,
+    ...stamp(),
   })}\n`);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'local-cleaned', '--now', T);
   assert.equal(r.status, 2, 'pr-open→local-cleaned 缺 wrapup-cleanup 回执必须拒');
@@ -192,10 +245,21 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
     worktree: '/wt/g4',
     sha: SHA1,
     remoteDeleted: false,
-    checked_at: T,
+    checked_at: LATER,
+    ...stamp(),
   })}\n`);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'local-cleaned', '--now', T, '--cleanup-receipt', skippedCleanup);
   assert.equal(r.status, 2, 'skipped 清理回执不得入账');
+  writeFileSync(cleanupReceipt, `${JSON.stringify({
+    ok: true,
+    skipped: false,
+    branch: 'feat/run-ledger',
+    worktree: '/wt/g4',
+    sha: SHA1,
+    remoteDeleted: false,
+    checked_at: LATER,
+    ...stamp(),
+  })}\n`);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'local-cleaned', '--now', T, '--cleanup-receipt', cleanupReceipt);
   assert.equal(r.status, 0, r.stderr);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'archived', '--now', T);
@@ -205,7 +269,8 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
   writeFileSync(archiveReceipt, `${JSON.stringify({
     session_id: 'sess-g4',
     archived: true,
-    checked_at: T,
+    checked_at: LATER,
+    ...stamp(),
   })}\n`);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'archived', '--now', T, '--archive-receipt', archiveReceipt);
   assert.equal(r.status, 0, r.stderr);
@@ -217,16 +282,20 @@ test('confirm-pr-open / wrapup-cleanup stdout 必须能被台账回执闸直接�
   const gh = join(binDir, 'gh');
   writeFileSync(gh, `#!/bin/sh\nprintf '{"url":"https://github.com/acme/app/pull/9","state":"OPEN","isDraft":false,"headRefOid":"${SHA}","number":9}\\n'\n`);
   chmodSync(gh, 0o755);
-  const pr = confirmPrOpen({ repo: 'acme/app', branch: 'feat/x', head: SHA, ghBin: gh, now: NOW });
+  const pr = confirmPrOpen({ repo: 'acme/app', branch: 'feat/x', head: SHA, ghBin: gh, now: NOW, ...STAMP });
   assert.deepEqual(Object.keys(pr).sort(), [...PR_OPEN_RECEIPT_KEYS].sort());
   const prPath = join(dir, 'pr-open.json');
   writeFileSync(prPath, `${JSON.stringify(pr)}\n`);
   assert.equal(readPrOpenReceipt(prPath).number, 9);
 
   const gitRunner = (args) => {
+    if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/x';
+    if (args[0] === 'status') return '';
     if (args[0] === 'rev-parse' && args[1] === 'HEAD') return SHA;
     if (args[0] === 'ls-remote') return `${SHA}\trefs/heads/feat/x`;
     if (args[0] === 'rev-parse' && args.includes('--git-common-dir')) return '/repo/.git';
+    if (args[0] === 'worktree' && args[1] === 'list') return 'worktree /repo\n';
+    if (args[0] === 'branch' && args[1] === '--list') return '';
     return '';
   };
   const cleaned = wrapupCleanup({
@@ -235,6 +304,7 @@ test('confirm-pr-open / wrapup-cleanup stdout 必须能被台账回执闸直接�
     remote: 'origin',
     gitRunner,
     now: NOW,
+    ...STAMP,
   });
   assert.deepEqual(Object.keys(cleaned).sort(), [...CLEANUP_RECEIPT_KEYS].sort());
   const cleanupPath = join(dir, 'cleanup.json');
@@ -247,13 +317,54 @@ test('confirm-pr-open / wrapup-cleanup 缺 --now 拒', () => {
   assert.throws(() => wrapupCleanup({ worktree: '/wt/feat', branch: 'feat/x' }), LedgerError);
 });
 
+test('wrapup-cleanup: 分支不对 / dirty / 删不掉都拒', () => {
+  assert.throws(() => wrapupCleanup({
+    worktree: '/wt/feat',
+    branch: 'feat/x',
+    gitRunner: (args) => (args[0] === 'rev-parse' && args[1] === '--abbrev-ref' ? 'feat/other' : ''),
+    now: NOW,
+    ...STAMP,
+  }), LedgerError);
+  assert.throws(() => wrapupCleanup({
+    worktree: '/wt/feat',
+    branch: 'feat/x',
+    gitRunner: (args) => {
+      if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/x';
+      if (args[0] === 'status') return ' M src.ts';
+      return '';
+    },
+    now: NOW,
+    ...STAMP,
+  }), LedgerError);
+  assert.throws(() => wrapupCleanup({
+    worktree: '/wt/feat',
+    branch: 'feat/x',
+    gitRunner: (args) => {
+      if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/x';
+      if (args[0] === 'status') return '';
+      if (args[0] === 'rev-parse' && args[1] === 'HEAD') return SHA;
+      if (args[0] === 'ls-remote') return `${SHA}\trefs/heads/feat/x`;
+      if (args[0] === 'rev-parse' && args.includes('--git-common-dir')) return '/repo/.git';
+      if (args[0] === 'worktree' && args[1] === 'remove') return '';
+      if (args[0] === 'branch' && args[1] === '-D') throw Object.assign(new Error('branch still there'), { code: 'PRECONDITION' });
+      return '';
+    },
+    now: NOW,
+    ...STAMP,
+  }));
+});
+
 test('wrapup-cleanup: SHA 对得上才 remove worktree，不 push --delete', () => {
   const calls = [];
   const gitRunner = (args) => {
     calls.push(args);
+    if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/x';
+    if (args[0] === 'status') return '';
     if (args[0] === 'rev-parse' && args[1] === 'HEAD') return SHA;
     if (args[0] === 'ls-remote') return `${SHA}\trefs/heads/feat/x`;
     if (args[0] === 'rev-parse' && args.includes('--git-common-dir')) return '/repo/.git';
+    if (args[0] === 'worktree' && args[1] === 'list') return 'worktree /repo\n';
+    if (args[0] === 'branch' && args[1] === '--list') return '';
     return '';
   };
   const out = wrapupCleanup({
@@ -262,6 +373,7 @@ test('wrapup-cleanup: SHA 对得上才 remove worktree，不 push --delete', () 
     remote: 'origin',
     gitRunner,
     now: NOW,
+    ...STAMP,
   });
   assert.equal(out.ok, true);
   assert.equal(out.remoteDeleted, false);

@@ -266,6 +266,14 @@ export function assertEventSchema(ev) {
     if (typeof ev.detail.state_file !== 'string' || ev.detail.state_file.length === 0) {
       throw new LedgerError('SCHEMA', 'watch_registered 的 detail.state_file 必须是非空字符串');
     }
+    for (const k of ['owner', 'repo']) {
+      if (typeof ev.detail[k] !== 'string' || ev.detail[k].length === 0) {
+        throw new LedgerError('SCHEMA', `watch_registered 的 detail.${k} 必须是非空字符串`);
+      }
+    }
+    if (!Number.isSafeInteger(ev.detail.pr_number) || ev.detail.pr_number <= 0) {
+      throw new LedgerError('SCHEMA', 'watch_registered 的 detail.pr_number 必须是正整数');
+    }
     if (!Number.isSafeInteger(ev.detail.assignment_seq) || ev.detail.assignment_seq < 0) {
       throw new LedgerError('SCHEMA', 'watch_registered 的 detail.assignment_seq 必须是非负安全整数（代际隔离）');
     }
@@ -894,12 +902,18 @@ export const PR_RECEIPT_KEYS = Object.freeze([
 ]);
 export const PR_OPEN_RECEIPT_KEYS = Object.freeze([
   'url', 'number', 'headRefOid', 'isDraft', 'state', 'branch', 'checked_at',
+  'ledger_version', 'assignment_seq',
 ]);
 export const CLEANUP_RECEIPT_KEYS = Object.freeze([
   'ok', 'skipped', 'branch', 'worktree', 'sha', 'remoteDeleted', 'checked_at',
+  'ledger_version', 'assignment_seq',
 ]);
 export const ARCHIVE_RECEIPT_KEYS = Object.freeze([
-  'session_id', 'archived', 'checked_at',
+  'session_id', 'archived', 'checked_at', 'ledger_version', 'assignment_seq',
+]);
+export const WATCH_RECEIPT_KEYS = Object.freeze([
+  'ok', 'owner', 'repo', 'pr_number', 'branch', 'state_file', 'session_id',
+  'checked_at', 'ledger_version', 'assignment_seq',
 ]);
 const GOAL_SKILL_PATHS = Object.freeze([
   '/Users/praise/.agents/skills/goal/SKILL.md',
@@ -955,7 +969,39 @@ function readExactReceipt(receiptPath, keys, what) {
   if (typeof parsed.checked_at !== 'string' || parsed.checked_at.length === 0) {
     throw new LedgerError('WRAPUP_RECEIPT', `${what}.checked_at 必须是非空字符串`);
   }
+  if (!Number.isSafeInteger(parsed.ledger_version) || parsed.ledger_version < 0) {
+    throw new LedgerError('WRAPUP_RECEIPT', `${what}.ledger_version 必须是非负安全整数（当前: ${parsed.ledger_version}）`);
+  }
+  if (!Number.isSafeInteger(parsed.assignment_seq) || parsed.assignment_seq < 0) {
+    throw new LedgerError('WRAPUP_RECEIPT', `${what}.assignment_seq 必须是非负安全整数（当前: ${parsed.assignment_seq}）`);
+  }
   return parsed;
+}
+
+function githubIdentityFromUrl(url) {
+  const m = typeof url === 'string' ? url.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/) : null;
+  if (!m) return null;
+  return { owner: m[1], repo: m[2], pr_number: Number(m[3]) };
+}
+
+function assertReceiptBoundToLedger(receipt, ledger, group, what) {
+  const g = findGroup(ledger, group);
+  if (receipt.ledger_version !== ledger.version) {
+    throw new LedgerError('WRAPUP_RECEIPT', `${what}.ledger_version=${receipt.ledger_version} 对不上台账 version=${ledger.version}（旧回执不得重放）`);
+  }
+  if (receipt.assignment_seq !== (g.assignment_seq ?? 0)) {
+    throw new LedgerError('WRAPUP_RECEIPT', `${what}.assignment_seq=${receipt.assignment_seq} 对不上组 assignment_seq=${g.assignment_seq ?? 0}`);
+  }
+}
+
+function assertReceiptAfterEvent(receipt, ledger, group, eventType, what) {
+  const ev = latestGroupEvent(ledger, group, eventType);
+  if (!ev) {
+    throw new LedgerError('WRAPUP_RECEIPT', `${what} 要求本组成立的 ${eventType}`);
+  }
+  if (receipt.checked_at <= ev.at) {
+    throw new LedgerError('WRAPUP_RECEIPT', `${what}.checked_at=${receipt.checked_at} 不得早于或等于 ${eventType}.at=${ev.at}`);
+  }
 }
 
 export function readPrOpenReceipt(receiptPath) {
@@ -1015,6 +1061,28 @@ export function readArchiveReceipt(receiptPath) {
   }
   if (typeof parsed.session_id !== 'string' || parsed.session_id.length === 0) {
     throw new LedgerError('WRAPUP_RECEIPT', '→archived receipt.session_id 必须是非空字符串');
+  }
+  return parsed;
+}
+
+export function readWatchReceipt(receiptPath) {
+  const parsed = readExactReceipt(receiptPath, WATCH_RECEIPT_KEYS, 'watch_registered receipt');
+  if (parsed.ok !== true) {
+    throw new LedgerError('WRAPUP_RECEIPT', `watch_registered receipt.ok 必须是 true（当前: ${parsed.ok}）`);
+  }
+  for (const k of ['owner', 'repo', 'branch', 'state_file']) {
+    if (typeof parsed[k] !== 'string' || parsed[k].length === 0) {
+      throw new LedgerError('WRAPUP_RECEIPT', `watch_registered receipt.${k} 必须是非空字符串`);
+    }
+  }
+  if (!parsed.state_file.startsWith('/')) {
+    throw new LedgerError('WRAPUP_RECEIPT', 'watch_registered receipt.state_file 必须是 Mini 绝对路径');
+  }
+  if (!Number.isSafeInteger(parsed.pr_number) || parsed.pr_number <= 0) {
+    throw new LedgerError('WRAPUP_RECEIPT', `watch_registered receipt.pr_number 必须是正整数（当前: ${parsed.pr_number}）`);
+  }
+  if (parsed.session_id !== null) {
+    throw new LedgerError('WRAPUP_RECEIPT', 'watch_registered receipt.session_id 必须是 null（盯梢会话由 Mini 首次信号 create，不是本机代填）');
   }
   return parsed;
 }
@@ -1230,27 +1298,28 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
     if (typeof parsed.pr_url !== 'string' || parsed.pr_url !== g.pr_url) {
       throw new LedgerError('PRECONDITION', `watch_registered.pr_url 必须等于组上已开的 GitHub URL`);
     }
-    if (typeof parsed.state_file !== 'string' || !parsed.state_file.startsWith('/') || !existsSync(parsed.state_file)) {
-      throw new LedgerError('PRECONDITION', 'watch_registered 的 state_file 必须是已存在的绝对路径（Mini 名册文件，先 register 再入账）');
+    if (typeof parsed.receipt !== 'string' || parsed.receipt.length === 0) {
+      throw new LedgerError('ARGS', 'watch_registered 必须携带 Mini register.mjs 成功回执（--detail.receipt <path>）');
     }
-    let roster;
-    try {
-      roster = JSON.parse(readFileSync(parsed.state_file, 'utf8'));
-    } catch (err) {
-      throw new LedgerError('PRECONDITION', `watch_registered 名册文件不可解析: ${err.message}`);
+    const watchReceipt = readWatchReceipt(resolve(parsed.receipt));
+    assertReceiptBoundToLedger(watchReceipt, ledger, parsed.group_id, 'watch_registered receipt');
+    assertReceiptAfterEvent(watchReceipt, ledger, parsed.group_id, 'pr_opened', 'watch_registered receipt');
+    const expectedId = githubIdentityFromUrl(g.pr_url);
+    if (!expectedId) {
+      throw new LedgerError('PRECONDITION', 'watch_registered 组 pr_url 解析不出 owner/repo/pr');
     }
-    const rosterPr = Number(roster?.pr_number ?? roster?.pr);
-    const urlMatch = typeof g.pr_url === 'string' ? g.pr_url.match(/\/pull\/(\d+)/) : null;
-    const expectedPr = urlMatch ? Number(urlMatch[1]) : null;
-    if (!Number.isInteger(rosterPr) || rosterPr !== expectedPr) {
-      throw new LedgerError('PRECONDITION', `watch_registered 名册身份不符（文件 pr=${roster?.pr_number ?? roster?.pr}，组 PR=${expectedPr}）`);
+    if (watchReceipt.owner !== expectedId.owner || watchReceipt.repo !== expectedId.repo || watchReceipt.pr_number !== expectedId.pr_number) {
+      throw new LedgerError('PRECONDITION', `watch_registered receipt 身份不符（${watchReceipt.owner}/${watchReceipt.repo}#${watchReceipt.pr_number} ≠ ${expectedId.owner}/${expectedId.repo}#${expectedId.pr_number}）`);
     }
-    if (roster.session_id) {
-      throw new LedgerError('PRECONDITION', 'watch_registered 名册此时不得已有 Mini session_id（盯梢会话由 Mini 首次信号 create，不是本机代填）');
+    if (typeof g.branch === 'string' && watchReceipt.branch !== g.branch) {
+      throw new LedgerError('PRECONDITION', `watch_registered receipt.branch=${watchReceipt.branch} 对不上组分支 ${g.branch}`);
     }
-    if (!('assignment_seq' in parsed)) {
-      ev.detail.assignment_seq = g.assignment_seq ?? 0;
-    }
+    ev.detail.state_file = watchReceipt.state_file;
+    ev.detail.owner = watchReceipt.owner;
+    ev.detail.repo = watchReceipt.repo;
+    ev.detail.pr_number = watchReceipt.pr_number;
+    ev.detail.assignment_seq = g.assignment_seq ?? 0;
+    delete ev.detail.receipt;
   }
   assertEventSchema(ev);
   return writeLedgerAtomic(ledgerPath, expected, (cur) => {
@@ -1603,6 +1672,17 @@ export function setState({
       if (prOpenReceipt.headRefOid !== g.tip_sha) {
         return `缺失前置：pr-open receipt.headRefOid=${prOpenReceipt.headRefOid} 对不上组 tip_sha=${g.tip_sha ?? '缺失'}`;
       }
+      try {
+        assertReceiptBoundToLedger(prOpenReceipt, ledger, group, 'pr-open receipt');
+        const acceptedEv = latestGroupEvent(ledger, group, 'accepted');
+        if (!acceptedEv) return '缺失前置：accepted→pr-open 要求本组成立的 accepted 事件';
+        if (prOpenReceipt.checked_at <= acceptedEv.at) {
+          return `缺失前置：pr-open receipt.checked_at=${prOpenReceipt.checked_at} 不得早于或等于 accepted.at=${acceptedEv.at}`;
+        }
+      } catch (err) {
+        if (err instanceof LedgerError) return `缺失前置：${err.message}`;
+        throw err;
+      }
     }
     if (to === 'local-cleaned' && from === 'pr-open') {
       if (typeof g.pr_url !== 'string' || !GITHUB_PR_URL_RE.test(g.pr_url)) {
@@ -1623,6 +1703,13 @@ export function setState({
       if (typeof g.worktree === 'string' && cleanupReceipt.worktree !== g.worktree) {
         return `缺失前置：cleanup receipt.worktree=${cleanupReceipt.worktree} 对不上组 worktree=${g.worktree}`;
       }
+      try {
+        assertReceiptBoundToLedger(cleanupReceipt, ledger, group, 'cleanup receipt');
+        assertReceiptAfterEvent(cleanupReceipt, ledger, group, 'watch_registered', 'cleanup receipt');
+      } catch (err) {
+        if (err instanceof LedgerError) return `缺失前置：${err.message}`;
+        throw err;
+      }
     }
     if (to === 'archived' && from === 'local-cleaned') {
       if (typeof g.session_id !== 'string' || g.session_id.length === 0) {
@@ -1633,6 +1720,13 @@ export function setState({
       }
       if (archiveReceipt.session_id !== g.session_id) {
         return `缺失前置：archive receipt.session_id=${archiveReceipt.session_id} 对不上组 session_id=${g.session_id}`;
+      }
+      try {
+        assertReceiptBoundToLedger(archiveReceipt, ledger, group, 'archive receipt');
+        assertReceiptAfterEvent(archiveReceipt, ledger, group, 'local_cleaned', 'archive receipt');
+      } catch (err) {
+        if (err instanceof LedgerError) return `缺失前置：${err.message}`;
+        throw err;
       }
     }
     if (to === 'failed') {
@@ -1732,7 +1826,7 @@ export function setState({
       cur.events.push({
         type: 'accepted',
         at: now,
-        detail: { group_id: group, session_id: g.session_id, tip_sha: g.tip_sha },
+        detail: { group_id: group, session_id: g.session_id, tip_sha: g.tip_sha, assignment_seq: g.assignment_seq ?? 0 },
       });
     } else if (to === 'pr-open') {
       g.state = 'pr-open';
@@ -1747,6 +1841,7 @@ export function setState({
           headRefOid: prOpenReceipt.headRefOid,
           session_id: g.session_id,
           tip_sha: g.tip_sha,
+          assignment_seq: g.assignment_seq ?? 0,
         },
       });
     } else if (to === 'local-cleaned') {
@@ -1762,6 +1857,7 @@ export function setState({
           remoteDeleted: false,
           session_id: g.session_id,
           pr_url: g.pr_url,
+          assignment_seq: g.assignment_seq ?? 0,
         },
       });
     } else if (to === 'archived') {
@@ -1774,6 +1870,7 @@ export function setState({
           session_id: archiveReceipt.session_id,
           archived: true,
           pr_url: g.pr_url,
+          assignment_seq: g.assignment_seq ?? 0,
         },
       });
     } else if (to === 'failed') {
