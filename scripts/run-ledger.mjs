@@ -31,6 +31,7 @@ import {
 } from 'node:fs';
 import { resolve, dirname, join, isAbsolute } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { loadMiniWatchConfig } from './lib/mini-watch-config.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -114,8 +115,7 @@ const SESSION_EVENT_TYPES = Object.freeze([
 ]);
 const NOTE_EVENT_TYPES = Object.freeze(['site_report', 'replan_note', 'watch_registered']);
 const OLD_WATCH_SCHEDULE_IDS = Object.freeze([
-  '031c7ffd-86a8-4f16-9404-1550181da4f3',
-  'c692c1a7-a4cf-4201-b9e2-f9dbea35aba2',
+  ...loadMiniWatchConfig().old_schedule_ids_blocklist,
 ]);
 const REPLAN_ACTIONS = Object.freeze(['repack', 'resplit', 'land-first', 'split-new']);
 const EXEC_DELIVERY_STATUS = Object.freeze(['done', 'partial', 'blocked']);
