@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { assertReadyPr, confirmPrOpen } from '../scripts/confirm-pr-open.mjs';
 import { wrapupCleanup } from '../scripts/wrapup-cleanup.mjs';
-import { confirmWatchRegistered, parseRegisterStdout, runWatchCli, MINI_WATCH_STATE_DIR } from '../scripts/confirm-watch-registered.mjs';
+import { confirmWatchRegistered, parseRegisterStdout, runWatchCli, MINI_WATCH_STATE_DIR, MINI_HOST } from '../scripts/confirm-watch-registered.mjs';
 import { confirmSessionArchived, extractArchiveResult } from '../scripts/confirm-session-archived.mjs';
 import {
   LedgerError,
@@ -522,6 +522,11 @@ test('confirm-watch-registered CLI 拒 --stdout，state-dir 必须钉 Mini 名�
     '--owner', 'xindong', '--repo', 'mivo-canvas-plugin', '--pr', '22',
     '--branch', 'feat/x', '--now', LATER, '--ledger-version', '1', '--assignment-seq', '0',
   ]), LedgerError);
+  assert.throws(() => runWatchCli([
+    '--host', 'Not-Mini',
+    '--owner', 'xindong', '--repo', 'mivo-canvas-plugin', '--pr', '22',
+    '--branch', 'feat/x', '--now', LATER, '--ledger-version', '1', '--assignment-seq', '0',
+  ]), LedgerError);
   const sshCalls = [];
   const out = runWatchCli([
     '--state-dir', MINI_WATCH_STATE_DIR,
@@ -536,6 +541,7 @@ test('confirm-watch-registered CLI 拒 --stdout，state-dir 必须钉 Mini 名�
   assert.equal(out.ok, true);
   assert.equal(out.pr_number, 1);
   assert.ok(JSON.stringify(sshCalls[0]).includes(MINI_WATCH_STATE_DIR));
+  assert.equal(sshCalls[0][2], MINI_HOST);
 });
 
 test('confirm-pr-open / wrapup-cleanup 缺 --now 拒', () => {

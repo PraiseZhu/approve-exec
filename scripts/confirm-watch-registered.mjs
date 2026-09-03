@@ -132,6 +132,14 @@ function runRegister({ host, registerBin, stateDir, owner, repo, pr, branch, pus
   return r.stdout;
 }
 
+export function assertMiniHost(host) {
+  const value = host ?? MINI_HOST;
+  if (value !== MINI_HOST) {
+    throw new LedgerError('ARGS', `host 必须是 ${MINI_HOST}（当前: ${value}）`);
+  }
+  return value;
+}
+
 export function runWatchCli(argv, { sshRunner } = {}) {
   const flags = parseWatchArgs(argv);
   if (flags.stdout !== undefined) {
@@ -139,8 +147,9 @@ export function runWatchCli(argv, { sshRunner } = {}) {
   }
   const stateDir = assertMiniWatchStateDir(flags['state-dir'] ?? MINI_WATCH_STATE_DIR);
   const registerBin = assertMiniRegisterBin(flags['register-bin']);
+  const host = assertMiniHost(flags.host);
   const stdout = runRegister({
-    host: flags.host ?? MINI_HOST,
+    host,
     registerBin,
     stateDir,
     owner: flags.owner,
