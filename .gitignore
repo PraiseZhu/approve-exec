@@ -3,3 +3,6 @@ node_modules/
 _tmp/*
 !_tmp/handoff-gate-block-0.md
 .worktrees/
+
+# Cindy 会话树（不入库）
+.cindy-worktrees/
