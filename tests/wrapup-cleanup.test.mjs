@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, chmodSync, readFileSync, copyFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, chmodSync, readFileSync, copyFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +22,7 @@ const SHA2 = 'b'.repeat(40);
 const NOW = '2026-08-09T00:00:00Z';
 const LATER = '2026-08-09T00:00:01Z';
 const STAMP = { ledgerVersion: 0, assignmentSeq: 0 };
+const PATH_SEP = process.platform === 'win32' ? ';' : ':';
 
 test('confirm-pr-open: draft 拒、OPEN ready 过', () => {
   assert.throws(
@@ -542,6 +543,38 @@ test('confirm-watch-registered CLI 拒 --stdout，state-dir 必须钉 Mini 名�
   assert.equal(out.pr_number, 1);
   assert.ok(JSON.stringify(sshCalls[0]).includes(MINI_WATCH_STATE_DIR));
   assert.equal(sshCalls[0][2], MINI_HOST);
+});
+
+test('watch CLI 的 ssh 不经 PATH 解析：PATH 前置伪 ssh 铸不出回执', () => {
+  // Sol 六轮: spawnSync('ssh') 裸命令名经 PATH 解析，前置伪 ssh 可在未连接 Mini 时铸 ok:true。
+  // 修复: 生产 runner 钉死 SSH_BIN='/usr/bin/ssh' 绝对路径。验证方式（无副作用）:
+  // PATH 前置伪 ssh（被调用会留 called.txt 并伪造 REGISTERED 成功输出 + exit 0），
+  // 用 --pr 0 跑生产 CLI——0 不匹配 register.mjs 的 /^[1-9]\d*$/，远端 registerPr 必然
+  // 拒绝（不写任何状态文件，连接本身无害）。断言:
+  //   1) called.txt 不存在——生产代码没经 PATH 解析到伪 ssh（走了 /usr/bin/ssh）;
+  //   2) CLI exit 非 0——若走了伪 ssh，其 exit 0 + 伪造 stdout 会让 CLI 铸出 ok:true;
+  //   3) stdout 无 ok:true、无伪 ssh 的 REGISTERED 内容。
+  const binDir = mkdtempSync(join(tmpdir(), 'fake-ssh-bin-'));
+  const fakeSsh = join(binDir, 'ssh');
+  const called = join(binDir, 'called.txt');
+  writeFileSync(fakeSsh, `#!/bin/sh\nprintf 'called\\n' > "${called}"\nprintf 'REGISTERED /Users/praise/pr-autopilot-runtime/state/fakeowner__fakerepo__999.json\\n'\nexit 0\n`);
+  chmodSync(fakeSsh, 0o755);
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const r = spawnSync(process.execPath, [join(root, 'scripts/confirm-watch-registered.mjs'),
+    '--owner', 'xindong', '--repo', 'mivo-canvas-plugin', '--pr', '0',
+    '--branch', 'feat/x', '--now', LATER, '--ledger-version', '1', '--assignment-seq', '0',
+  ], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: `${binDir}${PATH_SEP}${process.env.PATH}`,
+    },
+    timeout: 60_000,
+  });
+  assert.equal(existsSync(called), false, '生产 CLI 不得经 PATH 解析到伪 ssh');
+  assert.notEqual(r.status, 0, `--pr 0 必须失败: 远端 register 拒绝或本地校验拒绝（stdout: ${r.stdout}）`);
+  assert.doesNotMatch(r.stdout, /"ok":\s*true/, 'PATH 劫持下不得铸出 ok:true watch 回执');
+  assert.doesNotMatch(r.stdout, /fakeowner__fakerepo__999/, '伪 ssh 的 REGISTERED 输出不得进入回执');
 });
 
 test('confirm-pr-open / wrapup-cleanup 缺 --now 拒', () => {

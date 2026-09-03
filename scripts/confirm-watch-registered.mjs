@@ -11,6 +11,10 @@ const REGISTER_LINE_RE = /^(REGISTERED|ALREADY)\s+(\/\S+\.json)\s*$/;
 export const MINI_WATCH_STATE_DIR = '/Users/praise/pr-autopilot-runtime/state';
 export const MINI_REGISTER_BIN = '/Users/praise/AI-Agent/Claude/capabilities/source/pr-autopilot/scripts/pr-watch/register.mjs';
 export const MINI_HOST = 'Praise-Mini';
+// SSH_BIN 钉绝对路径：spawnSync('ssh') 裸命令名经 PATH 解析，PATH 前置伪 ssh 可在
+// 未连接 Mini 的情况下铸出 ok:true watch 回执。/usr/bin/ssh 是 macOS 系统级稳定路径，
+// 不受调用方 PATH 劫持。测试注入只走函数层 sshRunner，不开 CLI flag / env 口子。
+export const SSH_BIN = '/usr/bin/ssh';
 
 export function parseWatchArgs(argv) {
   const flags = {};
@@ -115,7 +119,7 @@ export function assertMiniRegisterBin(registerBin) {
 }
 
 function runRegister({ host, registerBin, stateDir, owner, repo, pr, branch, pushRemote, sshRunner }) {
-  const ssh = sshRunner ?? ((args) => spawnSync('ssh', args, { encoding: 'utf8' }));
+  const ssh = sshRunner ?? ((args) => spawnSync(SSH_BIN, args, { encoding: 'utf8' }));
   const remoteCmd = [
     'node', registerBin,
     '--state-dir', stateDir,
