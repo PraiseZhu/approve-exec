@@ -1,5 +1,7 @@
 # 依赖与临时产物（sc-p0a 脚手架基线）
 node_modules/
+__pycache__/
+*.pyc
 _tmp/*
 !_tmp/handoff-gate-block-0.md
 .worktrees/
