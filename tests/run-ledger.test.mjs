@@ -3332,10 +3332,12 @@ test('组F-1: 非规范化路径调用必须实际执行 init 并创建台账（
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   // 保持 <root>/scripts/run-ledger.mjs 布局：脚本 root = dirname(import.meta.url) + '..'，
   // config/defaults.json 按 root 解析（缺了会让命令与 guard 无关地失败）
-  mkdirSync(join(dir, 'scripts'), { recursive: true });
+  mkdirSync(join(dir, 'scripts/lib'), { recursive: true });
   mkdirSync(join(dir, 'config'), { recursive: true });
   cpSync(join(ROOT, 'scripts/run-ledger.mjs'), join(dir, 'scripts/run-ledger.mjs'));
+  cpSync(join(ROOT, 'scripts/lib/mini-watch-config.mjs'), join(dir, 'scripts/lib/mini-watch-config.mjs'));
   writeFileSync(join(dir, 'config/defaults.json'), readFileSync(join(ROOT, 'config/defaults.json'), 'utf8'));
+  writeFileSync(join(dir, 'config/mini-watch.json'), readFileSync(join(ROOT, 'config/mini-watch.json'), 'utf8'));
   // link 名必须唯一：历史用 process.pid，进程被杀时 t.after 未注册 → link-<PID> 残留；
   // 宿主并发下 PID 复用即撞名 EEXIST（mem-probe/selfcheck 组F-1 同款，tmpdir 曾积上千残留）。
   // dir 名来自 mkdtemp 唯一，用它派生 link 名——残留永不撞名，非规范化语义不变。

@@ -31,6 +31,7 @@ export const TEST_FILES = [
   'run-tests.test.mjs',
   'selfcheck.test.mjs',
   'session-dispatch.test.mjs',
+  'session-watch.test.mjs',
   'skill-doc.test.mjs',
   'wrapup-cleanup.test.mjs',
 ];

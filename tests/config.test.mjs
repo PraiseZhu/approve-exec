@@ -4,11 +4,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { join, resolve, dirname } from 'node:path';
+import { join, resolve, dirname, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadMiniWatchConfig } from '../scripts/lib/mini-watch-config.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const defaults = JSON.parse(readFileSync(join(root, 'config/defaults.json'), 'utf8'));
+const miniWatch = loadMiniWatchConfig();
 
 const REQUIRED_KEYS = [
   'routingPath',
@@ -81,4 +83,18 @@ test('每个必备键都有来源注释', () => {
     assert.equal(typeof defaults._comments[key], 'string', `缺 ${key} 的来源注释`);
     assert.ok(defaults._comments[key].length > 0, `${key} 的来源注释不能为空`);
   }
+});
+
+test('mini-watch.json 分机器段 + 绝对路径 fail-closed', () => {
+  assert.ok(isAbsolute(miniWatch.ssh_bin), 'ssh_bin 必须是绝对路径');
+  assert.ok(isAbsolute(miniWatch.hosts.mini.state_dir), 'state_dir 必须是绝对路径');
+  assert.ok(isAbsolute(miniWatch.hosts.mini.register_bin), 'register_bin 必须是绝对路径');
+  assert.equal(typeof miniWatch.hosts.mini.ssh_host, 'string');
+  assert.ok(miniWatch.hosts.mini.ssh_host.length > 0);
+  assert.equal(typeof miniWatch.hosts.mini.provider_id, 'string');
+  assert.ok(miniWatch.hosts.mini.provider_id.length > 0);
+  assert.equal(typeof miniWatch.hosts.local.provider_id, 'string');
+  assert.ok(miniWatch.hosts.local.provider_id.length > 0);
+  assert.ok(Array.isArray(miniWatch.old_schedule_ids_blocklist) && miniWatch.old_schedule_ids_blocklist.length >= 2);
+  assert.equal(miniWatch.auto_merge, false);
 });

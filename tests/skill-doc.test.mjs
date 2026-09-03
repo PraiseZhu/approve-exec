@@ -126,6 +126,8 @@ test('第③段：DISPATCH_MODES 含 session；E=session；LEAD_SELF=V/P；WORKE
     '③段 watch_registered 必须传 register 回执文件，不得只传本机 state_file');
   assert.ok(s3.includes('confirm-watch-registered.mjs') && s3.includes('confirm-session-archived.mjs'),
     '③段应收口 Mini register stdout 适配脚本与 archive_sessions 回执脚本');
+  assert.ok(s3.includes('scripts/pr-watch/register.mjs') && s3.includes('config/mini-watch.json'),
+    '③段 register 路径必须指向本仓 scripts/pr-watch/register.mjs，并按 config/mini-watch.json');
 });
 
 test('第⑥段：send_to_session create + Art 钉 + 标题正则', () => {
@@ -186,6 +188,8 @@ test('第⑨段：新组状态机 + identity 五段 + PR_RECEIPT_KEYS', () => {
     '⑨段应声明 Mini 名册先于清场');
   assert.ok(s9.includes('pr-open-receipt') && s9.includes('cleanup-receipt') && s9.includes('archive-receipt'),
     '⑨段应收口开 PR / 清本地 / 归档的真实回执');
+  assert.ok(s9.includes('scripts/pr-watch/register.mjs') && s9.includes('config/mini-watch.json'),
+    '⑨段 Mini 名册应点名本仓 register.mjs 与 mini-watch.json');
   assert.ok(s9.includes('register.mjs') && s9.includes('ledger_version') && s9.includes('assignment_seq'),
     '⑨段 Mini 名册应吃 register 回执，并绑定 ledger_version/assignment_seq');
   assert.ok(s9.includes('READY_FOR_LATER_SUBMIT_PR_SKILL'), '⑨段 run 级 ready 文案应保留 READY_FOR_LATER_SUBMIT_PR_SKILL 作为验收许可信号');
@@ -298,4 +302,14 @@ test('第⑱段：replan 四类 + 自进化台账', () => {
   assert.ok(s18.includes('evolution-note.mjs'), '⑱段应点名 evolution-note.mjs');
   assert.ok(s18.includes('ledger-triage.mjs'), '⑱段应点名每周自进化登记');
   assert.ok(s18.includes('扩权'), '⑱段应声明扩权永不自动落地');
+});
+
+test('Mini 运维前置 + 场景 E：调度四元组与 register 路径按配置', () => {
+  assert.ok(skillDoc.includes('Mini 运维前置'), 'SKILL.md 应含 Mini 运维前置段');
+  assert.ok(skillDoc.includes('goal skill 场景 E'), 'SKILL.md 应点名 Mini 被叫醒后走 goal 场景 E');
+  assert.ok(skillDoc.includes('sessions.dispatch'), 'Mini 调度 capabilities 应含 sessions.dispatch');
+  assert.ok(skillDoc.includes('session-watch-script.py'), '命令应指向本仓 session-watch-script.py');
+  assert.ok(skillDoc.includes('/opt/homebrew/bin'), '调度 env PATH 应含 /opt/homebrew/bin');
+  assert.ok(skillDoc.includes('保持 paused'), '旧两条调度必须保持 paused');
+  assert.ok(skillDoc.includes('可合并'), 'CI 绿后只发可合并通知');
 });
