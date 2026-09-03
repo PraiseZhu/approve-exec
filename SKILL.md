@@ -73,7 +73,7 @@ task-priority final manifest
         → 不开远端 PR，按第⑩节 candidate 交卷 jump 回报
   → 5. Lead 按每 PR receipt 验收（失败则充分交接重派，直到 accepted）
   → 6. 验收通过后 jump 各 session 开远端 ready PR（非 draft）；`confirm-pr-open.mjs` 确认
-  → 7. ssh Mini 跑 register.mjs 写入盯梢名册（不要 `--verify` 去查旧班车）→ `note-event watch_registered`（detail.state_file = Mini 上已存在的名册绝对路径）
+  → 7. ssh Mini 跑 register.mjs 写入盯梢名册（不要 `--verify` 去查旧班车）→ 把 stdout 回执落盘 → `note-event watch_registered`（`--detail.receipt` = 该回执文件；不要传本机假 state_file）
   → 8. 各 session `wrapup-cleanup.mjs` 清本地 worktree/分支（不删远端）→ 回报
   → 9. lead `archive_sessions` 只归档这些 PI session（lead 自己由用户归档）
 ```
@@ -204,7 +204,7 @@ Lead 在全部 PI session 归档、Mini 名册写完之前不得结束。子 ses
 
 `GROUP_STATES`：`pending | dispatched | executing | blocked | e2e | review | accepted | pr-open | local-cleaned | archived | failed`。旧的 `delivered` / `review_pass` / `verified` 删除。
 
-映射：dispatched = session 已 create 且 Art 已钉；executing = 子 session 在干活（前置：已有本组成立的 `gate_goal`）；blocked = 卡点上报；e2e/review = 子闭环阶段；accepted = lead 验收通过、尚无远端 PR；pr-open = 验收后远端已开；local-cleaned = Mini 名册已写且本地 worktree/分支已清；archived = PI session 已归档。`create_worker` 对应的 dispatched 前置：已有本组成立的 `gate_routing`。`accepted→pr-open` 必须消费 `confirm-pr-open.mjs` 成功回执（`--pr-open-receipt`：OPEN、`isDraft===false`、head 对上台账 tip；缺/null 一律拒）。`pr-open→local-cleaned` 要求本组成立的 `watch_registered`，并消费 `wrapup-cleanup.mjs` 成功回执（`--cleanup-receipt`：ok、未 skip、未删远端；脚本核当前分支、拒 dirty、删完复核 worktree/branch 不在）。`local-cleaned→archived` 必须消费 `archive_sessions` 成功回执（`--archive-receipt`：archived=true 且 session_id 对得上）。三份收尾回执与 Mini `register.mjs` 回执都必须带当前 `ledger_version` + `assignment_seq`，且 `checked_at` 晚于前置事件；旧回执不得重放。`confirm-pr-open.mjs` / `wrapup-cleanup.mjs` 必须带 `--now` / `--ledger-version` / `--assignment-seq`，stdout 才能直接当回执入账。
+映射：dispatched = session 已 create 且 Art 已钉；executing = 子 session 在干活（前置：已有本组成立的 `gate_goal`）；blocked = 卡点上报；e2e/review = 子闭环阶段；accepted = lead 验收通过、尚无远端 PR；pr-open = 验收后远端已开；local-cleaned = Mini 名册已写且本地 worktree/分支已清；archived = PI session 已归档。`create_worker` 对应的 dispatched 前置：已有本组成立的 `gate_routing`。`accepted→pr-open` 必须消费 `confirm-pr-open.mjs` 成功回执（`--pr-open-receipt`：OPEN、`isDraft===false`、head 对上台账 tip；缺/null 一律拒）。`pr-open→local-cleaned` 要求本组成立的 `watch_registered`，并消费 `wrapup-cleanup.mjs` 成功回执（`--cleanup-receipt`：ok、未 skip、未删远端；脚本核当前分支、拒 dirty、删完复核 worktree/branch 不在）。`local-cleaned→archived` 必须消费 `archive_sessions` 成功回执（`--archive-receipt`：archived=true 且 session_id 对得上）。三份收尾回执与 Mini `register.mjs` 回执都必须带铸造时的 `ledger_version` + 本组 `assignment_seq`；入账时 `ledger_version` 不得大于当前台账 version（其它组先入账导致 version 前进仍可入账），且 `checked_at` 必须是可解析时间并晚于本组前置事件。旧代回执不得重放。`confirm-pr-open.mjs` / `wrapup-cleanup.mjs` 必须带 `--now` / `--ledger-version` / `--assignment-seq`，stdout 才能直接当回执入账。
 
 `set-state --identity` 允许键：`{worktree, branch, base, session_id, title}`。`identityDigest` 输入段顺序：`seq → worktree → branch → base → session_id`（session_id 未定时用空串，create 后必须重写 identity 再记 dispatch）。
 

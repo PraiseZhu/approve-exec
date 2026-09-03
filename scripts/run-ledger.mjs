@@ -616,10 +616,22 @@ export function findGroup(ledger, groupId) {
 }
 
 // ---------- 时间戳注入 ----------
+export function parseTimestamp(value, what) {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new LedgerError('WRAPUP_RECEIPT', `${what} 必须是非空时间戳`);
+  }
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) {
+    throw new LedgerError('WRAPUP_RECEIPT', `${what} 不是可解析时间（当前: ${value}）`);
+  }
+  return ms;
+}
+
 function requireNow(now, what) {
   if (typeof now !== 'string' || now.length === 0) {
     throw new LedgerError('NOW_REQUIRED', `${what} 是写操作：必须携带 --now 时间戳（确定性可测，禁止缺省）`);
   }
+  parseTimestamp(now, `${what} --now`);
   return now;
 }
 
@@ -966,9 +978,7 @@ function readExactReceipt(receiptPath, keys, what) {
     }
     throw err;
   }
-  if (typeof parsed.checked_at !== 'string' || parsed.checked_at.length === 0) {
-    throw new LedgerError('WRAPUP_RECEIPT', `${what}.checked_at 必须是非空字符串`);
-  }
+  parseTimestamp(parsed.checked_at, `${what}.checked_at`);
   if (!Number.isSafeInteger(parsed.ledger_version) || parsed.ledger_version < 0) {
     throw new LedgerError('WRAPUP_RECEIPT', `${what}.ledger_version 必须是非负安全整数（当前: ${parsed.ledger_version}）`);
   }
@@ -986,8 +996,8 @@ function githubIdentityFromUrl(url) {
 
 function assertReceiptBoundToLedger(receipt, ledger, group, what) {
   const g = findGroup(ledger, group);
-  if (receipt.ledger_version !== ledger.version) {
-    throw new LedgerError('WRAPUP_RECEIPT', `${what}.ledger_version=${receipt.ledger_version} 对不上台账 version=${ledger.version}（旧回执不得重放）`);
+  if (receipt.ledger_version > ledger.version) {
+    throw new LedgerError('WRAPUP_RECEIPT', `${what}.ledger_version=${receipt.ledger_version} 大于当前台账 version=${ledger.version}（未来回执拒）`);
   }
   if (receipt.assignment_seq !== (g.assignment_seq ?? 0)) {
     throw new LedgerError('WRAPUP_RECEIPT', `${what}.assignment_seq=${receipt.assignment_seq} 对不上组 assignment_seq=${g.assignment_seq ?? 0}`);
@@ -999,7 +1009,9 @@ function assertReceiptAfterEvent(receipt, ledger, group, eventType, what) {
   if (!ev) {
     throw new LedgerError('WRAPUP_RECEIPT', `${what} 要求本组成立的 ${eventType}`);
   }
-  if (receipt.checked_at <= ev.at) {
+  const receiptMs = parseTimestamp(receipt.checked_at, `${what}.checked_at`);
+  const eventMs = parseTimestamp(ev.at, `${eventType}.at`);
+  if (receiptMs <= eventMs) {
     throw new LedgerError('WRAPUP_RECEIPT', `${what}.checked_at=${receipt.checked_at} 不得早于或等于 ${eventType}.at=${ev.at}`);
   }
 }

@@ -276,6 +276,99 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
   assert.equal(r.status, 0, r.stderr);
 });
 
+test('cleanup 回执在其它写入先推高 version 后仍可消费（不绑全局 version 等值）', () => {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const dir = mkdtempSync(join(tmpdir(), 'ready-wrapup-stale-version-'));
+  const ledgerPath = join(dir, 'ledger.json');
+  const T = '2026-08-09T00:00:00Z';
+  const SHA1 = 'a'.repeat(40);
+  const SHA3 = 'c'.repeat(40);
+  const GATE_GOAL_SHA = '7d7b9d9b97c99b39de5cbbd6b20e4869afe4cb16dab1dc91833a94a29dca356e';
+  const GATE_ROUTING_SHA = 'e88009fec5d61472d41554b8c0238c6eedd1395d8b301cbc1524d121dc386c23';
+  const ROUTING_LIVE = '/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json';
+  const GOAL_SKILL_PI = '/Users/praise/.agents/skills/goal/SKILL.md';
+  const cli = (...args) => spawnSync(process.execPath, [join(root, 'scripts/run-ledger.mjs'), ...args], { encoding: 'utf8' });
+  const manifestPath = join(dir, 'sample-manifest.json');
+  copyFileSync(join(root, 'tests/fixtures/sample-manifest.json'), manifestPath);
+  let r = cli('init', ledgerPath, '--manifest', manifestPath, '--run-id', 'wrapup-stale-version', '--now', T, '--baseline', SHA3);
+  assert.equal(r.status, 0, r.stderr);
+  const g = 'g4';
+  r = cli('set-state', ledgerPath, '--group', g, '--identity', JSON.stringify({
+    worktree: '/wt/g4', branch: 'feat/run-ledger', base: SHA3, session_id: 'sess-g4',
+  }), '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('render-packet', ledgerPath, '--group', g);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'dispatched', '--worker-label', 'w1', '--now', T,
+    '--mem-snapshot', JSON.stringify({ used_slots: 0, platform_cap: 8, concurrency: 8, available_bytes: 34359738368 }));
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'executing', '--now', T, '--detail', JSON.stringify({
+    goal_skill_path: GOAL_SKILL_PI, goal_skill_sha256: GATE_GOAL_SHA,
+  }));
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'e2e', '--now', T, '--detail', JSON.stringify({
+    route_source: ROUTING_LIVE, routing_sha256: GATE_ROUTING_SHA,
+    e2e_model: 'codex/gpt-5.6-luna', review_model: 'codex/gpt-5.6-sol',
+  }));
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'review', '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  const packet = manifest.dispatch.packets.find((p) => p.group_id === g);
+  r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify({
+    branch: 'feat/run-ledger', tip_sha: SHA1,
+    scs: packet.scs_inline.map((s) => ({ id: s.id, status: 'pass' })),
+    goal_skill_path: GOAL_SKILL_PI,
+    e2e: { status: 'pass', candidate_sha: SHA1, model: 'codex/gpt-5.6-luna', route_source: ROUTING_LIVE },
+    review: { unresolved: 0, candidate_sha: SHA1, model: 'codex/gpt-5.6-sol', route_source: ROUTING_LIVE },
+    size_gate: { result: 'PASS', candidate_sha: SHA1 },
+  }), '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'accepted', '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  const frozen = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  frozen.phase = 'ready';
+  frozen.phase_at = T;
+  writeFileSync(ledgerPath, `${JSON.stringify(frozen, null, 2)}\n`);
+  const stamp = () => {
+    const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+    const item = ledger.waves.flatMap((w) => w.groups).find((x) => x.group_id === g);
+    return { ledger_version: ledger.version, assignment_seq: item?.assignment_seq ?? 0 };
+  };
+  const prOpenReceipt = join(dir, 'pr-open-receipt.json');
+  writeFileSync(prOpenReceipt, `${JSON.stringify({
+    url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
+    number: 1, headRefOid: SHA1, isDraft: false, state: 'OPEN', branch: 'feat/run-ledger',
+    checked_at: LATER, ...stamp(),
+  })}\n`);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', T, '--pr-open-receipt', prOpenReceipt);
+  assert.equal(r.status, 0, r.stderr);
+  const watchReceipt = join(dir, 'watch-receipt.json');
+  writeFileSync(watchReceipt, `${JSON.stringify({
+    ok: true, owner: 'xindong', repo: 'mivo-canvas-plugin', pr_number: 1, branch: 'feat/run-ledger',
+    state_file: '/mini/runtime/state/xindong__mivo-canvas-plugin__1.json',
+    session_id: null, checked_at: LATER, ...stamp(),
+  })}\n`);
+  r = cli('note-event', ledgerPath, '--event', 'watch_registered', '--detail', JSON.stringify({
+    group_id: g,
+    pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
+    receipt: watchReceipt,
+  }), '--now', T);
+  assert.equal(r.status, 0, r.stderr);
+  const cleanupReceipt = join(dir, 'cleanup-stale-version.json');
+  writeFileSync(cleanupReceipt, `${JSON.stringify({
+    ok: true, skipped: false, branch: 'feat/run-ledger', worktree: '/wt/g4', sha: SHA1,
+    remoteDeleted: false, checked_at: LATER, ...stamp(),
+  })}\n`);
+  const bumped = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  const minted = JSON.parse(readFileSync(cleanupReceipt, 'utf8'));
+  bumped.version += 1;
+  writeFileSync(ledgerPath, `${JSON.stringify(bumped, null, 2)}\n`);
+  assert.ok(bumped.version > minted.ledger_version, '其它写入必须把 version 推高过 cleanup 回执');
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'local-cleaned', '--now', T, '--cleanup-receipt', cleanupReceipt);
+  assert.equal(r.status, 0, '其它写入先推高 version 后，旧 ledger_version 的 cleanup 回执仍应可入账');
+});
+
 test('confirm-pr-open / wrapup-cleanup stdout 必须能被台账回执闸直接吃', () => {
   const dir = mkdtempSync(join(tmpdir(), 'wrapup-stdout-'));
   const binDir = mkdtempSync(join(tmpdir(), 'gh-bin-'));
@@ -315,6 +408,8 @@ test('confirm-pr-open / wrapup-cleanup stdout 必须能被台账回执闸直接�
 test('confirm-pr-open / wrapup-cleanup 缺 --now 拒', () => {
   assert.throws(() => confirmPrOpen({ repo: 'acme/app', branch: 'feat/x', head: SHA }), LedgerError);
   assert.throws(() => wrapupCleanup({ worktree: '/wt/feat', branch: 'feat/x' }), LedgerError);
+  assert.throws(() => confirmPrOpen({ repo: 'acme/app', branch: 'feat/x', head: SHA, now: 'zzzz', ...STAMP }), LedgerError);
+  assert.throws(() => wrapupCleanup({ worktree: '/wt/feat', branch: 'feat/x', now: 'zzzz', ...STAMP }), LedgerError);
 });
 
 test('wrapup-cleanup: 分支不对 / dirty / 删不掉都拒', () => {

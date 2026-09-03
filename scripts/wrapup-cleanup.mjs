@@ -3,7 +3,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { LedgerError } from './run-ledger.mjs';
+import { LedgerError, parseTimestamp } from './run-ledger.mjs';
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 
@@ -47,9 +47,7 @@ export function wrapupCleanup({ worktree, branch, remote = 'origin', gitRunner =
   if (branch === 'main' || branch === 'master') {
     throw new LedgerError('PRECONDITION', `拒绝清理主分支 ${branch}`);
   }
-  if (typeof now !== 'string' || now.length === 0) {
-    throw new LedgerError('ARGS', 'now 必须是非空时间戳（--now；写入 cleanup-receipt.checked_at）');
-  }
+  parseTimestamp(now, 'wrapup-cleanup --now');
   const version = requireStamp(ledgerVersion, 'ledger-version');
   const seq = requireStamp(assignmentSeq, 'assignment-seq');
   const currentBranch = gitRunner(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: worktree });

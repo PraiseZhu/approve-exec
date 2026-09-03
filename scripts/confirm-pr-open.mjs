@@ -3,7 +3,7 @@
 import { spawnSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { LedgerError } from './run-ledger.mjs';
+import { LedgerError, parseTimestamp } from './run-ledger.mjs';
 
 const GITHUB_PR_URL_RE = /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+/;
 const SHA_RE = /^[0-9a-f]{40}$/;
@@ -66,9 +66,7 @@ export function confirmPrOpen({ repo, branch, head, ghBin, now, ledgerVersion, a
   if (typeof branch !== 'string' || branch.length === 0) {
     throw new LedgerError('ARGS', 'branch 必须是非空字符串');
   }
-  if (typeof now !== 'string' || now.length === 0) {
-    throw new LedgerError('ARGS', 'now 必须是非空时间戳（--now；写入 pr-open-receipt.checked_at）');
-  }
+  parseTimestamp(now, 'confirm-pr-open --now');
   const raw = runGh(repo, branch, ghBin);
   return {
     ...assertReadyPr({

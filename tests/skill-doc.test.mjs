@@ -122,6 +122,8 @@ test('第③段：DISPATCH_MODES 含 session；E=session；LEAD_SELF=V/P；WORKE
   const archiveAt = flow.indexOf('archive_sessions');
   assert.ok(registerAt >= 0 && wrapupAt >= 0 && archiveAt >= 0, '③段收尾应含 register / wrapup / archive');
   assert.ok(registerAt < wrapupAt && wrapupAt < archiveAt, '③段必须先 Mini 名册、再清本地、最后归档 PI');
+  assert.ok(s3.includes('detail.receipt') || s3.includes('--detail.receipt'),
+    '③段 watch_registered 必须传 register 回执文件，不得只传本机 state_file');
 });
 
 test('第⑥段：send_to_session create + Art 钉 + 标题正则', () => {
