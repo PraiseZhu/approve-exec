@@ -8,8 +8,9 @@
 //   ③ goal skill：SKILL.md 存在（config.goalSkillRoot）。
 //   ④ runLedgerDir：可创建可写（mkdir -p + 探针文件写入/读回/清理；~ 经 HOME 展开）。
 //   ⑤ --live 模式追加两处接线检查：
-//      a. skills/claude-active/approve-exec symlink 指向本仓 checkout 根（realpath 含 SKILL.md
-//         + git common dir 同源 + show-toplevel 严格等于 target 自身——嵌套子目录不能冒充仓根）；
+//      a. skills/claude-active/approve-exec symlink 指向 approve-exec 仓根（realpath 含 SKILL.md
+//         + 同一 git common dir 或同一 origin + show-toplevel 严格等于 target 自身——
+//         工程仓与 live 是两份独立 clone，common dir 不同不算接线错误；嵌套子目录不能冒充仓根）；
 //      b. config.skillTriggerScanPath 指向的文件含「批准执行」触发行（整行逐字匹配；
 //         路径来自 config 而非硬编码——改动触发词规则文件位置只改 config，不改脚本）。
 //
@@ -86,6 +87,35 @@ function gitTopLevel(dir) {
   const r = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd: dir, encoding: 'utf8' });
   if (r.status !== 0 || !r.stdout || !r.stdout.trim()) return null;
   try { return realpathSync(r.stdout.trim()); } catch { return null; }
+}
+
+// origin 归一：git@ / https / ssh 三种写法收成 host/owner/repo（小写、去 .git）。
+// 工程仓与 live 是两份独立 clone，common dir 必然不同；同一 GitHub 仓即接线正确。
+export function normalizeGitHubOrigin(url) {
+  let s = String(url).trim().replace(/\/+$/, '').replace(/\.git$/i, '');
+  let m = s.match(/^git@([^:]+):(.+)$/i);
+  if (m) return `${m[1].toLowerCase()}/${m[2].replace(/^\/+/, '').toLowerCase()}`;
+  m = s.match(/^ssh:\/\/(?:git@)?([^/]+)\/(.+)$/i);
+  if (m) return `${m[1].toLowerCase()}/${m[2].replace(/^\/+/, '').toLowerCase()}`;
+  m = s.match(/^https?:\/\/([^/]+)\/(.+)$/i);
+  if (m) return `${m[1].toLowerCase()}/${m[2].replace(/^\/+/, '').toLowerCase()}`;
+  return s.toLowerCase();
+}
+
+function gitOriginIdentity(dir) {
+  const r = spawnSync('git', ['remote', 'get-url', 'origin'], { cwd: dir, encoding: 'utf8' });
+  if (r.status !== 0 || !r.stdout || !r.stdout.trim()) return null;
+  return normalizeGitHubOrigin(r.stdout.trim());
+}
+
+function sameRepoIdentity(mineRoot, target) {
+  const mineCommon = gitCommonDir(mineRoot);
+  const theirsCommon = gitCommonDir(target);
+  if (mineCommon && theirsCommon && mineCommon === theirsCommon) return { ok: true, via: 'common-dir' };
+  const mineOrigin = gitOriginIdentity(mineRoot);
+  const theirsOrigin = gitOriginIdentity(target);
+  if (mineOrigin && theirsOrigin && mineOrigin === theirsOrigin) return { ok: true, via: 'origin' };
+  return { ok: false, via: null };
 }
 
 // ---------- ① routing ----------
@@ -184,9 +214,9 @@ function checkRunLedgerDir(config, items) {
 // 导出以便测试注入（组B-4 负向/正向夹具）：liveLink 是待验 symlink 路径，mineRoot 是「本仓」一侧。
 // 三段判据（加强不是替换，任一段 FAIL 即拒）：
 //   ① target 含 SKILL.md 文件（目标确实是 skill 目录）；
-//   ② target 与 mineRoot 的 git common dir 同源（同一仓库的 checkout）；
+//   ② target 与 mineRoot 同一 git common dir，或同一 origin（工程仓 / live 双份 clone 走 origin）；
 //   ③ target 自身就是仓根——realpath(--show-toplevel) 严格等于 target 自身 realpath
-//     （防「仓内任意带 SKILL.md 的嵌套子目录冒充本仓 checkout」：common dir 同源拦不住它）。
+//     （防「仓内任意带 SKILL.md 的嵌套子目录冒充仓根」：common dir / origin 同源拦不住它）。
 export function checkLiveSymlink(liveLink, mineRoot, items) {
   let st;
   try {
@@ -210,10 +240,9 @@ export function checkLiveSymlink(liveLink, mineRoot, items) {
     items.push({ id: 'live-symlink', ok: false, detail: `symlink 目标 ${target} 不含 SKILL.md 文件（不是 approve-exec 本仓）` });
     return;
   }
-  const mine = gitCommonDir(mineRoot);
-  const theirs = gitCommonDir(target);
-  if (!mine || !theirs || mine !== theirs) {
-    items.push({ id: 'live-symlink', ok: false, detail: `symlink 目标 ${target} 不是 approve-exec 本仓 checkout（git common dir 不一致）` });
+  const ident = sameRepoIdentity(mineRoot, target);
+  if (!ident.ok) {
+    items.push({ id: 'live-symlink', ok: false, detail: `symlink 目标 ${target} 不是 approve-exec 仓（git common dir 与 origin 都不一致）` });
     return;
   }
   const top = gitTopLevel(target);
@@ -221,7 +250,8 @@ export function checkLiveSymlink(liveLink, mineRoot, items) {
     items.push({ id: 'live-symlink', ok: false, detail: `symlink 目标 ${target} 不是本仓 checkout 根目录（git top-level 为 ${top ?? '不可解析'}）` });
     return;
   }
-  items.push({ id: 'live-symlink', ok: true, detail: `${liveLink} → ${target}（本仓 checkout 根）` });
+  const via = ident.via === 'origin' ? '同源 origin' : '同源 git common dir';
+  items.push({ id: 'live-symlink', ok: true, detail: `${liveLink} → ${target}（仓根，${via}）` });
 }
 
 // 路径来自 config.skillTriggerScanPath（配置键化：触发词规则文件位置变更只改 config，

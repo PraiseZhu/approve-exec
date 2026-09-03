@@ -6,7 +6,7 @@
 //                       agent/effort 越枚举 exit 2 点名、合法 JSON null（非对象）exit 2 点名而非 TypeError 崩溃、
 //                       agent/model/effort 纯空白（trim 后为空）exit 2 各自点名对应档、
 //                       带空格的枚举外值（agent:' codex '）exit 2（枚举校验用未 trim 原值）
-//   组 B「live 域」——--live 两处接线（symlink 指向本仓 + 触发行）输出 PASS；
+//   组 B「live 域」——--live 两处接线（symlink 指向 approve-exec 仓根 + 触发行）输出 PASS；
 //                       回归锚点：LIVE_LINK 推导与仓库嵌套深度无关（注入浅/深 root 恒同值）+ 与 cwd 无关（异 cwd 黑盒跑）；
 //                       F-B 锚点：target 必须是仓根本身（嵌套子目录冒充 → FAIL 点名）
 //   组 C「CLI 拒绝」——未知参数 exit 2
@@ -23,7 +23,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { deriveLiveLink, checkLiveSymlink, checkTriggerLine, TRIGGER_LINE } from '../scripts/selfcheck.mjs';
+import { deriveLiveLink, checkLiveSymlink, checkTriggerLine, TRIGGER_LINE, normalizeGitHubOrigin } from '../scripts/selfcheck.mjs';
 // buildChildEnv：变异子套件自起子进程，git 隔离必须同一份实现（run-tests.mjs 是唯一权威）。
 // 子套件在复制树里跑，缺隔离会继承机器全局 commit.gpgsign=true，负载下 gpg 失败让夹具
 // git commit 红——失败集比对随之漂移。
@@ -184,7 +184,7 @@ test('组A-7: effort 越六枚举 → exit 2 且点名', () => {
   });
 });
 
-test('组B-1: --live 接线两处（symlink 指向本仓 + 触发行）→ exit 0 且两项 PASS', (t) => {
+test('组B-1: --live 接线两处（symlink 指向 approve-exec 仓根 + 触发行）→ exit 0 且两项 PASS', (t) => {
   if (process.env.SC_MUTATION_CHILD === '1') { t.skip('子套件运行跳过 live 环境测试（副本根非 git checkout，接线无法验证）'); return; }
   const r = runSelfcheck(['--live', '--routing-file', FIX.valid]);
   assert.equal(r.status, 0, `期望 exit 0，实际 ${r.status}\n${out(r)}`);
@@ -288,6 +288,59 @@ test('组B-5(F-B): live link 指向仓根（含 SKILL.md）→ PASS（正向对�
     const it = items.find((i) => i.id === 'live-symlink');
     assert.ok(it, '必须产出 live-symlink 判定');
     assert.equal(it.ok, true, `仓根本身必须 PASS，实际 detail: ${it?.detail}`);
+  });
+});
+
+test('组B-7: git@ 与 https origin 归一成同一仓身份', () => {
+  const a = normalizeGitHubOrigin('git@github.com:PraiseZhu/approve-exec.git');
+  const b = normalizeGitHubOrigin('https://github.com/PraiseZhu/approve-exec.git');
+  const c = normalizeGitHubOrigin('ssh://git@github.com/PraiseZhu/approve-exec.git');
+  assert.equal(a, 'github.com/praisezhu/approve-exec');
+  assert.equal(a, b);
+  assert.equal(a, c);
+});
+
+test('组B-8: 两份独立 clone 同一 origin → live-symlink PASS（工程仓/live 双份）', () => {
+  withTempRepo((eng) => {
+    withTempRepo((live) => {
+      const env = buildChildEnv(process.env);
+      const origin = 'https://github.com/PraiseZhu/approve-exec.git';
+      for (const dir of [eng, live]) {
+        writeFileSync(join(dir, 'SKILL.md'), '# approve-exec\n');
+        const add = spawnSync('git', ['remote', 'add', 'origin', origin], { cwd: dir, encoding: 'utf8', env });
+        assert.equal(add.status, 0, `git remote add 失败: ${add.stderr}`);
+      }
+      const liveLink = join(eng, 'live-approve-exec');
+      symlinkSync(live, liveLink);
+      const items = [];
+      checkLiveSymlink(liveLink, eng, items);
+      const it = items.find((i) => i.id === 'live-symlink');
+      assert.ok(it, '必须产出 live-symlink 判定');
+      assert.equal(it.ok, true, `双份 clone 同源 origin 必须 PASS，实际: ${it.detail}`);
+      assert.match(it.detail, /origin/, `详情应点名 origin 路径，实际: ${it.detail}`);
+    });
+  });
+});
+
+test('组B-9: 两份独立 clone origin 不同 → live-symlink FAIL', () => {
+  withTempRepo((eng) => {
+    withTempRepo((live) => {
+      const env = buildChildEnv(process.env);
+      writeFileSync(join(eng, 'SKILL.md'), '# eng\n');
+      writeFileSync(join(live, 'SKILL.md'), '# live\n');
+      const a = spawnSync('git', ['remote', 'add', 'origin', 'https://github.com/PraiseZhu/approve-exec.git'], { cwd: eng, encoding: 'utf8', env });
+      const b = spawnSync('git', ['remote', 'add', 'origin', 'https://github.com/PraiseZhu/other-repo.git'], { cwd: live, encoding: 'utf8', env });
+      assert.equal(a.status, 0, `eng remote add 失败: ${a.stderr}`);
+      assert.equal(b.status, 0, `live remote add 失败: ${b.stderr}`);
+      const liveLink = join(eng, 'live-approve-exec');
+      symlinkSync(live, liveLink);
+      const items = [];
+      checkLiveSymlink(liveLink, eng, items);
+      const it = items.find((i) => i.id === 'live-symlink');
+      assert.ok(it, '必须产出 live-symlink 判定');
+      assert.equal(it.ok, false, `不同 origin 必须 FAIL，实际: ${it.detail}`);
+      assert.match(it.detail, /origin/, `必须点名 origin 不一致，实际: ${it.detail}`);
+    });
   });
 });
 
