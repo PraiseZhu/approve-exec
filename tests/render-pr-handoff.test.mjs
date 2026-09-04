@@ -46,6 +46,9 @@ test('render-pr-handoff: 0–10 段齐全，含开工闸与绝对路径', () => 
   assert.ok(out.includes('PR Ready') || out.includes('PR_READY'), '开工包应声明责任终点是 PR Ready');
   assert.ok(out.includes('检查点'), '开工包应声明 candidate 只是检查点');
   assert.ok(out.includes('可自决') && out.includes('必须停'), '开工包应含可自决/必须停');
+  assert.ok(out.includes('429') && out.includes('fallbacks'), '开工包应声明 429 走 fallbacks');
+  assert.ok(out.includes('崩溃') || out.includes('异常终止'), '开工包应声明 worker 崩溃走 fallbacks');
+  assert.ok(out.includes('不换代次'), '开工包降级只换 provider 不换代次');
   assert.ok(out.includes('假设破裂必须 blocked 上报'), '开工包第 9 段应禁就地改方案');
   assert.ok(out.includes('不得改总表'), '开工包第 9 段应禁改总表');
 });

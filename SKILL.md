@@ -176,8 +176,9 @@ PI 侧软链 `/Users/praise/.agents/skills/orca-fanout/routing.json`；`model-ro
 - tester → role=tester，用现读 **e2e** 档的 agent/model/effort
 - reviewer → role=reviewer，用现读 **review** 档（这就是 GPT 单审）
 - 禁止把 luna / sol / 任何模型 ID 抄进 create_worker；包里若有「渲染当时快照」只供对照，create_worker 以现读为准
-- primary 失败按该档 fallbacks 顺序降级，标注原因；降级链耗尽停，回报 lead，不猜替代品
-- **不要做的**：把 PI 写进 `routing.json` 的 agent 枚举；给 PI 另做一份路由表；把 luna/sol 写进本 SKILL 当永久默认
+- **可恢复失败必须走 fallbacks，禁止当 B 类停问 lead。** 包括：HTTP 429 / Too Many Requests、worker 进程崩溃或异常终止、`create_worker` / `create_workers` 创建失败、provider 瞬时不可用、网络短暂中断。PI owner（含 grok）自己按该档 `fallbacks` 数组顺序换 **provider，不换代次**（例：`gpt-5.6-sol` / `provider_id=codex` 429 → `codex/gpt-5.6-sol` / `provider_id=xd`）。每次降级必须标注原因；`fallbacks_tried` 必须写入交卷，禁止空数组。降级链耗尽才 `DECISION_REQUIRED` 一条，带已试清单；不得 `fallbacks_tried: []` 就 jump lead。
+- orca-model-routing 的三码（`NO_PROVIDER_FOR_AGENT` / `PROVIDER_ROUTE_UNAVAILABLE` / `BUDGET_MODEL_REQUIRES_API_MODE`）仍走 fallbacks；**不得把 429/崩溃/创建失败误判成 B 类停**。
+- **不要做的**：把 PI 写进 `routing.json` 的 agent 枚举；给 PI 另做一份路由表；把 luna/sol 写进本 SKILL 当永久默认；primary 429 后空着手问 lead「要不要限流解除」
 
 Lead 验收时现读 live routing.json：交卷 `e2e.model` / `review.model` 既不是当前 primary、也不在该档 fallbacks 里 → 验收失败，指令重派，不准当 ready。
 
@@ -192,6 +193,8 @@ owner session 只许在这五种情况下停。其中 2–5 进入 DECISION_REQU
 5. **假设破裂**：第 3 段摘录的接口/行为与实际不符，或必须偏离第 4 段改法。立刻 `blocked` + decision_required：哪条假设破了、影响哪些文件、是否波及别组。禁止就地改方案继续写。无权改总表、无权改 `allowed_paths`、无权换 `base`——这三件事只能 lead 走第⑱节 replan。
 
 连续 3 轮零增量：不得空转，也不得收工。必须发一条 decision_required 摊开卡点。Lead 只给一个决定，同一 owner 继续。
+
+PI owner（含 grok）遇到 worker 429 / 崩溃 / 创建失败：**自己**按第⑦段 fallbacks 重派，禁止 `fallbacks_tried: []` 后 jump lead 等限流解除。这不是决策题。
 
 Lead 在全部 PI session 归档、Mini 名册写完之前不得结束。owner `get_session_runtime` 变 idle 且没有 PR_READY → `steer_session`：「未到停点，继续；卡点报我」。owner 问「要开始吗 / 能不能并行」→ 驳回，这些不是决策题。越域 / 改了别人的 PR → 验收失败，给予充分交接后 `failed→pending` 重派。
 

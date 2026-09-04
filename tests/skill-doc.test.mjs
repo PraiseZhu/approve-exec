@@ -150,6 +150,10 @@ test('第⑦段：现读同一份 routing.json，禁止把 luna/sol 当唯一派
   assert.ok(s7.includes('model-route show'), '⑦段应允许 model-route show');
   assert.ok(s7.includes('luna') && s7.includes('sol'), '⑦段应点名禁止抄 luna/sol');
   assert.ok(s7.includes('不要做的') || s7.includes('禁止把 luna'), '⑦段应写禁止事项');
+  assert.ok(s7.includes('429') && s7.includes('fallbacks'), '⑦段应声明 429 走 fallbacks');
+  assert.ok(s7.includes('崩溃') || s7.includes('异常终止'), '⑦段应声明 worker 崩溃走 fallbacks');
+  assert.ok(s7.includes('不换代次'), '⑦段降级只换 provider 不换代次');
+  assert.ok(!s7.includes('fallbacks_tried: []') || s7.includes('禁止空数组'), '⑦段禁止空 fallbacks_tried 就问 lead');
 });
 
 test('第⑧段：create_workers ≥2 禁连续 create_worker 单发', () => {
@@ -165,6 +169,8 @@ test('第⑧段：create_workers ≥2 禁连续 create_worker 单发', () => {
     '⑧段第 1 种停必须是 PR Ready 正常完成，不是 DECISION_REQUIRED');
   assert.ok(s8.includes('开 PR ≠ 发盯梢') || s8.includes('pr_ready` 之后才注册'),
     '⑧段不得在仅开 PR 后立刻注册 Mini 盯梢');
+  assert.ok(s8.includes('429') && (s8.includes('fallbacks') || s8.includes('fallbacks_tried')),
+    '⑧段应禁止 429 空着手问 lead');
   assert.ok(s8.includes('假设破裂'), '⑧段应含第 5 类停：假设破裂');
 });
 
