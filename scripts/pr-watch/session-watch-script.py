@@ -122,6 +122,8 @@ def apply_watch_round(dispatch_fn, *, scan=None, bind_fn=_bind, persist_fn=_pers
     for plan in scan.get("dispatches", []):
         live = dict(plan)
         if live.get("action") == "create":
+            if os.environ.get("AE_WATCH_ALLOW_CREATE") != "1":
+                raise SystemExit("缺宿主 create gateway，盯梢不得另开第二 owner")
             claim = claim_fn(state_dir, live)
             if not claim.get("claimed"):
                 live["action"] = "jump"

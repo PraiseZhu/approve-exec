@@ -19,7 +19,7 @@ function packet() {
 function baseArgs(overrides = {}) {
   return {
     packet: packet(),
-    identity: { worktree: '/wt/g4', branch: 'feat/g4', base: SHA3 },
+    identity: { worktree: ROOT, branch: 'feat/g4', base: SHA3 },
     leadSessionId: 'lead-1',
     seq: 1,
     repo: 'xindong/mivo-canvas-plugin',
@@ -27,7 +27,7 @@ function baseArgs(overrides = {}) {
     snapshot: '渲染当时快照，派工时再读',
     why: 'Copy as PNG 失败时仍报已复制。',
     how: 'imageNodeClipboard.ts 走 libraryClipboardPort.write，失败走 copyPngFailed。',
-    excerpts: [{ file: 'src/lib/imageNodeClipboard.ts', line: 12, behavior: 'writePng 现调用成功 toast' }],
+    excerpts: [{ file: 'scripts/render-pr-handoff.mjs', line: 1, behavior: 'renderPrHandoff 入口' }],
     ...overrides,
   };
 }
@@ -67,11 +67,22 @@ test('render-pr-handoff: 缺 allowed_paths 或乱序身份拒', () => {
   assert.throws(() => renderPrHandoff(baseArgs({ title: 'no-sep 0902' })), LedgerError);
 });
 
+test('render-pr-handoff: packet.excerpts/how 可走 ledger 回退，缺则拒', () => {
+  const p = packet();
+  p.excerpts = [{ file: 'scripts/render-pr-handoff.mjs', line: 1, behavior: 'renderPrHandoff 入口' }];
+  p.how = 'ledger 路由必须带真摘录与改法。';
+  p.why = '缺 excerpts 不得出包。';
+  const out = renderPrHandoff(baseArgs({ packet: p, excerpts: undefined, how: undefined, why: undefined }));
+  assert.match(out, /scripts\/render-pr-handoff\.mjs:1/);
+  const p2 = packet();
+  assert.throws(() => renderPrHandoff(baseArgs({ packet: p2, excerpts: undefined, how: undefined })), LedgerError);
+});
+
 test('render-pr-handoff CLI: --packet + --identity 出包', () => {
   const r = spawnSync(process.execPath, [
     SCRIPT,
     '--packet', JSON.stringify(packet()),
-    '--identity', JSON.stringify({ worktree: '/wt/g4', branch: 'feat/g4', base: SHA3 }),
+    '--identity', JSON.stringify({ worktree: ROOT, branch: 'feat/g4', base: SHA3 }),
     '--lead-session-id', 'lead-1',
     '--seq', '1',
     '--repo', 'Skills',

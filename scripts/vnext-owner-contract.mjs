@@ -3,6 +3,8 @@
 // 终稿：docs/2026-09-04-0904-approve-exec-final.md
 // 本模块不改旧 ledger GROUP_STATES 语义；缺宿主 create gateway 时 fail-closed。
 import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
 import { LedgerError } from './run-ledger.mjs';
 
 export const CONTRACT_VERSION = 'vnext-owner-pr-ready-1';
@@ -27,10 +29,11 @@ export const OWNER_STATES = Object.freeze([
 ]);
 
 export const HAN_RE = /\p{Script=Han}/u;
-export const TITLE_RE = /^.+丨 \d{4}$/;
+export const TITLE_RE = /^.+-.+丨 \d{4}$/;
 export const PLACEHOLDER_EXCERPT_RE = /本包未附摘录/;
 export const WAIT_FOR_LEAD_RE = /停等验收|(?<!禁止)(?<!不得)(?<!不要)等 lead 放行|(?<!禁止)(?<!不得)等 lead 对账|是否开始|先停着|请重新理解任务|等 lead jump/;
-export const GH_PR_DIFF_RE = /^\s*gh\s+pr\s+diff\b/i;
+export const GH_PR_DIFF_RE = /\bgh\s+pr\s+diff\b/i;
+const STRING_EXCERPT_RE = /^(\S+):(\d+)\s+(\S.*)$/;
 
 export const SECTION_TITLES = Object.freeze([
   '0. 开工闸',
@@ -76,7 +79,10 @@ export function assertOwnerTitle(title) {
   const sep = title.lastIndexOf('丨 ');
   const left = sep >= 0 ? title.slice(0, sep) : title;
   const dash = left.indexOf('-');
-  const task = dash >= 0 ? left.slice(dash + 1) : left;
+  if (dash < 1 || dash === left.length - 1) {
+    throw new LedgerError('ARGS', `title 必须是 {项目名}-{中文任务名}丨 {MMDD}（当前: ${title}）`);
+  }
+  const task = left.slice(dash + 1);
   assertTaskHasHan(task, 'title 任务段');
   if (/^[pgv]\d+$/i.test(task) || /^(probe|verify)-/i.test(task)) {
     throw new LedgerError('ARGS', `title 任务段禁止只写 group/SC 机器 id（当前: ${title}）`);
@@ -84,9 +90,9 @@ export function assertOwnerTitle(title) {
   return title;
 }
 
-export function assertCreateGatewayOrFailClosed({ dryRun = false } = {}) {
+export function assertCreateGatewayOrFailClosed({ dryRun = false, available = HOST_CREATE_GATEWAY.available } = {}) {
   if (dryRun) return { ok: true, mode: 'dry-run' };
-  if (!HOST_CREATE_GATEWAY.available) {
+  if (!available) {
     throw new LedgerError(
       'HOST_GATEWAY_MISSING',
       `缺宿主 create gateway，不得真派 owner session。${HOST_CREATE_GATEWAY.reason}`,
@@ -103,32 +109,59 @@ function sectionBody(text, title) {
   return text.slice(after, next < 0 ? text.length : next).trim();
 }
 
-export function assertExcerpts(excerpts) {
+function assertExcerptFile(file, line, worktree) {
+  if (typeof worktree !== 'string' || worktree.length === 0) {
+    throw new LedgerError('PACKET_INCOMPLETE', '第 3 段核摘录需要 identity.worktree');
+  }
+  if (!existsSync(worktree)) {
+    throw new LedgerError('PACKET_INCOMPLETE', `第 3 段 worktree 不存在，无法核摘录（${worktree}）`);
+  }
+  const abs = isAbsolute(file) ? file : join(worktree, file);
+  if (!existsSync(abs)) {
+    throw new LedgerError('PACKET_INCOMPLETE', `第 3 段摘录文件不存在: ${file}`);
+  }
+  const lines = readFileSync(abs, 'utf8').split(/\r?\n/);
+  if (line > lines.length) {
+    throw new LedgerError('PACKET_INCOMPLETE', `第 3 段摘录行号超出文件: ${file}:${line}`);
+  }
+}
+
+export function assertExcerpts(excerpts, { worktree } = {}) {
   if (!Array.isArray(excerpts) || excerpts.length === 0) {
     throw new LedgerError('PACKET_INCOMPLETE', '第 3 段至少 1 条真摘录（file + line + behavior），禁止占位');
   }
   for (const e of excerpts) {
+    let file;
+    let line;
+    let behavior;
     if (typeof e === 'string') {
       if (PLACEHOLDER_EXCERPT_RE.test(e) || e.trim().length === 0) {
         throw new LedgerError('PACKET_INCOMPLETE', '第 3 段禁止占位句「本包未附摘录」');
       }
-      if (!/:\d+/.test(e) && !/\bline\s*\d+/i.test(e)) {
-        throw new LedgerError('PACKET_INCOMPLETE', `第 3 段摘录必须含文件与行号（当前: ${e}）`);
+      const m = e.trim().match(STRING_EXCERPT_RE);
+      if (!m) {
+        throw new LedgerError('PACKET_INCOMPLETE', `第 3 段摘录必须是 file:line 加行为说明（当前: ${e}）`);
       }
-      continue;
-    }
-    if (!e || typeof e !== 'object') {
+      file = m[1];
+      line = Number(m[2]);
+      behavior = m[3];
+    } else if (e && typeof e === 'object') {
+      file = e.file;
+      line = e.line;
+      behavior = e.behavior;
+    } else {
       throw new LedgerError('PACKET_INCOMPLETE', '第 3 段摘录必须是字符串或 {file,line,behavior}');
     }
-    if (typeof e.file !== 'string' || e.file.length === 0) {
+    if (typeof file !== 'string' || file.length === 0) {
       throw new LedgerError('PACKET_INCOMPLETE', '第 3 段摘录缺 file');
     }
-    if (!Number.isSafeInteger(e.line) || e.line < 1) {
-      throw new LedgerError('PACKET_INCOMPLETE', `第 3 段摘录 line 必须是正整数（当前: ${e.line}）`);
+    if (!Number.isSafeInteger(line) || line < 1) {
+      throw new LedgerError('PACKET_INCOMPLETE', `第 3 段摘录 line 必须是正整数（当前: ${line}）`);
     }
-    if (typeof e.behavior !== 'string' || e.behavior.trim().length === 0) {
+    if (typeof behavior !== 'string' || behavior.trim().length === 0) {
       throw new LedgerError('PACKET_INCOMPLETE', '第 3 段摘录缺 behavior');
     }
+    assertExcerptFile(file, line, worktree);
   }
 }
 
@@ -142,7 +175,7 @@ export function assertVerifyCmds(cmds) {
   }
 }
 
-export function assertHandoffComplete(text, { why, how, excerpts, verify_cmds, title } = {}) {
+export function assertHandoffComplete(text, { why, how, excerpts, verify_cmds, title, worktree } = {}) {
   if (typeof text !== 'string' || text.trim().length === 0) {
     throw new LedgerError('PACKET_INCOMPLETE', 'handoff 正文不能为空');
   }
@@ -158,7 +191,7 @@ export function assertHandoffComplete(text, { why, how, excerpts, verify_cmds, t
     }
   }
   if (title) assertOwnerTitle(title);
-  if (excerpts) assertExcerpts(excerpts);
+  if (excerpts) assertExcerpts(excerpts, { worktree });
   if (verify_cmds) assertVerifyCmds(verify_cmds);
   const whyBody = why ?? sectionBody(text, '2. 为什么改');
   const howBody = how ?? sectionBody(text, '4. 具体改法');

@@ -72,10 +72,11 @@ task-priority final manifest
         → 现读 routing.json 派 reviewer（review 档 = GPT 单审）
         → candidate 只是检查点；同一 owner 继续开远端 ready PR、跟 CI/review 到 PR Ready
   → 5. Lead 只读每 PR 的自动入账证据与 DECISION_REQUIRED（失败则给一个决定，同一 owner 继续，直到 PR_READY）
-  → 6. owner 开远端 ready PR（非 draft）；`confirm-pr-open.mjs` 由 gateway 消费，不是 lead 代跑
-  → 7. `confirm-watch-registered.mjs` ssh Mini 跑本仓 `scripts/pr-watch/register.mjs`（按 `config/mini-watch.json`，不要 `--verify` 去查旧班车），把 `REGISTERED/ALREADY <abs>` stdout 封成回执 → `note-event watch_registered --detail.receipt`
+  → 6. owner 开远端 ready PR（非 draft）；`confirm-pr-open.mjs` 由 gateway 消费，不是 lead 代跑。开 PR ≠ 发盯梢。
+  → 6.5 本组机器可证明 PR Ready 后才 `note-event pr_ready`。4 个 PR 只 Ready 1 个，只给这 1 个发 Mini 盯梢；其余仍 push 着但未 Ready 的不得 register。禁止等整批 run ready。
+  → 7. `confirm-watch-registered.mjs` ssh Mini 跑本仓 `scripts/pr-watch/register.mjs`（按 `config/mini-watch.json`，不要 `--verify` 去查旧班车），把 `REGISTERED/ALREADY <abs>` stdout 封成回执 → `note-event watch_registered --detail.receipt`（前置：本组 `pr_ready`）
   → 8. 各 session `wrapup-cleanup.mjs` 清本地 worktree/分支（不删远端）→ 回报
-  → 9. lead `archive_sessions` 归档 PI session 后，用 `confirm-session-archived.mjs --result <工具 JSON>` 出回执再入账（lead 自己由用户归档；仅 PR_READY 后）
+  → 9. lead `archive_sessions` 归档 PI session 后，用 `confirm-session-archived.mjs --result <工具 JSON>` 出回执再入账（lead 自己由用户归档；仅该 PR 的 PR_READY 后）
 ```
 
 席位真相源是 `graph.json`（五席，精确键集 E/R/V/T/P；Fable 不是第六席）：
@@ -182,9 +183,9 @@ Lead 验收时现读 live routing.json：交卷 `e2e.model` / `review.model` 既
 
 ## ⑧ 子 session 闭环与 lead 指挥
 
-owner session 只许在这五种情况下进入 DECISION_REQUIRED（lease 不放，不算完成）：
+owner session 只许在这五种情况下停。其中 2–5 进入 DECISION_REQUIRED（lease 不放，不算完成）；第 1 种是正常完成，lease 释放：
 
-1. 本 PR 已达机器可证明的 PR Ready（远端 ready PR + 当前 head 的 CI/review/mergeability 全绿）。candidate 只是检查点，交卷后不得停、不得卸责。
+1. 本 PR 已达机器可证明的 PR Ready（远端 ready PR + 当前 head 的 CI/review/mergeability 全绿）。candidate 只是检查点，交卷后不得停、不得卸责。合法 `pr_ready` 入账后 owner 正常结束，不是 DECISION_REQUIRED。
 2. 硬停六条。
 3. **本 session 自报**累计打到 `budgetPauseUsd`（可 `--no-budget-pause`）。不是 lead 跨 session 加总。
 4. **未读 goal skill 或未读 routing.json**：不得开工。停，提交 decision_required，写明卡在开工闸第 1 步还是第 2 步。禁止 jump 等 lead 放行。
@@ -194,7 +195,7 @@ owner session 只许在这五种情况下进入 DECISION_REQUIRED（lease 不放
 
 Lead 在全部 PI session 归档、Mini 名册写完之前不得结束。owner `get_session_runtime` 变 idle 且没有 PR_READY → `steer_session`：「未到停点，继续；卡点报我」。owner 问「要开始吗 / 能不能并行」→ 驳回，这些不是决策题。越域 / 改了别人的 PR → 验收失败，给予充分交接后 `failed→pending` 重派。
 
-「可验收」= candidate 交卷合法 + e2e PASS + GPT 单审 unresolved==0 + size-gate ≠ STOP，这只是检查点，**还没有** GitHub URL。同一 owner 继续开远端 ready PR；`confirm-pr-open.mjs` 确认非 draft 且 head 对得上。然后先注册 Mini 名册并 `note-event watch_registered`，再清本地，最后归档这些 PI session。合入不是本 skill 的收尾。Mini 被叫醒后走 goal skill 场景 E（盯梢 pr-fix）：拉 PR 反馈 → 在名册指定 clone 里 `git worktree add` → 修 → push → 回帖。CI 全绿且 review 无未解决项时，Mini 只发「可合并」通知，merge 由人点；`config/mini-watch.json` 的 `auto_merge` 本轮只读，false 时零影响。盯梢 create 标题必须走 `sessionTitle`：`{项目名}-{中文任务名}丨 {MMDD}`。
+「可验收」= candidate 交卷合法 + e2e PASS + GPT 单审 unresolved==0 + size-gate ≠ STOP，这只是检查点，**还没有** GitHub URL。同一 owner 继续开远端 ready PR；`confirm-pr-open.mjs` 确认非 draft 且 head 对得上。开 PR ≠ 发盯梢。本组 `note-event pr_ready` 之后才注册 Mini 名册并 `note-event watch_registered`，再清本地，最后归档这些 PI session。合入不是本 skill 的收尾。Mini 被叫醒后走 goal skill 场景 E（盯梢 pr-fix）：拉 PR 反馈 → 在名册指定 clone 里 `git worktree add` → 修 → push → 回帖。CI 全绿且 review 无未解决项时，Mini 只发「可合并」通知，merge 由人点；`config/mini-watch.json` 的 `auto_merge` 本轮只读，false 时零影响。盯梢 create 标题必须走 `sessionTitle`：`{项目名}-{中文任务名}丨 {MMDD}`。缺宿主 create gateway 时盯梢不得另开第二 owner。
 
 子 session 派 tester/reviewer **之前**自己跑 `mem-probe.mjs`。Lead 在同一波并行 create 多个 session 前也跑一次 mem-probe，按 `pending = 本波 PR 数 × 2` 估槽。同批 ≥2 worker 用 `create_workers` 批量派发，禁连续 `create_worker` 单发。
 
@@ -208,7 +209,7 @@ Lead 在全部 PI session 归档、Mini 名册写完之前不得结束。owner `
 
 `set-state --identity` 允许键：`{worktree, branch, base, session_id, title}`。`identityDigest` 输入段顺序：`seq → worktree → branch → base → session_id`（session_id 未定时用空串，create 后必须重写 identity 再记 dispatch）。
 
-`EVENT_TYPES` 新增：`session_created`、`session_steer`、`gate_goal`、`gate_routing`、`pr_opened`、`accepted`、`local_cleaned`、`session_archived`、`watch_registered`、`site_report`、`replan_note`。旧 `delivery` 仍是子 session candidate 交卷的唯一真写入口（`record-delivery`）。`gate_goal` / `gate_routing` 的 detail 必须含 `group_id` + 对应 sha256；缺 sha256 拒。`site_report` / `replan_note` / `watch_registered` 只经 `note-event` 入账，不进 set-state 成功流。`watch_registered` 只允许在 `pr-open` 入账，必须消费 `confirm-watch-registered.mjs` 产出的回执（该脚本只认本仓 `scripts/pr-watch/register.mjs` 的 `REGISTERED/ALREADY <abs.json>` stdout，主机 / state_dir / register_bin / ssh_bin 按 `config/mini-watch.json` 断言实际值 === 配置值）。不得本机 `existsSync` 读 Mini 路径，不得只核 pr 号。不得引用 `config/mini-watch.json` `old_schedule_ids_blocklist` 里的旧班车 id。`local-cleaned→archived` 必须消费 `confirm-session-archived.mjs` 产出的回执（输入是 `archive_sessions` 工具 JSON，不是手写 archived=true）。run 级 `phase=ready` 是验收门过了的冻结；组级 `pr-open` / `local-cleaned` / `archived` 与 `watch_registered` 仍可在 ready 之后写入，但必须带对应脚本回执，禁止只填 URL / 只报事件名。
+`EVENT_TYPES` 新增：`session_created`、`session_steer`、`gate_goal`、`gate_routing`、`pr_opened`、`accepted`、`pr_ready`、`local_cleaned`、`session_archived`、`watch_registered`、`site_report`、`replan_note`。旧 `delivery` 仍是子 session candidate 交卷的唯一真写入口（`record-delivery`）。`gate_goal` / `gate_routing` 的 detail 必须含 `group_id` + 对应 sha256；缺 sha256 拒。`site_report` / `replan_note` / `pr_ready` / `watch_registered` 只经 `note-event` 入账，不进 set-state 成功流。`pr_ready` 只允许在本组 `pr-open` 入账，表示这一颗 PR 已机器可证明 Ready；不得用 run 级 `phase=ready` 或「四个 PR 都 push 了」代替。`watch_registered` 只允许在本组已有 `pr_ready` 之后入账，必须消费 `confirm-watch-registered.mjs` 产出的回执（该脚本只认本仓 `scripts/pr-watch/register.mjs` 的 `REGISTERED/ALREADY <abs.json>` stdout，主机 / state_dir / register_bin / ssh_bin 按 `config/mini-watch.json` 断言实际值 === 配置值）。仅 `pr-open`、本组尚未 `pr_ready` → 拒，避免本机未 Ready 时 Mini 已跟进导致双边改同一 PR 分叉。同一次任务 4 个 PR：谁 Ready 发谁的盯梢，未 Ready 的不得 register。不得本机 `existsSync` 读 Mini 路径，不得只核 pr 号。不得引用 `config/mini-watch.json` `old_schedule_ids_blocklist` 里的旧班车 id。`local-cleaned→archived` 必须消费 `confirm-session-archived.mjs` 产出的回执（输入是 `archive_sessions` 工具 JSON，不是手写 archived=true）。run 级 `phase=ready` 是验收门过了的冻结；组级 `pr-open` / `pr_ready` / `local-cleaned` / `archived` 与 `watch_registered` 仍可在 ready 之后写入，但必须带对应脚本回执，禁止只填 URL / 只报事件名。
 
 `PHASE_ORDER` 改成 run 级：`splitting | dispatching | running | accepting | ready`。组级状态机在 group 上。
 

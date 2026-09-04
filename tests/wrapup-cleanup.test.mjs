@@ -201,6 +201,26 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
   })}\n`);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', T, '--pr-open-receipt', prOpenReceipt);
   assert.equal(r.status, 0, r.stderr);
+  const mintedEarly = stamp();
+  const watchTooSoon = join(dir, 'watch-too-soon.json');
+  writeFileSync(watchTooSoon, `${JSON.stringify({
+    ok: true, owner: 'xindong', repo: 'mivo-canvas-plugin', pr_number: 1, branch: 'feat/run-ledger',
+    state_file: '/mini/runtime/state/xindong__mivo-canvas-plugin__1.json',
+    session_id: null, checked_at: LATER, mini_watch_config_sha256: miniWatchConfigSha256(), ...mintedEarly,
+  })}\n`);
+  r = cli('note-event', ledgerPath, '--event', 'watch_registered', '--detail', JSON.stringify({
+    group_id: g,
+    pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
+    receipt: watchTooSoon,
+  }), '--now', T);
+  assert.equal(r.status, 2, '仅 pr-open、本组尚未 pr_ready 不得发 Mini 盯梢');
+  assert.match(r.stderr, /pr_ready/);
+  r = cli('note-event', ledgerPath, '--event', 'pr_ready', '--detail', JSON.stringify({
+    group_id: g,
+    pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
+    current_pr_head_sha: SHA1,
+  }), '--now', T);
+  assert.equal(r.status, 0, r.stderr);
   const fakeLocalWatch = join(dir, 'acme__app__1.json');
   writeFileSync(fakeLocalWatch, `${JSON.stringify({ owner: 'acme', repo: 'app', pr_number: 1, session_id: null })}\n`);
   r = cli('note-event', ledgerPath, '--event', 'watch_registered', '--detail', JSON.stringify({
@@ -348,6 +368,12 @@ test('cleanup 回执在其它写入先推高 version 后仍可消费（不绑全
     checked_at: LATER, ...stamp(),
   })}\n`);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', T, '--pr-open-receipt', prOpenReceipt);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('note-event', ledgerPath, '--event', 'pr_ready', '--detail', JSON.stringify({
+    group_id: g,
+    pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
+    current_pr_head_sha: SHA1,
+  }), '--now', T);
   assert.equal(r.status, 0, r.stderr);
   const watchReceipt = join(dir, 'watch-receipt.json');
   writeFileSync(watchReceipt, `${JSON.stringify({

@@ -79,11 +79,14 @@ export function renderPrHandoff({
     throw new LedgerError('PACKET_INCOMPLETE', 'verify_cmds 必须非空');
   }
   assertVerifyCmds(packet.verify_cmds);
-  if (!Array.isArray(excerpts) || excerpts.length === 0) {
+  const resolvedExcerpts = excerpts ?? packet.excerpts;
+  const resolvedHow = how ?? packet.how ?? '';
+  const resolvedWhy = why ?? packet.why ?? (typeof packet.instruction === 'string' ? packet.instruction.split('\n').find((l) => l.trim()) : '') ?? '';
+  if (!Array.isArray(resolvedExcerpts) || resolvedExcerpts.length === 0) {
     throw new LedgerError('PACKET_INCOMPLETE', '第 3 段至少 1 条真摘录（file + line + behavior），禁止占位');
   }
-  assertExcerpts(excerpts);
-  if (typeof how === 'string' && typeof why === 'string' && how.trim() === why.trim() && how.trim().length > 0) {
+  assertExcerpts(resolvedExcerpts, { worktree: identity.worktree });
+  if (typeof resolvedHow === 'string' && typeof resolvedWhy === 'string' && resolvedHow.trim() === resolvedWhy.trim() && resolvedHow.trim().length > 0) {
     throw new LedgerError('PACKET_INCOMPLETE', '第 4 段必须是改法，不得复制第 2 段');
   }
 
@@ -92,9 +95,9 @@ export function renderPrHandoff({
     throw new LedgerError('PACKET_INCOMPLETE', '开工闸第 0 块必须含「用 goal skill 执行。」');
   }
 
-  const whyLine = why ?? (typeof packet.instruction === 'string' ? packet.instruction.split('\n').find((l) => l.trim()) : '') ?? '';
-  const excerptLines = excerpts.map((e) => (typeof e === 'string' ? e : `${e.file}:${e.line} ${e.behavior}`));
-  const howLine = how ?? '';
+  const whyLine = resolvedWhy;
+  const excerptLines = resolvedExcerpts.map((e) => (typeof e === 'string' ? e : `${e.file}:${e.line} ${e.behavior}`));
+  const howLine = resolvedHow;
   if (typeof howLine !== 'string' || howLine.trim().length === 0) {
     throw new LedgerError('PACKET_INCOMPLETE', '第 4 段具体改法不能为空，不得回退成 instruction 禁令');
   }
@@ -189,14 +192,18 @@ export function renderPrHandoff({
   assertHandoffComplete(out, {
     why: whyLine,
     how: howLine,
-    excerpts,
+    excerpts: resolvedExcerpts,
     verify_cmds: packet.verify_cmds,
     title,
+    worktree: identity.worktree,
   });
   return out;
 }
 
-export function renderPrHandoffFromLedger({ ledgerPath, group, leadSessionId, seq, repo, title, snapshot, now }) {
+export function renderPrHandoffFromLedger({
+  ledgerPath, group, leadSessionId, seq, repo, title, snapshot, now,
+  why, how, excerpts,
+}) {
   const ledger = readLedger(ledgerPath);
   const manifest = readManifest(ledger.manifest_path);
   assertManifestBound(ledger, manifest, 'render-pr-handoff');
@@ -205,7 +212,16 @@ export function renderPrHandoffFromLedger({ ledgerPath, group, leadSessionId, se
   const wg = wave.groups.find((g) => g.group_id === group);
   const identity = { worktree: wg.worktree, branch: wg.branch, base: wg.base };
   return renderPrHandoff({
-    packet, identity, leadSessionId, seq, repo, title, snapshot,
+    packet,
+    identity,
+    leadSessionId,
+    seq,
+    repo,
+    title,
+    snapshot,
+    why: why ?? packet.why,
+    how: how ?? packet.how,
+    excerpts: excerpts ?? packet.excerpts,
   });
 }
 
@@ -244,6 +260,9 @@ function runCli(argv) {
         repo: flags.repo,
         title: flags.title,
         snapshot: flags.snapshot,
+        why: flags.why,
+        how: flags.how,
+        excerpts: flags.excerpts ? parseJsonFlag(flags.excerpts, '--excerpts') : undefined,
       });
     } else {
       out = renderPrHandoff({

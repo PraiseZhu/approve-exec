@@ -934,6 +934,13 @@ test('note-event: site_report / replan_note 入账；非法 action 拒', () => {
   }), '--now', T);
   assert.equal(r.status, 2, '未 pr-open 不得 watch_registered');
   assert.match(r.stderr, /pr-open/);
+  r = cli('note-event', ledgerPath, '--event', 'pr_ready', '--detail', JSON.stringify({
+    group_id: 'g4',
+    pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
+    current_pr_head_sha: 'a'.repeat(40),
+  }), '--now', T);
+  assert.equal(r.status, 2, '未 pr-open 不得 pr_ready');
+  assert.match(r.stderr, /pr-open/);
 });
 
 test('sc-p1c: 未知 event type 拒', () => {
@@ -3400,6 +3407,12 @@ test('watch_registered: init 后改夹具副本 mini-watch.json 必须拒（三�
     checked_at: later(T), ledger_version: ledger.version, assignment_seq: 0,
   })}\n`);
   r = treeCli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', T, '--pr-open-receipt', prOpen);
+  assert.equal(r.status, 0, r.stderr);
+  r = treeCli('note-event', ledgerPath, '--event', 'pr_ready', '--detail', JSON.stringify({
+    group_id: g,
+    pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
+    current_pr_head_sha: SHA1,
+  }), '--now', T);
   assert.equal(r.status, 0, r.stderr);
   const driftedHash = createHash('sha256').update(readFileSync(cfgPath)).digest('hex');
   assert.notEqual(driftedHash, pinned);

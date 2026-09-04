@@ -161,6 +161,10 @@ test('第⑧段：create_workers ≥2 禁连续 create_worker 单发', () => {
   );
   assert.ok(s8.includes('mem-probe'), '⑧段应要求派 tester/reviewer 前跑 mem-probe');
   assert.ok(s8.includes('这五种情况'), '⑧段应声明五类停');
+  assert.ok(s8.includes('合法 `pr_ready` 入账后 owner 正常结束') || s8.includes('不是 DECISION_REQUIRED'),
+    '⑧段第 1 种停必须是 PR Ready 正常完成，不是 DECISION_REQUIRED');
+  assert.ok(s8.includes('开 PR ≠ 发盯梢') || s8.includes('pr_ready` 之后才注册'),
+    '⑧段不得在仅开 PR 后立刻注册 Mini 盯梢');
   assert.ok(s8.includes('假设破裂'), '⑧段应含第 5 类停：假设破裂');
 });
 
@@ -183,6 +187,9 @@ test('第⑨段：新组状态机 + identity 五段 + PR_RECEIPT_KEYS', () => {
   assert.ok(s9.includes('site_report') && s9.includes('replan_note'), '⑨段 EVENT_TYPES 应含 site_report/replan_note');
   assert.ok(s9.includes('note-event'), '⑨段应声明 note-event 入账通道');
   assert.ok(s9.includes('watch_registered'), '⑨段应点名 watch_registered');
+  assert.ok(s9.includes('pr_ready'), '⑨段应点名 pr_ready');
+  assert.ok(s9.includes('谁 Ready 发谁') || s9.includes('本组已有 `pr_ready`') || s9.includes('尚未 `pr_ready`'),
+    '⑨段应声明 Mini 盯梢按本 PR Ready 发，不得开 PR 即发');
   assert.ok(s9.includes('phase=ready') && s9.includes('仍可在 ready 之后写入'),
     '⑨段应声明验收后收尾不受 run 级 ready 冻结挡住');
   assert.ok(s9.includes('Mini 名册先于清场') || s9.includes('watch_registered'),
