@@ -22,6 +22,7 @@ const SHA = 'a'.repeat(40);
 const SHA2 = 'b'.repeat(40);
 const NOW = '2026-08-09T00:00:00Z';
 const LATER = '2026-08-09T00:00:01Z';
+const AFTER = '2026-08-09T00:00:02Z';
 const STAMP = { ledgerVersion: 0, assignmentSeq: 0 };
 const PATH_SEP = process.platform === 'win32' ? ';' : ':';
 
@@ -219,8 +220,15 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
     group_id: g,
     pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
     current_pr_head_sha: SHA1,
-  }), '--now', T);
+  }), '--now', LATER);
   assert.equal(r.status, 0, r.stderr);
+  r = cli('note-event', ledgerPath, '--event', 'watch_registered', '--detail', JSON.stringify({
+    group_id: g,
+    pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
+    receipt: watchTooSoon,
+  }), '--now', T);
+  assert.equal(r.status, 2, 'pr_ready 入账后不得重放 Ready 前铸的 Mini 回执');
+  assert.match(r.stderr, /pr_ready/);
   const fakeLocalWatch = join(dir, 'acme__app__1.json');
   writeFileSync(fakeLocalWatch, `${JSON.stringify({ owner: 'acme', repo: 'app', pr_number: 1, session_id: null })}\n`);
   r = cli('note-event', ledgerPath, '--event', 'watch_registered', '--detail', JSON.stringify({
@@ -233,7 +241,7 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
   const watchReceiptBody = confirmWatchRegistered({
     stdout: 'REGISTERED /mini/runtime/state/xindong__mivo-canvas-plugin__1.json\n',
     owner: 'xindong', repo: 'mivo-canvas-plugin', prNumber: 1, branch: 'feat/run-ledger',
-    now: LATER, ledgerVersion: minted.ledger_version, assignmentSeq: minted.assignment_seq,
+    now: AFTER, ledgerVersion: minted.ledger_version, assignmentSeq: minted.assignment_seq,
   });
   const watchReceipt = join(dir, 'watch-receipt.json');
   writeFileSync(watchReceipt, `${JSON.stringify(watchReceiptBody)}\n`);
@@ -251,7 +259,7 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
     worktree: '/wt/g4',
     sha: SHA1,
     remoteDeleted: false,
-    checked_at: LATER,
+    checked_at: AFTER,
     ...stamp(),
   })}\n`);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'local-cleaned', '--now', T);
@@ -265,7 +273,7 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
     worktree: '/wt/g4',
     sha: SHA1,
     remoteDeleted: false,
-    checked_at: LATER,
+    checked_at: AFTER,
     ...stamp(),
   })}\n`);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'local-cleaned', '--now', T, '--cleanup-receipt', skippedCleanup);
@@ -277,7 +285,7 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
     worktree: '/wt/g4',
     sha: SHA1,
     remoteDeleted: false,
-    checked_at: LATER,
+    checked_at: AFTER,
     ...stamp(),
   })}\n`);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'local-cleaned', '--now', T, '--cleanup-receipt', cleanupReceipt);
@@ -294,7 +302,7 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
       count: 1,
       changed: [{ session_id: 'sess-g4', status: 'archived' }],
     },
-    now: LATER, ledgerVersion: archiveMinted.ledger_version, assignmentSeq: archiveMinted.assignment_seq,
+    now: AFTER, ledgerVersion: archiveMinted.ledger_version, assignmentSeq: archiveMinted.assignment_seq,
   });
   const archiveReceipt = join(dir, 'archive-receipt.json');
   writeFileSync(archiveReceipt, `${JSON.stringify(archiveReceiptBody)}\n`);

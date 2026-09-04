@@ -196,6 +196,8 @@ test('第⑨段：新组状态机 + identity 五段 + PR_RECEIPT_KEYS', () => {
   assert.ok(s9.includes('pr_ready'), '⑨段应点名 pr_ready');
   assert.ok(s9.includes('谁 Ready 发谁') || s9.includes('本组已有 `pr_ready`') || s9.includes('尚未 `pr_ready`'),
     '⑨段应声明 Mini 盯梢按本 PR Ready 发，不得开 PR 即发');
+  assert.ok(s9.includes('重放 Ready 前铸的 Mini 回执') || (s9.includes('checked_at') && s9.includes('pr_ready.at')),
+    '⑨段应声明 watch 回执不得早于 pr_ready（禁止重放 Ready 前 Mini 回执）');
   assert.ok(s9.includes('phase=ready') && s9.includes('仍可在 ready 之后写入'),
     '⑨段应声明验收后收尾不受 run 级 ready 冻结挡住');
   assert.ok(s9.includes('Mini 名册先于清场') || s9.includes('watch_registered'),

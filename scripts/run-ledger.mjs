@@ -1356,6 +1356,7 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
     const watchReceipt = readWatchReceipt(resolve(parsed.receipt));
     assertReceiptBoundToLedger(watchReceipt, ledger, parsed.group_id, 'watch_registered receipt');
     assertReceiptAfterEvent(watchReceipt, ledger, parsed.group_id, 'pr_opened', 'watch_registered receipt');
+    assertReceiptAfterEvent(watchReceipt, ledger, parsed.group_id, 'pr_ready', 'watch_registered receipt');
     const expectedId = githubIdentityFromUrl(g.pr_url);
     if (!expectedId) {
       throw new LedgerError('PRECONDITION', 'watch_registered 组 pr_url 解析不出 owner/repo/pr');
