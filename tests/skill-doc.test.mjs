@@ -138,7 +138,8 @@ test('第⑥段：send_to_session create + Art 钉 + 标题正则', () => {
   assert.ok(s6.includes('provider_id'), '⑥段应说明 create 无 provider_id');
   assert.ok(s6.includes('art'), '⑥段应钉 Art');
   assert.ok(s6.includes('丨'), '⑥段标题分隔符必须是 丨');
-  assert.ok(s6.includes('{项目名}-{任务名}丨 {MMDD}'), '⑥段应给出标题格式');
+  assert.ok(s6.includes('{项目名}-{中文任务名}丨 {MMDD}'), '⑥段应给出标题格式');
+  assert.ok(s6.includes('至少一个汉字'), '⑥段任务段必须含汉字');
 });
 
 test('第⑦段：现读同一份 routing.json，禁止把 luna/sol 当唯一派工值', () => {
@@ -149,6 +150,10 @@ test('第⑦段：现读同一份 routing.json，禁止把 luna/sol 当唯一派
   assert.ok(s7.includes('model-route show'), '⑦段应允许 model-route show');
   assert.ok(s7.includes('luna') && s7.includes('sol'), '⑦段应点名禁止抄 luna/sol');
   assert.ok(s7.includes('不要做的') || s7.includes('禁止把 luna'), '⑦段应写禁止事项');
+  assert.ok(s7.includes('429') && s7.includes('fallbacks'), '⑦段应声明 429 走 fallbacks');
+  assert.ok(s7.includes('崩溃') || s7.includes('异常终止'), '⑦段应声明 worker 崩溃走 fallbacks');
+  assert.ok(s7.includes('不换代次'), '⑦段降级只换 provider 不换代次');
+  assert.ok(!s7.includes('fallbacks_tried: []') || s7.includes('禁止空数组'), '⑦段禁止空 fallbacks_tried 就问 lead');
 });
 
 test('第⑧段：create_workers ≥2 禁连续 create_worker 单发', () => {
@@ -160,6 +165,12 @@ test('第⑧段：create_workers ≥2 禁连续 create_worker 单发', () => {
   );
   assert.ok(s8.includes('mem-probe'), '⑧段应要求派 tester/reviewer 前跑 mem-probe');
   assert.ok(s8.includes('这五种情况'), '⑧段应声明五类停');
+  assert.ok(s8.includes('合法 `pr_ready` 入账后 owner 正常结束') || s8.includes('不是 DECISION_REQUIRED'),
+    '⑧段第 1 种停必须是 PR Ready 正常完成，不是 DECISION_REQUIRED');
+  assert.ok(s8.includes('开 PR ≠ 发盯梢') || s8.includes('pr_ready` 之后才注册'),
+    '⑧段不得在仅开 PR 后立刻注册 Mini 盯梢');
+  assert.ok(s8.includes('429') && (s8.includes('fallbacks') || s8.includes('fallbacks_tried')),
+    '⑧段应禁止 429 空着手问 lead');
   assert.ok(s8.includes('假设破裂'), '⑧段应含第 5 类停：假设破裂');
 });
 
@@ -182,6 +193,11 @@ test('第⑨段：新组状态机 + identity 五段 + PR_RECEIPT_KEYS', () => {
   assert.ok(s9.includes('site_report') && s9.includes('replan_note'), '⑨段 EVENT_TYPES 应含 site_report/replan_note');
   assert.ok(s9.includes('note-event'), '⑨段应声明 note-event 入账通道');
   assert.ok(s9.includes('watch_registered'), '⑨段应点名 watch_registered');
+  assert.ok(s9.includes('pr_ready'), '⑨段应点名 pr_ready');
+  assert.ok(s9.includes('谁 Ready 发谁') || s9.includes('本组已有 `pr_ready`') || s9.includes('尚未 `pr_ready`'),
+    '⑨段应声明 Mini 盯梢按本 PR Ready 发，不得开 PR 即发');
+  assert.ok(s9.includes('重放 Ready 前铸的 Mini 回执') || (s9.includes('checked_at') && s9.includes('pr_ready.at')),
+    '⑨段应声明 watch 回执不得早于 pr_ready（禁止重放 Ready 前 Mini 回执）');
   assert.ok(s9.includes('phase=ready') && s9.includes('仍可在 ready 之后写入'),
     '⑨段应声明验收后收尾不受 run 级 ready 冻结挡住');
   assert.ok(s9.includes('Mini 名册先于清场') || s9.includes('watch_registered'),
@@ -203,9 +219,11 @@ test('第⑩段：开工闸收据 + 终态交卷 exact schema', () => {
   const s10 = sectionBetween(MARKERS[9], MARKERS[10]);
   assert.ok(s10.includes('gate_goal') && s10.includes('gate_routing'), '⑩段应给出两类开工闸收据');
   assert.ok(s10.includes('goal_skill_sha256') && s10.includes('routing_sha256'), '⑩段收据必须含 sha256');
-  for (const key of ['branch', 'tip_sha', 'scs', 'goal_skill_path', 'e2e', 'review', 'size_gate']) {
+  for (const key of ['branch', 'tip_sha', 'scs', 'goal_skill_path', 'e2e', 'review', 'size_gate', 'fallbacks_tried']) {
     assert.ok(s10.includes(key), `candidate 交卷应含键 ${key}`);
   }
+  assert.ok(s10.includes('禁止 tried_fallbacks') || s10.includes('禁止用 tried_fallbacks'),
+    '⑩段交卷字段必须是 fallbacks_tried，并禁止混用 tried_fallbacks');
   assert.ok(s10.includes('不得含 pr_url'), '⑩段应禁止 candidate 交卷带 pr_url');
   assert.ok(s10.includes('/Users/praise/.agents/skills/goal/SKILL.md'), 'goal_skill_path 必须钉 PI 自己的 goal');
 });

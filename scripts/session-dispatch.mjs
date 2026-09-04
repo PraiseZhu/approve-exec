@@ -5,6 +5,7 @@ import { writeFileSync, realpathSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { LedgerError } from './run-ledger.mjs';
+import { assertOwnerTitle, assertCreateGatewayOrFailClosed } from './vnext-owner-contract.mjs';
 
 const TITLE_RE = /^.+丨 \d{4}$/;
 const REPO_PREFIX = Object.freeze({
@@ -23,7 +24,9 @@ export function sessionTitle({ project, task, mmdd }) {
   if (!/^\d{4}$/.test(String(mmdd))) {
     throw new LedgerError('ARGS', `sessionTitle.mmdd 必须是 MMDD 四位（当前: ${mmdd}）`);
   }
-  return `${project}-${task}丨 ${mmdd}`;
+  const title = `${project}-${task}丨 ${mmdd}`;
+  assertOwnerTitle(title);
+  return title;
 }
 
 export function titlePrefixForRepo(repo) {
@@ -40,8 +43,9 @@ export function titlePrefixForRepo(repo) {
 
 export function wouldCreate({ title, working_dir, agent_kind = 'pi', model = 'grok-4.6', effort = 'high' }) {
   if (typeof title !== 'string' || !TITLE_RE.test(title)) {
-    throw new LedgerError('ARGS', `title 必须是 {项目名}-{任务名}丨 {MMDD}（当前: ${title}）`);
+    throw new LedgerError('ARGS', `title 必须是 {项目名}-{中文任务名}丨 {MMDD}（当前: ${title}）`);
   }
+  assertOwnerTitle(title);
   if (typeof working_dir !== 'string' || !working_dir.startsWith('/')) {
     throw new LedgerError('ARGS', `working_dir 必须是绝对路径（当前: ${working_dir}）`);
   }
@@ -100,8 +104,9 @@ function runCli(argv) {
       model: flags.model ?? 'grok-4.6',
       effort: flags.effort ?? 'high',
     });
+    assertCreateGatewayOrFailClosed({ dryRun: Boolean(flags['dry-run']) });
     if (!flags['dry-run']) {
-      throw new LedgerError('ARGS', '真派必须由 lead 调 send_to_session；本脚本只支持 --dry-run');
+      throw new LedgerError('HOST_GATEWAY_MISSING', '真派必须等宿主 create gateway；本脚本只支持 --dry-run');
     }
     const out = flags.out ? resolve(flags.out) : null;
     const json = `${JSON.stringify(created, null, 2)}\n`;

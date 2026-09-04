@@ -70,6 +70,7 @@ export const EVENT_TYPES = Object.freeze([
   'gate_routing',
   'pr_opened',
   'accepted',
+  'pr_ready',
   'local_cleaned',
   'session_archived',
   'watch_registered',
@@ -105,15 +106,15 @@ const GROUP_SCOPED_EVENT_TYPES = new Set([
   'dispatch', 'delivery', 'review_round', 'packet_rendered', 'timeout_redispatch',
   'overreach_rejected', 'overlap_replan', 'budget_note',
   'session_created', 'session_steer', 'gate_goal', 'gate_routing', 'pr_opened', 'accepted',
-  'local_cleaned', 'session_archived', 'watch_registered',
+  'pr_ready', 'local_cleaned', 'session_archived', 'watch_registered',
   'replan_note',
 ]);
 const GATE_EVENT_TYPES = Object.freeze(['gate_goal', 'gate_routing']);
 const SESSION_EVENT_TYPES = Object.freeze([
-  'session_created', 'session_steer', 'pr_opened', 'accepted',
+  'session_created', 'session_steer', 'pr_opened', 'accepted', 'pr_ready',
   'local_cleaned', 'session_archived', 'watch_registered',
 ]);
-const NOTE_EVENT_TYPES = Object.freeze(['site_report', 'replan_note', 'watch_registered']);
+const NOTE_EVENT_TYPES = Object.freeze(['site_report', 'replan_note', 'pr_ready', 'watch_registered']);
 const OLD_WATCH_SCHEDULE_IDS = Object.freeze([
   ...loadMiniWatchConfig().old_schedule_ids_blocklist,
 ]);
@@ -257,6 +258,16 @@ export function assertEventSchema(ev) {
     }
     if (!Array.isArray(ev.detail.affected_groups) || ev.detail.affected_groups.some((g) => typeof g !== 'string' || g.length === 0)) {
       throw new LedgerError('SCHEMA', 'replan_note 的 detail.affected_groups 必须是非空字符串数组');
+    }
+  }
+  if (ev.type === 'pr_ready') {
+    const url = ev.detail.pr_url;
+    if (typeof url !== 'string' || !GITHUB_PR_URL_RE.test(url)) {
+      throw new LedgerError('SCHEMA', 'pr_ready 的 detail.pr_url 必须是 GitHub PR URL');
+    }
+    const sha = ev.detail.current_pr_head_sha;
+    if (typeof sha !== 'string' || !TIP_SHA_RE.test(sha)) {
+      throw new LedgerError('SCHEMA', 'pr_ready 的 detail.current_pr_head_sha 必须是 40 位十六进制');
     }
   }
   if (ev.type === 'watch_registered') {
@@ -940,8 +951,9 @@ const GOAL_SKILL_PATHS = Object.freeze([
 const ROUTING_PATH_LIVE = '/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json';
 const ROUTING_PATH_LINK = '/Users/praise/.agents/skills/orca-fanout/routing.json';
 const PR_HANDOFF_DELIVERY_KEYS = Object.freeze([
-  'branch', 'tip_sha', 'scs', 'goal_skill_path', 'e2e', 'review', 'size_gate',
+  'branch', 'tip_sha', 'scs', 'goal_skill_path', 'e2e', 'review', 'size_gate', 'fallbacks_tried',
 ]);
+const FALLBACKS_TRIED_ITEM_KEYS = Object.freeze(['route', 'model', 'provider_id', 'error']);
 const PR_HANDOFF_E2E_KEYS = Object.freeze(['status', 'candidate_sha', 'model', 'route_source']);
 const PR_HANDOFF_REVIEW_KEYS = Object.freeze(['unresolved', 'candidate_sha', 'model', 'route_source']);
 const PR_HANDOFF_SIZE_KEYS = Object.freeze(['result', 'candidate_sha']);
@@ -1296,7 +1308,7 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
     throw new LedgerError('ARGS', '--detail 必须是 JSON 对象');
   }
   const ledger = readLedger(ledgerPath);
-  if (ledger.phase === 'ready' && event !== 'watch_registered') {
+  if (ledger.phase === 'ready' && event !== 'watch_registered' && event !== 'pr_ready') {
     throw new LedgerError('FROZEN', `台账已 ready（phase=${ledger.phase}），冻结只读，拒绝写操作`);
   }
   const expected = ledger.version;
@@ -1307,6 +1319,23 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
   if (event === 'replan_note' && !('group_id' in parsed) && typeof parsed.origin_group === 'string') {
     ev.detail.group_id = parsed.origin_group;
   }
+  if (event === 'pr_ready') {
+    if (typeof parsed.group_id !== 'string' || parsed.group_id.length === 0) {
+      throw new LedgerError('ARGS', 'pr_ready 的 --detail.group_id 必须是非空字符串');
+    }
+    const g = findGroup(ledger, parsed.group_id);
+    if (g.state !== 'pr-open') {
+      throw new LedgerError('PRECONDITION', `pr_ready 只允许在 pr-open 入账（组 ${parsed.group_id} 当前 ${g.state}）；不得把整批 run ready 当本 PR Ready`);
+    }
+    if (typeof parsed.pr_url !== 'string' || parsed.pr_url !== g.pr_url) {
+      throw new LedgerError('PRECONDITION', 'pr_ready.pr_url 必须等于组上已开的 GitHub URL');
+    }
+    const sha = parsed.current_pr_head_sha;
+    if (typeof sha !== 'string' || !TIP_SHA_RE.test(sha)) {
+      throw new LedgerError('ARGS', 'pr_ready.current_pr_head_sha 必须是 40 位十六进制');
+    }
+    ev.detail.assignment_seq = g.assignment_seq ?? 0;
+  }
   if (event === 'watch_registered') {
     if (typeof parsed.group_id !== 'string' || parsed.group_id.length === 0) {
       throw new LedgerError('ARGS', 'watch_registered 的 --detail.group_id 必须是非空字符串');
@@ -1314,6 +1343,10 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
     const g = findGroup(ledger, parsed.group_id);
     if (g.state !== 'pr-open') {
       throw new LedgerError('PRECONDITION', `watch_registered 只允许在 pr-open 入账（组 ${parsed.group_id} 当前 ${g.state}）`);
+    }
+    const readyEv = latestGroupEvent(ledger, parsed.group_id, 'pr_ready');
+    if (!readyEv) {
+      throw new LedgerError('PRECONDITION', `watch_registered 要求本组已有 pr_ready（组 ${parsed.group_id} 仅开 PR 不得发 Mini 盯梢，避免本机未 Ready 时双边改同一 PR 分叉）`);
     }
     if (typeof parsed.pr_url !== 'string' || parsed.pr_url !== g.pr_url) {
       throw new LedgerError('PRECONDITION', `watch_registered.pr_url 必须等于组上已开的 GitHub URL`);
@@ -1324,6 +1357,7 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
     const watchReceipt = readWatchReceipt(resolve(parsed.receipt));
     assertReceiptBoundToLedger(watchReceipt, ledger, parsed.group_id, 'watch_registered receipt');
     assertReceiptAfterEvent(watchReceipt, ledger, parsed.group_id, 'pr_opened', 'watch_registered receipt');
+    assertReceiptAfterEvent(watchReceipt, ledger, parsed.group_id, 'pr_ready', 'watch_registered receipt');
     const expectedId = githubIdentityFromUrl(g.pr_url);
     if (!expectedId) {
       throw new LedgerError('PRECONDITION', 'watch_registered 组 pr_url 解析不出 owner/repo/pr');
@@ -2235,6 +2269,17 @@ function validatePrHandoffDelivery(data, packet) {
   if (typeof data.size_gate.candidate_sha !== 'string' || !TIP_SHA_RE.test(data.size_gate.candidate_sha)) {
     throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 size_gate.candidate_sha 非 40 位十六进制');
   }
+  if (!Array.isArray(data.fallbacks_tried)) {
+    throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 fallbacks_tried 必须是数组（无降级写 []；禁止用 tried_fallbacks）');
+  }
+  for (const item of data.fallbacks_tried) {
+    assertKeys(item, FALLBACKS_TRIED_ITEM_KEYS, '终态交卷 fallbacks_tried 条目');
+    for (const k of FALLBACKS_TRIED_ITEM_KEYS) {
+      if (typeof item[k] !== 'string' || item[k].trim().length === 0) {
+        throw new LedgerError('DELIVERY_SCHEMA', `终态交卷 fallbacks_tried.${k} 必须是非空字符串`);
+      }
+    }
+  }
 }
 
 function assertPrewalkSentence(value, what) {
@@ -2632,6 +2677,7 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
           e2e: data.e2e,
           review: data.review,
           size_gate: data.size_gate,
+          fallbacks_tried: data.fallbacks_tried,
           session_id: g.session_id,
           candidate_sha: data.tip_sha,
           e2e_status: data.e2e.status,

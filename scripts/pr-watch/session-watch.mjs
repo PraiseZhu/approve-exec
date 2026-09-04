@@ -16,6 +16,8 @@ import { loadMiniWatchConfig, miniHost, assertAutoMergeDisabled } from '../lib/m
 import { evaluate, emptyCursors } from './gate.mjs';
 import { stateFileName, migrateAllLegacyStateFiles, STATE_FILE_NAME_RE, unregisterPr, identityMatches } from './register.mjs';
 import { withLock } from '../lib/state-lock.mjs';
+import { sessionTitle, titlePrefixForRepo } from '../session-dispatch.mjs';
+import { watchTaskName, mmddFromDate, assertCreateGatewayOrFailClosed, HOST_CREATE_GATEWAY } from '../vnext-owner-contract.mjs';
 
 const _mini = miniHost();
 export const MINI_WATCH_PROVIDER = _mini.provider_id;
@@ -62,7 +64,7 @@ function runSnapshot(snapshotCmd, owner, repo, pr) {
   return JSON.parse(execFileSync(parts[0], parts.slice(1), { encoding: 'utf8' }));
 }
 
-export function planDispatch({ decision, state, signals, newItems, watchConfig } = {}) {
+export function planDispatch({ decision, state, signals, newItems, watchConfig, gatewayAvailable } = {}) {
   assertAutoMergeDisabled(watchConfig);
   if (decision === 'none' || decision === 'blocked-external') return null;
   if (decision === 'terminal') {
@@ -72,6 +74,12 @@ export function planDispatch({ decision, state, signals, newItems, watchConfig }
   const sessionId = typeof state.session_id === 'string' && state.session_id.length > 0
     ? state.session_id
     : null;
+  if (!sessionId) {
+    assertCreateGatewayOrFailClosed({
+      dryRun: false,
+      available: gatewayAvailable ?? HOST_CREATE_GATEWAY.available,
+    });
+  }
   const mini = miniHost();
   return {
     action: sessionId ? 'jump' : 'create',
@@ -82,7 +90,11 @@ export function planDispatch({ decision, state, signals, newItems, watchConfig }
     session_id: sessionId,
     signals,
     newItems,
-    title: `${state.owner}/${state.repo}#${state.pr_number} 盯梢`,
+    title: sessionTitle({
+      project: titlePrefixForRepo(`${state.owner}/${state.repo}`),
+      task: watchTaskName(state.pr_number, state.task_name),
+      mmdd: typeof state.mmdd === 'string' && /^\d{4}$/.test(state.mmdd) ? state.mmdd : mmddFromDate(),
+    }),
     provider_id: mini.provider_id,
     model: mini.model,
     agent_kind: mini.agent_kind,
@@ -183,7 +195,7 @@ export function releaseCreateClaim({ stateDir, owner, repo, prNumber, claimId = 
   });
 }
 
-export function scanWatch({ stateDir, snapshotCmd, hmacKey = null }) {
+export function scanWatch({ stateDir, snapshotCmd, hmacKey = null, gatewayAvailable } = {}) {
   if (!existsSync(stateDir)) return { scanned: 0, dispatches: [], terminals: [] };
   migrateAllLegacyStateFiles(stateDir, null);
   const files = readdirSync(stateDir).filter((f) =>
@@ -213,7 +225,15 @@ export function scanWatch({ stateDir, snapshotCmd, hmacKey = null }) {
       continue;
     }
     const res = evaluate(state.cursors ?? emptyCursors(), snapshot, { hmacKey });
-    const plan = planDispatch({ decision: res.decision, state, signals: res.signals, newItems: res.newItems });
+    let plan;
+    try {
+      plan = planDispatch({
+        decision: res.decision, state, signals: res.signals, newItems: res.newItems, gatewayAvailable,
+      });
+    } catch (err) {
+      if (err?.code === 'HOST_GATEWAY_MISSING') continue;
+      throw err;
+    }
     if (!plan) continue;
     if (plan.action === 'unregister') {
       terminals.push(plan);
@@ -265,11 +285,12 @@ export function applyWatchRound({
   hmacKey = null,
   dispatchFn,
   unregisterFn = unregisterPr,
+  gatewayAvailable,
 }) {
   if (typeof dispatchFn !== 'function') {
     throw new Error('applyWatchRound 缺 dispatchFn（create 后必须能拿到 session_id）');
   }
-  const scan = scanWatch({ stateDir, snapshotCmd, hmacKey });
+  const scan = scanWatch({ stateDir, snapshotCmd, hmacKey, gatewayAvailable });
   const applied = [];
   for (const plan of scan.dispatches) {
     let livePlan = plan;
@@ -439,6 +460,7 @@ if (isMain(import.meta.url)) {
       stateDir: args['state-dir'],
       snapshotCmd: args['snapshot-cmd'],
       hmacKey: process.env.PR_AUTOPILOT_HMAC_KEY ?? null,
+      gatewayAvailable: process.env.AE_WATCH_ALLOW_CREATE === '1' ? true : undefined,
     });
     process.stdout.write(`${JSON.stringify(out)}\n`);
   }

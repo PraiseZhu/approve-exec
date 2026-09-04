@@ -174,6 +174,7 @@ function prHandoffFor(env, group, branch) {
     e2e: { status: 'pass', candidate_sha: tip, model: 'codex/gpt-5.6-luna', route_source: ROUTING_LIVE },
     review: { unresolved: 0, candidate_sha: tip, model: 'codex/gpt-5.6-sol', route_source: ROUTING_LIVE },
     size_gate: { result: 'PASS', candidate_sha: tip },
+    fallbacks_tried: [],
   };
 }
 

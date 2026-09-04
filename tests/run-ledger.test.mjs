@@ -150,6 +150,7 @@ function prHandoffPayload(group, extras = {}) {
       route_source: extras.route_source ?? ROUTING_LIVE,
     },
     size_gate: { result: extras.size_result ?? 'PASS', candidate_sha: tip },
+    fallbacks_tried: extras.fallbacks_tried ?? [],
   };
 }
 
@@ -933,6 +934,13 @@ test('note-event: site_report / replan_note 入账；非法 action 拒', () => {
     state_file: 'acme__app__1.json',
   }), '--now', T);
   assert.equal(r.status, 2, '未 pr-open 不得 watch_registered');
+  assert.match(r.stderr, /pr-open/);
+  r = cli('note-event', ledgerPath, '--event', 'pr_ready', '--detail', JSON.stringify({
+    group_id: 'g4',
+    pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
+    current_pr_head_sha: 'a'.repeat(40),
+  }), '--now', T);
+  assert.equal(r.status, 2, '未 pr-open 不得 pr_ready');
   assert.match(r.stderr, /pr-open/);
 });
 
@@ -2344,6 +2352,62 @@ test('F-H: →verified 无 pass 凭据拒（verify.status=null 或手工伪造�
   assert.match(r.stderr, /pr_url|无法唯一识别/);
 });
 
+test('pr-handoff: fallbacks_tried 必填；tried_fallbacks 拒；429 降级成功可入账', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  const g = 'g4';
+  assignIdentity(ledgerPath, g, 'feat/run-ledger');
+  renderGroup(ledgerPath, g);
+  for (const [to, extra] of [
+    ['dispatched', ['--worker-label', 'w1', '--mem-snapshot', memSnapshotJson()]],
+    ['executing', ['--detail', gateGoalDetail()]],
+    ['e2e', ['--detail', gateRoutingDetail()]],
+    ['review', []],
+  ]) {
+    const r = cli('set-state', ledgerPath, '--group', g, '--to', to, ...extra, '--now', T);
+    assert.equal(r.status, 0, r.stderr);
+  }
+  const missing = prHandoffPayload(g, { ledgerPath });
+  delete missing.fallbacks_tried;
+  let r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify(missing), '--now', T);
+  assert.equal(r.status, 2, '缺 fallbacks_tried 必须拒');
+  assert.match(r.stderr, /无法唯一识别|fallbacks_tried/);
+
+  const alias = prHandoffPayload(g, { ledgerPath });
+  alias.tried_fallbacks = alias.fallbacks_tried;
+  delete alias.fallbacks_tried;
+  r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify(alias), '--now', T);
+  assert.equal(r.status, 2, 'tried_fallbacks 不得顶替 fallbacks_tried');
+  assert.match(r.stderr, /无法唯一识别|fallbacks_tried/);
+
+  const both = prHandoffPayload(g, { ledgerPath });
+  both.tried_fallbacks = [];
+  r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify(both), '--now', T);
+  assert.equal(r.status, 2, '同时带 tried_fallbacks 必须拒');
+  assert.match(r.stderr, /无法唯一识别|未列键/);
+
+  const badItem = prHandoffPayload(g, { ledgerPath, fallbacks_tried: [{ route: 'review', model: '', provider_id: 'xd', error: '429' }] });
+  r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify(badItem), '--now', T);
+  assert.equal(r.status, 2, 'fallbacks_tried 条目缺非空 model 必须拒');
+  assert.match(r.stderr, /fallbacks_tried/);
+
+  const ok = prHandoffPayload(g, {
+    ledgerPath,
+    fallbacks_tried: [{
+      route: 'review',
+      model: 'codex/gpt-5.6-sol',
+      provider_id: 'xd',
+      error: '429 Too Many Requests',
+    }],
+  });
+  r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify(ok), '--now', T);
+  assert.equal(r.status, 0, `429 后按 fallbacks 换 provider 的 candidate 必须能入账: ${r.stderr}`);
+  const stored = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  const delivery = [...stored.events].reverse().find((ev) => ev.type === 'delivery' && ev.detail?.group_id === g);
+  assert.ok(delivery, 'candidate 入账必须留下 delivery 事件');
+  assert.deepEqual(delivery.detail.fallbacks_tried, ok.fallbacks_tried, 'fallbacks_tried 必须原样写入台账，禁止入账后丢失');
+});
+
 // =====================================================================
 // F-J：packet.scs_inline 自身重复/空 id 拒（出包 + 交卷双入口）
 // =====================================================================
@@ -3384,6 +3448,7 @@ test('watch_registered: init 后改夹具副本 mini-watch.json 必须拒（三�
     e2e: { status: 'pass', candidate_sha: SHA1, model: 'codex/gpt-5.6-luna', route_source: ROUTING_LIVE },
     review: { unresolved: 0, candidate_sha: SHA1, model: 'codex/gpt-5.6-sol', route_source: ROUTING_LIVE },
     size_gate: { result: 'PASS', candidate_sha: SHA1 },
+    fallbacks_tried: [],
   }), '--now', T);
   assert.equal(r.status, 0, r.stderr);
   r = treeCli('set-state', ledgerPath, '--group', g, '--to', 'accepted', '--now', T);
@@ -3400,6 +3465,12 @@ test('watch_registered: init 后改夹具副本 mini-watch.json 必须拒（三�
     checked_at: later(T), ledger_version: ledger.version, assignment_seq: 0,
   })}\n`);
   r = treeCli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', T, '--pr-open-receipt', prOpen);
+  assert.equal(r.status, 0, r.stderr);
+  r = treeCli('note-event', ledgerPath, '--event', 'pr_ready', '--detail', JSON.stringify({
+    group_id: g,
+    pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
+    current_pr_head_sha: SHA1,
+  }), '--now', T);
   assert.equal(r.status, 0, r.stderr);
   const driftedHash = createHash('sha256').update(readFileSync(cfgPath)).digest('hex');
   assert.notEqual(driftedHash, pinned);
@@ -3552,6 +3623,9 @@ const RL_MUTATION_PREDICTIONS = [
       // lead-self 正路径走 set-state dispatched（写 dispatch 事件）+ record-delivery exec：
       // F1 变异字符串化 dispatch detail → schema 拒 → 派工步骤红（同 sc-p0c 组同因）
       'lead-self: worker-label=lead-self 逻辑派工后 exec 交卷成功（无真实 Orca worker）',
+      // fallbacks_tried 契约测试同样先派工再 record-delivery：
+      // F1 变异字符串化 dispatch detail → schema 拒 → 派工步骤红
+      'pr-handoff: fallbacks_tried 必填；tried_fallbacks 拒；429 降级成功可入账',
     ],
   },
   {

@@ -4,6 +4,9 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { LedgerError, readLedger, readManifest, assertManifestBound, findPacket, findGroupWave } from './run-ledger.mjs';
+import {
+  assertHandoffComplete, assertExcerpts, assertVerifyCmds, assertOwnerTitle,
+} from './vnext-owner-contract.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const GATE_BLOCK_PATH = join(ROOT, '_tmp/handoff-gate-block-0.md');
@@ -65,6 +68,7 @@ export function renderPrHandoff({
   if (typeof title !== 'string' || !title.includes('丨 ')) {
     throw new LedgerError('PACKET_INCOMPLETE', 'title 必须含分隔符「丨 」');
   }
+  assertOwnerTitle(title);
   if (!Array.isArray(packet.allowed_paths) || packet.allowed_paths.some((p) => typeof p !== 'string' || p.endsWith('/'))) {
     throw new LedgerError('PACKET_INCOMPLETE', 'allowed_paths 只列文件，禁止目录');
   }
@@ -74,17 +78,29 @@ export function renderPrHandoff({
   if (!Array.isArray(packet.verify_cmds) || packet.verify_cmds.length === 0) {
     throw new LedgerError('PACKET_INCOMPLETE', 'verify_cmds 必须非空');
   }
+  assertVerifyCmds(packet.verify_cmds);
+  const resolvedExcerpts = excerpts ?? packet.excerpts;
+  const resolvedHow = how ?? packet.how ?? '';
+  const resolvedWhy = why ?? packet.why ?? (typeof packet.instruction === 'string' ? packet.instruction.split('\n').find((l) => l.trim()) : '') ?? '';
+  if (!Array.isArray(resolvedExcerpts) || resolvedExcerpts.length === 0) {
+    throw new LedgerError('PACKET_INCOMPLETE', '第 3 段至少 1 条真摘录（file + line + behavior），禁止占位');
+  }
+  assertExcerpts(resolvedExcerpts, { worktree: identity.worktree });
+  if (typeof resolvedHow === 'string' && typeof resolvedWhy === 'string' && resolvedHow.trim() === resolvedWhy.trim() && resolvedHow.trim().length > 0) {
+    throw new LedgerError('PACKET_INCOMPLETE', '第 4 段必须是改法，不得复制第 2 段');
+  }
 
   const gate = gateBlock0();
   if (!gate.includes('用 goal skill 执行。')) {
     throw new LedgerError('PACKET_INCOMPLETE', '开工闸第 0 块必须含「用 goal skill 执行。」');
   }
 
-  const whyLine = why ?? (typeof packet.instruction === 'string' ? packet.instruction.split('\n').find((l) => l.trim()) : '') ?? '';
-  const excerptLines = Array.isArray(excerpts) && excerpts.length > 0
-    ? excerpts
-    : ['（本包未附摘录：子 session 仍须按 allowed_paths 开工，禁止 Grep 整模块。）'];
-  const howLine = how ?? packet.instruction ?? '';
+  const whyLine = resolvedWhy;
+  const excerptLines = resolvedExcerpts.map((e) => (typeof e === 'string' ? e : `${e.file}:${e.line} ${e.behavior}`));
+  const howLine = resolvedHow;
+  if (typeof howLine !== 'string' || howLine.trim().length === 0) {
+    throw new LedgerError('PACKET_INCOMPLETE', '第 4 段具体改法不能为空，不得回退成 instruction 禁令');
+  }
   const forbidden = [
     ...(packet.forbidden ?? []),
     ...(forbiddenExtra ?? []),
@@ -124,16 +140,22 @@ export function renderPrHandoff({
     ['6. SC 全文', scLines.join('\n')],
     ['7. 验证命令', packet.verify_cmds.join('\n')],
     ['8. 做完之后（自动，不要问 lead）', [
-      'mem-probe → 现读同一份 routing.json 再派 e2e / GPT 单审',
+      'candidate 只是检查点，不是终点。同一 owner 继续到机器可证明的 PR Ready。',
+      'mem-probe → 现读同一份 routing.json 再派 e2e / GPT 单审；结果只回 owner，不向 lead 请示。',
       `绝对路径: ${ROUTING_LIVE}`,
       '先跑 model-route show',
       snapshotNote,
-      '按第⑩节 candidate 交卷 jump 回报 → 停等验收。验收前不开远端 PR。子 session 不合入。lead jump 开远端之后先注册 Mini 名册，再 wrapup-cleanup。',
+      '可自决：实现选型；派 read-only sub / e2e / review worker；429 / Too Many Requests、worker 崩溃或异常终止、create_worker 创建失败、provider 瞬时不可用，一律按现读 routing.json 该档 fallbacks 顺序换 provider、不换代次；每次降级写入 fallbacks_tried，禁止空数组就问 lead；测试红 / CI 红 / review unresolved>0 在 allowed_paths 内修到绿；已授权的 feature branch push 与目标 PR create/update；注册 watcher 唤醒同一 owner。',
+      '必须停（DECISION_REQUIRED，lease 不放）：硬停六条；hash/身份自检失败；SC 或现场与第 3/4 段矛盾；allowed_paths 不够；授权不足；fallbacks 全部试完仍失败；连续 3 轮零增量。只发一条 decision_required（必须带 fallbacks_tried），等 lead 一个决定后同一 owner 继续。429 不是 B 类停。',
+      '按第⑩节提交 candidate 后不得完成、不得归档、不得问 lead 下一步。继续开/更新已授权 PR，跟 CI/review 到 PR Ready。子 session 不合入。merge 由人点。',
     ].join('\n')],
     ['9. 禁做', forbidden.map((f) => `- ${f}`).join('\n')],
     ['10. 回报格式', [
-      'candidate record-delivery exact: branch, tip_sha, scs, goal_skill_path, e2e, review, size_gate（不得含 pr_url）',
+      'candidate（检查点，不得含 pr_url）record-delivery exact: branch, tip_sha, scs, goal_skill_path, e2e, review, size_gate, fallbacks_tried',
       `goal_skill_path 必须是 ${GOAL_SKILL}`,
+      'pr_ready exact: run_id, pr_key, owner_session_id, lease_id, owner_epoch, repo, pr_url, base, branch, attempt_id, source_candidate_sha, current_pr_head_sha, scs, local/e2e/CI/review/mergeability/policy, unresolved_count, watcher_id, checked_at',
+      'decision_required exact: sc_id, attempt_id, head, fallbacks_tried, unique_question, options[2-3], owner_recommendation',
+      '缺宿主 create gateway / lease / CAS 时不得假装已入账；skill 侧 fail-closed。',
     ].join('\n')],
   ];
 
@@ -167,10 +189,21 @@ export function renderPrHandoff({
   if (!out.includes(GOAL_SKILL) || !out.includes(ROUTING_LIVE)) {
     throw new LedgerError('PACKET_INCOMPLETE', '开工包必须含 goal skill 与 routing.json 绝对路径');
   }
+  assertHandoffComplete(out, {
+    why: whyLine,
+    how: howLine,
+    excerpts: resolvedExcerpts,
+    verify_cmds: packet.verify_cmds,
+    title,
+    worktree: identity.worktree,
+  });
   return out;
 }
 
-export function renderPrHandoffFromLedger({ ledgerPath, group, leadSessionId, seq, repo, title, snapshot, now }) {
+export function renderPrHandoffFromLedger({
+  ledgerPath, group, leadSessionId, seq, repo, title, snapshot, now,
+  why, how, excerpts,
+}) {
   const ledger = readLedger(ledgerPath);
   const manifest = readManifest(ledger.manifest_path);
   assertManifestBound(ledger, manifest, 'render-pr-handoff');
@@ -179,7 +212,16 @@ export function renderPrHandoffFromLedger({ ledgerPath, group, leadSessionId, se
   const wg = wave.groups.find((g) => g.group_id === group);
   const identity = { worktree: wg.worktree, branch: wg.branch, base: wg.base };
   return renderPrHandoff({
-    packet, identity, leadSessionId, seq, repo, title, snapshot,
+    packet,
+    identity,
+    leadSessionId,
+    seq,
+    repo,
+    title,
+    snapshot,
+    why: why ?? packet.why,
+    how: how ?? packet.how,
+    excerpts: excerpts ?? packet.excerpts,
   });
 }
 
@@ -218,6 +260,9 @@ function runCli(argv) {
         repo: flags.repo,
         title: flags.title,
         snapshot: flags.snapshot,
+        why: flags.why,
+        how: flags.how,
+        excerpts: flags.excerpts ? parseJsonFlag(flags.excerpts, '--excerpts') : undefined,
       });
     } else {
       out = renderPrHandoff({
@@ -229,6 +274,8 @@ function runCli(argv) {
         title: flags.title,
         snapshot: flags.snapshot,
         why: flags.why,
+        how: flags.how,
+        excerpts: flags.excerpts ? parseJsonFlag(flags.excerpts, '--excerpts') : undefined,
       });
     }
     process.stdout.write(out);

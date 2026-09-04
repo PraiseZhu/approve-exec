@@ -76,15 +76,29 @@ test('planDispatch: auto_merge=true 时 decision=terminal 必须抛，不得返�
   assert.equal(returned, undefined);
 });
 
-test('planDispatch: none / hold 不派；actionable 无 session_id 则 create', () => {
+test('planDispatch: none / hold 不派；actionable 无 session_id 缺宿主则拒 create', () => {
   const state = { owner: 'o', repo: 'r', pr_number: 1, session_id: null };
   assert.equal(planDispatch({ decision: 'none', state, signals: [], newItems: {} }), null);
   assert.equal(planDispatch({ decision: 'blocked-external', state, signals: ['hold-label'], newItems: {} }), null);
+  assert.throws(
+    () => planDispatch({
+      decision: 'actionable',
+      state,
+      signals: ['comment'],
+      newItems: { comments: [{ id: 'c1', body: 'fix this' }] },
+    }),
+    /HOST_GATEWAY_MISSING|缺宿主 create gateway/,
+  );
+});
+
+test('planDispatch: none / hold 不派；actionable 无 session_id 显式开闸才 create', () => {
+  const state = { owner: 'o', repo: 'r', pr_number: 1, session_id: null };
   const create = planDispatch({
     decision: 'actionable',
     state,
     signals: ['comment'],
     newItems: { comments: [{ id: 'c1', body: 'fix this' }] },
+    gatewayAvailable: true,
   });
   assert.equal(create.action, 'create');
   assert.equal(create.wake_kind, 'create');
@@ -92,6 +106,9 @@ test('planDispatch: none / hold 不派；actionable 无 session_id 则 create', 
   assert.equal(create.provider_id, MINI_WATCH_PROVIDER);
   assert.equal(create.session_id, null);
   assert.equal(Object.prototype.hasOwnProperty.call(create, 'merge'), false);
+  assert.match(create.title, /盯梢修复1丨 \d{4}$/);
+  assert.doesNotMatch(create.title, /[#/]1 盯梢$/);
+  assert.doesNotMatch(create.title, /o\/r#1/);
   const params = sessionsDispatchParams(create);
   assert.equal(Object.prototype.hasOwnProperty.call(params, 'target_session_id'), false);
   assert.match(params.message, MERGE_BAN);
@@ -149,7 +166,9 @@ test('scanWatch: 无新信号零 dispatch；第二次同 PR 是 jump', () => {
     ...quiet,
     comments: [{ id: 'c1', body: 'please fix' }],
   }));
-  const first = scanWatch({ stateDir, snapshotCmd: `${snapSh} {owner} {repo} {pr}` });
+  const blocked = scanWatch({ stateDir, snapshotCmd: `${snapSh} {owner} {repo} {pr}` });
+  assert.equal(blocked.dispatches.length, 0, '缺宿主 gateway 不得 create 第二 owner');
+  const first = scanWatch({ stateDir, snapshotCmd: `${snapSh} {owner} {repo} {pr}`, gatewayAvailable: true });
   assert.equal(first.dispatches.length, 1);
   assert.equal(first.dispatches[0].wake_kind, 'create');
   bindSessionId({ stateDir, owner: 'acme', repo: 'app', prNumber: 7, sessionId: 'sess-7' });
@@ -181,6 +200,7 @@ test('applyWatchRound: create 必须写回 session_id；缺返回值拒空跑；
     () => applyWatchRound({
       stateDir,
       snapshotCmd,
+      gatewayAvailable: true,
       dispatchFn: () => ({}),
     }),
     /未返回 target_session_id/,
@@ -191,6 +211,7 @@ test('applyWatchRound: create 必须写回 session_id；缺返回值拒空跑；
   const first = applyWatchRound({
     stateDir,
     snapshotCmd,
+    gatewayAvailable: true,
     dispatchFn: (params) => {
       assert.equal(Object.prototype.hasOwnProperty.call(params, 'target_session_id'), false);
       assert.match(params.message, MERGE_BAN);
@@ -266,7 +287,7 @@ print('PY-OK')
   const stateDir = tmpState();
   const r = spawnSync('python3', ['-c', helper], {
     encoding: 'utf8',
-    env: { ...process.env, AE_WATCH_STATE_DIR: stateDir },
+    env: { ...process.env, AE_WATCH_STATE_DIR: stateDir, AE_WATCH_ALLOW_CREATE: '1' },
   });
   assert.equal(r.status, 0, r.stderr || r.stdout);
   assert.match(r.stdout, /PY-OK/);
@@ -395,6 +416,7 @@ test('cindy-script stdin: start → sessions.dispatch → complete，create 写�
       CINDY_SCRIPT_PROTOCOL: '1',
       AE_WATCH_STATE_DIR: stateDir,
       AE_WATCH_SNAPSHOT_CMD: `${snapSh} {owner} {repo} {pr}`,
+      AE_WATCH_ALLOW_CREATE: '1',
     },
   });
   assert.equal(r.status, 0, r.stderr || r.stdout);
@@ -492,6 +514,7 @@ test('SC-4: fixture none 零 dispatch；第一次 create 读配置 provider；�
   const first = applyWatchRound({
     stateDir,
     snapshotCmd,
+    gatewayAvailable: true,
     dispatchFn: (params) => {
       assert.equal(Object.prototype.hasOwnProperty.call(params, 'target_session_id'), false);
       assert.match(params.message, MERGE_BAN);
