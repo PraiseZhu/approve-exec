@@ -951,8 +951,9 @@ const GOAL_SKILL_PATHS = Object.freeze([
 const ROUTING_PATH_LIVE = '/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json';
 const ROUTING_PATH_LINK = '/Users/praise/.agents/skills/orca-fanout/routing.json';
 const PR_HANDOFF_DELIVERY_KEYS = Object.freeze([
-  'branch', 'tip_sha', 'scs', 'goal_skill_path', 'e2e', 'review', 'size_gate',
+  'branch', 'tip_sha', 'scs', 'goal_skill_path', 'e2e', 'review', 'size_gate', 'fallbacks_tried',
 ]);
+const FALLBACKS_TRIED_ITEM_KEYS = Object.freeze(['route', 'model', 'provider_id', 'error']);
 const PR_HANDOFF_E2E_KEYS = Object.freeze(['status', 'candidate_sha', 'model', 'route_source']);
 const PR_HANDOFF_REVIEW_KEYS = Object.freeze(['unresolved', 'candidate_sha', 'model', 'route_source']);
 const PR_HANDOFF_SIZE_KEYS = Object.freeze(['result', 'candidate_sha']);
@@ -2267,6 +2268,17 @@ function validatePrHandoffDelivery(data, packet) {
   }
   if (typeof data.size_gate.candidate_sha !== 'string' || !TIP_SHA_RE.test(data.size_gate.candidate_sha)) {
     throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 size_gate.candidate_sha 非 40 位十六进制');
+  }
+  if (!Array.isArray(data.fallbacks_tried)) {
+    throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 fallbacks_tried 必须是数组（无降级写 []；禁止用 tried_fallbacks）');
+  }
+  for (const item of data.fallbacks_tried) {
+    assertKeys(item, FALLBACKS_TRIED_ITEM_KEYS, '终态交卷 fallbacks_tried 条目');
+    for (const k of FALLBACKS_TRIED_ITEM_KEYS) {
+      if (typeof item[k] !== 'string' || item[k].trim().length === 0) {
+        throw new LedgerError('DELIVERY_SCHEMA', `终态交卷 fallbacks_tried.${k} 必须是非空字符串`);
+      }
+    }
   }
 }
 

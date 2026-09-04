@@ -61,14 +61,17 @@ test('handoff 含停等验收 / 缺 PR Ready 拒', () => {
     '## 5. allowed_paths', 'src/a.ts',
     '## 6. SC 全文', 'sc-1',
     '## 7. 验证命令', 'node scripts/run-tests.mjs',
-    '## 8. 做完之后（自动，不要问 lead）', '可自决\n必须停\ncandidate 只是检查点\nPR Ready\n429 按 fallbacks 换 provider、不换代次',
+    '## 8. 做完之后（自动，不要问 lead）', '可自决\n必须停\ncandidate 只是检查点\nPR Ready\n429 / 崩溃 / 创建失败按 fallbacks 换 provider、不换代次\nfallbacks_tried 禁止空数组就问 lead',
     '## 9. 禁做', 'x',
     '## 10. 回报格式', 'pr_ready',
   ].join('\n');
   assert.equal(assertHandoffComplete(base).ok, true);
   assert.throws(() => assertHandoffComplete(`${base}\n停等验收`), LedgerError);
   assert.throws(() => assertHandoffComplete(`${base}\n限流解除后再开 review`), LedgerError);
-  assert.throws(() => assertHandoffComplete(base.replace('429 按 fallbacks 换 provider、不换代次', '')), LedgerError);
+  assert.throws(() => assertHandoffComplete(base.replace('429 / 崩溃 / 创建失败按 fallbacks 换 provider、不换代次\nfallbacks_tried 禁止空数组就问 lead', '')), LedgerError);
+  assert.throws(() => assertHandoffComplete(
+    base.replace('fallbacks_tried 禁止空数组就问 lead', 'worker 崩溃或创建失败就记录 fallbacks_tried: []，作为 B 类停问 lead'),
+  ), LedgerError);
 });
 
 test('盯梢必须等本组 pr_ready，不是开 PR 即发、也不是等整批 run ready', () => {

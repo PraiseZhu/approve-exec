@@ -219,9 +219,11 @@ test('第⑩段：开工闸收据 + 终态交卷 exact schema', () => {
   const s10 = sectionBetween(MARKERS[9], MARKERS[10]);
   assert.ok(s10.includes('gate_goal') && s10.includes('gate_routing'), '⑩段应给出两类开工闸收据');
   assert.ok(s10.includes('goal_skill_sha256') && s10.includes('routing_sha256'), '⑩段收据必须含 sha256');
-  for (const key of ['branch', 'tip_sha', 'scs', 'goal_skill_path', 'e2e', 'review', 'size_gate']) {
+  for (const key of ['branch', 'tip_sha', 'scs', 'goal_skill_path', 'e2e', 'review', 'size_gate', 'fallbacks_tried']) {
     assert.ok(s10.includes(key), `candidate 交卷应含键 ${key}`);
   }
+  assert.ok(s10.includes('禁止 tried_fallbacks') || s10.includes('禁止用 tried_fallbacks'),
+    '⑩段交卷字段必须是 fallbacks_tried，并禁止混用 tried_fallbacks');
   assert.ok(s10.includes('不得含 pr_url'), '⑩段应禁止 candidate 交卷带 pr_url');
   assert.ok(s10.includes('/Users/praise/.agents/skills/goal/SKILL.md'), 'goal_skill_path 必须钉 PI 自己的 goal');
 });

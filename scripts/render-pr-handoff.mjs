@@ -146,15 +146,15 @@ export function renderPrHandoff({
       '先跑 model-route show',
       snapshotNote,
       '可自决：实现选型；派 read-only sub / e2e / review worker；429 / Too Many Requests、worker 崩溃或异常终止、create_worker 创建失败、provider 瞬时不可用，一律按现读 routing.json 该档 fallbacks 顺序换 provider、不换代次；每次降级写入 fallbacks_tried，禁止空数组就问 lead；测试红 / CI 红 / review unresolved>0 在 allowed_paths 内修到绿；已授权的 feature branch push 与目标 PR create/update；注册 watcher 唤醒同一 owner。',
-      '必须停（DECISION_REQUIRED，lease 不放）：硬停六条；hash/身份自检失败；SC 或现场与第 3/4 段矛盾；allowed_paths 不够；授权不足；fallbacks 全部试完仍失败；连续 3 轮零增量。只发一条 decision_required（必须带 tried_fallbacks），等 lead 一个决定后同一 owner 继续。429 不是 B 类停。',
+      '必须停（DECISION_REQUIRED，lease 不放）：硬停六条；hash/身份自检失败；SC 或现场与第 3/4 段矛盾；allowed_paths 不够；授权不足；fallbacks 全部试完仍失败；连续 3 轮零增量。只发一条 decision_required（必须带 fallbacks_tried），等 lead 一个决定后同一 owner 继续。429 不是 B 类停。',
       '按第⑩节提交 candidate 后不得完成、不得归档、不得问 lead 下一步。继续开/更新已授权 PR，跟 CI/review 到 PR Ready。子 session 不合入。merge 由人点。',
     ].join('\n')],
     ['9. 禁做', forbidden.map((f) => `- ${f}`).join('\n')],
     ['10. 回报格式', [
-      'candidate（检查点，不得含 pr_url）record-delivery exact: branch, tip_sha, scs, goal_skill_path, e2e, review, size_gate',
+      'candidate（检查点，不得含 pr_url）record-delivery exact: branch, tip_sha, scs, goal_skill_path, e2e, review, size_gate, fallbacks_tried',
       `goal_skill_path 必须是 ${GOAL_SKILL}`,
       'pr_ready exact: run_id, pr_key, owner_session_id, lease_id, owner_epoch, repo, pr_url, base, branch, attempt_id, source_candidate_sha, current_pr_head_sha, scs, local/e2e/CI/review/mergeability/policy, unresolved_count, watcher_id, checked_at',
-      'decision_required exact: sc_id, attempt_id, head, tried_fallbacks, unique_question, options[2-3], owner_recommendation',
+      'decision_required exact: sc_id, attempt_id, head, fallbacks_tried, unique_question, options[2-3], owner_recommendation',
       '缺宿主 create gateway / lease / CAS 时不得假装已入账；skill 侧 fail-closed。',
     ].join('\n')],
   ];

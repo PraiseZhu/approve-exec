@@ -144,6 +144,7 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
     e2e: { status: 'pass', candidate_sha: SHA1, model: 'codex/gpt-5.6-luna', route_source: ROUTING_LIVE },
     review: { unresolved: 0, candidate_sha: SHA1, model: 'codex/gpt-5.6-sol', route_source: ROUTING_LIVE },
     size_gate: { result: 'PASS', candidate_sha: SHA1 },
+    fallbacks_tried: [],
   }), '--now', T);
   assert.equal(r.status, 0, r.stderr);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'accepted', '--now', T);
@@ -356,6 +357,7 @@ test('cleanup 回执在其它写入先推高 version 后仍可消费（不绑全
     e2e: { status: 'pass', candidate_sha: SHA1, model: 'codex/gpt-5.6-luna', route_source: ROUTING_LIVE },
     review: { unresolved: 0, candidate_sha: SHA1, model: 'codex/gpt-5.6-sol', route_source: ROUTING_LIVE },
     size_gate: { result: 'PASS', candidate_sha: SHA1 },
+    fallbacks_tried: [],
   }), '--now', T);
   assert.equal(r.status, 0, r.stderr);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'accepted', '--now', T);
@@ -491,6 +493,7 @@ test('pr-open 时区偏移不得绕过晚于 accepted 的 epoch 比较', () => {
     e2e: { status: 'pass', candidate_sha: SHA1, model: 'codex/gpt-5.6-luna', route_source: ROUTING_LIVE },
     review: { unresolved: 0, candidate_sha: SHA1, model: 'codex/gpt-5.6-sol', route_source: ROUTING_LIVE },
     size_gate: { result: 'PASS', candidate_sha: SHA1 },
+    fallbacks_tried: [],
   }), '--now', T);
   assert.equal(r.status, 0, r.stderr);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'accepted', '--now', T);

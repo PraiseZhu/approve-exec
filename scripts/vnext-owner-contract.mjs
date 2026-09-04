@@ -31,7 +31,7 @@ export const OWNER_STATES = Object.freeze([
 export const HAN_RE = /\p{Script=Han}/u;
 export const TITLE_RE = /^.+-.+丨 \d{4}$/;
 export const PLACEHOLDER_EXCERPT_RE = /本包未附摘录/;
-export const WAIT_FOR_LEAD_RE = /停等验收|(?<!禁止)(?<!不得)(?<!不要)等 lead 放行|(?<!禁止)(?<!不得)等 lead 对账|是否开始|先停着|请重新理解任务|等 lead jump|限流解除后再开 review|B 类 fail-closed/;
+export const WAIT_FOR_LEAD_RE = /停等验收|(?<!禁止)(?<!不得)(?<!不要)等 lead 放行|(?<!禁止)(?<!不得)等 lead 对账|是否开始|先停着|请重新理解任务|等 lead jump|限流解除后再开 review|B 类 fail-closed|B 类停问/;
 export const FALLBACK_REQUIRED_RE = /fallbacks|换 provider|不换代次/;
 export const GH_PR_DIFF_RE = /\bgh\s+pr\s+diff\b/i;
 const STRING_EXCERPT_RE = /^(\S+):(\d+)\s+(\S.*)$/;
@@ -208,8 +208,17 @@ export function assertHandoffComplete(text, { why, how, excerpts, verify_cmds, t
   if (!text.includes('candidate') || !text.includes('检查点')) {
     throw new LedgerError('PACKET_INCOMPLETE', '开工包必须声明 candidate 只是检查点');
   }
-  if (!FALLBACK_REQUIRED_RE.test(text) || !text.includes('429')) {
-    throw new LedgerError('PACKET_INCOMPLETE', '开工包必须声明 429/崩溃/创建失败按 routing.json fallbacks 换 provider、不换代次');
+  const section8 = sectionBody(text, '8. 做完之后（自动，不要问 lead）');
+  const fallbackNeedles = ['429', '崩溃', '创建失败', 'fallbacks', '换 provider', '不换代次', 'fallbacks_tried'];
+  const missingFallback = fallbackNeedles.filter((n) => !section8.includes(n) && !text.includes(n));
+  if (missingFallback.length > 0 || !FALLBACK_REQUIRED_RE.test(text)) {
+    throw new LedgerError(
+      'PACKET_INCOMPLETE',
+      `开工包必须声明 429/崩溃/创建失败按 routing.json fallbacks 换 provider、不换代次，并写入 fallbacks_tried（缺: ${missingFallback.join('/') || 'fallbacks 语义'}）`,
+    );
+  }
+  if (/fallbacks_tried:\s*\[\s*\]/.test(text) && !text.includes('禁止空数组')) {
+    throw new LedgerError('PACKET_INCOMPLETE', '开工包禁止把空 fallbacks_tried 写成可问 lead 的路径');
   }
   return { ok: true, handoff_hash: handoffHash(text), contract: CONTRACT_VERSION };
 }

@@ -245,6 +245,7 @@ goal_skill_path 必须是 /Users/praise/.agents/skills/goal/SKILL.md
 e2e             {status, candidate_sha, model, route_source}
 review          {unresolved, candidate_sha, model, route_source}
 size_gate       {result: 非空字符串, candidate_sha: 40hex}
+fallbacks_tried [{route, model, provider_id, error}] 无降级写 []；禁止 tried_fallbacks
 ```
 
 `goal_skill_path` 缺或不是上表三路径之一 → 视为未调用 PI 自己的 goal skill，拒。台账里没有本组成立的 `gate_goal` + `gate_routing` → 视为未执行开工闸，拒，不得 `accepted`。含 `pr_url` → 拒。`route_source` 必须是 live routing.json 绝对路径、其 `~/.agents/skills/orca-fanout/routing.json` 软链、或字面量 `model-route show`。其它路径拒。缺键 / 多键 / sha 不是 40 hex / `scs` 对不齐 → 拒。
