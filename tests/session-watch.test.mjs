@@ -92,6 +92,9 @@ test('planDispatch: none / hold 不派；actionable 无 session_id 则 create', 
   assert.equal(create.provider_id, MINI_WATCH_PROVIDER);
   assert.equal(create.session_id, null);
   assert.equal(Object.prototype.hasOwnProperty.call(create, 'merge'), false);
+  assert.match(create.title, /盯梢修复1丨 \d{4}$/);
+  assert.doesNotMatch(create.title, /[#/]1 盯梢$/);
+  assert.doesNotMatch(create.title, /o\/r#1/);
   const params = sessionsDispatchParams(create);
   assert.equal(Object.prototype.hasOwnProperty.call(params, 'target_session_id'), false);
   assert.match(params.message, MERGE_BAN);

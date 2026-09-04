@@ -33,6 +33,7 @@ export const TEST_FILES = [
   'session-dispatch.test.mjs',
   'session-watch.test.mjs',
   'skill-doc.test.mjs',
+  'vnext-owner-contract.test.mjs',
   'wrapup-cleanup.test.mjs',
 ];
 // confirm-watch-registered / confirm-session-archived 的用例落在 wrapup-cleanup.test.mjs，不另开文件。

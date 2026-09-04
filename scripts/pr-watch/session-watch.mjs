@@ -16,6 +16,8 @@ import { loadMiniWatchConfig, miniHost, assertAutoMergeDisabled } from '../lib/m
 import { evaluate, emptyCursors } from './gate.mjs';
 import { stateFileName, migrateAllLegacyStateFiles, STATE_FILE_NAME_RE, unregisterPr, identityMatches } from './register.mjs';
 import { withLock } from '../lib/state-lock.mjs';
+import { sessionTitle, titlePrefixForRepo } from '../session-dispatch.mjs';
+import { watchTaskName, mmddFromDate } from '../vnext-owner-contract.mjs';
 
 const _mini = miniHost();
 export const MINI_WATCH_PROVIDER = _mini.provider_id;
@@ -82,7 +84,11 @@ export function planDispatch({ decision, state, signals, newItems, watchConfig }
     session_id: sessionId,
     signals,
     newItems,
-    title: `${state.owner}/${state.repo}#${state.pr_number} 盯梢`,
+    title: sessionTitle({
+      project: titlePrefixForRepo(`${state.owner}/${state.repo}`),
+      task: watchTaskName(state.pr_number, state.task_name),
+      mmdd: typeof state.mmdd === 'string' && /^\d{4}$/.test(state.mmdd) ? state.mmdd : mmddFromDate(),
+    }),
     provider_id: mini.provider_id,
     model: mini.model,
     agent_kind: mini.agent_kind,

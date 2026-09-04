@@ -1,12 +1,13 @@
 # approve-exec — Graph loop 编排 skill
 
-把 task-priority 产出的 task-manifest.json 自动执行到「可直接『提交 PR』」：
-E(执行)→R(审查修复)→V(SC 验收)→T(e2e)→P(打包) 五阶段状态机。默认 E/R/V/P 由当前 lead 自跑（不 create_workers，但仍走台账 `set-state dispatched --worker-label lead-self` 再 `record-delivery`），worker 只派 T e2e。
+把 task-priority 产出的 `task-manifest.json` 拆成 **每 GitHub PR 一个 owner session**。owner 拿到完整 handoff 立即开工，自主做到机器可证明的 **PR Ready**。candidate 只是检查点。lead 只拆 PR、写开工包、派 session、读证据、裁决 `DECISION_REQUIRED`。
 
-- 执行环节硬约束：必须以 goal skill 场景 C 触发（claude-code 钉死）；默认 lead 本会话加载 goal，不派 E 席 worker
-- R 席硬约束：E 交卷后、开审前，lead 对本组 `allowed_paths` 做 simplify（内联，不调 `/simplify`/`/rc`），再跑本会话 `/code-review high --fix`
-- 并发 = min(内存允许, `orcaPlatformCap`（config/defaults.json）, 待派 T 组数)，每次派 T 前现跑 mem-probe；
-  平台侧 worker 硬上限不在此复述——由 Orca 运行时返回（create_worker 超限即拒），本仓只消费 config 里的执行档位
-- 状态全落 run 台账（~/.claude/.orca/approve-exec/），断点续跑 = `批准执行 --resume <run_id>`（skill 触发词参数，非脚本子命令，详见 SKILL.md §⑥）
+- 执行环节硬约束：必须以 goal skill 场景 C 触发；E 席 `dispatch=session`
+- R/T 由 **owner session** 现读 `routing.json` 派 worker，结果只回 owner
+- lead happy path 零执行：不改产品代码、不跑测试、不 git/gh、不搬 receipt、不替人开/修 PR
+- 缺 Cindy 宿主 create gateway / lease / CAS 时，skill 侧 `HOST_GATEWAY_MISSING` fail-closed，不得真派
+- 旧台账 `accepted` / run `ready` 保持 legacy 语义，不得原地改名冒充 PR Ready
+- 标题：`{项目名}-{中文任务名}丨 {MMDD}`（任务段必须含汉字）；盯梢修复窗同一套
+- 本 skill 不合入、不跑三机同步；merge 由人点
 
-状态：实现收敛期——五阶段编排守则（SKILL.md）与 run-ledger / ready-check / selfcheck / mem-probe 四脚本已落地；run 台账在 ~/.claude/.orca/approve-exec/，支持 `批准执行 --resume <run_id>` 断点续跑。Fable 决策是状态机外 sidecar（`config/fable-decision.json` + `scripts/decision-broker.mjs`），不能改变 group state，也不进 routing.json。
+状态：vNext owner 契约已在本仓落地（handoff 校验、标题、盯梢命名、缺宿主 fail-closed）。宿主 create gateway 与 per-PR `PR_READY` 状态机尚未实现，不能声称当前系统已经修好。Fable 决策是状态机外 sidecar（`config/fable-decision.json` + `scripts/decision-broker.mjs`）。

@@ -138,7 +138,8 @@ test('第⑥段：send_to_session create + Art 钉 + 标题正则', () => {
   assert.ok(s6.includes('provider_id'), '⑥段应说明 create 无 provider_id');
   assert.ok(s6.includes('art'), '⑥段应钉 Art');
   assert.ok(s6.includes('丨'), '⑥段标题分隔符必须是 丨');
-  assert.ok(s6.includes('{项目名}-{任务名}丨 {MMDD}'), '⑥段应给出标题格式');
+  assert.ok(s6.includes('{项目名}-{中文任务名}丨 {MMDD}'), '⑥段应给出标题格式');
+  assert.ok(s6.includes('至少一个汉字'), '⑥段任务段必须含汉字');
 });
 
 test('第⑦段：现读同一份 routing.json，禁止把 luna/sol 当唯一派工值', () => {

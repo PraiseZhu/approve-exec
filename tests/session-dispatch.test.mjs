@@ -18,6 +18,11 @@ test('sessionTitle 与仓前缀', () => {
   assert.equal(titlePrefixForRepo('Project Skills'), 'Skills');
 });
 
+test('sessionTitle 任务名必须含汉字，英文 kebab 拒', () => {
+  assert.throws(() => sessionTitle({ project: 'MivoPlugin', task: 'verify-copy-461', mmdd: '0904' }), LedgerError);
+  assert.throws(() => wouldCreate({ title: 'MivoPlugin-verify-copy-461丨 0904', working_dir: ROOT }), LedgerError);
+});
+
 test('wouldCreate dry-run 参数 exact，真派拒', () => {
   const c = wouldCreate({ title: 'Skills-开工闸收据丨 0902', working_dir: '/Users/praise/AI-Agent/Claude/projects/Project Skills/approve-exec' });
   assert.deepEqual(c, {

@@ -25,6 +25,9 @@ function baseArgs(overrides = {}) {
     repo: 'xindong/mivo-canvas-plugin',
     title: 'MivoPlugin-存图补图修复丨 0902',
     snapshot: '渲染当时快照，派工时再读',
+    why: 'Copy as PNG 失败时仍报已复制。',
+    how: 'imageNodeClipboard.ts 走 libraryClipboardPort.write，失败走 copyPngFailed。',
+    excerpts: [{ file: 'src/lib/imageNodeClipboard.ts', line: 12, behavior: 'writePng 现调用成功 toast' }],
     ...overrides,
   };
 }
@@ -40,10 +43,20 @@ test('render-pr-handoff: 0–10 段齐全，含开工闸与绝对路径', () => 
   assert.ok(out.includes('丨 0902'));
   assert.ok(out.includes('model-route show'));
   assert.ok(out.includes('子 session 不合入'), '开工包第 8 段应禁止子 session 合入');
-  assert.ok(out.includes('验收前不开远端 PR'), '开工包应写明验收前不开远端 PR');
-  assert.ok(out.includes('先注册 Mini 名册'), '开工包第 8 段应要求 Mini 名册先于 wrapup-cleanup');
+  assert.ok(out.includes('PR Ready') || out.includes('PR_READY'), '开工包应声明责任终点是 PR Ready');
+  assert.ok(out.includes('检查点'), '开工包应声明 candidate 只是检查点');
+  assert.ok(out.includes('可自决') && out.includes('必须停'), '开工包应含可自决/必须停');
   assert.ok(out.includes('假设破裂必须 blocked 上报'), '开工包第 9 段应禁就地改方案');
   assert.ok(out.includes('不得改总表'), '开工包第 9 段应禁改总表');
+});
+
+test('render-pr-handoff: 缺摘录或第 4 段复制第 2 段拒', () => {
+  assert.throws(() => renderPrHandoff(baseArgs({ excerpts: [] })), LedgerError);
+  assert.throws(() => renderPrHandoff(baseArgs({ excerpts: ['（本包未附摘录：子 session 仍须按 allowed_paths 开工，禁止 Grep 整模块。）'] })), LedgerError);
+  assert.throws(() => renderPrHandoff(baseArgs({ why: '同一段', how: '同一段' })), LedgerError);
+  const p = packet();
+  p.verify_cmds = ['gh pr diff 461 --repo xindong/mivo-canvas-plugin'];
+  assert.throws(() => renderPrHandoff(baseArgs({ packet: p })), LedgerError);
 });
 
 test('render-pr-handoff: 缺 allowed_paths 或乱序身份拒', () => {
@@ -63,6 +76,9 @@ test('render-pr-handoff CLI: --packet + --identity 出包', () => {
     '--seq', '1',
     '--repo', 'Skills',
     '--title', 'Skills-开工闸收据丨 0902',
+    '--why', '夹具：开工包缺摘录不得派。',
+    '--how', '补 render-pr-handoff 校验，缺 excerpts 即拒。',
+    '--excerpts', JSON.stringify([{ file: 'scripts/render-pr-handoff.mjs', line: 1, behavior: 'renderPrHandoff 入口' }]),
   ], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /用 goal skill 执行。/);
