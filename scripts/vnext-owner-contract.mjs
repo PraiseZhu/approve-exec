@@ -210,15 +210,15 @@ export function assertHandoffComplete(text, { why, how, excerpts, verify_cmds, t
   }
   const section8 = sectionBody(text, '8. 做完之后（自动，不要问 lead）');
   const fallbackNeedles = ['429', '崩溃', '创建失败', 'fallbacks', '换 provider', '不换代次', 'fallbacks_tried'];
-  const missingFallback = fallbackNeedles.filter((n) => !section8.includes(n) && !text.includes(n));
-  if (missingFallback.length > 0 || !FALLBACK_REQUIRED_RE.test(text)) {
+  const missingFallback = fallbackNeedles.filter((n) => !section8.includes(n));
+  if (missingFallback.length > 0 || !FALLBACK_REQUIRED_RE.test(section8)) {
     throw new LedgerError(
       'PACKET_INCOMPLETE',
-      `开工包必须声明 429/崩溃/创建失败按 routing.json fallbacks 换 provider、不换代次，并写入 fallbacks_tried（缺: ${missingFallback.join('/') || 'fallbacks 语义'}）`,
+      `开工包第 8 段必须声明 429/崩溃/创建失败按 routing.json fallbacks 换 provider、不换代次，并写入 fallbacks_tried（缺: ${missingFallback.join('/') || 'fallbacks 语义'}）`,
     );
   }
-  if (/fallbacks_tried:\s*\[\s*\]/.test(text) && !text.includes('禁止空数组')) {
-    throw new LedgerError('PACKET_INCOMPLETE', '开工包禁止把空 fallbacks_tried 写成可问 lead 的路径');
+  if (/fallbacks_tried:\s*\[\s*\]/.test(section8) && !section8.includes('禁止空数组')) {
+    throw new LedgerError('PACKET_INCOMPLETE', '开工包第 8 段禁止把空 fallbacks_tried 写成可问 lead 的路径');
   }
   return { ok: true, handoff_hash: handoffHash(text), contract: CONTRACT_VERSION };
 }

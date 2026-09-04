@@ -72,6 +72,10 @@ test('handoff 含停等验收 / 缺 PR Ready 拒', () => {
   assert.throws(() => assertHandoffComplete(
     base.replace('fallbacks_tried 禁止空数组就问 lead', 'worker 崩溃或创建失败就记录 fallbacks_tried: []，作为 B 类停问 lead'),
   ), LedgerError);
+  const moved = base
+    .replace('429 / 崩溃 / 创建失败按 fallbacks 换 provider、不换代次\nfallbacks_tried 禁止空数组就问 lead', 'candidate 只是检查点')
+    .replace('## 10. 回报格式\npr_ready', '## 10. 回报格式\npr_ready\n429 / 崩溃 / 创建失败按 fallbacks 换 provider、不换代次\nfallbacks_tried 禁止空数组就问 lead');
+  assert.throws(() => assertHandoffComplete(moved), LedgerError);
 });
 
 test('盯梢必须等本组 pr_ready，不是开 PR 即发、也不是等整批 run ready', () => {

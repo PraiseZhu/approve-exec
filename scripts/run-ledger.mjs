@@ -2677,6 +2677,7 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
           e2e: data.e2e,
           review: data.review,
           size_gate: data.size_gate,
+          fallbacks_tried: data.fallbacks_tried,
           session_id: g.session_id,
           candidate_sha: data.tip_sha,
           e2e_status: data.e2e.status,

@@ -2402,6 +2402,10 @@ test('pr-handoff: fallbacks_tried 必填；tried_fallbacks 拒；429 降级成�
   });
   r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify(ok), '--now', T);
   assert.equal(r.status, 0, `429 后按 fallbacks 换 provider 的 candidate 必须能入账: ${r.stderr}`);
+  const stored = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  const delivery = [...stored.events].reverse().find((ev) => ev.type === 'delivery' && ev.detail?.group_id === g);
+  assert.ok(delivery, 'candidate 入账必须留下 delivery 事件');
+  assert.deepEqual(delivery.detail.fallbacks_tried, ok.fallbacks_tried, 'fallbacks_tried 必须原样写入台账，禁止入账后丢失');
 });
 
 // =====================================================================
