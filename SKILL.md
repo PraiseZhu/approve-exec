@@ -12,7 +12,9 @@ Lead 只做判断：拆 PR、写开工包、派独立 session、裁决真正例�
 
 真实派窗与 owner 入账的命令、恢复边界见 references/owner-protocol.md（派发前必读，完整内容随 handoff 发送）。保证等级是 T1 skill 纪律与脚本校验，不是宿主强制隔离。
 
-生态链：task-priority（出 manifest）→ **本 skill（拆 PR + 写完整 handoff + 派唯一 owner）** → owner 调它自己的 goal 场景 C 推到 PR Ready。三审仍不在本 skill。
+生态链：task-priority（出 manifest）→ **本 skill（拆 PR + 写完整 handoff + 派唯一 owner）** → owner 用 goal 场景 C 完成实现与 SC 验证，再由同一 owner 完成已授权的审查和 PR Ready 收尾。三审仍不在本 skill。
+
+**阶段与授权交接**：SC PASS 是 goal 子阶段完成，不是 owner 整体任务完成。仅当所有 SC 都有 PASS 证据且没有 hard_stop、预算暂停或 blocked 时，才正常返回同一 owner 继续收尾；不得通过切换阶段绕过停止条件。开工包应注明已有授权的来源、目标仓、分支和动作；本次任务已明确授权的提交、推送、创建/更新目标 PR 直接执行，不重复请示。只有对应动作确实未获授权时才停下请求决定，PR Ready 终点本身不产生新增授权。goal 内 push／回帖仍遵守 goal 的精确声明及当前 PR 窄范围，不能为省去请示自行补造声明，也不借此授权创建 PR 或 merge。
 
 本文是 lead 侧编排的**唯一守则**。机器保障：`scripts/run-tests.mjs` 冻结枚举 + `tests/skill-doc.test.mjs` 结构断言。
 

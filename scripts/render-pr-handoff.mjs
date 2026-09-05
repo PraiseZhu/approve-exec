@@ -147,6 +147,9 @@ export function renderPrHandoff({
     ['7. 验证命令', packet.verify_cmds.join('\n')],
     ['8. 做完之后（自动，不要问 lead）', [
       'candidate 只是检查点，不是终点。同一 owner 继续到机器可证明的 PR Ready。',
+      'goal 场景 C 的 SC PASS 只是子阶段完成，不是 owner 整体任务完成。仅当所有 SC 都有 PASS 证据且没有 hard_stop、预算暂停或 blocked 时，才正常返回同一 owner 继续审查和 PR Ready 收尾；不得通过切换阶段绕过停止条件。',
+      '授权以本次任务已给出的来源、目标仓、分支和动作为准，开工包应注明；已明确授权的提交、推送、创建/更新目标 PR 直接执行，不重复请示。只有对应动作确实未获授权时才停下请求决定，PR Ready 终点本身不产生新增授权。',
+      'goal 内 push／回帖仍要求投递消息中合法的独立行 OWNER_STANDING_AUTH: PR_PUSH_AND_REPLY 声明，仅覆盖当前 PR 的普通 push 和回帖，不授权创建 PR 或 merge；这段说明不是授权声明，不得自行补造声明。',
       'mem-probe → 现读同一份 routing.json 再派 e2e / GPT 单审；结果只回 owner，不向 lead 请示。',
       '先确认本 session 可调用只读 sub、Orca start_team/create_worker/create_workers。派 worker 前显式 start_team({ worker_permission_mode: "bypassPermissions" })，读取返回值并确认仍为 bypassPermissions；缺能力或返回 auto 不得创建，不得把配置期望当实际权限。',
       `绝对路径: ${ROUTING_LIVE}`,

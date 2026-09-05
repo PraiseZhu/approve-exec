@@ -61,6 +61,23 @@ test('render-pr-handoff: 0–10 段齐全，含开工闸与绝对路径', () => 
   assert.match(out, /Mini 确认接管之前保留本机现场/);
 });
 
+test('render-pr-handoff: SC 阶段结束后的收尾说明保留授权与硬停边界', () => {
+  const out = renderPrHandoff(baseArgs());
+  const afterSc = out.split('## 8. 做完之后（自动，不要问 lead）\n')[1].split('\n## 9. 禁做')[0];
+  assert.match(afterSc, /SC PASS 只是子阶段完成，不是 owner 整体任务完成/);
+  assert.match(afterSc, /所有 SC 都有 PASS 证据且没有 hard_stop、预算暂停或 blocked/);
+  assert.match(afterSc, /正常返回同一 owner 继续审查和 PR Ready 收尾/);
+  assert.match(afterSc, /不得通过切换阶段绕过停止条件/);
+  assert.match(afterSc, /已明确授权的提交、推送、创建\/更新目标 PR 直接执行，不重复请示/);
+  assert.match(afterSc, /只有对应动作确实未获授权时才停下请求决定/);
+  assert.match(afterSc, /PR Ready 终点本身不产生新增授权/);
+  assert.match(afterSc, /不授权创建 PR 或 merge/);
+  assert.match(afterSc, /这段说明不是授权声明，不得自行补造声明/);
+  // 空白包不能因说明文字变成 goal 可消费的常设授权；既有合入边界也不能丢失。
+  assert.doesNotMatch(out, /^\s*OWNER_STANDING_AUTH:\s*PR_PUSH_AND_REPLY\s*$/m);
+  assert.match(afterSc, /子 session 不合入/);
+});
+
 test('render-pr-handoff: 缺摘录或第 4 段复制第 2 段拒', () => {
   assert.throws(() => renderPrHandoff(baseArgs({ excerpts: [] })), LedgerError);
   assert.throws(() => renderPrHandoff(baseArgs({ excerpts: ['（本包未附摘录：子 session 仍须按 allowed_paths 开工，禁止 Grep 整模块。）'] })), LedgerError);
