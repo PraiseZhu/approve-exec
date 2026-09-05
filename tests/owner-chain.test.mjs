@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { initLedger, setState, renderPacket, readLedger, manifestCoreHash, latestPrHandoffDelivery, latestGroupEvent } from '../scripts/run-ledger.mjs';
+import { initLedger, setState, renderPacket, readLedger, readExecutionManifest, manifestCoreHash, latestPrHandoffDelivery, latestGroupEvent } from '../scripts/run-ledger.mjs';
+import { libraryManifests } from './fixtures/library-pr-manifests.mjs';
+import { recordDelivery, readDefaults, noteEvent } from '../scripts/run-ledger.mjs';
 import { renderPrHandoff } from '../scripts/render-pr-handoff.mjs';
 import { prepareOwner, bindOwner, retireOwner } from '../scripts/owner-dispatch.mjs';
 import { ownerGate } from '../scripts/owner-gate.mjs';
@@ -14,7 +16,7 @@ import { assertTakeover } from '../scripts/pr-watch/takeover.mjs';
 import { miniWatchConfigSha256 } from '../scripts/lib/mini-watch-config.mjs';
 
 const NOW = '2026-09-05T00:00:00Z';
-function fixture(t) {
+function fixture(t, staged = false, probeExit = 0) {
   const dir = mkdtempSync(join(tmpdir(), 'owner-chain-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const repo = join(dir, 'repo with spaces');
@@ -27,24 +29,145 @@ function fixture(t) {
   git('-C', repo, 'add', '.');
   git('-C', repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', 'fixture');
   const sha = git('-C', repo, 'rev-parse', 'HEAD');
-  const manifest = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/sample-manifest.json', import.meta.url)), 'utf8'));
+  let manifest = staged ? libraryManifests()[0] : JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/sample-manifest.json', import.meta.url)), 'utf8'));
+  if (staged && probeExit) {
+    manifest.scs.find(sc => sc.kind === 'probe').verify.args = ['-e', 'process.exit(' + probeExit + ')'];
+    manifest.manifest_core_hash = manifestCoreHash(manifest);
+    manifest.receipts[0].manifest_core_hash = manifest.manifest_core_hash;
+  }
   const mp = join(dir, 'manifest.json');
   writeFileSync(mp, JSON.stringify(manifest));
   const ledgerPath = join(dir, 'ledger.json');
-  initLedger({ ledgerPath, manifestPath: mp, runId: 'owner-fixture', now: NOW, baseline: sha });
+  const prMapPath = join(dir, 'pr-map.json');
+  if (staged) writeFileSync(prMapPath, JSON.stringify({ schema_version: 'pr-map-v1', source_manifest_core_hash: manifestCoreHash(manifest), prs: [{ pr_id: 'g4', source_groups: ['p1', 'g1', 'v1'] }] }));
+  initLedger({ ledgerPath, manifestPath: mp, runId: 'owner-fixture', now: NOW, baseline: sha, ...(staged ? { prMapPath } : {}) });
+  if (staged) manifest = readExecutionManifest(readLedger(ledgerPath));
   const identity = { worktree: repo, base: sha, branch: 'feat/fixture', title: 'Skills-独立负责验收丨 0905' };
   setState({ ledgerPath, group: 'g4', now: NOW, identity });
   const packet = manifest.dispatch.packets[0];
   const handoff = renderPrHandoff({ packet, identity, leadSessionId: 'lead-test', seq: 1,
+    executionPlanHash: manifest.execution_plan_hash,
     repo: 'Skills', title: identity.title, why: '派窗重试会重复创建', how: '绑定一次性派工记录和回执',
     excerpts: [{ file: 'README.md', line: 1, behavior: '测试初始内容' }] });
   const handoffPath = join(dir, 'handoff.md'); writeFileSync(handoffPath, handoff);
-  const report = { manifest_core_hash: manifestCoreHash(manifest), cross_sc_edges: [], open_unknowns: [],
+  const report = { manifest_core_hash: manifest.source_manifest_core_hash ?? manifestCoreHash(manifest), execution_plan_hash: manifest.execution_plan_hash, cross_sc_edges: [], open_unknowns: [],
     per_sc: manifest.dispatch.packets.flatMap((p) => p.scs_inline.map((sc) => ({ sc_id: sc.id,
-      group_id: p.group_id, read_only: p.allowed_paths.length === 0, real_write_paths: p.allowed_paths }))) };
+      group_id: p.group_id, read_only: sc.kind === 'probe' || p.allowed_paths.length === 0, real_write_paths: sc.kind === 'probe' ? [] : p.allowed_paths }))) };
   const sitePath = join(dir, 'site.json'); writeFileSync(sitePath, JSON.stringify(report));
   return { dir, repo, sha, manifest, report, ledgerPath, handoffPath, sitePath, groupId: 'g4', now: NOW };
 }
+
+test('新版 PR 全链：真实格式计划、唯一 owner、核查先行、完整条件验收', t => {
+  const input = fixture(t, true);
+  const request = prepareOwner(input);
+  assert.equal(request.action, 'create_once');
+  assert.throws(() => prepareOwner(input), /禁止自动再次 create/);
+  bindOwner({ ...input, claimId: request.claim_id, result: { target_session_id: 'staged-owner' } });
+  renderPacket({ ledgerPath: input.ledgerPath, group: input.groupId, now: NOW });
+  const transition = to => setState({ ledgerPath: input.ledgerPath, group: input.groupId, to, now: NOW,
+    memSnapshot: { used_slots: 0, platform_cap: 8, concurrency: 2, available_bytes: 16 * 1024 ** 3 } });
+  transition('dispatched');
+  const dirty = join(input.repo, 'README.md');
+  const original = readFileSync(dirty, 'utf8');
+  writeFileSync(dirty, 'premature edit');
+  assert.throws(() => ownerGate({ ...input, kind: 'baseline' }), /干净原基线/);
+  writeFileSync(dirty, original);
+  const goalPath = join(input.dir, 'goal.md');
+  writeFileSync(goalPath, 'fixture goal');
+  assert.throws(() => ownerGate({ ...input, kind: 'goal', goalPath }), /核查/);
+  assert.throws(() => transition('executing'), /核查/);
+  ownerGate({ ...input, kind: 'baseline' });
+  ownerGate({ ...input, kind: 'goal', goalPath });
+  assert.equal(prepareOwner(input).session_id, 'staged-owner');
+  const invoke = (...gitArgs) => {
+    const result = spawnSync('git', ['-C', input.repo, ...gitArgs], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  writeFileSync(join(input.repo, 'README.md'), original + 'line\n'.repeat(799));
+  invoke('add', 'README.md');
+  invoke('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', '799-line candidate');
+  input.sha = invoke('rev-parse', 'HEAD');
+  const routingPath = join(input.dir, 'routing.json');
+  const route = { agent: 'codex', model: 'fixture', effort: 'high', provider_id: 'fixture' };
+  writeFileSync(routingPath, JSON.stringify({ e2e: route, review: route }));
+  ownerGate({ ...input, kind: 'routing', routingPath, ownerModel: 'gpt-fixture', teamResult: { worker_permission_mode: 'bypassPermissions' } });
+  transition('e2e');
+  transition('review');
+  assert.equal(prepareOwner(input).action, 'resume');
+  const candidate = { branch: 'feat/fixture', tip_sha: input.sha,
+    scs: input.manifest.scs.map(sc => ({ id: sc.id, status: 'pass' })),
+    goal_skill_path: '/Users/praise/.agents/skills/goal/SKILL.md',
+    e2e: { status: 'pass', candidate_sha: input.sha, model: 'fixture', route_source: readDefaults().routingPath },
+    review: { unresolved: 0, candidate_sha: input.sha, model: 'fixture', route_source: readDefaults().routingPath },
+    size_gate: { result: 'PASS', candidate_sha: input.sha }, fallbacks_tried: [] };
+  const deliver = payload => recordDelivery({ ledgerPath: input.ledgerPath, group: input.groupId, now: NOW, payload });
+  assert.throws(() => deliver({ ...candidate, scs: candidate.scs.filter(sc => !sc.id.includes('acceptance')) }), /SC|sc/);
+  const incomplete = structuredClone(candidate);
+  incomplete.scs.at(-1).status = 'not_run';
+  deliver(incomplete);
+  assert.throws(() => transition('accepted'), /全部 SC/);
+  deliver(candidate);
+  transition('accepted');
+  const ledger = readLedger(input.ledgerPath);
+  assert.equal(ledger.waves.length, 1);
+  assert.equal(ledger.waves[0].groups[0].session_id, 'staged-owner');
+  assert.equal(ledger.waves[0].integrated_tip, null);
+  assert.equal(latestPrHandoffDelivery(ledger, input.groupId).scs.length, 14);
+  const verdictPath = join(input.dir, 'verdict.json');
+  const evidence = readFileSync(join(input.repo, 'README.md'), 'utf8').trim();
+  const verdict = { candidate_sha: input.sha, scs: candidate.scs.map(sc => ({ sc_id: sc.id, status: sc.status,
+    evidence: [{ file: 'README.md', command: 'node -e "process.exit(0)"', summary: evidence }] })), output_records: { 'README.md': evidence } };
+  writeFileSync(verdictPath, JSON.stringify(verdict));
+  const e2ePath = join(input.dir, 'e2e.json');
+  writeFileSync(e2ePath, JSON.stringify({ candidate_sha: input.sha, status: 'pass', failed: 0 }));
+  for (const name of ['size', 'format', 'intent']) writeFileSync(join(input.dir, name + '.json'), JSON.stringify({ candidate_sha: input.sha, result: name === 'intent' ? 'OK' : 'PASS' }));
+  const receiptPath = join(input.dir, 'receipt.json');
+  const validatedAt = '2026-09-05T00:00:01Z';
+  const args = [fileURLToPath(new URL('../scripts/ready-check.mjs', import.meta.url)), '--group', input.groupId,
+    '--repo', input.repo, '--ledger', input.ledgerPath, '--manifest', ledger.manifest_path, '--verdict', verdictPath,
+    '--e2e-report', e2ePath, '--presubmit-dir', input.dir, '--receipt', receiptPath, '--now', validatedAt];
+  const ready = spawnSync(process.execPath, args, { encoding: 'utf8' });
+  assert.equal(ready.status, 0, ready.stdout + ready.stderr);
+  assert.equal(JSON.parse(readFileSync(receiptPath)).execution_plan_hash, ledger.pr_plan.plan_hash);
+  const receipt = JSON.parse(readFileSync(receiptPath));
+  delete receipt.execution_plan_hash;
+  writeFileSync(receiptPath, JSON.stringify(receipt));
+  assert.throws(() => noteEvent({ ledgerPath: input.ledgerPath, now: validatedAt, event: 'local_validated',
+    detail: { group_id: input.groupId, receipt: receiptPath } }), /execution_plan_hash|归属/);
+  receipt.execution_plan_hash = ledger.pr_plan.plan_hash;
+  writeFileSync(receiptPath, JSON.stringify(receipt));
+  noteEvent({ ledgerPath: input.ledgerPath, now: validatedAt, event: 'local_validated', detail: { group_id: input.groupId, receipt: receiptPath } });
+  writeFileSync(join(input.repo, 'budget.test.mjs'), 'export const fixture = true;\n');
+  invoke('add', 'budget.test.mjs');
+  invoke('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', 'oversize fixture');
+  const oversize = spawnSync(process.execPath, args, { encoding: 'utf8' });
+  assert.equal(oversize.status, 2);
+  assert.match(oversize.stderr, /pr-total-lines/);
+  invoke('reset', '--hard', input.sha);
+  verdict.scs.pop();
+  writeFileSync(verdictPath, JSON.stringify(verdict));
+  const missing = spawnSync(process.execPath, args, { encoding: 'utf8' });
+  assert.equal(missing.status, 2);
+});
+
+test('新版核查失败不能开工，归属变化不能恢复旧 claim', t => {
+  const input = fixture(t, true, 1);
+  const request = prepareOwner(input);
+  bindOwner({ ...input, claimId: request.claim_id, result: { target_session_id: 'failed-probe-owner' } });
+  renderPacket({ ledgerPath: input.ledgerPath, group: input.groupId, now: NOW });
+  setState({ ledgerPath: input.ledgerPath, group: input.groupId, to: 'dispatched', now: NOW,
+    memSnapshot: { used_slots: 0, platform_cap: 8, concurrency: 2, available_bytes: 16 * 1024 ** 3 } });
+  assert.throws(() => ownerGate({ ...input, kind: 'baseline' }), /核查失败/);
+  const ledger = readLedger(input.ledgerPath);
+  assert.equal(latestGroupEvent(ledger, input.groupId, 'baseline_checked'), null);
+  const mapPath = ledger.pr_plan.map_path;
+  const map = JSON.parse(readFileSync(mapPath, 'utf8'));
+  map.prs[0].pr_id = 'replacement';
+  writeFileSync(mapPath, JSON.stringify(map));
+  assert.throws(() => prepareOwner(input), /PR_MAP_HASH_MISMATCH/);
+  assert.throws(() => bindOwner({ ...input, claimId: request.claim_id, result: { target_session_id: 'failed-probe-owner' } }), /PR_MAP_HASH_MISMATCH/);
+});
 
 test('两个独立进程同时 prepare：只能发放一个 create 请求', async (t) => {
   const f=fixture(t);

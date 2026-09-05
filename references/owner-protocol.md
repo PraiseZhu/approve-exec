@@ -5,7 +5,7 @@
 ## 派窗前（lead 的编排工作）
 
 1. 只读 sub 对每条 SC 查现场，产出 site-report.json：manifest_core_hash、per_sc[{sc_id,group_id,real_write_paths,read_only}]、cross_sc_edges[{from,to}]、open_unknowns。from 是前置 SC，to 是依赖者。无写入只能明确 read_only=true；未知问题必须先裁决，不能默认为无依赖。
-2. site-check.mjs --manifest <final> --site <报告>。共享写路径或依赖顺序不符时回 task-priority 重新出 final；不在 lead 当前窗口偷偷改 allowed_paths。相同波可并行，跨波必须满足现有 ledger 的前波集成与基线闸。
+2. 新版先按文末显式归属表建账，再运行 site-check.mjs --ledger <台账> --site <报告>，报告另带 execution_plan_hash；旧版继续 --manifest <final>。共享写路径或依赖顺序不符时回 task-priority 重新出 final；不在 lead 当前窗口偷偷改 allowed_paths。相同波可并行，跨 PR 的波必须满足现有 ledger 的前波集成与基线闸，同 PR 内部阶段不等待合并。
 3. 给每 PR 准备独立 worktree、准确 base/branch，写 pending identity。渲染 0–10 完整包；不可只发摘要。摘录带文件指纹，prepare 时重新核对。新增文件仍要在包里说明相关现有接口。
 4. 执行 owner-dispatch.mjs prepare --ledger <绝对路径> --group <组> --handoff <包文件> --site <报告> --now <当前ISO时间>。脚本只发放一次 create 请求：返回 action=create_once 时，把 args 原样交给现有 send_to_session 工具且只调用一次。action=resume 只处理已返回的 session_id，不再 create。
 5. 真实工具结果保存到任务目录，执行 owner-dispatch.mjs bind --ledger <同一台账> --group <同一组> --claim-id <prepare返回值> --result <工具JSON> --now <当前ISO时间>。不凭标题猜 ID，不手写成功结果。工具结果已保存时可重复 bind；未知结果保留 claim 并上报唯一决策，不自动删 claim、换代或换目录绕过。
@@ -21,7 +21,7 @@ prepare 使用台账路径旁固定的 .owners 目录。持久 claim 的作用�
 正文已列出 SC、优先级、写入范围、基线、文件指纹与改法；消费它们，不重新做整轮规划。必要的定点读文件和调试仍允许，不应把“不重复规划”误读成“不能看代码”。
 
 - 先核自己的 runtime 与 ledger.session_id、worktree、branch、base；确认 Art、完整包身份无误。绑定或 dispatched 登记尚未到达时，读台账等待，保留该 owner；不要写代码或重复派窗。
-- 真实读取自己的 goal skill 后，执行随包给出的 owner-gate.mjs goal 命令。脚本重算文件 hash、检查干净基线、CAS 入账 gate_goal 并推进 executing。不得补造已有改动之前的开工证据，不用 jump 等逐步放行。
+- 真实读取自己的 goal skill；新版先执行文末 owner-gate.mjs baseline，通过后再执行随包给出的 owner-gate.mjs goal 命令，旧版不补造 baseline。脚本重算文件 hash、检查干净基线、CAS 入账 gate_goal 并推进 executing。不得补造已有改动之前的开工证据，不用 jump 等逐步放行。
 - 自主完成本 PR 的 SC。可以开只读 sub 获取信息，也可提前派 tester/reviewer 验证。提前验证不能替代最终当前提交的全量 SC/e2e/review。
 - 首次及每次重新派 worker 前，现读共享 routing.json，执行 start_team({worker_permission_mode:"bypassPermissions"}) 并确认实际返回。用 owner-gate.mjs routing --owner-model <当前模型ID> --team-result <真实工具结果JSON> 连同台账/组/时间入账。脚本输出当前 e2e/review 档；agent、model、effort、provider_id 原样传给 Orca。GPT owner 使用 review.when_lead.gpt（存在时）。配置缺项或 auto 不得冒充通过。
 - 本机测试红、review 未解决项，先 owner-gate.mjs rework --ledger <台账> --group <组> --reason <失败证据> --now <时间>，保留同一 session/branch/base 并使旧候选与验收失效，再在授权路径内修复重测。交给 Mini 后禁止本机重做。新链路不用旧 run 级 phase=ready 提前冻结各 PR。429 按 Retry-After 在原路由等待；只有 NO_PROVIDER_FOR_AGENT、PROVIDER_ROUTE_UNAVAILABLE、BUDGET_MODEL_REQUIRES_API_MODE 才允许依共享 fallbacks 降级。创建结果未知先查原 worker，不重复建；queued 表示已入队，不重发消息。
@@ -37,6 +37,27 @@ prepare 使用台账路径旁固定的 .owners 目录。持久 claim 的作用�
 6. lead 仅对这颗 Ready PR 发 Mini：confirm-watch-registered.mjs 按配置注册，再读 Mini takeover 首扫心跳。TAKEOVER_PENDING 时只等待/复查接手，保留本机现场；不替 owner 写代码、不因另一颗 PR 未完成而拖住它。
 7. watch_registered 要有本 PR Ready 之后、十分钟内、同配置的有效首扫心跳。Mini 每 PR 一个持久 session，首次有反馈 create，以后只 jump；没有反馈时保持零 LLM 轮询。Mini 负责后续 GitHub CI/review 修复，本机 owner 不再同时写该 PR。
 8. 接管确认后 owner 才 wrapup-cleanup（不删远端分支），lead archive_sessions 并消费真实归档回执。GitHub 合入另需用户授权；本任务 skill 不自动 merge。
+
+## 显式 PR 归属与阶段
+
+阶段式 final 必须先提供独立归属表，例如：
+
+```json
+{
+  "schema_version": "pr-map-v1",
+  "source_manifest_core_hash": "原 final 的 64 位 core hash",
+  "prs": [{ "pr_id": "PR1", "source_groups": ["p1", "g1", "v1"] }]
+}
+```
+
+示例归属只能在已明确批准这些组属于 PR1 时使用；不以组名、priority_id 或同文件写入推断归属。每个源组和 SC 必须恰好出现一次。六份已确认的业务计划分别建账，每份的三个阶段映射到一个 PR，合计六个 owner，不是十八个。
+
+- `run-ledger.mjs init --manifest <原final> --pr-map <归属表> --ledger <新台账> --run-id <id> --now <ISO> --baseline <SHA>`：生成 pr-ledger-v2；不得覆盖已有台账。原 final 与原回执继续按原 hash 校验，转换视图不携带原回执。
+- `site-check.mjs --ledger <新台账> --site <报告>`：报告绑定 manifest_core_hash 和 execution_plan_hash；per_sc.group_id 使用业务 PR，路径按原阶段授权检查。probe 为只读。跨 PR 依赖决定前后波，同 PR 依赖保留在内部。
+- renderer 从台账出包，包含全部阶段、全部 SC、各阶段路径与验证命令，以及 execution_plan_hash。claim 同时绑定原计划和执行计划，恢复必须重读归属表；同一 PR 转阶段只继续原 owner。
+- owner 在 dispatched 后先运行 `owner-gate.mjs baseline --ledger <台账> --group <业务PR> --now <ISO>`。脚本在原基线干净工作树逐项执行 probe.verify 的 cmd/args，无 shell，单条超时两分钟；前后 HEAD/branch/status 不符或任一失败即拒。记录结果码和输出 hash，不保存原始输出。之后才能通过 goal 开工闸进入实现。
+- Ready 必须包含全部 probe/fix/verify SC 的 PASS 证据，不接受只有 fix 的交卷。新版执行单元另按 git diff 的全部新增＋删除严格 `<800` 检查，包含测试；二进制无法计数时拒绝自动通过。验收回执额外绑定 execution_plan_hash。
+- 旧台账保持旧版语义，不添加 pr_plan、不合并 owner、不修改 claim。发现旧任务已经派出会话或存在工作树时保留现场，单独裁决。尚未派出的阶段计划使用原 final 与独立归属表新建台账，不复用旧凭据。
 
 ## 保证边界
 

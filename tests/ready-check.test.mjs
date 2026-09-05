@@ -933,7 +933,7 @@ const MUTATION_PREDICTIONS = [
     to: '&& false) {',
     red: ['F-N: dispatch 事件 group_id 换成未知 gX（数量仍为 2）→ exit 2 gap ledger-partition',
           'F-N: manifest packet group_id 换成未知 gX → exit 2 gap ledger-partition'] },
-  { id: '变异⑦', label: 'F-O 不可解析输入不提前 exit', from: 'let ledger = readJsonOrNull(args.ledger);\n  // manifest 经 readManifest 统一收口（receipts 在场/形状契约与 run-ledger 全部消费入口同判据）：\n  // 不合约/不可解析 → 转 gap 占位（F-O：不提前 exit，后项照常运行），错误原文随 manifestError\n  // 进 gap detail——「可解析但不合约」不得被笼统说成「不可解析」。\n  let manifest = null;\n  let manifestError = null;\n  try { manifest = readManifest(args.manifest); } catch (err) { manifestError = err.message; }',
+  { id: '变异⑦', label: 'F-O 不可解析输入不提前 exit', from: 'let ledger = readJsonOrNull(args.ledger);\n  // manifest 经 readManifest 统一收口（receipts 在场/形状契约与 run-ledger 全部消费入口同判据）：\n  // 不合约/不可解析 → 转 gap 占位（F-O：不提前 exit，后项照常运行），错误原文随 manifestError\n  // 进 gap detail——「可解析但不合约」不得被笼统说成「不可解析」。\n  let manifest = null;\n  let manifestError = null;\n  try { manifest = ledger?.pr_plan ? readExecutionManifest(ledger, args.manifest) : readManifest(args.manifest); } catch (err) { manifestError = err.message; }',
     to: 'let ledger = readJsonOrNull(args.ledger);\n  let manifest = readJsonOrNull(args.manifest);\n  let manifestError = null;\n  if (!ledger || !manifest) { console.error(\'GAP: ledger-partition: 前置输入不可解析（旧版提前 exit 行为）\'); process.exit(2); }',
     red: ['F-O: ledger+e2e 都删 → 三项 gap 同时点名（不跳过后项）',
           'F-O: manifest+verdict 都删 → ledger-partition + verdict-anchors 双 gate 点名'] },

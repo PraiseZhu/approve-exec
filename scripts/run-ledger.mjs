@@ -33,6 +33,8 @@ import { resolve, dirname, join, isAbsolute } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadMiniWatchConfig, miniWatchConfigSha256 } from './lib/mini-watch-config.mjs';
 import { assertTakeover } from './pr-watch/takeover.mjs';
+import { hashObject } from './lib/common.mjs';
+import { compilePrPlan, executionPlanHash } from './lib/pr-plan.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -68,6 +70,7 @@ export const EVENT_TYPES = Object.freeze([
   'session_created',
   'session_steer',
   'gate_goal',
+  'baseline_checked',
   'gate_routing',
   'pr_opened',
   'accepted',
@@ -106,6 +109,7 @@ const GITHUB_PR_URL_RE = /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+/;
 // 事件类型（F1 修复点）。wave 级（integrate）与相位级（illegal_transition 的 group_id: null）
 // 事件无组上下文，不强制非空字符串，但 detail 必须显式含 group_id 键（无组归属写 null，不伪造）。
 const GROUP_SCOPED_EVENT_TYPES = new Set([
+  'baseline_checked',
   'dispatch', 'delivery', 'review_round', 'packet_rendered', 'timeout_redispatch',
   'overreach_rejected', 'overlap_replan', 'budget_note',
   'session_created', 'session_steer', 'gate_goal', 'gate_routing', 'pr_opened', 'accepted',
@@ -154,6 +158,15 @@ export function manifestCoreHash(manifest) {
  * 旧结论干活——绑定不能只存在于「你可以不调」的 validate 里。不符抛 HASH_MISMATCH（exit 2 点名）。
  */
 export function assertManifestBound(ledger, manifest, what) {
+  if (manifest?.kind === 'pr-execution-plan') {
+    if (!ledger.pr_plan || manifest.source_manifest_core_hash !== ledger.manifest_core_hash
+      || manifest.pr_map_hash !== ledger.pr_plan.map_hash
+      || manifest.execution_plan_hash !== ledger.pr_plan.plan_hash
+      || executionPlanHash(manifest) !== ledger.pr_plan.plan_hash) {
+      throw new LedgerError('HASH_MISMATCH', what + ': PR execution plan hash mismatch');
+    }
+    return ledger.manifest_core_hash;
+  }
   const computed = manifestCoreHash(manifest);
   if (computed !== ledger.manifest_core_hash) {
     throw new LedgerError(
@@ -173,7 +186,7 @@ const LEDGER_TOP_KEYS = Object.freeze([
   'version', 'phase', 'phase_at',
   'baseline_tip', // 独立成行：F2 变异锚点只挖 phase_at 行，baseline_tip 保持白名单成员
   'mini_watch_config_sha256', // 独立成行：init 钉死盯梢配置，watch_registered 三方等值
-  'waves', 'events',
+  'waves', 'events', 'pr_plan',
 ]);
 const WAVE_KEYS = Object.freeze(['wave', 'integrated_tip', 'groups']);
 // 身份三键（worktree/branch/base）属于台账 schema：由 lead 经 orca-fanout
@@ -303,6 +316,13 @@ export function assertEventSchema(ev) {
 
 export function assertLedgerSchema(ledger) {
   assertKeys(ledger, LEDGER_TOP_KEYS, '台账顶层');
+  if (ledger.schema_version === 'pr-ledger-v2') {
+    assertKeys(ledger.pr_plan, ['map_path', 'map_hash', 'plan_hash'], 'PR plan binding');
+    if (!isAbsolute(ledger.pr_plan.map_path ?? '') || !SHA256_HEX_RE.test(ledger.pr_plan.map_hash)
+      || !SHA256_HEX_RE.test(ledger.pr_plan.plan_hash)) throw new LedgerError('SCHEMA', 'invalid PR plan binding');
+  } else if (ledger.pr_plan !== undefined) {
+    throw new LedgerError('SCHEMA', 'legacy ledger cannot acquire a PR mapping; create a new run');
+  }
   for (const k of ['schema_version', 'run_id', 'slug', 'manifest_path', 'manifest_core_hash']) {
     if (typeof ledger[k] !== 'string' || ledger[k].length === 0) {
       throw new LedgerError('SCHEMA', `台账 ${k} 必须是非空字符串`);
@@ -620,6 +640,38 @@ export function findPacket(manifest, groupId) {
   return packet;
 }
 
+export function readExecutionManifest(ledger, manifestPath = ledger.manifest_path, context = 'source manifest') {
+  const source = readManifest(manifestPath);
+  assertManifestBound(ledger, source, context);
+  if (!ledger.pr_plan) {
+    if (ledger.schema_version === 'pr-ledger-v2') throw new LedgerError('SCHEMA', 'missing PR plan binding');
+    return source;
+  }
+  if (ledger.schema_version !== 'pr-ledger-v2') throw new LedgerError('SCHEMA', 'legacy PR mapping migration is not supported');
+  const mapping = JSON.parse(readFileSync(ledger.pr_plan.map_path, 'utf8'));
+  if (hashObject(mapping) !== ledger.pr_plan.map_hash) throw new LedgerError('PR_MAP_HASH_MISMATCH', 'PR_MAP_HASH_MISMATCH: mapping changed');
+  const plan = compilePrPlan(source, mapping, manifestCoreHash(source));
+  assertManifestBound(ledger, plan, 'PR plan');
+  const partition = waves => waves.map(wave => ({ wave: wave.wave, groups: wave.groups.map(group => ({ group_id: group.group_id, sc_ids: group.sc_ids })) }));
+  if (hashObject(partition(ledger.waves)) !== hashObject(partition(plan.waves))) throw new LedgerError('SCHEMA', 'PR partition changed');
+  return plan;
+}
+
+export function assertBaselineReady(ledger, groupId, plan = readExecutionManifest(ledger)) {
+  if (!ledger.pr_plan) return;
+  const group = findGroup(ledger, groupId);
+  const probes = findPacket(plan, groupId).scs_inline.filter(sc => sc.kind === 'probe');
+  if (!probes.length) return;
+  const evidence = latestGroupEvent(ledger, groupId, 'baseline_checked')?.detail;
+  if (!evidence || evidence.execution_plan_hash !== ledger.pr_plan.plan_hash
+    || evidence.manifest_core_hash !== ledger.manifest_core_hash || evidence.base !== group.base
+    || evidence.session_id !== group.session_id
+    || hashObject(evidence.results?.map(result => result.sc_id)) !== hashObject(probes.map(sc => sc.id))
+    || evidence.results.some(result => result.exit_code !== 0)) {
+    throw new LedgerError('BASELINE_REQUIRED', '核查阶段尚未通过，禁止实现或验收');
+  }
+}
+
 export function findGroupWave(ledger, groupId) {
   const wave = ledger.waves.find((w) => w.groups.some((g) => g.group_id === groupId));
   if (!wave) {
@@ -732,7 +784,7 @@ function assertManifestComplete(manifest) {
 // baseline（sc-p0a 基线漂移闸）：函数层必填参数（undefined 即拒——in-process 调用漏传
 // 与 CLI 同判据）；null = 兼容模式（e2e-dryrun 等无基线语义的旧路径，基线闸/快照闸/凭证闸
 // 全部跳过）；40hex = 严格模式（三道新闸全强制）。
-export function initLedger({ ledgerPath, manifestPath, runId, now, baseline }) {
+export function initLedger({ ledgerPath, manifestPath, runId, now, baseline, prMapPath }) {
   requireNow(now, 'init');
   if (!manifestPath) throw new LedgerError('ARGS', 'init 缺 --manifest <path>');
   if (!runId) throw new LedgerError('ARGS', 'init 缺 --run-id <id>');
@@ -742,7 +794,14 @@ export function initLedger({ ledgerPath, manifestPath, runId, now, baseline }) {
   if (baseline !== null && !TIP_SHA_RE.test(baseline)) {
     throw new LedgerError('ARGS', `init --baseline 非 40 位十六进制: ${baseline}`);
   }
-  const manifest = readManifest(manifestPath);
+  const source = readManifest(manifestPath);
+  assertManifestComplete(source);
+  if (!prMapPath && (source.scs?.some(sc => sc.kind === 'probe') || source.priorities?.some(priority => priority.pr_split))) {
+    throw new LedgerError('PR_MAPPING_REQUIRED', 'PR_MAPPING_REQUIRED: phase groups require an explicit --pr-map; do not guess PR boundaries');
+  }
+  const mapping = prMapPath ? JSON.parse(readFileSync(prMapPath, 'utf8')) : null;
+  if (mapping && baseline === null) throw new LedgerError('ARGS', '新版 PR 计划必须绑定明确基线');
+  const manifest = mapping ? compilePrPlan(source, mapping, manifestCoreHash(source)) : source;
   // 顶层三要素 + 逐 packet 完整性在 init 入口一次性校验（SKILL.md ② 段「缺任一 → 不开跑」）。
   // 校验失败不写台账——连空台账都不留（不能「先开跑、出包时才炸」，中间态污染状态机）。
   assertManifestComplete(manifest);
@@ -805,11 +864,12 @@ export function initLedger({ ledgerPath, manifestPath, runId, now, baseline }) {
     };
   });
   const ledger = {
-    schema_version: typeof manifest.schema_version === 'string' ? manifest.schema_version : 'v1',
+    schema_version: mapping ? 'pr-ledger-v2' : (typeof manifest.schema_version === 'string' ? manifest.schema_version : 'v1'),
     run_id: runId,
     slug: typeof manifest.slug === 'string' ? manifest.slug : runId,
     manifest_path: resolve(manifestPath),
-    manifest_core_hash: manifest.manifest_core_hash,
+    manifest_core_hash: source.manifest_core_hash,
+    ...(mapping ? { pr_plan: { map_path: resolve(prMapPath), map_hash: manifest.pr_map_hash, plan_hash: manifest.execution_plan_hash } } : {}),
     version: 0,
     phase: 'splitting', // run 级起步：拆 PR
     baseline_tip: baseline, // sc-p0a：init 基线（40hex=严格模式 / null=兼容模式）
@@ -837,7 +897,7 @@ export function initLedger({ ledgerPath, manifestPath, runId, now, baseline }) {
 // ---------- validate：重读 manifest 现算 core hash 与台账比对 ----------
 export function validateLedger({ ledgerPath }) {
   const ledger = readLedger(ledgerPath);
-  const manifest = readManifest(ledger.manifest_path);
+  const manifest = readExecutionManifest(ledger);
   const computed = assertManifestBound(ledger, manifest, 'validate');
   return { ledger, computed };
 }
@@ -1317,6 +1377,7 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
   if (ledger.phase === 'ready' && event !== 'watch_registered' && event !== 'pr_ready') {
     throw new LedgerError('FROZEN', `台账已 ready（phase=${ledger.phase}），冻结只读，拒绝写操作`);
   }
+  if (ledger.pr_plan) readExecutionManifest(ledger);
   const expected = ledger.version;
   const ev = { type: event, at: now, detail: { ...parsed } };
   if (event === 'site_report' && !('group_id' in parsed)) {
@@ -1369,13 +1430,17 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
     const group = findGroup(ledger, parsed.group_id);
     if (group.state !== 'accepted') throw new LedgerError('PRECONDITION', 'local_validated 要求本组 accepted');
     const receipt = readExactReceipt(parsed.receipt, ['candidate_sha', 'ledger_version', 'checked_at',
-      'group_id', 'assignment_seq', 'manifest_core_hash', 'base'], '单 PR 七门验收回执');
+      'group_id', 'assignment_seq', 'manifest_core_hash', 'base',
+      ...(ledger.pr_plan ? ['execution_plan_hash'] : [])], '单 PR 七门验收回执');
+    if (ledger.pr_plan && receipt.execution_plan_hash !== ledger.pr_plan.plan_hash) {
+      throw new LedgerError('PRECONDITION', '验收回执 PR 归属不符');
+    }
     if (receipt.group_id !== parsed.group_id || receipt.candidate_sha !== group.tip_sha
       || receipt.manifest_core_hash !== ledger.manifest_core_hash || receipt.base !== group.base
       || receipt.ledger_version > ledger.version) {
       throw new LedgerError('PRECONDITION', '单 PR 验收回执与当前组/提交/基线/manifest/台账版本不符');
     }
-    assertManifestBound(ledger, readManifest(ledger.manifest_path), 'local_validated');
+    assertManifestBound(ledger, readExecutionManifest(ledger), 'local_validated');
     assertReceiptBoundToLedger(receipt, ledger, parsed.group_id, 'local_validated');
     assertReceiptAfterEvent(receipt, ledger, parsed.group_id, 'accepted', 'local_validated');
     ev.detail = { ...parsed, ...receipt, tip_sha: group.tip_sha };
@@ -1443,6 +1508,10 @@ export function setState({
 }) {
   requireNow(now, 'set-state');
   const ledger = readLedger(ledgerPath);
+  if (ledger.pr_plan) {
+    const plan = readExecutionManifest(ledger);
+    if (group && ['executing', 'e2e', 'review', 'accepted', 'pr-open'].includes(to)) assertBaselineReady(ledger, group, plan);
+  }
   const wrapupAfterReady = ledger.phase === 'ready'
     && identity === undefined
     && phase === undefined
@@ -1616,7 +1685,7 @@ export function setState({
       // 与 validate/render-packet/record-delivery 同一入口闸：manifest 变了就不能拿旧结论进 ready。
       // manifest 来源 = 台账 manifest_path（init 时 resolve 为绝对路径，cwd 无关；调用方无需传，
       // 也就不会「忘记传」——与既有三个消费入口同源同判据）。
-      const manifest = readManifest(ledger.manifest_path);
+      const manifest = readExecutionManifest(ledger, ledger.manifest_path, 'set-state →ready');
       assertManifestBound(ledger, manifest, 'set-state →ready');
     }
     if (problem) {
@@ -2018,7 +2087,7 @@ export function renderPacket({ ledgerPath, group, manifestPath, now }) {
   // F-D 内容绑定入口：消费 manifest 先校 core hash。--manifest 覆盖只接受 resolve 后
   // 等于台账 manifest_path（此时 hash 校验 = 验原文件未被篡改）或通过同一 hash 校验的异本文件。
   const manifestResolved = manifestPath ? resolve(manifestPath) : ledger.manifest_path;
-  const manifest = readManifest(manifestResolved);
+  const manifest = readExecutionManifest(ledger, manifestResolved);
   assertManifestBound(ledger, manifest, 'render-packet');
   const packet = findPacket(manifest, group);
   const wave = findGroupWave(ledger, group);
@@ -2606,7 +2675,7 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
   const wave = findGroupWave(ledger, group);
   const wg = wave.groups.find((g) => g.group_id === group);
   // F-D 内容绑定入口：manifest 已变（相对台账记录）时交卷不得入账——禁止拿旧结论/旧 manifest 干活
-  const manifest = readManifest(ledger.manifest_path);
+  const manifest = readExecutionManifest(ledger, ledger.manifest_path, 'record-delivery');
   assertManifestBound(ledger, manifest, 'record-delivery');
   const packet = findPacket(manifest, group);
 
@@ -2800,7 +2869,7 @@ export function staleness({ ledgerPath, now }) {
 function usage() {
   return [
     'run-ledger <sub> <ledger> [flags]',
-    '  init <ledger> --manifest <path> --run-id <id> --now <ts> [--baseline <sha>]',
+    '  init <ledger> --manifest <path> --run-id <id> --now <ts> [--baseline <sha>] [--pr-map <path>]',
     '  validate <ledger>',
     '  set-state <ledger> --group <gid> --to <state> --now <ts> [--worker-label <l>] [--tip-sha <hex40>] [--event <type>] [--mem-snapshot <json>] [--pr-open-receipt <path>] [--cleanup-receipt <path>] [--archive-receipt <path>]',
     '  set-state <ledger> --identity <json> --group <gid> --now <ts>',
@@ -2857,7 +2926,7 @@ function removedFlagMessage(flag) {
 // 已移除/已拒 flag（--ready-check-exit0/--verify-status/--verify-evidence-ref/--unresolved/
 // 身份独立键）由各分支专门点名拒绝，不在此表（防 allowlist 通用报错顶掉语义更明确的点名）。
 const SUBCOMMAND_FLAGS = Object.freeze({
-  init: ['manifest', 'run-id', 'now', 'baseline'],
+  init: ['manifest', 'run-id', 'now', 'baseline', 'pr-map'],
   validate: [],
   'set-state': ['group', 'to', 'now', 'worker-label', 'tip-sha', 'event', 'identity', 'phase', 'wave', 'integrate', 'ready-receipt', 'mem-snapshot', 'detail', 'pr-open-receipt', 'cleanup-receipt', 'archive-receipt'],
   'render-packet': ['group', 'manifest', 'now'],
@@ -2921,6 +2990,7 @@ export function runCli(argv) {
           runId: flags['run-id'],
           now: flags.now,
           baseline: flags.baseline ?? null,
+          prMapPath: flags['pr-map'],
         });
         console.log(`init: 台账已创建 ${ledgerPath}（version=0, phase=splitting, baseline=${flags.baseline ?? 'null（兼容模式）'}）`);
         return 0;

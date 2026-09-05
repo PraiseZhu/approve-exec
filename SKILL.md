@@ -20,6 +20,8 @@ Lead 只做判断：拆 PR、写开工包、派独立 session、裁决真正例�
 
 ## ① 身份与触发
 
+**业务 PR 与内部阶段分离**：原 final manifest 不改写。含核查/实现/验收阶段的计划必须提供显式 `pr-map-v1` 归属表，经 `scripts/lib/pr-plan.mjs` 转为业务 PR 执行视图；不得按组名或 priority_id 猜归属。`run-ledger.mjs init --pr-map <绝对路径>` 创建 `pr-ledger-v2` 台账，site-check 使用 `--ledger`，派工、开工包与验收均消费同一视图。每个 PR 一个 owner，baseline → fix → verify 依次执行，阶段之间不等待合并。原 manifest hash、归属表 hash 和执行视图 hash 分别绑定，任何变化都拒用旧凭据。旧台账不自动合并或迁移，已有 owner/claim/工作树保留现场。格式与恢复规则见 `references/owner-protocol.md`。
+
 - frontmatter：`name: approve-exec`，触发词「批准执行」。
 - 用法：`批准执行`（用当前最新 final manifest 真派）/ `批准执行 --dry-run`（只出拆分表 + 开工包 + 将要 create 的参数，不调 `send_to_session`）/ `批准执行 --resume <run_id>` / `批准执行 --no-budget-pause`（写入包文，关闭该子 session 的自报暂停）。
 - 本 skill 是 **lead 编排层**：Lead 禁止改 `allowed_paths` 里的产品代码，禁止替子 session 修 bug，禁止替子 session 开 PR。E 席 `dispatch=session`；R/T 席 `dispatch=worker`（由**owner session** 派）；V/P 席 `dispatch=lead-self`（只读验收 / 写裁决台账；.pr-intent.md 由 owner 写）。owner 调本 skill 脚本校验并直接入账，不逐步跳回 lead。lead 的编排、验收裁决和登记不是产品执行。
@@ -67,10 +69,10 @@ task-priority final manifest
   → 0. 输入门
   → 0.5 可选：批准执行 --dry-run
   → 0.7 SiteScout（只读探查，产出 site-report.json；冲突图吃真实写入路径）
-  → 1. 拆 PR（估计 ≤800 行；冲突图定并行/串行；写合并顺序）
+  → 1. 核对显式 PR 归属（不猜组名；估计含测试新增＋删除 <800 行；冲突图校验并行/串行；写合并顺序）
   → 2. 每个 PR 写开工包（render-pr-handoff.mjs）
   → 3. send_to_session 派独立 PI owner session（先 owner-dispatch prepare 写一次性 claim，完整包 create 一次，再 bind 真实工具回执；未知结果不重派）→ 立刻钉 Art
-  → 3.5 开工闸：gate_goal 自动入账后才允许改代码；gate_routing 自动入账后才允许派 worker（不等 lead 聊天放行）
+  → 3.5 开工闸：新版先 baseline 核查通过，再 gate_goal 自动入账才允许改代码；gate_routing 自动入账后才允许派 worker（不等 lead 聊天放行）
   → 4. owner session：自己的 goal 场景 C 把本 PR 的 SC 跑绿
         → mem-probe → 现读 routing.json 派 tester（e2e 档）
         → 现读 routing.json 派 reviewer（review 档 = GPT 单审）
@@ -102,9 +104,9 @@ task-priority final manifest
 派窗机器门：scripts/site-check.mjs 必须通过（逐 SC 完整报告、manifest hash、真实写入授权、同波无交叉写、依赖顺序、未决问题为空）。冲突时回到 task-priority 重新出 final，不现场改清单。它校验只读 sub 的报告，不声称能自动发现所有隐藏依赖。
 
 1. **隐藏依赖先分波**。波与波串行；后波的 base = 前波已合入或已 rebase 的 tip。
-2. **同一波内按精确写入路径建冲突图**，连通分量 = 一个 PR。路径不相交才能并行开工。
+2. **同一波内按精确写入路径建冲突图**，只检查显式归属的不同 PR 是否冲突，不把连通分量自动合并为 PR。同一 PR 内部阶段共享路径不算跨 PR 冲突；不同 PR 路径不相交才能并行开工。
 3. **跨仓默认可并行**。
-4. **规模**：计划期只能估计。估计会超 800 行（`size-gate.mjs`：相对 `origin/main` 的非测试 added+deleted）必须再拆。真实判定在子 session 的 candidate 上；`result=STOP` 的唯一出路是拆出新 session，不许豁免、不许丢给 Fable。
+4. **规模**：计划期只能估计。Mivo 必须按含测试的 added+deleted 严格 `<800`；新版 ready-check 对本 PR 明确基线到 candidate 的全部 diff 复核，800 行即拒，原 presubmit size/format/intent 门也保留。超预算返回重新拆计划并明确新 PR 归属，不自动另开 session，不许豁免、不许丢给 Fable。
 
 合并顺序单独写进总表，和「能不能并行写代码」分开。子 session **不得自行 merge**。本 skill 也不合入；合入发生在 GitHub 上，由 Mini 盯梢跟到可合（本轮不自动 `gh pr merge`）。
 

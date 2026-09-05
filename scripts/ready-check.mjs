@@ -68,7 +68,7 @@ import { spawnSync } from 'node:child_process';
 // readManifest 一并复用：manifest 在场/形状契约与 run-ledger 全部消费入口同判据（同一份实现，
 // 不在 ready-check 另写一套存在性检查——receipts 在 core hash 黑名单之外，删它 hash 不变，
 // 出口门不能只靠 hash 兜底）。
-import { tmpPath, readManifest, assertManifestBound, findGroup, findPacket, latestPrHandoffDelivery } from './run-ledger.mjs';
+import { tmpPath, readManifest, readExecutionManifest, assertManifestBound, assertBaselineReady, findGroup, findPacket, latestPrHandoffDelivery } from './run-ledger.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -484,19 +484,27 @@ function main() {
   // 进 gap detail——「可解析但不合约」不得被笼统说成「不可解析」。
   let manifest = null;
   let manifestError = null;
-  try { manifest = readManifest(args.manifest); } catch (err) { manifestError = err.message; }
+  try { manifest = ledger?.pr_plan ? readExecutionManifest(ledger, args.manifest) : readManifest(args.manifest); } catch (err) { manifestError = err.message; }
   let groupReceipt;
+  if (ledger?.pr_plan && !args.group) {
+    console.error('GAP: group-ready: 新版执行计划必须按 --group 验收业务 PR');
+    process.exit(2);
+  }
   if (args.group) {
     try {
       assertManifestBound(ledger, manifest, 'ready-check --group');
       const group = findGroup(ledger, args.group);
       const packet = findPacket(manifest, args.group);
+      if (ledger.pr_plan) {
+        assertBaselineReady(ledger, args.group, manifest);
+      }
       if (group.state !== 'accepted' || !group.base || !group.worktree
         || realpathSync(group.worktree) !== realpathSync(args.repo)) {
         throw new Error('单 PR 验收要求 accepted、明确 base 和匹配的 worktree');
       }
       groupReceipt = { group_id: args.group, assignment_seq: group.assignment_seq ?? 0,
-        manifest_core_hash: ledger.manifest_core_hash, base: group.base };
+        manifest_core_hash: ledger.manifest_core_hash, base: group.base,
+        ...(ledger.pr_plan ? { execution_plan_hash: ledger.pr_plan.plan_hash } : {}) };
       const events = ledger.events.filter((event) => event.detail?.group_id === args.group
         && (event.detail.assignment_seq ?? 0) === (group.assignment_seq ?? 0));
       const candidate = latestPrHandoffDelivery(ledger, args.group);
@@ -520,6 +528,15 @@ function main() {
     process.exit(2);
   }
   const headSha = headResult.stdout;
+  if (ledger?.pr_plan) {
+    const size = runGit(args.repo, ['diff', '--numstat', '--no-renames', ledger.baseline_tip, headSha, '--']);
+    const rows = size.stdout.split('\n').filter(Boolean).map(row => row.split('\t').slice(0, 2));
+    if (size.status !== 0 || rows.some(row => row.length !== 2 || row.some(value => !/^\d+$/.test(value)))
+      || rows.reduce((total, row) => total + Number(row[0]) + Number(row[1]), 0) >= 800) {
+      console.error('GAP: pr-total-lines: 含测试的新增＋删除必须严格 <800，无法计数亦拒绝');
+      process.exit(2);
+    }
+  }
   if (args.group) {
     const group = findGroup(ledger, args.group);
     const branch = runGit(args.repo, ['rev-parse', '--abbrev-ref', 'HEAD']);

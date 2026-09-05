@@ -26,6 +26,7 @@ export const TEST_FILES = [
   'graph.test.mjs',
   'mem-probe.test.mjs',
   'owner-chain.test.mjs',
+  'pr-plan.test.mjs',
   'ready-check.test.mjs',
   'render-pr-handoff.test.mjs',
   'run-ledger.test.mjs',
