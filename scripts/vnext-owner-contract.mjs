@@ -3,8 +3,8 @@
 // 终稿：docs/2026-09-04-0904-approve-exec-final.md
 // 本模块不改旧 ledger GROUP_STATES 语义；缺宿主 create gateway 时 fail-closed。
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import { LedgerError } from './run-ledger.mjs';
 
 export const CONTRACT_VERSION = 'vnext-owner-pr-ready-1';
@@ -53,7 +53,7 @@ export const SECTION_TITLES = Object.freeze([
 // Cindy host create gateway 尚未提供原子 handoff 绑定。skill 仓不得假装已通。
 export const HOST_CREATE_GATEWAY = Object.freeze({
   available: false,
-  reason: 'session-dispatch 只支持 --dry-run；真实 send_to_session 没有 canonical handoff / lease / CAS 原子绑定',
+  reason: '宿主无幂等 create；旧入口只支持 --dry-run 预览。真实路径用 owner-dispatch 的 skill 单次 claim，未知回执不重派',
 });
 
 export function handoffHash(text) {
@@ -120,6 +120,10 @@ function assertExcerptFile(file, line, worktree) {
   const abs = isAbsolute(file) ? file : join(worktree, file);
   if (!existsSync(abs)) {
     throw new LedgerError('PACKET_INCOMPLETE', `第 3 段摘录文件不存在: ${file}`);
+  }
+  const rel = relative(realpathSync(worktree), realpathSync(abs));
+  if (!rel || rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel) || !statSync(abs).isFile()) {
+    throw new LedgerError('PACKET_INCOMPLETE', '第 3 段摘录必须是仓内真实文件，禁止越界或目录');
   }
   const lines = readFileSync(abs, 'utf8').split(/\r?\n/);
   if (line > lines.length) {
@@ -190,6 +194,13 @@ export function assertHandoffComplete(text, { why, how, excerpts, verify_cmds, t
     if (!text.includes(`## ${t}`)) {
       throw new LedgerError('PACKET_INCOMPLETE', `开工包缺块: ${t}`);
     }
+  }
+  const headings = text.split('\n').filter((line) => /^## \d+\./.test(line));
+  if (headings.join('|') !== SECTION_TITLES.map((t) => '## ' + t).join('|')) {
+    throw new LedgerError('PACKET_INCOMPLETE', '开工包 0–10 必须各出现一次且顺序正确');
+  }
+  for (const heading of SECTION_TITLES) if (!sectionBody(text, heading)) {
+    throw new LedgerError('PACKET_INCOMPLETE', '开工包空段: ' + heading);
   }
   if (title) assertOwnerTitle(title);
   if (excerpts) assertExcerpts(excerpts, { worktree });

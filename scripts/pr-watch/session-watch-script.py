@@ -47,6 +47,7 @@ def _bind(state_dir: str, plan: dict, session_id: str) -> None:
         "--repo", plan["repo"],
         "--pr", str(plan["pr"]),
         "--session-id", session_id,
+        "--claim-id", plan["_create_claim_id"],
     ])
 
 
@@ -112,6 +113,15 @@ def _release_create(state_dir: str, plan: dict, claim_id: str | None = None) -> 
     _run_node(args)
 
 
+def _ack_takeover(scan: dict, state_dir: str, schedule_id: str) -> None:
+    for item in scan.get("observed", []):
+        subprocess.check_output([
+            "node", str(HERE / "takeover.mjs"), "ack", "--state-dir", state_dir,
+            "--owner", item["owner"], "--repo", item["repo"], "--pr", str(item["pr"]),
+            "--schedule-id", schedule_id,
+        ], text=True)
+
+
 def apply_watch_round(dispatch_fn, *, scan=None, bind_fn=_bind, persist_fn=_persist_cursors, unregister_fn=_unregister, claim_fn=_claim_create, release_fn=_release_create) -> dict:
     """真实协议一轮：create 必须拿到 session_id 并写回；无信号不派。"""
     state_dir = os.environ.get("AE_WATCH_STATE_DIR", "")
@@ -119,41 +129,43 @@ def apply_watch_round(dispatch_fn, *, scan=None, bind_fn=_bind, persist_fn=_pers
         raise SystemExit("AE_WATCH_STATE_DIR 未设置")
     scan = scan if scan is not None else _scan()
     applied = []
+    errors = []
     for plan in scan.get("dispatches", []):
-        live = dict(plan)
-        if live.get("action") == "create":
-            if os.environ.get("AE_WATCH_ALLOW_CREATE") != "1":
-                raise SystemExit("缺宿主 create gateway，盯梢不得另开第二 owner")
-            claim = claim_fn(state_dir, live)
-            if not claim.get("claimed"):
-                live["action"] = "jump"
-                live["session_id"] = claim.get("session_id")
-            else:
-                live["_create_claim_id"] = (claim.get("claim_id")
-                                              or claim.get("state", {}).get("create_claim", {}).get("claim_id"))
-        claim_id = live.get("_create_claim_id") if live.get("action") == "create" else None
         try:
-            result = dispatch_fn(_dispatch_params(live)) or {}
-        except Exception:
+            live = dict(plan)
             if live.get("action") == "create":
-                release_fn(state_dir, live, claim_id)
-            raise
-        session_id = result.get("target_session_id")
-        if live.get("action") == "create":
-            if not session_id:
-                release_fn(state_dir, live, claim_id)
-                raise SystemExit(
-                    f"create {live.get('owner')}/{live.get('repo')}#{live.get('pr')} 未返回 target_session_id，拒绝空跑"
-                )
-            bind_fn(state_dir, live, session_id)
-        persist_fn(state_dir, live)
-        live.pop("_create_claim_id", None)
-        applied.append({**live, "session_id": session_id or live.get("session_id")})
+                claim = claim_fn(state_dir, live)
+                if not claim.get("claimed"):
+                    live["action"] = "jump"
+                    live["session_id"] = claim.get("session_id")
+                else:
+                    live["_create_claim_id"] = (claim.get("claim_id")
+                                                  or claim.get("state", {}).get("create_claim", {}).get("claim_id"))
+            claim_id = live.get("_create_claim_id") if live.get("action") == "create" else None
+            try:
+                result = dispatch_fn(_dispatch_params(live)) or {}
+            except Exception:
+                # A lost response may hide a successful external create. Keep claim.
+                raise
+            session_id = result.get("target_session_id")
+            if live.get("action") == "create":
+                if not session_id:
+                    raise RuntimeError(
+                        f"create {live.get('owner')}/{live.get('repo')}#{live.get('pr')} 未返回 target_session_id，拒绝空跑"
+                    )
+                bind_fn(state_dir, live, session_id)
+            persist_fn(state_dir, live)
+            live.pop("_create_claim_id", None)
+            applied.append({**live, "session_id": session_id or live.get("session_id")})
+        except Exception as exc:
+            errors.append({"owner": plan.get("owner"), "repo": plan.get("repo"), "pr": plan.get("pr"), "error": str(exc)})
+            # Keep an ambiguous create claimed; continue unrelated PRs.
     for term in scan.get("terminals", []):
         unregister_fn(state_dir, term)
     return {
         "scanned": scan.get("scanned", 0),
         "dispatches": applied,
+        "errors": errors,
         "terminals": scan.get("terminals", []),
     }
 
@@ -164,7 +176,7 @@ def main() -> None:
     _load_watch_config()
     sys.path.insert(0, str(HERE))
     try:
-        from maker_client import emit_complete, sessions_dispatch
+        from maker_client import emit_complete, sessions_dispatch, _client
     except ImportError as exc:
         raise SystemExit(f"cindy-script 协议客户端缺失，拒绝空跑: {exc}") from exc
 
@@ -175,12 +187,21 @@ def main() -> None:
             target_session_id=params.get("target_session_id"),
         ) or {}
 
-    out = apply_watch_round(dispatch)
+    # Consume the actual host start frame before scanning; no Core changes.
+    _client._ensure_started()
+    schedule_id = _client.context.get("scheduleId")
+    if not isinstance(schedule_id, str) or not schedule_id:
+        raise SystemExit("当前 script start 帧缺 scheduleId，不能出接管回执")
+    scan = _scan()
+    out = apply_watch_round(dispatch, scan=scan)
+    failed = {(item["owner"], item["repo"], item["pr"]) for item in out["errors"]}
+    scan["observed"] = [item for item in scan.get("observed", []) if (item["owner"], item["repo"], item["pr"]) not in failed]
+    _ack_takeover(scan, os.environ["AE_WATCH_STATE_DIR"], schedule_id)
     last_id = None
     if out["dispatches"]:
         last_id = out["dispatches"][-1].get("session_id")
     emit_complete(
-        f"dispatches={len(out['dispatches'])} terminals={len(out['terminals'])}",
+        f"dispatches={len(out['dispatches'])} terminals={len(out['terminals'])} errors={json.dumps(out['errors'], ensure_ascii=False)}",
         last_id,
     )
 

@@ -1147,6 +1147,19 @@ test('sc-p1d: 非法跳转矩阵全部 exit 2 且落 illegal_transition 事件',
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', T, '--pr-open-receipt', prOpenReceiptPath(dir, { ledgerPath }));
   assert.equal(r.status, 2, 'accepted→pr-open 缺 phase=ready 必须 exit 2');
   assert.match(r.stderr, /phase=ready/);
+  const current = readLedger(ledgerPath);
+  const localReceipt = join(dir, 'local-ready.json');
+  const localStamp = { candidate_sha: SHA1, ledger_version: current.version, checked_at: later(T),
+    group_id: g, assignment_seq: 0, manifest_core_hash: current.manifest_core_hash,
+    base: current.waves.flatMap((wave) => wave.groups).find((item) => item.group_id === g).base };
+  writeFileSync(localReceipt, JSON.stringify({ ...localStamp, candidate_sha: SHA3 }));
+  r = cli('note-event', ledgerPath, '--event', 'local_validated', '--detail', JSON.stringify({ group_id: g, receipt: localReceipt }), '--now', later(T));
+  assert.equal(r.status, 2, '其他提交的本机验收回执必须拒');
+  writeFileSync(localReceipt, JSON.stringify(localStamp));
+  r = cli('note-event', ledgerPath, '--event', 'local_validated', '--detail', JSON.stringify({ group_id: g, receipt: localReceipt }), '--now', later(T));
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'pr-open', '--now', later(T), '--pr-open-receipt', prOpenReceiptPath(dir, { ledgerPath }));
+  assert.equal(r.status, 0, '本组已过七门不必等 run ready: ' + r.stderr);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'local-cleaned', '--now', T, '--cleanup-receipt', cleanupReceiptPath(dir, { ledgerPath }));
   assert.equal(r.status, 2, 'accepted 不得直接 local-cleaned');
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'archived', '--now', T, '--archive-receipt', archiveReceiptPath(dir, { ledgerPath }));
@@ -1159,7 +1172,7 @@ test('sc-p1d: 非法跳转矩阵全部 exit 2 且落 illegal_transition 事件',
   const ledger = readLedger(ledgerPath);
   const illegal = ledger.events.filter((e) => e.type === 'illegal_transition');
   assert.ok(illegal.length >= before + 14, `应至少落 ${before + 14} 条 illegal_transition，实际 ${illegal.length}`);
-  assert.equal(ledger.waves[0].groups[0].state, 'accepted', '非法尝试不得改变组状态');
+  assert.equal(ledger.waves[0].groups[0].state, 'pr-open', '非法尝试不得改变已验收组状态');
 });
 
 test('sc-p1d: failed→pending 后 rounds==0 且 tip_sha/worker_label/身份三键清空（重派不继承旧计数/旧身份）', () => {
@@ -1250,17 +1263,21 @@ test('sc-p1d: set-state --unresolved 一律拒（unresolved 唯一通道是审�
   assert.deepEqual(readLedger(ledgerPath).waves[0].groups[0].review, { rounds: 0, unresolved: 0 });
 });
 
-test('sc-p1d: --identity 含空白字符拒（身份行空格分隔解析）', () => {
+test('sc-p1d: worktree 允许空格但禁止控制字符，branch 不允许空白', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
   for (const bad of [
-    { worktree: '/wt/group 1', branch: 'b', base: SHA3 },
+    { worktree: '/wt/group\n1', branch: 'b', base: SHA3 },
     { worktree: '/wt/g', branch: 'feat/a b', base: SHA3 },
   ]) {
     const r = cli('set-state', ledgerPath, '--group', 'g4', '--identity', JSON.stringify(bad), '--now', T);
     assert.equal(r.status, 2, `identity ${JSON.stringify(bad)} 必须 exit 2`);
-    assert.match(r.stderr, /空白/);
+    assert.match(r.stderr, /空白|换行/);
   }
+  const r = cli('set-state', ledgerPath, '--group', 'g4', '--identity', JSON.stringify({
+    worktree: '/wt/group 1', branch: 'b', base: SHA3,
+  }), '--now', T);
+  assert.equal(r.status, 0, r.stderr);
 });
 
 test('sc-p1d: tip_sha 非 40hex 拒（任意字符串拒，格式校验）', () => {
@@ -3399,6 +3416,8 @@ test('watch_registered: init 后改夹具副本 mini-watch.json 必须拒（三�
   mkdirSync(join(tree, 'config'), { recursive: true });
   mkdirSync(join(tree, 'tests/fixtures'), { recursive: true });
   cpSync(join(ROOT, 'scripts/run-ledger.mjs'), join(tree, 'scripts/run-ledger.mjs'));
+  cpSync(join(ROOT, 'scripts/pr-watch'), join(tree, 'scripts/pr-watch'), { recursive: true });
+  cpSync(join(ROOT, 'scripts/lib'), join(tree, 'scripts/lib'), { recursive: true });
   cpSync(join(ROOT, 'scripts/lib/mini-watch-config.mjs'), join(tree, 'scripts/lib/mini-watch-config.mjs'));
   writeFileSync(join(tree, 'config/defaults.json'), readFileSync(join(ROOT, 'config/defaults.json'), 'utf8'));
   const cfgPath = join(tree, 'config/mini-watch.json');
@@ -3469,8 +3488,8 @@ test('watch_registered: init 后改夹具副本 mini-watch.json 必须拒（三�
   r = treeCli('note-event', ledgerPath, '--event', 'pr_ready', '--detail', JSON.stringify({
     group_id: g,
     pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
-    current_pr_head_sha: SHA1,
-  }), '--now', T);
+    current_pr_head_sha: SHA1, receipt: prOpen,
+  }), '--now', later(T));
   assert.equal(r.status, 0, r.stderr);
   const driftedHash = createHash('sha256').update(readFileSync(cfgPath)).digest('hex');
   assert.notEqual(driftedHash, pinned);
@@ -3479,9 +3498,10 @@ test('watch_registered: init 后改夹具副本 mini-watch.json 必须拒（三�
   writeFileSync(watchReceipt, `${JSON.stringify({
     ok: true, owner: 'xindong', repo: 'mivo-canvas-plugin', pr_number: 1, branch: 'feat/run-ledger',
     state_file: '/mini/runtime/state/xindong__mivo-canvas-plugin__1.json',
-    session_id: null, checked_at: later(T),
+    session_id: null, checked_at: later(later(T)),
     ledger_version: afterOpen.version, assignment_seq: 0,
     mini_watch_config_sha256: driftedHash,
+    takeover: { schedule_id: 'fixture-script', first_scan_ack: T, last_scan_at: later(later(T)), config_sha256: driftedHash },
   })}\n`);
   r = treeCli('note-event', ledgerPath, '--event', 'watch_registered', '--detail', JSON.stringify({
     group_id: g,
@@ -3508,6 +3528,8 @@ test('组F-1: 非规范化路径调用必须实际执行 init 并创建台账（
   mkdirSync(join(dir, 'scripts/lib'), { recursive: true });
   mkdirSync(join(dir, 'config'), { recursive: true });
   cpSync(join(ROOT, 'scripts/run-ledger.mjs'), join(dir, 'scripts/run-ledger.mjs'));
+  cpSync(join(ROOT, 'scripts/pr-watch'), join(dir, 'scripts/pr-watch'), { recursive: true });
+  cpSync(join(ROOT, 'scripts/lib'), join(dir, 'scripts/lib'), { recursive: true });
   cpSync(join(ROOT, 'scripts/lib/mini-watch-config.mjs'), join(dir, 'scripts/lib/mini-watch-config.mjs'));
   writeFileSync(join(dir, 'config/defaults.json'), readFileSync(join(ROOT, 'config/defaults.json'), 'utf8'));
   writeFileSync(join(dir, 'config/mini-watch.json'), readFileSync(join(ROOT, 'config/mini-watch.json'), 'utf8'));

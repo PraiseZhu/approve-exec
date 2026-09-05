@@ -10,7 +10,7 @@
 1. 调用你自己的 goal skill。必须真的 Read 这个文件，读完按其正文走场景 C：
    /Users/praise/.agents/skills/goal/SKILL.md
    未 Read 这一文件 = 未调用 goal skill = 不得改 allowed_paths 里的任何文件。
-2. 本 PR 的 SC 全 PASS 之后、派 tester/reviewer 之前：必须真的现读同一份 routing.json。
+2. 首次派 tester/reviewer 之前（允许提前验证；最终仍须验证当前提交的完整 SC）：必须真的现读同一份 routing.json。
    先跑 `model-route show`
    或 Read
    /Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json
@@ -21,8 +21,8 @@
 
 检查你是否真的执行（自报「我读了」不算；必须先交收据）：
 
-- 第 1 步完成后、改任何代码之前：提交 payload 类型 `gate_goal`，带 goal_skill_path + goal_skill_sha256（对该文件 utf-8 字节做 sha256，64 位 hex）。收据走宿主 gateway / 台账 inbox 自动入账，禁止 jump 进 lead 聊天，禁止等待 lead 审核。
+- 第 1 步完成后、改任何代码之前：提交 payload 类型 `gate_goal`，带 goal_skill_path + goal_skill_sha256（对该文件 utf-8 字节做 sha256，64 位 hex）。收据走本 skill 的 owner-gate.mjs 校验并直接入账，禁止 jump 进 lead 聊天，禁止等待 lead 审核。
 - 第 2 步完成后、create_worker 之前：提交 payload 类型 `gate_routing`，带 route_source + routing_sha256（对 routing.json utf-8 字节做 sha256）+ e2e_model + review_model（从刚读到的 JSON 抄 primary，不是从本包快照抄）。同样自动入账，不经 lead 聊天。
-- 宿主会用磁盘上的同一文件重算 sha256。对不上、缺收据、或收据到达前 worktree 已有新 commit = 未执行 = 不得开工。
+- owner-gate.mjs 会用磁盘上的同一文件重算 sha256。对不上、缺收据、或收据到达前 worktree 已有新 commit = 未执行 = 不得开工。
 
 未读 goal skill、或未读 routing.json、或本地 hash 自检失败：不得开工。不得写代码、不得开 PR、不得派 worker。停，提交 decision_required，写明卡在第几步。禁止问 lead「要开始吗」。

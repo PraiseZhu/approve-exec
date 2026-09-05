@@ -128,11 +128,12 @@ function buildEnv(t, repo, mutate) {
   };
 }
 
-function runReady(repo, env, { withNow = true, now = FIXED_NOW, withReceipt = true, receiptPath } = {}) {
+function runReady(repo, env, { withNow = true, now = FIXED_NOW, withReceipt = true, receiptPath, group } = {}) {
   const args = [READY_CHECK, '--repo', repo.dir, '--ledger', env.ledgerPath, '--manifest', env.manifestPath,
     '--verdict', env.verdictPath, '--e2e-report', env.e2ePath, '--presubmit-dir', env.presubmitDir];
   if (withNow) args.push('--now', now);
   if (withReceipt) args.push('--receipt', receiptPath || join(env.dir, 'ready-receipt.json'));
+  if (group) args.push('--group', group);
   return run(process.execPath, args);
 }
 
@@ -248,6 +249,40 @@ test('full: 七项全齐 → READY_FOR_LATER_SUBMIT_PR_SKILL 含分支与 SHA，
   assert.equal(receipt.candidate_sha, repo.sha, 'receipt.candidate_sha 必须 = 候选仓 HEAD');
   assert.equal(receipt.ledger_version, 3, 'receipt.ledger_version 必须 = 检查时读到的台账 version（非 +1）');
   assert.equal(receipt.checked_at, FIXED_NOW, 'receipt.checked_at 必须 = --now 注入的时间戳');
+});
+
+test('单 PR 七门：其他组未完成不阻塞；本组身份、提交与真实文件仍校验', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, (data) => {
+    const group = data.ledger.waves[0].groups[0];
+    group.worktree = repo.dir;
+    group.base = repo.sha;
+    group.branch = 'feat/fixture-branch';
+    data.ledger.waves[1].groups[0].state = 'executing';
+    for (const event of data.ledger.events) event.detail.assignment_seq = 0;
+    data.ledger.events.push({ type: 'delivery', detail: {
+      group_id: 'g1', assignment_seq: 0, branch: group.branch, tip_sha: repo.sha,
+      e2e: { status: 'pass', candidate_sha: repo.sha },
+      review: { unresolved: 0, candidate_sha: repo.sha },
+      size_gate: { result: 'PASS', candidate_sha: repo.sha },
+    } });
+  });
+  const result = runReady(repo, env, { group: 'g1' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /LOCAL_PR_VALIDATED/);
+  const receipt = JSON.parse(readFileSync(join(env.dir, 'ready-receipt.json'), 'utf8'));
+  assert.equal(receipt.group_id, 'g1');
+  assert.equal(receipt.candidate_sha, repo.sha);
+  assert.equal(receipt.base, repo.sha);
+  assert.equal(receipt.assignment_seq, 0);
+  assert.equal(runReady(repo, env).status, 2, '整批验收仍不能越过未完成的组');
+  assert.equal(runReady(repo, env, { group: 'missing' }).status, 2);
+  assert.equal(spawnSync('git', ['checkout', '-b', 'feat/wrong-owner'], { cwd: repo.dir }).status, 0);
+  assert.equal(runReady(repo, env, { group: 'g1' }).status, 2, '相同提交、错误分支也拒绝');
+  assert.equal(spawnSync('git', ['checkout', 'feat/fixture-branch'], { cwd: repo.dir }).status, 0);
+  const headSha = appendCommit(t, repo, { empty: true, message: 'unaccepted new head' });
+  rebindToHead(env, headSha);
+  assert.equal(runReady(repo, env, { group: 'g1' }).status, 2, '提交变化后即使树相同也须重新验收');
 });
 
 test('gap1: 台账缺组（组数 < manifest packets）→ exit 2 gap ledger-partition', (t) => {
@@ -898,13 +933,14 @@ const MUTATION_PREDICTIONS = [
     to: '&& false) {',
     red: ['F-N: dispatch 事件 group_id 换成未知 gX（数量仍为 2）→ exit 2 gap ledger-partition',
           'F-N: manifest packet group_id 换成未知 gX → exit 2 gap ledger-partition'] },
-  { id: '变异⑦', label: 'F-O 不可解析输入不提前 exit', from: 'const ledger = readJsonOrNull(args.ledger);\n  // manifest 经 readManifest 统一收口（receipts 在场/形状契约与 run-ledger 全部消费入口同判据）：\n  // 不合约/不可解析 → 转 gap 占位（F-O：不提前 exit，后项照常运行），错误原文随 manifestError\n  // 进 gap detail——「可解析但不合约」不得被笼统说成「不可解析」。\n  let manifest = null;\n  let manifestError = null;\n  try { manifest = readManifest(args.manifest); } catch (err) { manifestError = err.message; }',
-    to: 'const ledger = readJsonOrNull(args.ledger);\n  const manifest = readJsonOrNull(args.manifest);\n  let manifestError = null;\n  if (!ledger || !manifest) { console.error(\'GAP: ledger-partition: 前置输入不可解析（旧版提前 exit 行为）\'); process.exit(2); }',
+  { id: '变异⑦', label: 'F-O 不可解析输入不提前 exit', from: 'let ledger = readJsonOrNull(args.ledger);\n  // manifest 经 readManifest 统一收口（receipts 在场/形状契约与 run-ledger 全部消费入口同判据）：\n  // 不合约/不可解析 → 转 gap 占位（F-O：不提前 exit，后项照常运行），错误原文随 manifestError\n  // 进 gap detail——「可解析但不合约」不得被笼统说成「不可解析」。\n  let manifest = null;\n  let manifestError = null;\n  try { manifest = readManifest(args.manifest); } catch (err) { manifestError = err.message; }',
+    to: 'let ledger = readJsonOrNull(args.ledger);\n  let manifest = readJsonOrNull(args.manifest);\n  let manifestError = null;\n  if (!ledger || !manifest) { console.error(\'GAP: ledger-partition: 前置输入不可解析（旧版提前 exit 行为）\'); process.exit(2); }',
     red: ['F-O: ledger+e2e 都删 → 三项 gap 同时点名（不跳过后项）',
           'F-O: manifest+verdict 都删 → ledger-partition + verdict-anchors 双 gate 点名'] },
-  { id: '变异⑨', label: '→ready receipt 写入（成功路径铸凭据）', from: 'const receiptError = writeReadyReceipt(args.receipt, { candidateSha: headSha, ledgerVersion: ledger.version, checkedAt: args.now });',
+  { id: '变异⑨', label: '→ready receipt 写入（成功路径铸凭据）', from: 'const receiptError = writeReadyReceipt(args.receipt, { candidateSha: headSha, ledgerVersion: ledger.version, checkedAt: args.now, groupReceipt });',
     to: 'const receiptError = null; // 变异⑨：receipt 写盘被挖掉',
-    red: ['full: 七项全齐 → READY_FOR_LATER_SUBMIT_PR_SKILL 含分支与 SHA，receipt 原子落盘（ledger_version=检查时 version），台账不被驱动',
+    red: ['单 PR 七门：其他组未完成不阻塞；本组身份、提交与真实文件仍校验',
+          'full: 七项全齐 → READY_FOR_LATER_SUBMIT_PR_SKILL 含分支与 SHA，receipt 原子落盘（ledger_version=检查时 version），台账不被驱动',
           'receipt 写盘失败: --receipt 指向不存在目录 → exit 2 gap ready-receipt，不输出 READY 行',
           '闭环: ready-check 写出 receipt → run-ledger set-state --ready-receipt 消费 → exit 0 成功到 ready',
           '闭环反例 A: 铸 receipt 后对台账做一次写操作（version+1）→ run-ledger 拒并点名版本不匹配（防重放）',
@@ -939,6 +975,8 @@ function copyTreeForMutation(t, mutateScript) {
   writeFileSync(join(dir, 'scripts/ready-check.mjs'), scriptMutated);
   // full 测试的链尾 run-ledger validate（F2 回归锚点）需要真实 run-ledger.mjs 副本
   writeFileSync(join(dir, 'scripts/run-ledger.mjs'), readFileSync(join(root, 'scripts/run-ledger.mjs'), 'utf8'));
+  cpSync(join(root, 'scripts/pr-watch'), join(dir, 'scripts/pr-watch'), { recursive: true });
+  cpSync(join(root, 'scripts/lib'), join(dir, 'scripts/lib'), { recursive: true });
   mkdirSync(join(dir, 'scripts/lib'), { recursive: true });
   writeFileSync(join(dir, 'scripts/lib/mini-watch-config.mjs'), readFileSync(join(root, 'scripts/lib/mini-watch-config.mjs'), 'utf8'));
   writeFileSync(join(dir, 'config/mini-watch.json'), readFileSync(join(root, 'config/mini-watch.json'), 'utf8'));

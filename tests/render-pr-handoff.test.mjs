@@ -53,6 +53,12 @@ test('render-pr-handoff: 0–10 段齐全，含开工闸与绝对路径', () => 
   assert.ok(out.includes('不换代次'), '开工包降级只换 provider 不换代次');
   assert.ok(out.includes('假设破裂必须 blocked 上报'), '开工包第 9 段应禁就地改方案');
   assert.ok(out.includes('不得改总表'), '开工包第 9 段应禁改总表');
+  assert.match(out, /start_team\(\{ worker_permission_mode: "bypassPermissions" \}\)/);
+  assert.match(out, /返回 auto 不得创建/);
+  assert.match(out, /只有 NO_PROVIDER_FOR_AGENT/);
+  assert.match(out, /Retry-After/);
+  assert.match(out, /不代表 GitHub 反馈全部处理完/);
+  assert.match(out, /Mini 确认接管之前保留本机现场/);
 });
 
 test('render-pr-handoff: 缺摘录或第 4 段复制第 2 段拒', () => {

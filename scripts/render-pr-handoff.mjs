@@ -3,6 +3,7 @@
 import { readFileSync, realpathSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { sha256 } from './lib/common.mjs';
 import { LedgerError, readLedger, readManifest, assertManifestBound, findPacket, findGroupWave } from './run-ledger.mjs';
 import {
   assertHandoffComplete, assertExcerpts, assertVerifyCmds, assertOwnerTitle,
@@ -36,6 +37,14 @@ function requireAbs(path, what) {
   if (typeof path !== 'string' || !path.startsWith('/')) {
     throw new LedgerError('PACKET_INCOMPLETE', `${what} 必须是绝对路径（当前: ${path ?? '缺失'}）`);
   }
+}
+
+export function renderScText(packet) {
+  return packet.scs_inline.map((sc) => {
+    const anchors = Array.isArray(sc.anchor_paths) ? sc.anchor_paths.join(', ') : packet.allowed_paths.join(', ');
+    return '- id=' + sc.id + '\n  priority_id=' + sc.priority_id + '\n  change=' + (sc.change ?? '')
+      + '\n  holds=' + (sc.holds ?? '') + '\n  expect=' + (sc.expect ?? '') + '\n  anchor_paths=' + anchors;
+  }).join('\n');
 }
 
 export function renderPrHandoff({
@@ -97,6 +106,10 @@ export function renderPrHandoff({
 
   const whyLine = resolvedWhy;
   const excerptLines = resolvedExcerpts.map((e) => (typeof e === 'string' ? e : `${e.file}:${e.line} ${e.behavior}`));
+  for (const entry of resolvedExcerpts) {
+    const file = typeof entry === 'string' ? entry.trim().match(/^(\S+):\d+\s/)[1] : entry.file;
+    excerptLines.push('source_sha256(' + file + ')=' + sha256(readFileSync(resolve(identity.worktree, file))));
+  }
   const howLine = resolvedHow;
   if (typeof howLine !== 'string' || howLine.trim().length === 0) {
     throw new LedgerError('PACKET_INCOMPLETE', '第 4 段具体改法不能为空，不得回退成 instruction 禁令');
@@ -106,17 +119,10 @@ export function renderPrHandoff({
     ...(forbiddenExtra ?? []),
     '未读 goal / 未读 routing.json 不得开工',
     '不得改总表 / allowed_paths / base（只能 lead 走 replan）',
-    '假设破裂必须 blocked 上报，禁止就地改方案',
+    '假设破裂必须 blocked 上报：仅指 SC、接口兼容、授权或跨 PR 依赖变化；域内等价实现可自决',
   ];
 
-  const scLines = packet.scs_inline.map((sc) => {
-    const id = sc.id;
-    const change = sc.change ?? '';
-    const holds = sc.holds ?? '';
-    const expect = sc.expect ?? '';
-    const anchors = Array.isArray(sc.anchor_paths) ? sc.anchor_paths.join(', ') : (packet.allowed_paths ?? []).join(', ');
-    return `- id=${id}\n  change=${change}\n  holds=${holds}\n  expect=${expect}\n  anchor_paths=${anchors}`;
-  });
+  const scLines = renderScText(packet).split('\n');
 
   const snapshotNote = snapshot
     ? `渲染当时快照，派工时再读。model-route show / ${ROUTING_LIVE}${typeof snapshot === 'string' ? `\n${snapshot}` : ''}`
@@ -142,20 +148,22 @@ export function renderPrHandoff({
     ['8. 做完之后（自动，不要问 lead）', [
       'candidate 只是检查点，不是终点。同一 owner 继续到机器可证明的 PR Ready。',
       'mem-probe → 现读同一份 routing.json 再派 e2e / GPT 单审；结果只回 owner，不向 lead 请示。',
+      '先确认本 session 可调用只读 sub、Orca start_team/create_worker/create_workers。派 worker 前显式 start_team({ worker_permission_mode: "bypassPermissions" })，读取返回值并确认仍为 bypassPermissions；缺能力或返回 auto 不得创建，不得把配置期望当实际权限。',
       `绝对路径: ${ROUTING_LIVE}`,
       '先跑 model-route show',
       snapshotNote,
-      '可自决：实现选型；派 read-only sub / e2e / review worker；429 / Too Many Requests、worker 崩溃或异常终止、create_worker 创建失败、provider 瞬时不可用，一律按现读 routing.json 该档 fallbacks 顺序换 provider、不换代次；每次降级写入 fallbacks_tried，禁止空数组就问 lead；测试红 / CI 红 / review unresolved>0 在 allowed_paths 内修到绿；已授权的 feature branch push 与目标 PR create/update；注册 watcher 唤醒同一 owner。',
-      '必须停（DECISION_REQUIRED，lease 不放）：硬停六条；hash/身份自检失败；SC 或现场与第 3/4 段矛盾；allowed_paths 不够；授权不足；fallbacks 全部试完仍失败；连续 3 轮零增量。只发一条 decision_required（必须带 fallbacks_tried），等 lead 一个决定后同一 owner 继续。429 不是 B 类停。',
-      '按第⑩节提交 candidate 后不得完成、不得归档、不得问 lead 下一步。继续开/更新已授权 PR，跟 CI/review 到 PR Ready。子 session 不合入。merge 由人点。',
+      '可自决：不改变 SC、接口兼容、授权和跨 PR 依赖的域内实现选型；派 read-only sub / e2e / review worker；本机测试红和 review unresolved>0 在 allowed_paths 内修到绿；已授权的 feature branch push 与目标 PR create/update。',
+      '429 / Too Many Requests 按 Retry-After 和现有预算在原路由等待重试，记录下一次唤醒；worker 崩溃先查原 worker 状态再恢复。创建失败结果不明时先查绑定，不盲目重复创建。只有 NO_PROVIDER_FOR_AGENT / PROVIDER_ROUTE_UNAVAILABLE / BUDGET_MODEL_REQUIRES_API_MODE 才按现读该档 fallbacks 换 provider、不换代次。每次实际降级写入 fallbacks_tried；未走降级保留空数组并说明原因，禁止空数组就问 lead。',
+      '必须停（DECISION_REQUIRED，保留原 owner 绑定）：硬停六条；hash/身份自检失败；SC、接口兼容、授权或跨 PR 依赖发生变化；allowed_paths 不够；授权不足；已授权恢复策略和预算耗尽；连续 3 轮零增量。只发一条 decision_required，附已尝试动作和 fallbacks_tried，等 lead 一个决定后同一 owner 继续。等待期间保留任务状态、阻塞原因和唤醒条件，不报完成。',
+      '按第⑩节提交 candidate 后不得完成、不得归档、不得问 lead 下一步。lead 仅验收本组当前提交的本机证据；不通过仍由同一 owner 修复。PR Ready 指本机 SC/e2e/独立审查通过且对应非 draft PR 已确认，不代表 GitHub 反馈全部处理完。lead 验收通过后才发本组 Mini 盯梢，后续 GitHub CI/review 由 Mini 负责。Mini 确认接管之前保留本机现场，不以名册文件写入冒充接管成功。子 session 不合入。merge 由人点。',
     ].join('\n')],
     ['9. 禁做', forbidden.map((f) => `- ${f}`).join('\n')],
     ['10. 回报格式', [
       'candidate（检查点，不得含 pr_url）record-delivery exact: branch, tip_sha, scs, goal_skill_path, e2e, review, size_gate, fallbacks_tried',
       `goal_skill_path 必须是 ${GOAL_SKILL}`,
-      'pr_ready exact: run_id, pr_key, owner_session_id, lease_id, owner_epoch, repo, pr_url, base, branch, attempt_id, source_candidate_sha, current_pr_head_sha, scs, local/e2e/CI/review/mergeability/policy, unresolved_count, watcher_id, checked_at',
-      'decision_required exact: sc_id, attempt_id, head, fallbacks_tried, unique_question, options[2-3], owner_recommendation',
-      '缺宿主 create gateway / lease / CAS 时不得假装已入账；skill 侧 fail-closed。',
+      'pr_ready note-event detail: group_id, pr_url, current_pr_head_sha, receipt（重新执行 confirm-pr-open 的真实回执路径；必须晚于 pr_opened，五分钟内）',
+      'decision_required 人读报告：本组/当前 head、阻塞事实、已尝试动作、fallbacks_tried、唯一待决问题、选项和建议；不是另造 ledger schema',
+      '直接调用随包 owner-protocol 的 skill 脚本入账；不需要宿主 gateway。创建回执未知时保留原 claim，不重复 create。',
     ].join('\n')],
   ];
 

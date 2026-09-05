@@ -68,7 +68,7 @@ import { spawnSync } from 'node:child_process';
 // readManifest 一并复用：manifest 在场/形状契约与 run-ledger 全部消费入口同判据（同一份实现，
 // 不在 ready-check 另写一套存在性检查——receipts 在 core hash 黑名单之外，删它 hash 不变，
 // 出口门不能只靠 hash 兜底）。
-import { tmpPath, readManifest } from './run-ledger.mjs';
+import { tmpPath, readManifest, assertManifestBound, findGroup, findPacket, latestPrHandoffDelivery } from './run-ledger.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -86,6 +86,7 @@ function parseArgs(argv) {
     else if (a === '--now') args.now = argv[++i];
     else if (a === '--receipt') args.receipt = argv[++i];
     else if (a === '--config') args.config = argv[++i];
+    else if (a === '--group') args.group = argv[++i];
     else { console.error(`ready-check: 未知参数 ${a}`); process.exit(2); }
   }
   const missing = ['repo', 'ledger', 'manifest', 'verdict', 'e2eReport', 'presubmitDir'].filter((k) => !args[k]);
@@ -441,8 +442,8 @@ function checkFeatureBranch(repoRoot, gaps) {
 // ledger_version = 检查时读到的台账 version（不是 +1——ready-check 不驱动台账）；
 // run-ledger 消费时要求 receipt.ledger_version == 当前台账 version，检查后任何写操作
 // 都会使 receipt 失效（防重放）。返回 null = 成功；字符串 = 失败原因。
-function writeReadyReceipt(receiptPath, { candidateSha, ledgerVersion, checkedAt }) {
-  const receipt = { candidate_sha: candidateSha, ledger_version: ledgerVersion, checked_at: checkedAt };
+function writeReadyReceipt(receiptPath, { candidateSha, ledgerVersion, checkedAt, groupReceipt }) {
+  const receipt = { candidate_sha: candidateSha, ledger_version: ledgerVersion, checked_at: checkedAt, ...groupReceipt };
   const tmp = tmpPath(receiptPath);
   try {
     writeFileSync(tmp, `${JSON.stringify(receipt, null, 2)}\n`);
@@ -477,13 +478,41 @@ function main() {
     process.exit(2);
   }
 
-  const ledger = readJsonOrNull(args.ledger);
+  let ledger = readJsonOrNull(args.ledger);
   // manifest 经 readManifest 统一收口（receipts 在场/形状契约与 run-ledger 全部消费入口同判据）：
   // 不合约/不可解析 → 转 gap 占位（F-O：不提前 exit，后项照常运行），错误原文随 manifestError
   // 进 gap detail——「可解析但不合约」不得被笼统说成「不可解析」。
   let manifest = null;
   let manifestError = null;
   try { manifest = readManifest(args.manifest); } catch (err) { manifestError = err.message; }
+  let groupReceipt;
+  if (args.group) {
+    try {
+      assertManifestBound(ledger, manifest, 'ready-check --group');
+      const group = findGroup(ledger, args.group);
+      const packet = findPacket(manifest, args.group);
+      if (group.state !== 'accepted' || !group.base || !group.worktree
+        || realpathSync(group.worktree) !== realpathSync(args.repo)) {
+        throw new Error('单 PR 验收要求 accepted、明确 base 和匹配的 worktree');
+      }
+      groupReceipt = { group_id: args.group, assignment_seq: group.assignment_seq ?? 0,
+        manifest_core_hash: ledger.manifest_core_hash, base: group.base };
+      const events = ledger.events.filter((event) => event.detail?.group_id === args.group
+        && (event.detail.assignment_seq ?? 0) === (group.assignment_seq ?? 0));
+      const candidate = latestPrHandoffDelivery(ledger, args.group);
+      if (!candidate || candidate.review?.candidate_sha !== group.tip_sha
+        || candidate.review?.unresolved !== 0) throw new Error('单 PR 缺当前 candidate 审查证据');
+      const projectedReview = { type: 'delivery', detail: { group_id: args.group, rounds: group.review.rounds,
+        candidate_sha: candidate.review.candidate_sha } };
+      ledger = { ...ledger, baseline_tip: group.base, waves: [{ wave: 1, groups: [group] }],
+        events: [...events, projectedReview] };
+      manifest = { ...manifest, scs: manifest.scs.filter((sc) => group.sc_ids.includes(sc.id)),
+        dispatch: { ...manifest.dispatch, packets: [packet] } };
+    } catch (error) {
+      console.error('GAP: group-ready: ' + error.message);
+      process.exit(2);
+    }
+  }
 
   const headResult = runGit(args.repo, ['rev-parse', 'HEAD']);
   if (headResult.status !== 0) {
@@ -491,12 +520,24 @@ function main() {
     process.exit(2);
   }
   const headSha = headResult.stdout;
+  if (args.group) {
+    const group = findGroup(ledger, args.group);
+    const branch = runGit(args.repo, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    if (headSha !== group.tip_sha || branch.status !== 0 || branch.stdout !== group.branch) {
+      console.error('GAP: group-ready: 当前 HEAD/branch 不匹配本组已验收提交与分支');
+      process.exit(2);
+    }
+  }
   if (!/^[0-9a-f]{40}$/.test(headSha)) {
     console.error(`GAP: git-clean: 候选仓 HEAD 非 40 位十六进制: ${headSha}`);
     process.exit(2);
   }
 
-  const verdict = readJsonOrNull(args.verdict);
+  let verdict = readJsonOrNull(args.verdict);
+  if (args.group && verdict && Array.isArray(verdict.scs)) {
+    const ids = new Set(manifest.scs.map((sc) => sc.id));
+    verdict = { ...verdict, scs: verdict.scs.filter((sc) => ids.has(sc.sc_id)) };
+  }
   const e2eReport = readJsonOrNull(args.e2eReport);
 
   // 七项逐项独立检查，全部跑完再收束（不因前项失败跳过后项）
@@ -530,7 +571,7 @@ function main() {
   // ready-check 不写台账——phase→ready 由 run-ledger set-state --phase ready
   // --ready-receipt 驱动（锁/CAS/phase 单步/全波集成校验都在它那边）。
   // receipt 未落盘时不得输出 READY 行（写失败 → exit 2 点名）。
-  const receiptError = writeReadyReceipt(args.receipt, { candidateSha: headSha, ledgerVersion: ledger.version, checkedAt: args.now });
+  const receiptError = writeReadyReceipt(args.receipt, { candidateSha: headSha, ledgerVersion: ledger.version, checkedAt: args.now, groupReceipt });
   if (receiptError !== null) {
     console.error(`GAP: ready-receipt: ${receiptError}`);
     process.exit(2);
@@ -538,7 +579,7 @@ function main() {
 
   const branchResult = runGit(args.repo, ['rev-parse', '--abbrev-ref', 'HEAD']);
   const branch = branchResult.status === 0 ? branchResult.stdout : 'unknown';
-  console.log(`READY_FOR_LATER_SUBMIT_PR_SKILL ${branch} ${headSha}`);
+  console.log(`${args.group ? 'LOCAL_PR_VALIDATED' : 'READY_FOR_LATER_SUBMIT_PR_SKILL'} ${branch} ${headSha}`);
   process.exit(0);
 }
 

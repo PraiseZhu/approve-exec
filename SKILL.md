@@ -6,9 +6,11 @@ trigger: 批准执行
 
 # approve-exec — lead 编排守则
 
-**lead 按本文编排**：把 task-priority 产出的 `task-manifest.json` 拆成每 PR 一个独立 PI owner session。owner 拿到通过校验的完整 handoff 立即开工，自主完成实现、验证、提交、推送、开 PR、CI/review 修复，直到远端 PR 达到机器可证明的 PR Ready。candidate 只是检查点。lead 只拆 PR、写开工包、派 session、读证据、裁决 DECISION_REQUIRED。不改「提交 PR」skill。子 session 不得自行 merge。本 skill 不合入、不跑三机同步。
+**lead 按本文编排**：把 task-priority 产出的 `task-manifest.json` 拆成每 PR 一个独立 PI owner session。owner 拿到通过校验的完整 handoff 立即开工，自主完成实现、验证、提交、推送与开 PR；本机证据经 lead 验收且当前非 draft PR 已确认即 PR Ready，后续 GitHub CI/review 由 Mini 跟进。candidate 只是检查点。lead 只拆 PR、写开工包、派 session、读证据、裁决 DECISION_REQUIRED。不改「提交 PR」skill。子 session 不得自行 merge。本 skill 不合入、不跑三机同步。
 
-Lead 只做判断：拆 PR、写开工包、派独立 session、裁决真正例外、归档 PI session。功能代码、SC 执行、e2e、GPT 单审、开远端 PR、追 CI/review 都在 owner session。Mini 名册写完、全部 PI session 归档之前 lead 不停。Fable 只走第⑰ sidecar，禁止 `create_worker` 调 Fable。缺 Cindy 宿主 create gateway / lease / CAS 时，skill 侧 fail-closed，不得假装已通。
+Lead 只做判断：拆 PR、写开工包、派独立 session、裁决真正例外、归档 PI session。功能代码、SC 执行、e2e、GPT 单审、开远端 PR 都在 owner session；移交后的 GitHub CI/review 在 Mini session。Mini 名册写完、全部 PI session 归档之前 lead 不停。Fable 只走第⑰ sidecar，禁止 `create_worker` 调 Fable。不改 Cindy 宿主。skill 用持久 claim + 单次 create + 真实工具回执绑定防重复；结果未知暂停该 PR，不自动重派，不承诺宿主级 exactly-once。
+
+真实派窗与 owner 入账的命令、恢复边界见 references/owner-protocol.md（派发前必读，完整内容随 handoff 发送）。保证等级是 T1 skill 纪律与脚本校验，不是宿主强制隔离。
 
 生态链：task-priority（出 manifest）→ **本 skill（拆 PR + 写完整 handoff + 派唯一 owner）** → owner 调它自己的 goal 场景 C 推到 PR Ready。三审仍不在本 skill。
 
@@ -18,8 +20,8 @@ Lead 只做判断：拆 PR、写开工包、派独立 session、裁决真正例�
 
 - frontmatter：`name: approve-exec`，触发词「批准执行」。
 - 用法：`批准执行`（用当前最新 final manifest 真派）/ `批准执行 --dry-run`（只出拆分表 + 开工包 + 将要 create 的参数，不调 `send_to_session`）/ `批准执行 --resume <run_id>` / `批准执行 --no-budget-pause`（写入包文，关闭该子 session 的自报暂停）。
-- 本 skill 是 **lead 编排层**：Lead 禁止改 `allowed_paths` 里的产品代码，禁止替子 session 修 bug，禁止替子 session 开 PR。E 席 `dispatch=session`；R/T 席 `dispatch=worker`（由**owner session** 派）；V/P 席 `dispatch=lead-self`（只读验收 / 写台账与 `.pr-intent.md`）。happy path 入账由宿主 gateway 自动写，lead 不手工搬 receipt。
-- **开工闸（PI owner session）**：未交过账的 `gate_goal` / `gate_routing` = 未执行 = 不得开工。组状态不得离开 `dispatched`。收据走 gateway / inbox 自动入账，禁止 jump 进 lead 聊天等放行。包文第 0 块必须逐字含：
+- 本 skill 是 **lead 编排层**：Lead 禁止改 `allowed_paths` 里的产品代码，禁止替子 session 修 bug，禁止替子 session 开 PR。E 席 `dispatch=session`；R/T 席 `dispatch=worker`（由**owner session** 派）；V/P 席 `dispatch=lead-self`（只读验收 / 写裁决台账；.pr-intent.md 由 owner 写）。owner 调本 skill 脚本校验并直接入账，不逐步跳回 lead。lead 的编排、验收裁决和登记不是产品执行。
+- **开工闸（PI owner session）**：未交过账的 `gate_goal` / `gate_routing` = 未执行 = 不得开工。组状态不得离开 `dispatched`。收据走 owner-gate.mjs 校验并直接入账，禁止 jump 进 lead 聊天等放行。包文第 0 块必须逐字含：
 
 ```
 用 goal skill 执行。
@@ -32,7 +34,7 @@ Lead 只做判断：拆 PR、写开工包、派独立 session、裁决真正例�
 1. 调用你自己的 goal skill。必须真的 Read 这个文件，读完按其正文走场景 C：
    /Users/praise/.agents/skills/goal/SKILL.md
    未 Read 这一文件 = 未调用 goal skill = 不得改 allowed_paths 里的任何文件。
-2. 本 PR 的 SC 全 PASS 之后、派 tester/reviewer 之前：必须真的现读同一份 routing.json。
+2. 首次派 tester/reviewer 之前（允许提前验证；最终仍须验证当前提交的完整 SC）：必须真的现读同一份 routing.json。
    先跑 `model-route show`
    或 Read
    /Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json
@@ -43,9 +45,9 @@ Lead 只做判断：拆 PR、写开工包、派独立 session、裁决真正例�
 
 检查你是否真的执行（自报「我读了」不算；必须先交收据）：
 
-- 第 1 步完成后、改任何代码之前：提交 payload 类型 `gate_goal`，带 goal_skill_path + goal_skill_sha256（对该文件 utf-8 字节做 sha256，64 位 hex）。收据走宿主 gateway / 台账 inbox 自动入账，禁止 jump 进 lead 聊天，禁止等待 lead 审核。
+- 第 1 步完成后、改任何代码之前：提交 payload 类型 `gate_goal`，带 goal_skill_path + goal_skill_sha256（对该文件 utf-8 字节做 sha256，64 位 hex）。收据走本 skill 的 owner-gate.mjs 校验并直接入账，禁止 jump 进 lead 聊天，禁止等待 lead 审核。
 - 第 2 步完成后、create_worker 之前：提交 payload 类型 `gate_routing`，带 route_source + routing_sha256（对 routing.json utf-8 字节做 sha256）+ e2e_model + review_model（从刚读到的 JSON 抄 primary，不是从本包快照抄）。同样自动入账，不经 lead 聊天。
-- 宿主会用磁盘上的同一文件重算 sha256。对不上、缺收据、或收据到达前 worktree 已有新 commit = 未执行 = 不得开工。
+- owner-gate.mjs 会用磁盘上的同一文件重算 sha256。对不上、缺收据、或收据到达前 worktree 已有新 commit = 未执行 = 不得开工。
 
 未读 goal skill、或未读 routing.json、或本地 hash 自检失败：不得开工。不得写代码、不得开 PR、不得派 worker。停，提交 decision_required，写明卡在第几步。禁止问 lead「要开始吗」。
 ```
@@ -65,16 +67,16 @@ task-priority final manifest
   → 0.7 SiteScout（只读探查，产出 site-report.json；冲突图吃真实写入路径）
   → 1. 拆 PR（估计 ≤800 行；冲突图定并行/串行；写合并顺序）
   → 2. 每个 PR 写开工包（render-pr-handoff.mjs）
-  → 3. send_to_session 派独立 PI owner session（必须经宿主 create gateway 原子绑定完整 handoff；缺 gateway 则 fail-closed，不得真派）→ 立刻钉 Art
+  → 3. send_to_session 派独立 PI owner session（先 owner-dispatch prepare 写一次性 claim，完整包 create 一次，再 bind 真实工具回执；未知结果不重派）→ 立刻钉 Art
   → 3.5 开工闸：gate_goal 自动入账后才允许改代码；gate_routing 自动入账后才允许派 worker（不等 lead 聊天放行）
   → 4. owner session：自己的 goal 场景 C 把本 PR 的 SC 跑绿
         → mem-probe → 现读 routing.json 派 tester（e2e 档）
         → 现读 routing.json 派 reviewer（review 档 = GPT 单审）
-        → candidate 只是检查点；同一 owner 继续开远端 ready PR、跟 CI/review 到 PR Ready
+        → candidate 只是检查点；lead 验收本组本机证据，同一 owner 继续开远端非 draft PR
   → 5. Lead 只读每 PR 的自动入账证据与 DECISION_REQUIRED（失败则给一个决定，同一 owner 继续，直到 PR_READY）
-  → 6. owner 开远端 ready PR（非 draft）；`confirm-pr-open.mjs` 由 gateway 消费，不是 lead 代跑。开 PR ≠ 发盯梢。
-  → 6.5 本组机器可证明 PR Ready 后才 `note-event pr_ready`。4 个 PR 只 Ready 1 个，只给这 1 个发 Mini 盯梢；其余仍 push 着但未 Ready 的不得 register。禁止等整批 run ready。
-  → 7. `confirm-watch-registered.mjs` ssh Mini 跑本仓 `scripts/pr-watch/register.mjs`（按 `config/mini-watch.json`，不要 `--verify` 去查旧班车），把 `REGISTERED/ALREADY <abs>` stdout 封成回执 → `note-event watch_registered --detail.receipt`（前置：本组 `pr_ready`）
+  → 6. owner 开远端 ready PR（非 draft）；`confirm-pr-open.mjs` 由 owner 执行并消费回执，不是 lead 代跑。开 PR ≠ 发盯梢。
+  → 6.5 本组本机验收通过、重新确认当前远端 OPEN 非 draft/head 后才 `note-event pr_ready`。4 个 PR 只 Ready 1 个，只给这 1 个发 Mini 盯梢；其余仍 push 着但未 Ready 的不得 register。禁止等整批 run ready。
+  → 7. `confirm-watch-registered.mjs` ssh Mini 跑本仓 `scripts/pr-watch/register.mjs`（按 config/mini-watch.json，不查旧班车），注册后再查 takeover.mjs 的首扫心跳，全部确认才封成回执 → `note-event watch_registered --detail.receipt`（前置：本组 `pr_ready`）
   → 8. 各 session `wrapup-cleanup.mjs` 清本地 worktree/分支（不删远端）→ 回报
   → 9. lead `archive_sessions` 归档 PI session 后，用 `confirm-session-archived.mjs --result <工具 JSON>` 出回执再入账（lead 自己由用户归档；仅该 PR 的 PR_READY 后）
 ```
@@ -86,14 +88,16 @@ task-priority final manifest
 | E | `session` | 独立 PI session；`goal=goal-scenario-c` |
 | R | `worker` | **子 session** 现读 review 档派 GPT 单审 |
 | T | `worker` | **子 session** 现读 e2e 档派 tester |
-| V | `lead-self` | lead 只读验收（ready-check / receipt），不改产品代码；happy path 零执行 |
-| P | `lead-self` | lead 只写台账契约与 `.pr-intent.md`；开远端 PR、注册 Mini、清本地由 owner / gateway 执行，lead 归档 PI。graph `route=pr_merge` 只是路由档名，不是 git merge |
+| V | `lead-self` | lead 只读验收（ready-check / receipt），不改产品代码；happy path 零产品执行 |
+| P | `lead-self` | lead 只写裁决台账；.pr-intent.md 由 owner 写；开远端 PR、注册 Mini、清本地由 owner / skill 脚本执行，lead 归档 PI。graph `route=pr_merge` 只是路由档名，不是 git merge |
 
-`DISPATCH_MODES` = `lead-self` / `worker` / `session`。LEAD_SELF_SEATS = V、P。WORKER_SEATS = R、T。E 不是 lead-self。graph 内不出现具体模型 ID；R 不钉 `model`/`pre_command`/`command`。routing.json 的 agent 枚举仍是 `codex` | `claude-code`，**不准把 PI 写进路由档**。PI 只出现在 `send_to_session.agent_kind`。
+`DISPATCH_MODES` = `lead-self` / `worker` / `session`。LEAD_SELF_SEATS = V、P。WORKER_SEATS = R、T。E 不是 lead-self。graph 内不出现具体模型 ID；R 不钉 `model`/`pre_command`/`command`。routing.json 的 agent/model/provider 以每次现读的所选档为准，不把旧 agent 枚举当作限制；独立 owner 的创建使用 send_to_session.agent_kind。
 
 ## ④ 拆 PR、并行与合并顺序
 
 沿用 `orca-fanout` 已写死的算法，不另发明。**拆之前必须先 SiteScout**（第 0.7 步）：lead 派只读探查，产物 `site-report.json`（per-SC `real_write_paths`、`cross_sc_edges`、`landmines`、`est_lines`、`open_unknowns`≤5）。冲突图吃 `real_write_paths`，不吃 manifest 里估计的 `allowed_paths`。与 manifest `allowed_paths` 差集过大（新增文件 >30%，或出现跨组共享文件）→ fail-closed 停，指路「汇总任务优先级」修 manifest，lead 不得现场改 `allowed_paths`。`open_unknowns` 非空且涉及组间依赖 → 不拆全量，先切一条串行探路 PR（wave 0 单组）。现有 `prewalk` 只作执行期增量发现，不再是唯一现场来源。台账用 `note-event --event site_report` 记下报告 sha256，不另建状态机。探查 session 无写权限。
+
+派窗机器门：scripts/site-check.mjs 必须通过（逐 SC 完整报告、manifest hash、真实写入授权、同波无交叉写、依赖顺序、未决问题为空）。冲突时回到 task-priority 重新出 final，不现场改清单。它校验只读 sub 的报告，不声称能自动发现所有隐藏依赖。
 
 1. **隐藏依赖先分波**。波与波串行；后波的 base = 前波已合入或已 rebase 的 tip。
 2. **同一波内按精确写入路径建冲突图**，连通分量 = 一个 PR。路径不相交才能并行开工。
@@ -126,14 +130,14 @@ task-priority final manifest
 
 ## ⑥ 独立 session 怎么派
 
-通道：`send_to_session` **create**（不是 Orca worker）。create 出的是普通独立 session，不进 Lead 右侧 worker 栏。由 `scripts/session-dispatch.mjs` 执行。
+通道：send_to_session **create**（不是 Orca worker）。create 出的是普通独立 session，不进 Lead 右侧 worker 栏。真实派工用 scripts/owner-dispatch.mjs 的 prepare → 调现有工具一次 → bind；session-dispatch.mjs 仅保留旧预览入口。详见 references/owner-protocol.md，真派前必须完整读取。
 
 ```
 send_to_session
   message      = 总表 + 该 PR 开工包
   title        = {项目名}-{任务名}丨 {MMDD}
-  working_dir  = 该仓绝对路径
-  use_worktree = true
+  working_dir  = 本 PR 已校验的独立 worktree 绝对路径
+  use_worktree = false（已经准备且校验本 PR 独立 worktree；不让宿主另选 base）
   agent_kind   = pi
   model        = grok-4.6
   effort       = high
@@ -163,9 +167,11 @@ Art = Super Grok（`provider_id=art`，模型 id `grok-4.6`），不是 cindy-ar
 
 时序：① `render-pr-handoff.mjs` 出开工包（此时还没有 session_id）② create ③ 钉 Art ④ `set-state --identity` 一次写齐 `{worktree, branch, base, session_id, title}` ⑤ 记 `dispatch` / `session_created`。create 之后组状态停在 `dispatched`。没有 `gate_goal` 入账之前，禁止 `executing`。
 
-`--dry-run` 写出将要 create 的 `{title, working_dir, agent_kind, model, effort}`，**不**调 `send_to_session`。真派缺宿主 create gateway 时 `HOST_GATEWAY_MISSING` fail-closed。
+`--dry-run` 写出将要 create 的 `{title, working_dir, agent_kind, model, effort}`，**不**调 `send_to_session`。真实派工走 owner-dispatch.mjs；旧 session-dispatch 非 dry-run 仍拒，不能据此改宿主。
 
 ## ⑦ 模型现读纪律
+
+派 worker 前，owner 必须确认可调用 Orca 工具，显式执行 start_team({ worker_permission_mode: "bypassPermissions" })，并确认返回的权限模式仍为 bypassPermissions。返回 auto、能力缺失或无法确认时不得创建 worker；不得用 routing.json 的模型配置冒充权限确认。只读 sub 可用于取信息，不能替代指定的 tester/reviewer 路由。
 
 PI 会话没有 `~/.claude/rules/orca-model-routing.md` 注入。保证靠开工包命令 + PI `AGENTS.md` 触发表 + 交卷对账。`config/defaults.json` 的 `routingPath` 指向同一文件：
 
@@ -176,29 +182,29 @@ PI 侧软链 `/Users/praise/.agents/skills/orca-fanout/routing.json`；`model-ro
 - tester → role=tester，用现读 **e2e** 档的 agent/model/effort
 - reviewer → role=reviewer，用现读 **review** 档（这就是 GPT 单审）
 - 禁止把 luna / sol / 任何模型 ID 抄进 create_worker；包里若有「渲染当时快照」只供对照，create_worker 以现读为准
-- **可恢复失败必须走 fallbacks，禁止当 B 类停问 lead。** 包括：HTTP 429 / Too Many Requests、worker 进程崩溃或异常终止、`create_worker` / `create_workers` 创建失败、provider 瞬时不可用、网络短暂中断。PI owner（含 grok）自己按该档 `fallbacks` 数组顺序换 **provider，不换代次**（例：`gpt-5.6-sol` / `provider_id=codex` 429 → `codex/gpt-5.6-sol` / `provider_id=xd`）。每次降级必须标注原因；`fallbacks_tried` 必须写入交卷，禁止空数组。降级链耗尽才 `DECISION_REQUIRED` 一条，带已试清单；不得 `fallbacks_tried: []` 就 jump lead。
-- orca-model-routing 的三码（`NO_PROVIDER_FOR_AGENT` / `PROVIDER_ROUTE_UNAVAILABLE` / `BUDGET_MODEL_REQUIRES_API_MODE`）仍走 fallbacks；**不得把 429/崩溃/创建失败误判成 B 类停**。
-- **不要做的**：把 PI 写进 `routing.json` 的 agent 枚举；给 PI 另做一份路由表；把 luna/sol 写进本 SKILL 当永久默认；primary 429 后空着手问 lead「要不要限流解除」
+- **可恢复失败先自行恢复，不等于任意错误都换 provider。** HTTP 429 / Too Many Requests 按 Retry-After 和既有预算在原路由等待重试；worker 崩溃或异常终止先核原 worker 状态并恢复；创建失败结果不明先查原绑定，不盲目重复创建。等待必须记录下一次唤醒条件，不能报完成。
+- 只有 `NO_PROVIDER_FOR_AGENT` / `PROVIDER_ROUTE_UNAVAILABLE` / `BUDGET_MODEL_REQUIRES_API_MODE` 才按现读该档 fallbacks 顺序换 provider、不换代次。每次实际降级记录原因和 fallbacks_tried；未走降级时允许空数组并说明原因，禁止空数组就问 lead。未识别错误、授权不足或恢复预算耗尽才发一条 DECISION_REQUIRED，保留原 owner。
+- **不要做的**：绕过共享 routing.json 自造 agent 枚举或给 PI 另做一份路由表；把 luna/sol 写进本 SKILL 当永久默认；primary 429 后空着手问 lead「要不要限流解除」
 
 Lead 验收时现读 live routing.json：交卷 `e2e.model` / `review.model` 既不是当前 primary、也不在该档 fallbacks 里 → 验收失败，指令重派，不准当 ready。
 
 ## ⑧ 子 session 闭环与 lead 指挥
 
-owner session 只许在这五种情况下停。其中 2–5 进入 DECISION_REQUIRED（lease 不放，不算完成）；第 1 种是正常完成，lease 释放：
+owner session 只许在这五种情况下停。其中 2–5 进入 DECISION_REQUIRED（保留 owner 身份和现场，不算完成）；第 1 种是正常完成，接管确认后按协议清理归档：
 
-1. 本 PR 已达机器可证明的 PR Ready（远端 ready PR + 当前 head 的 CI/review/mergeability 全绿）。candidate 只是检查点，交卷后不得停、不得卸责。合法 `pr_ready` 入账后 owner 正常结束，不是 DECISION_REQUIRED。
+1. 本 PR 的当前提交已通过 lead 本机验收（SC、e2e、独立审查和规模门），且同一提交的远端非 draft PR 已确认：这称为 PR Ready，即可以交给 Mini，不代表 GitHub 审核反馈已全部处理完。candidate 只是检查点，交卷后不得停、不得卸责。合法 `pr_ready` 入账并收到 Mini 接管确认后 owner 正常结束，不是 DECISION_REQUIRED。只有名册文件写入不算接管确认；没有接管证据不得清场或释放责任。
 2. 硬停六条。
 3. **本 session 自报**累计打到 `budgetPauseUsd`（可 `--no-budget-pause`）。不是 lead 跨 session 加总。
 4. **未读 goal skill 或未读 routing.json**：不得开工。停，提交 decision_required，写明卡在开工闸第 1 步还是第 2 步。禁止 jump 等 lead 放行。
-5. **假设破裂**：第 3 段摘录的接口/行为与实际不符，或必须偏离第 4 段改法。立刻 `blocked` + decision_required：哪条假设破了、影响哪些文件、是否波及别组。禁止就地改方案继续写。无权改总表、无权改 `allowed_paths`、无权换 `base`——这三件事只能 lead 走第⑱节 replan。
+5. **假设破裂**：SC、接口兼容、授权或跨 PR 依赖与第 3/4 段不符。立刻 `blocked` + decision_required：哪条假设破了、影响哪些文件、是否波及别组。禁止就地改方案继续写。域内等价实现不算假设破裂，可以自主选择。无权改总表、无权改 `allowed_paths`、无权换 `base`——这三件事只能 lead 走第⑱节 replan。
 
 连续 3 轮零增量：不得空转，也不得收工。必须发一条 decision_required 摊开卡点。Lead 只给一个决定，同一 owner 继续。
 
-PI owner（含 grok）遇到 worker 429 / 崩溃 / 创建失败：**自己**按第⑦段 fallbacks 重派，禁止 `fallbacks_tried: []` 后 jump lead 等限流解除。这不是决策题。
+PI owner（含 grok）遇到 worker 429 / 崩溃 / 创建失败：自己按第⑦段恢复，记录原 worker、已尝试动作、预算和下一次唤醒条件。可恢复等待不报完成，不因单次失败问 lead，也不盲目重建窗口。上层未授权的错误码不得换 provider。
 
-Lead 在全部 PI session 归档、Mini 名册写完之前不得结束。owner `get_session_runtime` 变 idle 且没有 PR_READY → `steer_session`：「未到停点，继续；卡点报我」。owner 问「要开始吗 / 能不能并行」→ 驳回，这些不是决策题。越域 / 改了别人的 PR → 验收失败，给予充分交接后 `failed→pending` 重派。
+Lead 在全部 PI session 归档、Mini 名册写完之前不得结束。owner get_session_runtime 变 idle 且没有 PR_READY → send_to_session(target_session_id=原owner) 恢复原窗（queued 不重发；steer_session 只用于正在运行的窗口）：「未到停点，继续；卡点报我」。owner 问「要开始吗 / 能不能并行」→ 驳回，这些不是决策题。越域 / 改了别人的 PR → 验收失败，给予充分交接后 `failed→pending` 重派。
 
-「可验收」= candidate 交卷合法 + e2e PASS + GPT 单审 unresolved==0 + size-gate ≠ STOP，这只是检查点，**还没有** GitHub URL。同一 owner 继续开远端 ready PR；`confirm-pr-open.mjs` 确认非 draft 且 head 对得上。开 PR ≠ 发盯梢。本组 `note-event pr_ready` 之后才注册 Mini 名册并 `note-event watch_registered`，再清本地，最后归档这些 PI session。合入不是本 skill 的收尾。Mini 被叫醒后走 goal skill 场景 E（盯梢 pr-fix）：拉 PR 反馈 → 在名册指定 clone 里 `git worktree add` → 修 → push → 回帖。CI 全绿且 review 无未解决项时，Mini 只发「可合并」通知，merge 由人点；`config/mini-watch.json` 的 `auto_merge` 本轮只读，false 时零影响。盯梢 create 标题必须走 `sessionTitle`：`{项目名}-{中文任务名}丨 {MMDD}`。缺宿主 create gateway 时盯梢不得另开第二 owner。
+「可验收」= candidate 交卷合法 + e2e PASS + GPT 单审 unresolved==0 + size-gate ≠ STOP，这只是检查点，**还没有** GitHub URL。同一 owner 继续开远端 ready PR；`confirm-pr-open.mjs` 确认非 draft 且 head 对得上。开 PR ≠ 发盯梢。本组 `note-event pr_ready` 之后才注册 Mini 名册并 `note-event watch_registered`，再清本地，最后归档这些 PI session。合入不是本 skill 的收尾。Mini 被叫醒后走 goal skill 场景 E（盯梢 pr-fix）：拉 PR 反馈 → 在名册指定 clone 里 `git worktree add` → 修 → push → 回帖。CI 全绿且 review 无未解决项时，Mini 只发「可合并」通知，merge 由人点；`config/mini-watch.json` 的 `auto_merge` 本轮只读，false 时零影响。盯梢 create 标题必须走 `sessionTitle`：`{项目名}-{中文任务名}丨 {MMDD}`。Mini 也使用 per-PR 单次 claim；create 回执未知时禁止超时回收再建，已绑定 session 只 jump。
 
 子 session 派 tester/reviewer **之前**自己跑 `mem-probe.mjs`。Lead 在同一波并行 create 多个 session 前也跑一次 mem-probe，按 `pending = 本波 PR 数 × 2` 估槽。同批 ≥2 worker 用 `create_workers` 批量派发，禁连续 `create_worker` 单发。
 
@@ -208,7 +214,9 @@ Lead 在全部 PI session 归档、Mini 名册写完之前不得结束。owner `
 
 `GROUP_STATES`：`pending | dispatched | executing | blocked | e2e | review | accepted | pr-open | local-cleaned | archived | failed`。旧的 `delivered` / `review_pass` / `verified` 删除。
 
-映射：dispatched = session 已 create 且 Art 已钉；executing = 子 session 在干活（前置：已有本组成立的 `gate_goal`）；blocked = 卡点上报；e2e/review = 子闭环阶段；accepted = 本地 candidate accepted（检查点，不是 PR Ready）；pr-open = 远端已开；local-cleaned = Mini 名册已写且本地 worktree/分支已清；archived = PI session 已归档。`create_worker` 对应的 dispatched 前置：已有本组成立的 `gate_routing`。`accepted→pr-open` 必须消费 `confirm-pr-open.mjs` 成功回执（`--pr-open-receipt`：OPEN、`isDraft===false`、head 对上台账 tip；缺/null 一律拒）。`pr-open→local-cleaned` 要求本组成立的 `watch_registered`，并消费 `wrapup-cleanup.mjs` 成功回执（`--cleanup-receipt`：ok、未 skip、未删远端；脚本核当前分支、拒 dirty、删完复核 worktree/branch 不在）。`local-cleaned→archived` 必须消费 `archive_sessions` 成功回执（`--archive-receipt`：archived=true 且 session_id 对得上）。三份收尾回执与 Mini `register.mjs` 回执都必须带铸造时的 `ledger_version` + 本组 `assignment_seq`；入账时 `ledger_version` 不得大于当前台账 version（其它组先入账导致 version 前进仍可入账），且 `checked_at` 必须是可解析时间并晚于本组前置事件。旧代回执不得重放。`confirm-pr-open.mjs` / `wrapup-cleanup.mjs` 必须带 `--now` / `--ledger-version` / `--assignment-seq`，stdout 才能直接当回执入账。
+映射：dispatched = session 已 create 且 Art 已钉；executing = 子 session 在干活（前置：已有本组成立的 `gate_goal`）；blocked = 卡点上报；e2e/review = 子闭环阶段；accepted = 本地 candidate accepted（检查点，不是 PR Ready）；pr-open = 远端已开；local-cleaned = Mini 新鲜首扫已确认接管且本地 worktree/分支已清；archived = PI session 已归档。`create_worker` 对应的 dispatched 前置：已有本组成立的 `gate_routing`。`accepted→pr-open` 必须消费 `confirm-pr-open.mjs` 成功回执（`--pr-open-receipt`：OPEN、`isDraft===false`、head 对上台账 tip；缺/null 一律拒）。`pr-open→local-cleaned` 要求本组成立的 `watch_registered`，并消费 `wrapup-cleanup.mjs` 成功回执（`--cleanup-receipt`：ok、未 skip、未删远端；脚本核当前分支、拒 dirty、删完复核 worktree/branch 不在）。`local-cleaned→archived` 必须消费 `archive_sessions` 成功回执（`--archive-receipt`：archived=true 且 session_id 对得上）。local_validated 消费 ready-check --group 回执（本组提交/基线/代次/manifest 绑定，其他组版本前进不使它失效）；pr_ready 另消费一次五分钟内的 confirm-pr-open 回执，必须晚于 pr_opened。
+
+三份收尾回执与 Mini `register.mjs` 回执都必须带铸造时的 `ledger_version` + 本组 `assignment_seq`；入账时 `ledger_version` 不得大于当前台账 version（其它组先入账导致 version 前进仍可入账），且 `checked_at` 必须是可解析时间并晚于本组前置事件。旧代回执不得重放。`confirm-pr-open.mjs` / `wrapup-cleanup.mjs` 必须带 `--now` / `--ledger-version` / `--assignment-seq`，stdout 才能直接当回执入账。
 
 `set-state --identity` 允许键：`{worktree, branch, base, session_id, title}`。`identityDigest` 输入段顺序：`seq → worktree → branch → base → session_id`（session_id 未定时用空串，create 后必须重写 identity 再记 dispatch）。
 
@@ -218,7 +226,9 @@ Lead 在全部 PI session 归档、Mini 名册写完之前不得结束。owner `
 
 `PR_RECEIPT_KEYS` exact：`pr_id, session_id, candidate_sha, pr_url, e2e_status, review_unresolved, size_result, ledger_version, checked_at`。candidate 交卷阶段还没有 `pr_url`。`pr_url` 在 accepted→pr-open 时才写入。缺 `gate_goal` / `gate_routing` 事件的组，ready-check 直接 GAP，不得 accepted。
 
-ready-check 先每 PR、再 run：对每个 group 用该组 worktree 跑门；全部 group 至少 `accepted` → 写 run 级 `READY_FOR_LATER_SUBMIT_PR_SKILL`。这行是验收门过了的机器信号，意思是 owner 可以继续开远端 PR 并在 PR Ready 后归档；不是「交给以后的提交 PR skill」，也不是 lead 可以 git merge。旧 `accepted` / run `ready` 不得原地改名冒充 PR Ready。七门按 PR 各算一遍。L2 相对该 PR 的 `identity.base`。run 级 ready 额外一条：总表里的波次顺序已记录；真正合入不由本 skill 执行。
+ready-check 先每 PR、再 run：对每个 group 用该组 worktree 跑门；单 PR 通过后独立写 LOCAL_PR_VALIDATED，不等其它组；兼容旧整批入口才写 run 级 `READY_FOR_LATER_SUBMIT_PR_SKILL`。这行是验收门过了的机器信号，意思是 owner 可以继续开远端 PR 并在 PR Ready 后归档；不是「交给以后的提交 PR skill」，也不是 lead 可以 git merge。旧 `accepted` / run `ready` 不得原地改名冒充 PR Ready。七门按 PR 各算一遍。L2 相对该 PR 的 `identity.base`。run 级 ready 额外一条：总表里的波次顺序已记录；真正合入不由本 skill 执行。
+
+watch_registered 还必须消费 takeover（schedule_id、first_scan_ack、last_scan_at、config_sha256）：last_scan_at 必须晚于 pr_ready.at，十分钟内且不在未来。只有 REGISTERED/ALREADY 文件不够。lead 在每颗 Ready 后发 Mini；Mini 首扫确认前 owner 保留现场、保持待接管状态，不与 Mini 同时继续写同一 PR。
 
 Lock+tmp+rename+CAS 与 `LedgerError` 码沿用。`budget_note` 事件可留，但 lead 不跨 session 加总账单。
 
@@ -231,7 +241,7 @@ gate_goal     {type:"gate_goal", goal_skill_path, goal_skill_sha256}
 gate_routing  {type:"gate_routing", route_source, routing_sha256, e2e_model, review_model}
 ```
 
-宿主 gateway 对磁盘文件 `/Users/praise/.agents/skills/goal/SKILL.md`（realpath 后与 live `.../claude-active/goal/SKILL.md` 同一 inode 也算）算 sha256，与 `gate_goal` 逐字比对。不过 → `overreach_rejected`。`gate_goal.at` 之前该 worktree 相对 `identity.base` 已有非文档 diff → 越域，指令 revert。`gate_routing` 对 `/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json`；收据里的 `e2e_model` / `review_model` 必须等于该文件当前 primary（或 fallbacks 之一）。不过 → 不得 `create_worker`。缺宿主 gateway 时 skill 侧 `HOST_GATEWAY_MISSING` fail-closed，不得让 lead 手工对账冒充入账。
+owner-gate.mjs 对磁盘文件 `/Users/praise/.agents/skills/goal/SKILL.md`（realpath 后与 live `.../claude-active/goal/SKILL.md` 同一 inode 也算）算 sha256，与 `gate_goal` 逐字比对。不过 → `overreach_rejected`。`gate_goal.at` 之前该 worktree 相对 `identity.base` 已有非文档 diff → 越域，指令 revert。`gate_routing` 对 `/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json`；收据里的 `e2e_model` / `review_model` 必须等于该文件当前 primary（或 fallbacks 之一）。不过 → 不得 `create_worker`。由 owner 自己调用 owner-gate.mjs，不需要宿主 gateway；脚本能核文件 hash 和返回的权限模式，不把它说成宿主拦截或阅读过程证明。
 
 candidate `record-delivery --payload` exact（验收前，**不得含 pr_url**）：
 
@@ -278,7 +288,7 @@ fallbacks_tried [{route, model, provider_id, error}] 无降级写 []；禁止 tr
 
 ## ⑯ 防越域与验收
 
-Lead 允许：读码、写开工包、派/收回 session、只读验收证据、按第⑱节 replan、PR_READY 后 `archive_sessions` 归档 PI session。不允许：改产品代码、替子 session 修 bug、替 owner 开 PR、追 CI/review、手工搬 receipt、git merge、resume 旧盯梢班车、Mini 名册未写就清本地。happy path 执行调用数为 0。越域 commit 验收失败。`gate_goal` 过账后才允许 worktree 出现本 PR 的新 commit。该 PR diff 触碰了别组 site-report 里的 read 依赖文件 → 即使在自己 `allowed_paths` 内也标「需重协调」，下游不得开工直到 lead 重发包。
+Lead 允许：读码、写开工包、派/收回 session、只读验收证据、按第⑱节 replan、PR_READY 后 `archive_sessions` 归档 PI session。不允许：改产品代码、替子 session 修 bug、替 owner 开 PR、追 CI/review、手工搬 receipt、git merge、resume 旧盯梢班车、Mini 名册未写就清本地。happy path 产品执行调用数为 0；编排派窗、验收决定、发 Mini 与归档是 lead 的职责。越域 commit 验收失败。`gate_goal` 过账后才允许 worktree 出现本 PR 的新 commit。该 PR diff 触碰了别组 site-report 里的 read 依赖文件 → 即使在自己 `allowed_paths` 内也标「需重协调」，下游不得开工直到 lead 重发包。
 
 ## ⑰ Fable 决策 sidecar（非第六席）
 

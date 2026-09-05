@@ -23,6 +23,7 @@ const SHA2 = 'b'.repeat(40);
 const NOW = '2026-08-09T00:00:00Z';
 const LATER = '2026-08-09T00:00:01Z';
 const AFTER = '2026-08-09T00:00:02Z';
+const takeoverAt = (at) => ({ schedule_id: 'fixture-script', first_scan_ack: NOW, last_scan_at: at, config_sha256: miniWatchConfigSha256() });
 const STAMP = { ledgerVersion: 0, assignmentSeq: 0 };
 const PATH_SEP = process.platform === 'win32' ? ';' : ':';
 
@@ -208,26 +209,33 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
   writeFileSync(watchTooSoon, `${JSON.stringify({
     ok: true, owner: 'xindong', repo: 'mivo-canvas-plugin', pr_number: 1, branch: 'feat/run-ledger',
     state_file: '/mini/runtime/state/xindong__mivo-canvas-plugin__1.json',
-    session_id: null, checked_at: LATER, mini_watch_config_sha256: miniWatchConfigSha256(), ...mintedEarly,
+    session_id: null, checked_at: LATER, takeover: takeoverAt(LATER), mini_watch_config_sha256: miniWatchConfigSha256(), ...mintedEarly,
   })}\n`);
   r = cli('note-event', ledgerPath, '--event', 'watch_registered', '--detail', JSON.stringify({
     group_id: g,
     pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
     receipt: watchTooSoon,
-  }), '--now', T);
+  }), '--now', AFTER);
   assert.equal(r.status, 2, '仅 pr-open、本组尚未 pr_ready 不得发 Mini 盯梢');
   assert.match(r.stderr, /pr_ready/);
   r = cli('note-event', ledgerPath, '--event', 'pr_ready', '--detail', JSON.stringify({
     group_id: g,
     pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
-    current_pr_head_sha: SHA1,
+    current_pr_head_sha: 'f'.repeat(40),
+  }), '--now', LATER);
+  assert.equal(r.status, 2, '格式合法但不是已验收提交的 SHA 不得冒充 Ready');
+  assert.match(r.stderr, /同代已验收/);
+  r = cli('note-event', ledgerPath, '--event', 'pr_ready', '--detail', JSON.stringify({
+    group_id: g,
+    pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
+    current_pr_head_sha: SHA1, receipt: prOpenReceipt,
   }), '--now', LATER);
   assert.equal(r.status, 0, r.stderr);
   r = cli('note-event', ledgerPath, '--event', 'watch_registered', '--detail', JSON.stringify({
     group_id: g,
     pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
     receipt: watchTooSoon,
-  }), '--now', T);
+  }), '--now', LATER);
   assert.equal(r.status, 2, 'pr_ready 入账后不得重放 Ready 前铸的 Mini 回执');
   assert.match(r.stderr, /pr_ready/);
   const fakeLocalWatch = join(dir, 'acme__app__1.json');
@@ -236,13 +244,13 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
     group_id: g,
     pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
     state_file: fakeLocalWatch,
-  }), '--now', T);
+  }), '--now', AFTER);
   assert.equal(r.status, 2, '本机假名册不得冒充 Mini register 回执');
   const minted = stamp();
   const watchReceiptBody = confirmWatchRegistered({
     stdout: 'REGISTERED /mini/runtime/state/xindong__mivo-canvas-plugin__1.json\n',
     owner: 'xindong', repo: 'mivo-canvas-plugin', prNumber: 1, branch: 'feat/run-ledger',
-    now: AFTER, ledgerVersion: minted.ledger_version, assignmentSeq: minted.assignment_seq,
+    now: AFTER, takeover: takeoverAt(AFTER), ledgerVersion: minted.ledger_version, assignmentSeq: minted.assignment_seq,
   });
   const watchReceipt = join(dir, 'watch-receipt.json');
   writeFileSync(watchReceipt, `${JSON.stringify(watchReceiptBody)}\n`);
@@ -250,7 +258,7 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
     group_id: g,
     pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
     receipt: watchReceipt,
-  }), '--now', T);
+  }), '--now', AFTER);
   assert.equal(r.status, 0, r.stderr);
   const cleanupReceipt = join(dir, 'cleanup-receipt.json');
   writeFileSync(cleanupReceipt, `${JSON.stringify({
@@ -260,7 +268,7 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
     worktree: '/wt/g4',
     sha: SHA1,
     remoteDeleted: false,
-    checked_at: AFTER,
+    checked_at: '2026-08-09T00:00:03Z',
     ...stamp(),
   })}\n`);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'local-cleaned', '--now', T);
@@ -274,7 +282,7 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
     worktree: '/wt/g4',
     sha: SHA1,
     remoteDeleted: false,
-    checked_at: AFTER,
+    checked_at: '2026-08-09T00:00:03Z',
     ...stamp(),
   })}\n`);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'local-cleaned', '--now', T, '--cleanup-receipt', skippedCleanup);
@@ -286,7 +294,7 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
     worktree: '/wt/g4',
     sha: SHA1,
     remoteDeleted: false,
-    checked_at: AFTER,
+    checked_at: '2026-08-09T00:00:03Z',
     ...stamp(),
   })}\n`);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'local-cleaned', '--now', T, '--cleanup-receipt', cleanupReceipt);
@@ -382,25 +390,25 @@ test('cleanup 回执在其它写入先推高 version 后仍可消费（不绑全
   r = cli('note-event', ledgerPath, '--event', 'pr_ready', '--detail', JSON.stringify({
     group_id: g,
     pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
-    current_pr_head_sha: SHA1,
-  }), '--now', T);
+    current_pr_head_sha: SHA1, receipt: prOpenReceipt,
+  }), '--now', LATER);
   assert.equal(r.status, 0, r.stderr);
   const watchReceipt = join(dir, 'watch-receipt.json');
   writeFileSync(watchReceipt, `${JSON.stringify({
     ok: true, owner: 'xindong', repo: 'mivo-canvas-plugin', pr_number: 1, branch: 'feat/run-ledger',
     state_file: '/mini/runtime/state/xindong__mivo-canvas-plugin__1.json',
-    session_id: null, checked_at: LATER, mini_watch_config_sha256: miniWatchConfigSha256(), ...stamp(),
+    session_id: null, checked_at: AFTER, takeover: takeoverAt(AFTER), mini_watch_config_sha256: miniWatchConfigSha256(), ...stamp(),
   })}\n`);
   r = cli('note-event', ledgerPath, '--event', 'watch_registered', '--detail', JSON.stringify({
     group_id: g,
     pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
     receipt: watchReceipt,
-  }), '--now', T);
+  }), '--now', AFTER);
   assert.equal(r.status, 0, r.stderr);
   const cleanupReceipt = join(dir, 'cleanup-stale-version.json');
   writeFileSync(cleanupReceipt, `${JSON.stringify({
     ok: true, skipped: false, branch: 'feat/run-ledger', worktree: '/wt/g4', sha: SHA1,
-    remoteDeleted: false, checked_at: LATER, ...stamp(),
+    remoteDeleted: false, checked_at: '2026-08-09T00:00:03Z', ...stamp(),
   })}\n`);
   const bumped = JSON.parse(readFileSync(ledgerPath, 'utf8'));
   const minted = JSON.parse(readFileSync(cleanupReceipt, 'utf8'));
@@ -521,7 +529,7 @@ test('confirm-watch-registered 只吃 register.mjs 真实 stdout', () => {
   const receipt = confirmWatchRegistered({
     stdout: 'ALREADY /mini/runtime/state/xindong__mivo-canvas-plugin__1.json\n',
     owner: 'xindong', repo: 'mivo-canvas-plugin', prNumber: 1, branch: 'feat/run-ledger',
-    now: LATER, ledgerVersion: 12, assignmentSeq: 0,
+    now: LATER, takeover: takeoverAt(LATER), ledgerVersion: 12, assignmentSeq: 0,
   });
   assert.equal(receipt.ok, true);
   assert.equal(receipt.pr_number, 1);
@@ -575,6 +583,7 @@ test('confirm-watch-registered CLI 拒 --stdout，state-dir 必须钉 Mini 名�
   ], {
     sshRunner: (args) => {
       sshCalls.push(args);
+      if (args.at(-1).includes('takeover.mjs')) return {status:0,stdout:JSON.stringify(takeoverAt(LATER)),stderr:''};
       return { status: 0, stdout: 'REGISTERED /Users/praise/pr-autopilot-runtime/state/xindong__mivo-canvas-plugin__1.json\n', stderr: '' };
     },
   });
