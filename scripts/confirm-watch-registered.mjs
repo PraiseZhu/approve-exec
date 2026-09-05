@@ -2,6 +2,8 @@
 // confirm-watch-registered.mjs — 把 Mini register.mjs 的真实 stdout 封成台账回执。
 // 不改 Mini。register.mjs 成功输出是 `REGISTERED <abs>` / `ALREADY <abs>`。
 import { spawnSync } from 'node:child_process';
+import { dirname, join } from 'node:path';
+import { assertTakeover } from './pr-watch/takeover.mjs';
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { LedgerError, parseTimestamp, WATCH_RECEIPT_KEYS } from './run-ledger.mjs';
@@ -75,7 +77,7 @@ export function identityFromStateFile(stateFile) {
 }
 
 export function confirmWatchRegistered({
-  stdout, owner, repo, prNumber, branch, now, ledgerVersion, assignmentSeq,
+  stdout, owner, repo, prNumber, branch, now, ledgerVersion, assignmentSeq, takeover,
 } = {}) {
   parseTimestamp(now, 'confirm-watch-registered --now');
   if (typeof owner !== 'string' || owner.length === 0) throw new LedgerError('ARGS', 'owner 必须是非空字符串');
@@ -86,6 +88,7 @@ export function confirmWatchRegistered({
     throw new LedgerError('ARGS', `pr 必须是正整数（当前: ${prNumber}）`);
   }
   const parsed = parseRegisterStdout(stdout);
+  assertTakeover(takeover, { now });
   const id = identityFromStateFile(parsed.stateFile);
   if (id.owner !== owner.toLowerCase() || id.repo !== repo.toLowerCase() || id.pr_number !== expectedPr) {
     throw new LedgerError('PRECONDITION', `register stdout 身份不符（${id.owner}/${id.repo}#${id.pr_number} ≠ ${owner}/${repo}#${expectedPr}）`);
@@ -102,6 +105,7 @@ export function confirmWatchRegistered({
     ledger_version: requireStamp(ledgerVersion, 'ledger-version'),
     assignment_seq: requireStamp(assignmentSeq, 'assignment-seq'),
     mini_watch_config_sha256: miniWatchConfigSha256(),
+    takeover,
   };
   const keys = Object.keys(receipt).sort();
   if (keys.join(',') !== [...WATCH_RECEIPT_KEYS].sort().join(',')) {
@@ -178,6 +182,18 @@ export function runWatchCli(argv, { sshRunner } = {}) {
     pushRemote: flags['push-remote'] ?? 'origin',
     sshRunner,
   });
+  // Registration is idempotent; missing heartbeat means retry only this read,
+  // never release the local owner or fabricate a successful takeover.
+  const quote = (part) => "'" + String(part).replace(/'/g, "'\\''") + "'";
+  const checkCmd = ['node', join(dirname(registerBin), 'takeover.mjs'), 'read',
+    '--state-dir', stateDir, '--owner', flags.owner, '--repo', flags.repo,
+    '--pr', flags.pr, '--branch', flags.branch, '--now', flags.now].map(quote).join(' ');
+  const ssh = sshRunner ?? ((args) => spawnSync(watchCfg().ssh_bin, args, { encoding: 'utf8' }));
+  const checked = ssh(['-o', 'BatchMode=yes', host, checkCmd]);
+  if (checked.status !== 0) throw new LedgerError('TAKEOVER_PENDING', 'Mini 尚未确认首扫接手；保留本机 owner，下一轮仅复查接手状态');
+  let takeover;
+  try { takeover = JSON.parse(checked.stdout); }
+  catch { throw new LedgerError('TAKEOVER_PENDING', 'Mini 首扫检查返回非 JSON，不能确认接管'); }
   const out = confirmWatchRegistered({
     stdout,
     owner: flags.owner,
@@ -187,6 +203,7 @@ export function runWatchCli(argv, { sshRunner } = {}) {
     now: flags.now,
     ledgerVersion: flags['ledger-version'],
     assignmentSeq: flags['assignment-seq'],
+    takeover,
   });
   return out;
 }

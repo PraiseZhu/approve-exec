@@ -76,19 +76,11 @@ test('planDispatch: auto_merge=true 时 decision=terminal 必须抛，不得返�
   assert.equal(returned, undefined);
 });
 
-test('planDispatch: none / hold 不派；actionable 无 session_id 缺宿主则拒 create', () => {
+test('planDispatch: none / hold 不派；actionable 只生成计划、不直接创建 session', () => {
   const state = { owner: 'o', repo: 'r', pr_number: 1, session_id: null };
   assert.equal(planDispatch({ decision: 'none', state, signals: [], newItems: {} }), null);
   assert.equal(planDispatch({ decision: 'blocked-external', state, signals: ['hold-label'], newItems: {} }), null);
-  assert.throws(
-    () => planDispatch({
-      decision: 'actionable',
-      state,
-      signals: ['comment'],
-      newItems: { comments: [{ id: 'c1', body: 'fix this' }] },
-    }),
-    /HOST_GATEWAY_MISSING|缺宿主 create gateway/,
-  );
+  assert.equal(planDispatch({ decision: 'actionable', state, signals: ['comment'], newItems: {} }).action, 'create');
 });
 
 test('planDispatch: none / hold 不派；actionable 无 session_id 显式开闸才 create', () => {
@@ -167,7 +159,7 @@ test('scanWatch: 无新信号零 dispatch；第二次同 PR 是 jump', () => {
     comments: [{ id: 'c1', body: 'please fix' }],
   }));
   const blocked = scanWatch({ stateDir, snapshotCmd: `${snapSh} {owner} {repo} {pr}` });
-  assert.equal(blocked.dispatches.length, 0, '缺宿主 gateway 不得 create 第二 owner');
+  assert.equal(blocked.dispatches.length, 1, 'scan 只出计划，实际 dispatch 必须先获得 skill claim');
   const first = scanWatch({ stateDir, snapshotCmd: `${snapSh} {owner} {repo} {pr}`, gatewayAvailable: true });
   assert.equal(first.dispatches.length, 1);
   assert.equal(first.dispatches[0].wake_kind, 'create');
@@ -196,29 +188,35 @@ test('applyWatchRound: create 必须写回 session_id；缺返回值拒空跑；
   chmodSync(snapSh, 0o755);
   const snapshotCmd = `${snapSh} {owner} {repo} {pr}`;
 
-  assert.throws(
-    () => applyWatchRound({
+  assert.match(
+    applyWatchRound({
       stateDir,
       snapshotCmd,
       gatewayAvailable: true,
       dispatchFn: () => ({}),
-    }),
+    }).errors[0].error,
     /未返回 target_session_id/,
   );
   const unbound = JSON.parse(readFileSync(join(stateDir, stateFileName('acme', 'app', 8)), 'utf8'));
   assert.equal(unbound.session_id, null, '空跑失败后不得写 session_id');
+  assert.equal(unbound.create_pending, true);
+  let repeatCalls = 0;
+  assert.match(applyWatchRound({ stateDir, snapshotCmd, dispatchFn: () => { repeatCalls++; return {}; } }).errors[0].error, /create 在途/);
+  assert.equal(repeatCalls, 0, '回执丢失后不能自动第二次调用 create');
+  // 原调用迟到的真实回执可恢复绑定，后续只 jump。
+  bindSessionId({ stateDir, owner:'acme', repo:'app', prNumber:8, sessionId:'sess-8', claimId:unbound.create_claim.claim_id });
 
   const first = applyWatchRound({
     stateDir,
     snapshotCmd,
     gatewayAvailable: true,
     dispatchFn: (params) => {
-      assert.equal(Object.prototype.hasOwnProperty.call(params, 'target_session_id'), false);
+      assert.equal(params.target_session_id, 'sess-8');
       assert.match(params.message, MERGE_BAN);
       return { target_session_id: 'sess-8' };
     },
   });
-  assert.equal(first.dispatches[0].wake_kind, 'create');
+  assert.equal(first.dispatches[0].wake_kind, 'jump');
   assert.equal(first.dispatches[0].session_id, 'sess-8');
   const bound = JSON.parse(readFileSync(join(stateDir, stateFileName('acme', 'app', 8)), 'utf8'));
   assert.equal(bound.session_id, 'sess-8');
@@ -262,11 +260,9 @@ scan = {
   }],
   'terminals': [],
 }
-try:
-  mod.apply_watch_round(lambda params: {}, scan=scan, claim_fn=lambda sd, plan: {'claimed': True, 'session_id': None}, release_fn=lambda *a, **k: None)
-  raise SystemExit('should have failed')
-except SystemExit as e:
-  assert '未返回 target_session_id' in str(e)
+bad = mod.apply_watch_round(lambda params: {}, scan=scan, claim_fn=lambda sd, plan: {'claimed': True, 'session_id': None}, release_fn=lambda *a, **k: None)
+assert bad['dispatches'] == []
+assert '未返回 target_session_id' in bad['errors'][0]['error']
 bound = []
 def dispatch(params):
   assert 'target_session_id' not in params
@@ -282,6 +278,14 @@ out = mod.apply_watch_round(
 )
 assert bound == [(state_dir, 4, 'sess-4')]
 assert out['dispatches'][0]['session_id'] == 'sess-4'
+scan['dispatches'].append({**scan['dispatches'][0], 'pr': 5, 'message': 'second'})
+isolated = mod.apply_watch_round(
+  lambda params: {} if params['message'] == 'm' else {'target_session_id': 'sess-5'},
+  scan=scan, bind_fn=lambda *a: None, persist_fn=lambda *a: None,
+  claim_fn=lambda *a: {'claimed': True},
+)
+assert len(isolated['errors']) == 1
+assert isolated['dispatches'][0]['session_id'] == 'sess-5'
 print('PY-OK')
 `;
   const stateDir = tmpState();
@@ -307,7 +311,7 @@ test('claimCreate: 并发第二轮不得再 create', () => {
   );
 });
 
-test('claimCreate: 崩溃遗留 claim 仅在租约过期且持有 pid 已死时回收', () => {
+test('claimCreate: 崩溃遗留 claim 即使租约过期且 pid 已死也不得再创建', () => {
   const stateDir = tmpState();
   const { file } = registerPr({
     stateDir, owner: 'acme', repo: 'app', prNumber: 55,
@@ -322,10 +326,8 @@ test('claimCreate: 崩溃遗留 claim 仅在租约过期且持有 pid 已死时�
   const stale = JSON.parse(readFileSync(file, 'utf8'));
   writeFileSync(file, JSON.stringify({ ...stale, create_pending: true, create_claim: oldClaim }));
   assert.equal(createClaimStale(oldClaim, { nowMs }), true);
-  const recovered = claimCreate({ stateDir, owner: 'acme', repo: 'app', prNumber: 55, nowMs });
-  assert.equal(recovered.claimed, true);
-  assert.notEqual(recovered.state.create_claim.claim_id, 'crashed-claim');
-  assert.equal(recovered.state.create_claim.owner_pid, process.pid);
+  assert.throws(() => claimCreate({ stateDir, owner: 'acme', repo: 'app', prNumber: 55, nowMs }), /create 在途/);
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).create_claim.claim_id, 'crashed-claim');
   const explicitDir = tmpState();
   registerPr({
     stateDir: explicitDir, owner: 'acme', repo: 'app', prNumber: 58,

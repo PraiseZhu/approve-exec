@@ -32,6 +32,7 @@ import {
 import { resolve, dirname, join, isAbsolute } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadMiniWatchConfig, miniWatchConfigSha256 } from './lib/mini-watch-config.mjs';
+import { assertTakeover } from './pr-watch/takeover.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -71,6 +72,8 @@ export const EVENT_TYPES = Object.freeze([
   'pr_opened',
   'accepted',
   'pr_ready',
+  'local_validated',
+  'owner_rework',
   'local_cleaned',
   'session_archived',
   'watch_registered',
@@ -106,15 +109,15 @@ const GROUP_SCOPED_EVENT_TYPES = new Set([
   'dispatch', 'delivery', 'review_round', 'packet_rendered', 'timeout_redispatch',
   'overreach_rejected', 'overlap_replan', 'budget_note',
   'session_created', 'session_steer', 'gate_goal', 'gate_routing', 'pr_opened', 'accepted',
-  'pr_ready', 'local_cleaned', 'session_archived', 'watch_registered',
+  'pr_ready', 'local_validated', 'owner_rework', 'local_cleaned', 'session_archived', 'watch_registered',
   'replan_note',
 ]);
 const GATE_EVENT_TYPES = Object.freeze(['gate_goal', 'gate_routing']);
 const SESSION_EVENT_TYPES = Object.freeze([
-  'session_created', 'session_steer', 'pr_opened', 'accepted', 'pr_ready',
+  'session_created', 'session_steer', 'pr_opened', 'accepted', 'pr_ready', 'local_validated',
   'local_cleaned', 'session_archived', 'watch_registered',
 ]);
-const NOTE_EVENT_TYPES = Object.freeze(['site_report', 'replan_note', 'pr_ready', 'watch_registered']);
+const NOTE_EVENT_TYPES = Object.freeze(['site_report', 'replan_note', 'local_validated', 'pr_ready', 'watch_registered']);
 const OLD_WATCH_SCHEDULE_IDS = Object.freeze([
   ...loadMiniWatchConfig().old_schedule_ids_blocklist,
 ]);
@@ -941,7 +944,7 @@ export const ARCHIVE_RECEIPT_KEYS = Object.freeze([
 ]);
 export const WATCH_RECEIPT_KEYS = Object.freeze([
   'ok', 'owner', 'repo', 'pr_number', 'branch', 'state_file', 'session_id',
-  'checked_at', 'ledger_version', 'assignment_seq', 'mini_watch_config_sha256',
+  'checked_at', 'ledger_version', 'assignment_seq', 'mini_watch_config_sha256', 'takeover',
 ]);
 const GOAL_SKILL_PATHS = Object.freeze([
   '/Users/praise/.agents/skills/goal/SKILL.md',
@@ -1184,6 +1187,8 @@ export function latestGroupEvent(ledger, groupId, type) {
   const seq = g?.assignment_seq;
   for (let i = ledger.events.length - 1; i >= 0; i -= 1) {
     const ev = ledger.events[i];
+    if (ev.type === 'owner_rework' && ev.detail?.group_id === groupId
+      && ['accepted', 'pr_opened', 'pr_ready', 'local_validated', 'delivery'].includes(type)) return null;
     if (ev.type !== type || ev.detail?.group_id !== groupId) continue;
     if (seq !== undefined && ev.detail?.assignment_seq !== seq) continue;
     return ev;
@@ -1197,6 +1202,7 @@ export function latestPrHandoffDelivery(ledger, groupId) {
   const seq = g?.assignment_seq;
   for (let i = ledger.events.length - 1; i >= 0; i -= 1) {
     const ev = ledger.events[i];
+    if (ev.type === 'owner_rework' && ev.detail?.group_id === groupId) return null;
     if (ev.type !== 'delivery' || ev.detail?.group_id !== groupId) continue;
     if (!(ev.detail?.e2e && ev.detail?.review && ev.detail?.size_gate && ev.detail?.branch && ev.detail?.tip_sha)) continue;
     if (ev.detail?.pr_url) continue;
@@ -1334,7 +1340,45 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
     if (typeof sha !== 'string' || !TIP_SHA_RE.test(sha)) {
       throw new LedgerError('ARGS', 'pr_ready.current_pr_head_sha 必须是 40 位十六进制');
     }
+    const accepted = latestGroupEvent(ledger, parsed.group_id, 'accepted');
+    const opened = latestGroupEvent(ledger, parsed.group_id, 'pr_opened');
+    const candidate = latestPrHandoffDelivery(ledger, parsed.group_id);
+    if (sha !== g.tip_sha || accepted?.detail?.tip_sha !== sha
+      || opened?.detail?.headRefOid !== sha || candidate?.tip_sha !== sha) {
+      throw new LedgerError('PRECONDITION', 'pr_ready 必须绑定本组同代已验收 candidate、pr-open 回执和当前 tip_sha；提交变化须重新验收');
+    }
+    if (candidate.e2e?.status !== 'pass' || candidate.review?.unresolved !== 0
+      || candidate.size_gate?.result === 'STOP' || g.review?.unresolved !== 0
+      || !candidate.scs?.length || candidate.scs.some((sc) => sc.status !== 'pass')
+      || [candidate.e2e, candidate.review, candidate.size_gate].some((result) => result?.candidate_sha !== sha)) {
+      throw new LedgerError('PRECONDITION', 'pr_ready 要求本组同一提交的 SC/e2e/review/size 全部通过本机验收');
+    }
+    const receipt = readPrOpenReceipt(parsed.receipt);
+    assertReceiptBoundToLedger(receipt, ledger, parsed.group_id, 'pr_ready');
+    assertReceiptAfterEvent(receipt, ledger, parsed.group_id, 'pr_opened', 'pr_ready');
+    const receiptMs = parseTimestamp(receipt.checked_at, 'pr_ready.checked_at');
+    const nowMs = parseTimestamp(now, 'pr_ready.now');
+    if (receipt.headRefOid !== sha || receipt.url !== g.pr_url || receipt.branch !== g.branch
+      || receiptMs > nowMs || nowMs - receiptMs > 5 * 60_000) {
+      throw new LedgerError('PRECONDITION', 'pr_ready 必须重新确认当前非 draft PR（URL/branch/head 对齐，回执五分钟内且不在未来）');
+    }
+    ev.detail.remote_confirmed_at = receipt.checked_at;
     ev.detail.assignment_seq = g.assignment_seq ?? 0;
+  }
+  if (event === 'local_validated') {
+    const group = findGroup(ledger, parsed.group_id);
+    if (group.state !== 'accepted') throw new LedgerError('PRECONDITION', 'local_validated 要求本组 accepted');
+    const receipt = readExactReceipt(parsed.receipt, ['candidate_sha', 'ledger_version', 'checked_at',
+      'group_id', 'assignment_seq', 'manifest_core_hash', 'base'], '单 PR 七门验收回执');
+    if (receipt.group_id !== parsed.group_id || receipt.candidate_sha !== group.tip_sha
+      || receipt.manifest_core_hash !== ledger.manifest_core_hash || receipt.base !== group.base
+      || receipt.ledger_version > ledger.version) {
+      throw new LedgerError('PRECONDITION', '单 PR 验收回执与当前组/提交/基线/manifest/台账版本不符');
+    }
+    assertManifestBound(ledger, readManifest(ledger.manifest_path), 'local_validated');
+    assertReceiptBoundToLedger(receipt, ledger, parsed.group_id, 'local_validated');
+    assertReceiptAfterEvent(receipt, ledger, parsed.group_id, 'accepted', 'local_validated');
+    ev.detail = { ...parsed, ...receipt, tip_sha: group.tip_sha };
   }
   if (event === 'watch_registered') {
     if (typeof parsed.group_id !== 'string' || parsed.group_id.length === 0) {
@@ -1377,6 +1421,8 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
       );
     }
     ev.detail.state_file = watchReceipt.state_file;
+    assertTakeover(watchReceipt.takeover, { now, readyAt: readyEv.at,
+      configHash: ledger.mini_watch_config_sha256 });
     ev.detail.owner = watchReceipt.owner;
     ev.detail.repo = watchReceipt.repo;
     ev.detail.pr_number = watchReceipt.pr_number;
@@ -1419,7 +1465,7 @@ export function setState({
     }
     const allowed = Object.freeze(['worktree', 'branch', 'base', 'session_id', 'title']);
     const required = Object.freeze(['worktree', 'branch', 'base']);
-    const noWhitespace = Object.freeze(['worktree', 'branch', 'base', 'session_id']);
+    const noWhitespace = Object.freeze(['branch', 'base', 'session_id']);
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
       throw new LedgerError('ARGS', '--identity 必须是 {worktree, branch, base, session_id?, title?} 对象');
     }
@@ -1448,6 +1494,7 @@ export function setState({
     }
     // ④ 修复点：worktree 会原样渲染进派工包身份行（worktree=.. 被 goal 当作实际工作目录），
     // 相对路径会把执行带到解析者 cwd 下的意外位置——强制绝对路径。
+    if (/[\r\n\0]/.test(parsed.worktree)) throw new LedgerError('ARGS', 'worktree 不得含换行或 NUL');
     if (!isAbsolute(parsed.worktree)) {
       throw new LedgerError('ARGS', `--identity.worktree 必须是绝对路径（当前: ${parsed.worktree}）`);
     }
@@ -1722,8 +1769,11 @@ export function setState({
       }
     }
     if (to === 'pr-open' && from === 'accepted') {
-      if (ledger.phase !== 'ready') {
-        return `缺失前置：accepted→pr-open 要求 run phase=ready（当前 ${ledger.phase}；先由 ready-check receipt 驱动 →ready，再开远端 PR）`;
+      const localValidated = latestGroupEvent(ledger, group, 'local_validated');
+      if (ledger.phase !== 'ready' && (localValidated?.detail?.tip_sha !== g.tip_sha
+        || localValidated?.detail?.base !== g.base
+        || localValidated?.detail?.manifest_core_hash !== ledger.manifest_core_hash)) {
+        return '缺失前置：accepted→pr-open 要求本组 local_validated 七门回执，或旧 run phase=ready；不得跳过验收';
       }
       if (prOpenReceipt === undefined) {
         return '缺失前置：accepted→pr-open 要求 confirm-pr-open 成功回执（--pr-open-receipt <path>）';

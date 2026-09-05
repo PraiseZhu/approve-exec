@@ -36,6 +36,18 @@ function asRecord(raw) {
 
 export function extractArchiveResult(raw, sessionId) {
   const rec = asRecord(raw);
+  if (rec.isError === true || rec.ok === false) {
+    throw new LedgerError('PRECONDITION', 'archive_sessions 工具返回失败，不能用作归档证明');
+  }
+  // MCP clients may retain the text/structuredContent envelope. Consume that
+  // real result directly instead of making the caller hand-transcribe a receipt.
+  if (rec.structuredContent) return extractArchiveResult(rec.structuredContent, sessionId);
+  if (Array.isArray(rec.content)) {
+    const payloads = rec.content.filter((part) => part.type === 'text')
+      .map((part) => asRecord(part.text)).filter((value) => Object.keys(value).length);
+    if (payloads.length !== 1) throw new LedgerError('PRECONDITION', 'archive_sessions 结果必须能解析为唯一回执');
+    return extractArchiveResult(payloads[0], sessionId);
+  }
   const payload = rec.result && typeof rec.result === 'object' ? rec.result : rec;
   if (payload.ok !== true) {
     throw new LedgerError('PRECONDITION', `archive_sessions 回执 ok 必须是 true（当前: ${payload.ok ?? '缺失'}）`);

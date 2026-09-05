@@ -17,7 +17,7 @@ import { evaluate, emptyCursors } from './gate.mjs';
 import { stateFileName, migrateAllLegacyStateFiles, STATE_FILE_NAME_RE, unregisterPr, identityMatches } from './register.mjs';
 import { withLock } from '../lib/state-lock.mjs';
 import { sessionTitle, titlePrefixForRepo } from '../session-dispatch.mjs';
-import { watchTaskName, mmddFromDate, assertCreateGatewayOrFailClosed, HOST_CREATE_GATEWAY } from '../vnext-owner-contract.mjs';
+import { watchTaskName, mmddFromDate } from '../vnext-owner-contract.mjs';
 
 const _mini = miniHost();
 export const MINI_WATCH_PROVIDER = _mini.provider_id;
@@ -74,12 +74,7 @@ export function planDispatch({ decision, state, signals, newItems, watchConfig, 
   const sessionId = typeof state.session_id === 'string' && state.session_id.length > 0
     ? state.session_id
     : null;
-  if (!sessionId) {
-    assertCreateGatewayOrFailClosed({
-      dryRun: false,
-      available: gatewayAvailable ?? HOST_CREATE_GATEWAY.available,
-    });
-  }
+  // Planning is not dispatch: the caller must acquire the skill claim first.
   const mini = miniHost();
   return {
     action: sessionId ? 'jump' : 'create',
@@ -157,8 +152,9 @@ export function claimCreate({ stateDir, owner, repo, prNumber, nowMs = Date.now(
     }
     if (state.create_pending === true) {
       const claim = state.create_claim;
-      if (!createClaimStale(claim, { nowMs, ttlMs })) {
-        const detail = claim?.claim_id ? `（claim ${claim.claim_id} 未过期或持有进程仍存活）` : '（旧版 claim 缺少可安全恢复的租约凭据）';
+      // A dead process does not prove the external create failed. Never reclaim.
+      if (state.create_pending) {
+        const detail = claim?.claim_id ? `（claim ${claim.claim_id} 结果未完成绑定，禁止按超时回收）` : '（旧版 claim 缺少可安全恢复的租约凭据）';
         throw new Error(`${owner}/${repo}#${prNumber} 已有 create 在途${detail}，拒绝并发再建`);
       }
     }
@@ -202,6 +198,7 @@ export function scanWatch({ stateDir, snapshotCmd, hmacKey = null, gatewayAvaila
     STATE_FILE_NAME_RE.test(f) && !f.startsWith('manifest-') && !f.startsWith('receipt-'));
   const dispatches = [];
   const terminals = [];
+  const observed = [];
   for (const f of files) {
     let state;
     try { state = JSON.parse(readFileSync(join(stateDir, f), 'utf8')); } catch { continue; }
@@ -234,7 +231,7 @@ export function scanWatch({ stateDir, snapshotCmd, hmacKey = null, gatewayAvaila
       if (err?.code === 'HOST_GATEWAY_MISSING') continue;
       throw err;
     }
-    if (!plan) continue;
+    if (!plan) { observed.push({ owner: state.owner, repo: state.repo, pr: state.pr_number }); continue; }
     if (plan.action === 'unregister') {
       terminals.push(plan);
       continue;
@@ -242,8 +239,9 @@ export function scanWatch({ stateDir, snapshotCmd, hmacKey = null, gatewayAvaila
     plan.message = buildDispatchMessage(plan);
     plan.next_cursors = res.cursors;
     dispatches.push(plan);
+    observed.push({ owner: state.owner, repo: state.repo, pr: state.pr_number });
   }
-  return { scanned: files.length, dispatches, terminals };
+  return { scanned: files.length, dispatches, terminals, observed };
 }
 
 export function persistCursors({ stateDir, owner, repo, prNumber, cursors }) {
@@ -292,79 +290,71 @@ export function applyWatchRound({
   }
   const scan = scanWatch({ stateDir, snapshotCmd, hmacKey, gatewayAvailable });
   const applied = [];
+  const errors = [];
   for (const plan of scan.dispatches) {
-    let livePlan = plan;
-    let createClaimId = null;
-    if (plan.action === 'create') {
-      const claim = claimCreate({
-        stateDir,
-        owner: plan.owner,
-        repo: plan.repo,
-        prNumber: plan.pr,
-      });
-      if (!claim.claimed) {
-        livePlan = { ...plan, action: 'jump', wake_kind: 'jump', session_id: claim.session_id };
-      } else {
-        createClaimId = claim.state?.create_claim?.claim_id ?? null;
-      }
-    }
-    const params = sessionsDispatchParams(livePlan);
-    let result;
     try {
-      result = dispatchFn(params) ?? {};
-    } catch (err) {
+      let livePlan = plan;
+      let createClaimId = null;
+      if (plan.action === 'create') {
+        const claim = claimCreate({
+          stateDir,
+          owner: plan.owner,
+          repo: plan.repo,
+          prNumber: plan.pr,
+        });
+        if (!claim.claimed) {
+          livePlan = { ...plan, action: 'jump', wake_kind: 'jump', session_id: claim.session_id };
+        } else {
+          createClaimId = claim.state?.create_claim?.claim_id ?? null;
+        }
+      }
+      const params = sessionsDispatchParams(livePlan);
+      let result;
+      try {
+        result = dispatchFn(params) ?? {};
+      } catch (err) {
+        // The host may already have created a session: retain the durable claim.
+        throw err;
+      }
+      const sessionId = typeof result.target_session_id === 'string' && result.target_session_id.length > 0
+        ? result.target_session_id
+        : null;
       if (livePlan.action === 'create') {
-        releaseCreateClaim({
+        if (!sessionId) {
+          // An empty receipt is ambiguous, not permission to create again.
+          throw new Error(`create ${livePlan.owner}/${livePlan.repo}#${livePlan.pr} 未返回 target_session_id，拒绝空跑`);
+        }
+        bindSessionId({
           stateDir,
           owner: livePlan.owner,
           repo: livePlan.repo,
           prNumber: livePlan.pr,
+          sessionId,
           claimId: createClaimId,
         });
+      } else if (livePlan.action === 'jump') {
+        const file = join(stateDir, stateFileName(livePlan.owner, livePlan.repo, livePlan.pr));
+        const live = readJson(file);
+        if (live.session_id && live.session_id !== (sessionId ?? livePlan.session_id)) {
+          throw new Error(`jump ${livePlan.owner}/${livePlan.repo}#${livePlan.pr} 名册已绑 ${live.session_id}，拒绝 ${sessionId ?? livePlan.session_id}`);
+        }
       }
-      throw err;
-    }
-    const sessionId = typeof result.target_session_id === 'string' && result.target_session_id.length > 0
-      ? result.target_session_id
-      : null;
-    if (livePlan.action === 'create') {
-      if (!sessionId) {
-        releaseCreateClaim({
+      if (livePlan.next_cursors) {
+        persistCursors({
           stateDir,
           owner: livePlan.owner,
           repo: livePlan.repo,
           prNumber: livePlan.pr,
-          claimId: createClaimId,
+          cursors: livePlan.next_cursors,
         });
-        throw new Error(`create ${livePlan.owner}/${livePlan.repo}#${livePlan.pr} 未返回 target_session_id，拒绝空跑`);
       }
-      bindSessionId({
-        stateDir,
-        owner: livePlan.owner,
-        repo: livePlan.repo,
-        prNumber: livePlan.pr,
-        sessionId,
+      applied.push({
+        ...livePlan,
+        session_id: sessionId ?? livePlan.session_id,
       });
-    } else if (livePlan.action === 'jump') {
-      const file = join(stateDir, stateFileName(livePlan.owner, livePlan.repo, livePlan.pr));
-      const live = readJson(file);
-      if (live.session_id && live.session_id !== (sessionId ?? livePlan.session_id)) {
-        throw new Error(`jump ${livePlan.owner}/${livePlan.repo}#${livePlan.pr} 名册已绑 ${live.session_id}，拒绝 ${sessionId ?? livePlan.session_id}`);
-      }
+    } catch (error) {
+      errors.push({ owner:plan.owner, repo:plan.repo, pr:plan.pr, error:error.message });
     }
-    if (livePlan.next_cursors) {
-      persistCursors({
-        stateDir,
-        owner: livePlan.owner,
-        repo: livePlan.repo,
-        prNumber: livePlan.pr,
-        cursors: livePlan.next_cursors,
-      });
-    }
-    applied.push({
-      ...livePlan,
-      session_id: sessionId ?? livePlan.session_id,
-    });
   }
   const unregistered = [];
   for (const term of scan.terminals) {
@@ -380,6 +370,7 @@ export function applyWatchRound({
   return {
     scanned: scan.scanned,
     dispatches: applied,
+    errors,
     terminals: scan.terminals,
     unregistered,
   };
@@ -398,6 +389,7 @@ if (isMain(import.meta.url)) {
       repo: args.repo,
       prNumber: args.pr,
       sessionId: args['session-id'],
+      claimId: args['claim-id'],
     });
     process.stdout.write('BOUND\n');
   } else if (cmd === 'persist-cursors') {

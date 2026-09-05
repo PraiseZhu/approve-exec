@@ -88,15 +88,6 @@ test('盯梢必须等本组 pr_ready，不是开 PR 即发、也不是等整批 
 test('盯梢 create 标题走 sessionTitle，不是 owner/repo#号 盯梢', () => {
   assert.equal(titlePrefixForRepo('xindong/mivo-canvas-plugin'), 'MivoPlugin');
   assert.equal(watchTaskName(461), '盯梢修复461');
-  assert.throws(
-    () => planDispatch({
-      decision: 'actionable',
-      state: { owner: 'xindong', repo: 'mivo-canvas-plugin', pr_number: 461, session_id: null, mmdd: '0905' },
-      signals: ['comment'],
-      newItems: { comments: [{ id: 'c1', body: 'fix' }] },
-    }),
-    /HOST_GATEWAY_MISSING|缺宿主 create gateway/,
-  );
   const create = planDispatch({
     decision: 'actionable',
     state: { owner: 'xindong', repo: 'mivo-canvas-plugin', pr_number: 461, session_id: null, mmdd: '0905' },

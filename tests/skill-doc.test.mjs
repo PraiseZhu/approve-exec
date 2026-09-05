@@ -113,8 +113,8 @@ test('第③段：DISPATCH_MODES 含 session；E=session；LEAD_SELF=V/P；WORKE
     '③段应声明 LEAD_SELF_SEATS = V、P');
   assert.ok(s3.includes('WORKER_SEATS') && /R/.test(s3) && /T/.test(s3),
     '③段应声明 WORKER_SEATS = R、T');
-  assert.ok(s3.includes('不准把 PI 写进路由档') || s3.includes('不准把 PI 写进'),
-    '③段应禁止把 PI 写进 routing.json');
+  assert.ok(s3.includes('以每次现读的所选档为准'),
+    '③段按实际路由取值，不得用旧 agent 枚举覆盖 routing.json');
   assert.ok(s3.includes('0.7') && s3.includes('SiteScout'), '③段流程应含 0.7 SiteScout');
   const flow = s3.slice(s3.indexOf('→ 6.'), s3.indexOf('席位真相源'));
   const registerAt = flow.indexOf('register.mjs');
@@ -169,8 +169,8 @@ test('第⑧段：create_workers ≥2 禁连续 create_worker 单发', () => {
     '⑧段第 1 种停必须是 PR Ready 正常完成，不是 DECISION_REQUIRED');
   assert.ok(s8.includes('开 PR ≠ 发盯梢') || s8.includes('pr_ready` 之后才注册'),
     '⑧段不得在仅开 PR 后立刻注册 Mini 盯梢');
-  assert.ok(s8.includes('429') && (s8.includes('fallbacks') || s8.includes('fallbacks_tried')),
-    '⑧段应禁止 429 空着手问 lead');
+  assert.ok(s8.includes('429') && s8.includes('唤醒条件'),
+    '⑧段应要求可恢复等待有唤醒条件');
   assert.ok(s8.includes('假设破裂'), '⑧段应含第 5 类停：假设破裂');
 });
 
