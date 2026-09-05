@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { withLock } from './lib/state-lock.mjs';
 import { writeJsonAtomic, hashObject, sha256, isMain, parseArgs } from './lib/common.mjs';
-import { readLedger, readManifest, assertManifestBound, findGroup, findPacket,
+import { readLedger, readExecutionManifest, assertManifestBound, findGroup, findPacket,
   setState, parseTimestamp, LedgerError } from './run-ledger.mjs';
 import { assertHandoffComplete, handoffHash } from './vnext-owner-contract.mjs';
 import { wouldCreate } from './session-dispatch.mjs';
@@ -18,13 +18,14 @@ import { extractArchiveResult } from './confirm-session-archived.mjs';
 
 function context(ledgerPath, groupId) {
   const ledger = readLedger(ledgerPath);
-  const manifest = readManifest(ledger.manifest_path);
+  const manifest = readExecutionManifest(ledger);
   assertManifestBound(ledger, manifest, 'owner-dispatch');
   const group = findGroup(ledger, groupId);
   const packet = findPacket(manifest, groupId);
   const identity = { worktree: group.worktree, branch: group.branch, base: group.base, title: group.title };
   const scope = { ledger: realpathSync(ledgerPath), run_id: ledger.run_id, group_id: groupId,
     assignment_seq: group.assignment_seq ?? 0, manifest_core_hash: ledger.manifest_core_hash, identity };
+  if (ledger.pr_plan) scope.execution_plan_hash = ledger.pr_plan.plan_hash;
   return { ledger, manifest, group, packet, identity, scope, scope_hash: hashObject(scope) };
 }
 
@@ -41,6 +42,12 @@ export function prepareOwner({ ledgerPath, groupId, handoffPath, sitePath, now }
     const site = checkSite(ctx.manifest, JSON.parse(readFileSync(sitePath, 'utf8')));
     const text = readFileSync(handoffPath, 'utf8');
     const hash = handoffHash(text);
+    if (ctx.ledger.pr_plan && !text.split('\n').includes('execution_plan_hash=' + ctx.ledger.pr_plan.plan_hash)) {
+      throw new LedgerError('PACKET_STALE', '开工包未绑定当前 PR 归属');
+    }
+    if (ctx.packet.stages && !text.split('\n').includes(JSON.stringify(ctx.packet.stages))) {
+      throw new LedgerError('PACKET_INCOMPLETE', '开工包阶段顺序或阶段授权不符');
+    }
     let retired = [];
     if (existsSync(file)) {
       const prior = JSON.parse(readFileSync(file, 'utf8'));

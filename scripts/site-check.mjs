@@ -3,11 +3,13 @@
 // the final manifest: a conflict is returned to task-priority for a new final.
 import { readFileSync } from 'node:fs';
 import { hashObject, normalizeRepoPath, isMain, parseArgs } from './lib/common.mjs';
-import { readManifest, manifestCoreHash, LedgerError } from './run-ledger.mjs';
+import { readManifest, readLedger, readExecutionManifest, manifestCoreHash, LedgerError } from './run-ledger.mjs';
 
 export function checkSite(manifest, report) {
   const reject = (why) => { throw new LedgerError('SITE_REPLAN_REQUIRED', why + '；请重新汇总任务优先级，禁止直接派窗'); };
-  if (report?.manifest_core_hash !== manifestCoreHash(manifest)) reject('现场报告未绑定当前 final manifest');
+  const compiled = manifest.kind === 'pr-execution-plan';
+  if (report?.manifest_core_hash !== (compiled ? manifest.source_manifest_core_hash : manifestCoreHash(manifest))) reject('现场报告未绑定当前 final manifest');
+  if (compiled && report.execution_plan_hash !== manifest.execution_plan_hash) reject('现场报告未绑定 PR 归属');
   if (!Array.isArray(report.per_sc) || !Array.isArray(report.cross_sc_edges)
     || !Array.isArray(report.open_unknowns)) reject('现场报告缺 per_sc/cross_sc_edges/open_unknowns');
   if (report.open_unknowns.length) reject('现场仍有未决问题，不允许把未知依赖当作可并行');
@@ -20,7 +22,8 @@ export function checkSite(manifest, report) {
     groups.set(group.group_id, { wave: wave.wave, writes: new Set(), packet });
     for (const id of group.sc_ids) {
       if (bySc.has(id)) reject('同一 SC 被派给多个 PR');
-      bySc.set(id, { group: group.group_id, wave: wave.wave });
+      const stage = packet.stages?.find(entry => entry.sc_ids.includes(id));
+      bySc.set(id, { group: group.group_id, wave: wave.wave, stage });
     }
   }
   const ids = new Set(manifest.scs.map((sc) => sc.id));
@@ -34,7 +37,8 @@ export function checkSite(manifest, report) {
     if (!sc.real_write_paths.length && sc.read_only !== true) reject('空写入路径必须明确 read_only=true');
     const group = groups.get(slot.group);
     for (const path of sc.real_write_paths) {
-      if (!normalizeRepoPath(path).ok || !group.packet.allowed_paths.includes(path)) reject('真实写入路径超出本 PR 授权: ' + path);
+      if (!normalizeRepoPath(path).ok || !(slot.stage?.allowed_paths ?? group.packet.allowed_paths).includes(path)
+        || slot.stage?.kind === 'probe') reject('真实写入路径超出本 PR 阶段授权: ' + path);
       group.writes.add(path);
     }
   }
@@ -52,6 +56,8 @@ export function checkSite(manifest, report) {
     const from = bySc.get(edge.from); const to = bySc.get(edge.to);
     if (!from || !to) reject('依赖边引用未知 SC');
     if (from.group !== to.group && from.wave >= to.wave) reject('依赖必须先于下游 PR，不能同波或反序');
+    if (from.group === to.group && from.stage && to.stage && from.stage.group_id !== to.stage.group_id
+      && from.stage.wave >= to.stage.wave) reject('PR 内阶段依赖反序');
   }
   return { ok: true, site_hash: hashObject(report), manifest_core_hash: report.manifest_core_hash,
     groups: [...groups].map(([group_id, g]) => ({ group_id, wave: g.wave, real_write_paths: [...g.writes].sort() })) };
@@ -60,6 +66,8 @@ export function checkSite(manifest, report) {
 if (isMain(import.meta.url)) {
   try {
     const args = parseArgs(process.argv.slice(2));
-    console.log(JSON.stringify(checkSite(readManifest(args.manifest), JSON.parse(readFileSync(args.site, 'utf8')))));
+    const manifest = args.ledger ? readExecutionManifest(readLedger(args.ledger)) : readManifest(args.manifest);
+    if (!args.ledger && manifest.scs.some(sc => sc.kind === 'probe')) throw new Error('PR_MAPPING_REQUIRED: 使用 --ledger 检查业务 PR');
+    console.log(JSON.stringify(checkSite(manifest, JSON.parse(readFileSync(args.site, 'utf8')))));
   } catch (error) { console.error('site-check: ' + error.message); process.exitCode = 2; }
 }

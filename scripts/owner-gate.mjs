@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { sha256, parseArgs, isMain } from './lib/common.mjs';
 import { readLedger, findGroup, latestGroupEvent, setState, writeLedgerAtomic,
-  LedgerError, readDefaults, parseTimestamp } from './run-ledger.mjs';
+  LedgerError, readDefaults, parseTimestamp, readExecutionManifest, findPacket, assertBaselineReady } from './run-ledger.mjs';
 
 const GOAL = '/Users/praise/.agents/skills/goal/SKILL.md';
 
@@ -29,6 +29,37 @@ export function ownerGate({ ledgerPath, groupId, kind, now, teamResult, ownerMod
   parseTimestamp(now, 'owner-gate now');
   const ledger = readLedger(ledgerPath);
   const group = findGroup(ledger, groupId);
+  const plan = readExecutionManifest(ledger);
+  if (kind === 'baseline') {
+    if (!ledger.pr_plan || group.state !== 'dispatched') throw new LedgerError('PRECONDITION', 'baseline 要求新版 PR 已 dispatched');
+    const clean = () => {
+      const git = args => {
+        const result = spawnSync('git', ['-C', group.worktree, ...args], { encoding: 'utf8' });
+        if (result.status !== 0) throw new LedgerError('PRECONDITION', '核查无法读取工作树');
+        return result.stdout.trim();
+      };
+      if (git(['rev-parse', 'HEAD']) !== group.base || git(['branch', '--show-current']) !== group.branch
+        || git(['status', '--porcelain'])) throw new LedgerError('PRECONDITION', '核查前后必须保持干净原基线');
+    };
+    clean();
+    const results = [];
+    for (const sc of findPacket(plan, groupId).scs_inline.filter(sc => sc.kind === 'probe')) {
+      const result = spawnSync(sc.verify.cmd, sc.verify.args, { cwd: group.worktree, encoding: 'utf8', timeout: 120000, maxBuffer: 1024 * 1024 });
+      clean();
+      if (result.error || result.status !== 0) throw new LedgerError('BASELINE_FAILED', '核查失败: ' + sc.id);
+      results.push({ sc_id: sc.id, exit_code: result.status, stdout_sha256: sha256(result.stdout ?? ''), stderr_sha256: sha256(result.stderr ?? '') });
+    }
+    writeLedgerAtomic(ledgerPath, ledger.version, current => {
+      readExecutionManifest(current);
+      current.events.push({ type: 'baseline_checked', at: now, detail: { group_id: groupId,
+        assignment_seq: group.assignment_seq ?? 0, session_id: group.session_id, base: group.base,
+        manifest_core_hash: ledger.manifest_core_hash, execution_plan_hash: ledger.pr_plan.plan_hash, results } });
+      current.version++;
+      return current;
+    });
+    return { ok: true, kind, results };
+  }
+  if (ledger.pr_plan) assertBaselineReady(ledger, groupId, plan);
   if (kind === 'rework') {
     if (ledger.phase === 'ready' || !['e2e', 'review', 'accepted', 'pr-open'].includes(group.state)
       || latestGroupEvent(ledger, groupId, 'pr_ready') || latestGroupEvent(ledger, groupId, 'watch_registered')) {
@@ -64,7 +95,7 @@ export function ownerGate({ ledgerPath, groupId, kind, now, teamResult, ownerMod
       detail: { goal_skill_path: goalPath, goal_skill_sha256: hash } });
     return { ok: true, kind, sha256: hash };
   }
-  if (kind !== 'routing') throw new LedgerError('ARGS', 'kind 必须是 goal、routing 或 rework');
+  if (kind !== 'routing') throw new LedgerError('ARGS', 'kind 必须是 baseline、goal、routing 或 rework');
   if (!['executing', 'e2e', 'review'].includes(group.state) || !latestGroupEvent(ledger, groupId, 'gate_goal')) {
     throw new LedgerError('PRECONDITION', '派 worker 前必须已有本组 goal 开工闸');
   }

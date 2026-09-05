@@ -4,7 +4,7 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { sha256 } from './lib/common.mjs';
-import { LedgerError, readLedger, readManifest, assertManifestBound, findPacket, findGroupWave } from './run-ledger.mjs';
+import { LedgerError, readLedger, readExecutionManifest, assertManifestBound, findPacket, findGroupWave } from './run-ledger.mjs';
 import {
   assertHandoffComplete, assertExcerpts, assertVerifyCmds, assertOwnerTitle,
 } from './vnext-owner-contract.mjs';
@@ -49,7 +49,7 @@ export function renderScText(packet) {
 
 export function renderPrHandoff({
   packet, identity, leadSessionId, seq, repo, title, snapshot,
-  why, excerpts, how, forbiddenExtra, tableLine,
+  why, excerpts, how, forbiddenExtra, tableLine, executionPlanHash,
 }) {
   if (!packet || typeof packet !== 'object') {
     throw new LedgerError('PACKET_INCOMPLETE', 'render-pr-handoff 缺 packet');
@@ -181,6 +181,13 @@ export function renderPrHandoff({
   }
 
   const lines = ['用 goal skill 执行。', '--until-sc', ''];
+  if (packet.stages) {
+    if (!executionPlanHash) throw new LedgerError('PACKET_INCOMPLETE', '缺 PR 执行计划绑定');
+    lines.push('execution_plan_hash=' + executionPlanHash);
+    lines.push('PR 内阶段（同一 owner，不另开 PR、不等待阶段合并）：');
+    lines.push(JSON.stringify(packet.stages));
+    lines.push('先执行 owner-gate.mjs baseline，通过后才执行 goal 开工闸；全部阶段 SC 通过后才能 Ready。');
+  }
   if (tableLine) {
     lines.push('## 总表');
     lines.push(tableLine);
@@ -216,13 +223,14 @@ export function renderPrHandoffFromLedger({
   why, how, excerpts,
 }) {
   const ledger = readLedger(ledgerPath);
-  const manifest = readManifest(ledger.manifest_path);
+  const manifest = readExecutionManifest(ledger);
   assertManifestBound(ledger, manifest, 'render-pr-handoff');
   const packet = findPacket(manifest, group);
   const wave = findGroupWave(ledger, group);
   const wg = wave.groups.find((g) => g.group_id === group);
   const identity = { worktree: wg.worktree, branch: wg.branch, base: wg.base };
   return renderPrHandoff({
+    executionPlanHash: ledger.pr_plan?.plan_hash,
     packet,
     identity,
     leadSessionId,
