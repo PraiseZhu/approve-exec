@@ -3,7 +3,7 @@
 //
 // 五类检查（exact 枚举，逐项独立报告，不因前项失败跳过后项）：
 //   ① routing（routing.json）：文件存在可读可解析；execute/review/e2e/pr_merge 四档齐；
-//      各档 agent/model/effort 非空字符串；agent ∈ {codex, claude-code}；effort ∈ 六枚举。
+//      各档 agent/model/effort 非空字符串；agent ∈ {pi, codex, claude-code}；effort ∈ 六枚举。
 //   ② orca-fanout：worktree-ledger.mjs / worktree-reclaim.mjs 存在（config.orcaFanoutScriptsRoot）。
 //   ③ goal skill：SKILL.md 存在（config.goalSkillRoot）。
 //   ④ runLedgerDir：可创建可写（mkdir -p + 探针文件写入/读回/清理；~ 经 HOME 展开）。
@@ -26,7 +26,7 @@ import { spawnSync } from 'node:child_process';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-const AGENTS = ['codex', 'claude-code'];
+const AGENTS = ['pi', 'codex', 'claude-code'];
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 const ROUTES = ['execute', 'review', 'e2e', 'pr_merge'];
 // sc-p2c change ② 的触发行原文（整行逐字匹配，防描述被改写后入口失效）

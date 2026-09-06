@@ -117,7 +117,7 @@ test('组A-5: routing JSON 不可解析 → exit 2 且点名解析失败', () =>
   });
 });
 
-test('组A-6: agent 越枚举（不在 {codex, claude-code}）→ exit 2 且点名', () => {
+test('组A-6: agent 越枚举（不在 {pi, codex, claude-code}）→ exit 2 且点名', () => {
   const body = JSON.stringify({
     execute: { agent: 'cobol', model: 'm', effort: 'max' },
     review: { agent: 'codex', model: 'm', effort: 'xhigh' },

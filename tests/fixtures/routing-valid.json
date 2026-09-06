@@ -1,7 +1,7 @@
 {
   "_readme": "selfcheck 测试用合法夹具：四档齐全、agent/effort 枚举合法。夹具注入仅测试用（--routing-file），模型 id 为占位符，不校验存在性。",
   "execute": {
-    "agent": "claude-code",
+    "agent": "pi",
     "model": "test-model-execute",
     "effort": "max"
   },
