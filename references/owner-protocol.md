@@ -24,18 +24,18 @@ prepare 使用台账路径旁固定的 .owners 目录。持久 claim 的作用�
 - 真实读取自己的 goal skill；新版先执行文末 owner-gate.mjs baseline，通过后再执行随包给出的 owner-gate.mjs goal 命令，旧版不补造 baseline。脚本重算文件 hash、检查干净基线、CAS 入账 gate_goal 并推进 executing。不得补造已有改动之前的开工证据，不用 jump 等逐步放行。
 - 自主完成本 PR 的 SC。可以开只读 sub 获取信息，也可提前派 tester/reviewer 验证。提前验证不能替代最终当前提交的全量 SC/e2e/review。
 - 首次及每次重新派 worker 前，现读共享 routing.json，执行 start_team({worker_permission_mode:"bypassPermissions"}) 并确认实际返回。用 owner-gate.mjs routing --owner-model <当前模型ID> --team-result <真实工具结果JSON> 连同台账/组/时间入账。脚本输出当前 e2e/review 档；agent、model、effort、provider_id 原样传给 Orca。GPT owner 使用 review.when_lead.gpt（存在时）。配置缺项或 auto 不得冒充通过。
-- 本机测试红、review 未解决项，先 owner-gate.mjs rework --ledger <台账> --group <组> --reason <失败证据> --now <时间>，保留同一 session/branch/base 并使旧候选与验收失效，再在授权路径内修复重测。交给 Mini 后禁止本机重做。新链路不用旧 run 级 phase=ready 提前冻结各 PR。429 按 Retry-After 在原路由等待；只有 NO_PROVIDER_FOR_AGENT、PROVIDER_ROUTE_UNAVAILABLE、BUDGET_MODEL_REQUIRES_API_MODE 才允许依共享 fallbacks 降级。创建结果未知先查原 worker，不重复建；queued 表示已入队，不重发消息。
+正常 owner 不因 PR Ready 停写；只有真实 Mini 接管后才禁止本机重做。
 - 每次等待保留原任务 ID、状态、已尝试动作和下次唤醒条件；使用当前工具的等待/回执机制。无等待能力时如实报能力缺失，不能声称有后台自动唤醒。连续三轮无新证据，或授权/SC/接口/跨 PR 依赖改变，只发一个 DECISION_REQUIRED。停止的是受阻动作，不是宣布任务完成。
 
 ## 一个 PR 的验收与接手
 
 1. 同一 owner 走 executing→e2e→review，提交本组 candidate（record-delivery）。提交内 branch、tip_sha、scs、goal_skill_path、e2e、review、size_gate、fallbacks_tried 按渲染器第10段 schema；最终证据必须绑定同一提交。
-2. lead 只判断这颗 PR 的证据是否满足原 SC、优先级和授权；通过则 accepted。不通过给一份集中意见，由同一 owner 修复。candidate 不是完工，禁止另开 verify session 接走责任。
+2. owner 自己判断并满足原 SC、优先级和授权；candidate 不是完工，不需要 lead 中途 accepted。owner 继续修复、开 PR 并跟进必要 CI/review；lead 只在最终 PR Ready 时集中验收。
 3. owner 对本组运行 ready-check.mjs --group <组> --ledger <台账> --manifest <final> --repo <本组worktree> --verdict <真实SC验收JSON> --e2e-report <真实报告> --presubmit-dir <size/format/intent目录> --receipt <输出路径> --now <当前ISO时间>。成功是 LOCAL_PR_VALIDATED；note-event local_validated --detail 的 group_id/receipt 消费这份回执。其它组尚未完成不阻塞本组。
-4. owner 提交/推送/开对应非 draft PR，运行 confirm-pr-open.mjs --repo <owner/repo> --branch <branch> --head <已验收SHA> --now <当前ISO时间> --ledger-version <当前版本> --assignment-seq <本组代次>；真实 stdout 给 accepted→pr-open 的 --pr-open-receipt。
-5. 重新运行 confirm-pr-open 获取新鲜 OPEN/非draft/head 回执，再 note-event pr_ready，detail 为 group_id、pr_url、current_pr_head_sha、receipt。回执必须晚于 pr_opened，五分钟内。PR Ready 的含义是“本机完成且可交给 Mini”，不是云端反馈已全部处理完。
-6. lead 仅对这颗 Ready PR 发 Mini：confirm-watch-registered.mjs 按配置注册，再读 Mini takeover 首扫心跳。TAKEOVER_PENDING 时只等待/复查接手，保留本机现场；不替 owner 写代码、不因另一颗 PR 未完成而拖住它。
-7. watch_registered 要有本 PR Ready 之后、十分钟内、同配置的有效首扫心跳。Mini 每 PR 一个持久 session，首次有反馈 create，以后只 jump；没有反馈时保持零 LLM 轮询。Mini 负责后续 GitHub CI/review 修复，本机 owner 不再同时写该 PR。
+4. owner 提交/推送/开对应非 draft PR，运行 confirm-pr-open.mjs --repo <owner/repo> --branch <branch> --head <已验收SHA> --now <当前ISO时间> --ledger-version <当前版本> --assignment-seq <本组代次>；真实 stdout 给 local_validated→pr-open（accepted 仅兼容旧台账） 的 --pr-open-receipt。
+5. 重新运行 confirm-pr-open 获取新鲜 OPEN/非draft/head 回执；owner 继续跟进必要 CI/review，直到当前 head 收口，再 note-event pr_ready。PR Ready 是 owner 完成的终点，不是交给 Mini 的中转点。
+6. 正常 Ready 不发 Mini。只有 owner 挂起、预算暂停、硬停或外部接管条件成立时，lead 才注册 Mini，并保留原 owner 现场直到真实接管确认。
+7. `watch_registered` 只属于异常接管路径。正常路径由原 owner 负责后续 GitHub CI/review 修复。
 8. 接管确认后 owner 才 wrapup-cleanup（不删远端分支），lead archive_sessions 并消费真实归档回执。GitHub 合入另需用户授权；本任务 skill 不自动 merge。
 
 ## 显式 PR 归属与阶段

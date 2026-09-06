@@ -909,7 +909,8 @@ const GROUP_TRANSITIONS = Object.freeze({
   executing: ['blocked', 'e2e', 'failed'],
   blocked: ['executing', 'failed'],
   e2e: ['review', 'failed'],
-  review: ['accepted', 'failed'],
+  review: ['local_validated', 'accepted', 'failed'],
+  local_validated: ['pr-open', 'failed'],
   accepted: ['pr-open', 'failed'],
   'pr-open': ['local-cleaned', 'failed'],
   'local-cleaned': ['archived', 'failed'],
@@ -1428,7 +1429,7 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
   }
   if (event === 'local_validated') {
     const group = findGroup(ledger, parsed.group_id);
-    if (group.state !== 'accepted') throw new LedgerError('PRECONDITION', 'local_validated 要求本组 accepted');
+    if (['review', 'local_validated', 'accepted'].includes(group.state) === false) throw new LedgerError('PRECONDITION', 'local_validated 要求本组处于 review 或既有验收态');
     const receipt = readExactReceipt(parsed.receipt, ['candidate_sha', 'ledger_version', 'checked_at',
       'group_id', 'assignment_seq', 'manifest_core_hash', 'base',
       ...(ledger.pr_plan ? ['execution_plan_hash'] : [])], '单 PR 七门验收回执');
@@ -1621,7 +1622,7 @@ export function setState({
         message: `wave ${wave} 已集成（integrated_tip=${w.integrated_tip}），不可重复集成`,
       });
     }
-    const allAccepted = w.groups.every((g) => g.state === 'accepted');
+  const allAccepted = w.groups.every((g) => ['accepted', 'local_validated', 'pr-open', 'local-cleaned', 'archived'].includes(g.state));
     if (!allAccepted) {
       const pending = w.groups.filter((g) => g.state !== 'accepted').map((g) => g.group_id);
       rejectWithEvent({
@@ -1791,7 +1792,16 @@ export function setState({
         return '缺失前置：executing→e2e 要求本组成立的 gate_routing（detail.routing_sha256 64hex）；create_worker 前必须现读 routing.json';
       }
     }
-    if (to === 'accepted' && from === 'review') {
+    if (to === 'local_validated' && from === 'review') {
+      const handoff = latestPrHandoffDelivery(ledger, group);
+      if (!handoff) return '缺失前置：→local_validated 要求 candidate record-delivery';
+      g.state = 'local_validated';
+      cur.events.push({
+        type: 'local_validated',
+        at: now,
+        detail: { group_id: group, session_id: g.session_id, tip_sha: g.tip_sha, assignment_seq: g.assignment_seq ?? 0 },
+      });
+    } else if (to === 'accepted' && from === 'review') {
       if (!latestGroupEvent(ledger, group, 'gate_goal')) {
         return '缺失前置：→accepted 要求本组成立的 gate_goal';
       }
@@ -1837,15 +1847,15 @@ export function setState({
         return `缺失前置：→accepted 要求 e2e/review/size candidate_sha 全部等于 tip_sha=${tip}（不一致: ${mismatched.join(', ')}）`;
       }
     }
-    if (to === 'pr-open' && from === 'accepted') {
+    if (to === 'pr-open' && ['accepted', 'local_validated'].includes(from)) {
       const localValidated = latestGroupEvent(ledger, group, 'local_validated');
       if (ledger.phase !== 'ready' && (localValidated?.detail?.tip_sha !== g.tip_sha
         || localValidated?.detail?.base !== g.base
         || localValidated?.detail?.manifest_core_hash !== ledger.manifest_core_hash)) {
-        return '缺失前置：accepted→pr-open 要求本组 local_validated 七门回执，或旧 run phase=ready；不得跳过验收';
+        return '缺失前置：local_validated→pr-open（accepted 仅兼容旧台账） 要求本组 local_validated 七门回执，或旧 run phase=ready；不得跳过验收';
       }
       if (prOpenReceipt === undefined) {
-        return '缺失前置：accepted→pr-open 要求 confirm-pr-open 成功回执（--pr-open-receipt <path>）';
+        return '缺失前置：local_validated→pr-open 要求 confirm-pr-open 成功回执（--pr-open-receipt <path>）';
       }
       if (prOpenReceipt.branch !== g.branch) {
         return `缺失前置：pr-open receipt.branch=${prOpenReceipt.branch} 对不上组分支 ${g.branch ?? '缺失'}`;
@@ -1855,7 +1865,7 @@ export function setState({
       }
       try {
         assertReceiptBoundToLedger(prOpenReceipt, ledger, group, 'pr-open receipt');
-        assertReceiptAfterEvent(prOpenReceipt, ledger, group, 'accepted', 'pr-open receipt');
+        assertReceiptAfterEvent(prOpenReceipt, ledger, group, from, 'pr-open receipt');
       } catch (err) {
         if (err instanceof LedgerError) return `缺失前置：${err.message}`;
         throw err;

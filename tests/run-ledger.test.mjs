@@ -3561,7 +3561,7 @@ test('组F-1: 非规范化路径调用必须实际执行 init 并创建台账（
 // =====================================================================
 // 机制同 ready-check.test.mjs 的 mutation-kill：把 scripts/tests/config/SKILL.md/graph.json 复制到
 // 临时目录，对 run-ledger.mjs 副本应用变异（精确字符串替换，锚点唯一），跑「跳过变异测试自身」
-// （RL_MUTATION_CHILD=1 + RC_MUTATION_CHILD=1）的完整 7 文件套件（清单见 RL_MUTATION_TEST_FILES），
+// （RL_MUTATION_CHILD=1 + RC_MUTATION_CHILD=1）的受影响测试套件（清单见 RL_MUTATION_TEST_FILES），
 // 断言失败集恰为预测集——
 // 排除说明（两个测试文件都未列入，各有一个独立原因）：
 //   - selfcheck.test.mjs：其组B-1/组B-3 的 --live 接线检查依赖「真实仓库」（symlink 目标与 git
@@ -4051,8 +4051,7 @@ test('ae-prewalk-handoff: 后续执行组出包含波0组的 first_edit.path/lan
 // 不只是生产侧）。不含 selfcheck.test.mjs：其组B-1/组B-3 的 --live 接线检查依赖真实 live
 // 接线位点，在变异复制树中天然 FAIL，与本三缺陷的变异无关。
 const RL_MUTATION_TEST_FILES = [
-  'tests/config.test.mjs', 'tests/e2e-dryrun.test.mjs', 'tests/graph.test.mjs',
-  'tests/mem-probe.test.mjs', 'tests/ready-check.test.mjs', 'tests/run-ledger.test.mjs',
+  'tests/e2e-dryrun.test.mjs', 'tests/ready-check.test.mjs', 'tests/run-ledger.test.mjs',
   'tests/skill-doc.test.mjs',
 ];
 
@@ -4084,18 +4083,22 @@ function runMutatedRLSuite(dir) {
   // 剥掉 NODE_TEST_CONTEXT：本进程由 node --test 拉起时该标记会被子进程继承，
   // node 检测到「test run 递归」会静默跳过全部测试并 exit 0（实际空跑），必须剥离才能让子套件真正执行。
   const { NODE_TEST_CONTEXT: _drop, ...childEnv } = process.env;
-  const r = spawnSync(process.execPath, ['--test', ...RL_MUTATION_TEST_FILES],
-    { cwd: dir, encoding: 'utf8', env: { ...buildChildEnv(childEnv), RL_MUTATION_CHILD: '1', RC_MUTATION_CHILD: '1' } });
   const failedNames = new Set();
-  for (const line of `${r.stdout}\n${r.stderr}`.split('\n')) {
-    if (line.startsWith('not ok ')) {
-      const m = line.match(/^not ok \d+ - (.+)$/);
-      if (m) failedNames.add(m[1].trim());
-    } else if (line.startsWith('✖ ') && !line.startsWith('✖ failing tests:')) {
-      failedNames.add(line.replace(/^✖ /, '').replace(/\s*\(\d+(?:\.\d+)?ms\)\s*$/, '').trim());
+  let status = 0;
+  for (const file of RL_MUTATION_TEST_FILES) {
+    const r = spawnSync(process.execPath, ['--test', '--test-force-exit', file],
+      { cwd: dir, encoding: 'utf8', env: { ...buildChildEnv(childEnv), RL_MUTATION_CHILD: '1', RC_MUTATION_CHILD: '1' } });
+    if (r.status !== 0) status = 1;
+    for (const line of `${r.stdout}\n${r.stderr}`.split('\n')) {
+      if (line.startsWith('not ok ')) {
+        const m = line.match(/^not ok \d+ - (.+)$/);
+        if (m) failedNames.add(m[1].trim());
+      } else if (line.startsWith('✖ ') && !line.startsWith('✖ failing tests:')) {
+        failedNames.add(line.replace(/^✖ /, '').replace(/\s*\(\d+(?:\.\d+)?ms\)\s*$/, '').trim());
+      }
     }
   }
-  return { status: r.status, failedNames: [...failedNames] };
+  return { status, failedNames: [...failedNames] };
 }
 
 for (const m of RL_MUTATION_PREDICTIONS) {

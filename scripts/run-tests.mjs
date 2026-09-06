@@ -98,7 +98,7 @@ function main() {
   const testFiles = TEST_FILES.map((f) => join(testsDir, f));
   console.log(`run-tests: 显式枚举 ${testFiles.length} 个测试文件\n`);
   for (const file of testFiles) {
-    const result = spawnSync(process.execPath, ['--test', file], { stdio: 'inherit', env: buildChildEnv(process.env) });
+    const result = spawnSync(process.execPath, ['--test', '--test-force-exit', file], { stdio: 'inherit', env: buildChildEnv(process.env) });
     if (result.status === null) {
       // 子进程被信号杀死（异常），与"测试失败"区分：非 0 收束，不静默
       process.exitCode = 1;

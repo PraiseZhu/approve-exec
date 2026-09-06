@@ -998,7 +998,7 @@ function runMutatedSuite(testFile, dir) {
   // 剥掉 NODE_TEST_CONTEXT：本进程由 node --test 拉起时该标记会被子进程继承，
   // node 检测到「test run 递归」会静默跳过全部测试并 exit 0（实际空跑），必须剥离才能让子套件真正执行
   const { NODE_TEST_CONTEXT: _drop, ...childEnv } = process.env;
-  const r = spawnSync(process.execPath, ['--test', testFile],
+  const r = spawnSync(process.execPath, ['--test', '--test-force-exit', testFile],
     { cwd: dir, encoding: 'utf8', env: { ...buildChildEnv(childEnv), RC_MUTATION_CHILD: '1' } });
   const failedNames = new Set();
   for (const line of `${r.stdout}\n${r.stderr}`.split('\n')) {
