@@ -36,6 +36,12 @@ const FIX = {
   valid: join(root, 'tests/fixtures/routing-valid.json'),
 };
 
+test('批准执行触发行要求 owner 自主到 PR Ready，正常路径不交给 Mini', () => {
+  assert.match(TRIGGER_LINE, /owner session.*自主推到 PR Ready/);
+  assert.match(TRIGGER_LINE, /正常路径不注册 Mini/);
+  assert.doesNotMatch(TRIGGER_LINE, /验收通过后再开远端 PR、注册 Mini/);
+});
+
 function runSelfcheck(args) {
   return spawnSync(process.execPath, [scriptPath, ...args], { cwd: root, encoding: 'utf8' });
 }

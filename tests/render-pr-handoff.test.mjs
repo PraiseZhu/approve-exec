@@ -57,8 +57,8 @@ test('render-pr-handoff: 0–10 段齐全，含开工闸与绝对路径', () => 
   assert.match(out, /返回 auto 不得创建/);
   assert.match(out, /只有 NO_PROVIDER_FOR_AGENT/);
   assert.match(out, /Retry-After/);
-  assert.match(out, /不代表 GitHub 反馈全部处理完/);
-  assert.match(out, /Mini 确认接管之前保留本机现场/);
+  assert.match(out, /必要门禁和远端 head 均已确认/);
+  assert.match(out, /Mini 仅在 owner 挂起、预算暂停、硬停或外部接管时接手/);
 });
 
 test('render-pr-handoff: SC 阶段结束后的收尾说明保留授权与硬停边界', () => {

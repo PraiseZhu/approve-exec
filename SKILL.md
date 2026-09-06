@@ -6,9 +6,9 @@ trigger: 批准执行
 
 # approve-exec — lead 编排守则
 
-**lead 按本文编排**：把 task-priority 产出的 `task-manifest.json` 拆成每 PR 一个独立 PI owner session。owner 拿到通过校验的完整 handoff 立即开工，自主完成实现、验证、提交、推送与开 PR；本机证据经 lead 验收且当前非 draft PR 已确认即 PR Ready，后续 GitHub CI/review 由 Mini 跟进。candidate 只是检查点。lead 只拆 PR、写开工包、派 session、读证据、裁决 DECISION_REQUIRED。不改「提交 PR」skill。子 session 不得自行 merge。本 skill 不合入、不跑三机同步。
+**lead 按本文编排**：把 task-priority 产出的 `task-manifest.json` 拆成每 PR 一个独立 PI owner session。owner 拿到完整 handoff 立即开工，自主完成实现、验证、提交、推送、开 PR，并继续跟进当前 PR 的必要 CI/review 反馈直到 PR Ready；lead 只在终点读证据并验收。candidate 只是检查点，不是 lead 放行闸。Mini 只作为 owner 挂起、预算暂停或外部接管异常时的升级路径，正常 PR Ready 不自动交给 Mini。子 session 不得自行 merge。
 
-Lead 只做判断：拆 PR、写开工包、派独立 session、裁决真正例外、归档 PI session。功能代码、SC 执行、e2e、GPT 单审、开远端 PR 都在 owner session；移交后的 GitHub CI/review 在 Mini session。Mini 名册写完、全部 PI session 归档之前 lead 不停。Fable 只走第⑰ sidecar，禁止 `create_worker` 调 Fable。不改 Cindy 宿主。skill 用持久 claim + 单次 create + 真实工具回执绑定防重复；结果未知暂停该 PR，不自动重派，不承诺宿主级 exactly-once。
+Lead 只做判断：拆 PR、写开工包、派独立 session、裁决真正例外、在终点验收、归档 PI session。功能代码、SC 执行、e2e、GPT 单审、开远端 PR 及当前 PR 的 CI/review 修复都在 owner session。Mini 只在明确升级条件成立时接管。
 
 真实派窗与 owner 入账的命令、恢复边界见 references/owner-protocol.md（派发前必读，完整内容随 handoff 发送）。保证等级是 T1 skill 纪律与脚本校验，不是宿主强制隔离。
 
@@ -76,14 +76,16 @@ task-priority final manifest
   → 4. owner session：自己的 goal 场景 C 把本 PR 的 SC 跑绿
         → mem-probe → 现读 routing.json 派 tester（e2e 档）
         → 现读 routing.json 派 reviewer（review 档 = GPT 单审）
-        → candidate 只是检查点；lead 验收本组本机证据，同一 owner 继续开远端非 draft PR
+        → candidate 只是检查点；owner 自己完成本机验证并直接开远端非 draft PR，lead 不在中途放行
   → 5. Lead 只读每 PR 的自动入账证据与 DECISION_REQUIRED（失败则给一个决定，同一 owner 继续，直到 PR_READY）
   → 6. owner 开远端 ready PR（非 draft）；`confirm-pr-open.mjs` 由 owner 执行并消费回执，不是 lead 代跑。开 PR ≠ 发盯梢。
-  → 6.5 本组本机验收通过、重新确认当前远端 OPEN 非 draft/head 后才 `note-event pr_ready`。4 个 PR 只 Ready 1 个，只给这 1 个发 Mini 盯梢；其余仍 push 着但未 Ready 的不得 register。禁止等整批 run ready。
-  → 7. `confirm-watch-registered.mjs` ssh Mini 跑本仓 `scripts/pr-watch/register.mjs`（按 config/mini-watch.json，不查旧班车），注册后再查 takeover.mjs 的首扫心跳，全部确认才封成回执 → `note-event watch_registered --detail.receipt`（前置：本组 `pr_ready`）
+  → 6.5 owner 本机验证通过后开远端非 draft PR，自己跟进必要 CI/review 反馈；当前 head 收口后才 `note-event pr_ready`，lead 只在此时验收。
+  → 7. 正常 pr_ready 不自动注册 Mini；只有 owner 挂起、预算暂停、硬停或外部接管条件成立时，才按配置注册 watch_registered。
   → 8. 各 session `wrapup-cleanup.mjs` 清本地 worktree/分支（不删远端）→ 回报
   → 9. lead `archive_sessions` 归档 PI session 后，用 `confirm-session-archived.mjs --result <工具 JSON>` 出回执再入账（lead 自己由用户归档；仅该 PR 的 PR_READY 后）
 ```
+
+正常路径不注册 Mini；Mini 仅作为异常升级路径，不是正常路径接管者。
 
 席位真相源是 `graph.json`（五席，精确键集 E/R/V/T/P；Fable 不是第六席）：
 
@@ -93,7 +95,7 @@ task-priority final manifest
 | R | `worker` | **子 session** 现读 review 档派 GPT 单审 |
 | T | `worker` | **子 session** 现读 e2e 档派 tester |
 | V | `lead-self` | lead 只读验收（ready-check / receipt），不改产品代码；happy path 零产品执行 |
-| P | `lead-self` | lead 只写裁决台账；.pr-intent.md 由 owner 写；开远端 PR、注册 Mini、清本地由 owner / skill 脚本执行，lead 归档 PI。graph `route=pr_merge` 只是路由档名，不是 git merge |
+| P | `lead-self` | lead 只写裁决台账；.pr-intent.md、开远端 PR 和 PR Ready 收口由 owner 执行；Mini 注册与清场只用于异常接管，lead 在终点验收并归档 PI。graph `route=pr_merge` 只是路由档名，不是 git merge |
 
 `DISPATCH_MODES` = `lead-self` / `worker` / `session`。LEAD_SELF_SEATS = V、P。WORKER_SEATS = R、T。E 不是 lead-self。graph 内不出现具体模型 ID；R 不钉 `model`/`pre_command`/`command`。routing.json 的 agent/model/provider 以每次现读的所选档为准，不把旧 agent 枚举当作限制；独立 owner 的创建使用 send_to_session.agent_kind。
 
@@ -108,24 +110,26 @@ task-priority final manifest
 3. **跨仓默认可并行**。
 4. **规模**：计划期只能估计。Mivo 必须按含测试的 added+deleted 严格 `<800`；新版 ready-check 对本 PR 明确基线到 candidate 的全部 diff 复核，800 行即拒，原 presubmit size/format/intent 门也保留。超预算返回重新拆计划并明确新 PR 归属，不自动另开 session，不许豁免、不许丢给 Fable。
 
-合并顺序单独写进总表，和「能不能并行写代码」分开。子 session **不得自行 merge**。本 skill 也不合入；合入发生在 GitHub 上，由 Mini 盯梢跟到可合（本轮不自动 `gh pr merge`）。
+合并顺序单独写进总表，和「能不能并行写代码」分开。子 session **不得自行 merge**。本 skill 也不合入；合入发生在 GitHub 上。正常路径由原 owner 跟到 PR Ready，只有异常接管后才由 Mini 盯梢到可合（本轮不自动 `gh pr merge`）。
 
 ## ⑤ 开工包
+
+子 session 不合入；正常路径不注册 Mini，Mini 仅作为异常升级路径。
 
 用户可见开工包由 `scripts/render-pr-handoff.mjs` 渲染。旧 `renderExecPacket` 不再作为用户可见开工包。缺块、乱序、缺绝对路径 = 渲染失败，不得 create session。
 
 包文顺序钉死：
 
-**0. 开工闸** — 第①段代码块全文，逐字。  
-**1. 身份**：仓、对照树（只读）、开发基线 SHA、新分支名、lead session id、本 PR 在总表里的序号。  
-**2. 为什么改**：人话，一条用户能看见的失败。  
-**3. 不要重读也能开工的现场（假设收据）**：每个洞一段已证实摘录（文件 + 行号 + 行为/接口签名）。owner 开工即承诺这些假设。发现不符 → DECISION_REQUIRED，禁止就地改方案。没有摘录 = 渲染失败，不得 create。禁止占位句「本包未附摘录」。  
-**4. 具体改法**：函数/类型/控制流；兼容旧调用的硬约束。不得复制第 2 段禁令当改法。  
-**5. allowed_paths**：只列文件，禁止目录。点名不可改的文件。  
-**6. SC 全文**：每条 `id` + `change` + `holds` + `expect` + `anchor_paths`。禁止「去 ~/.claude/.goal 自己找」。  
-**7. 验证命令**：可复制的真实命令。禁止 `console.log` 占位，禁止「先读 AGENTS.md 再决定跑什么」，禁止只用 `gh pr diff`。  
-**8. 做完之后（自动，不要问 lead）**：mem-probe → **现读同一份 routing.json 再派** e2e / GPT 单审 → candidate 只是检查点 → 同一 owner 开远端 ready PR、跟 CI/review 到 PR Ready。子 session 不合入。merge 由人点。Mini 名册写完、`watch_registered` 入账之后才跑 wrapup-cleanup。
-**9. 禁做**：硬停六条 + 本 PR 产品禁令 + 「未读 goal / 未读 routing.json 不得开工」+ 不得改总表 / `allowed_paths` / `base` + 假设破裂必须 blocked 上报，禁止就地改方案。含「可自决 / 必须停」两张表。  
+**0. 开工闸** — 第①段代码块全文，逐字。
+**1. 身份**：仓、对照树（只读）、开发基线 SHA、新分支名、lead session id、本 PR 在总表里的序号。
+**2. 为什么改**：人话，一条用户能看见的失败。
+**3. 不要重读也能开工的现场（假设收据）**：每个洞一段已证实摘录（文件 + 行号 + 行为/接口签名）。owner 开工即承诺这些假设。发现不符但仍在原 SC、接口和写入范围内，允许定点重读并自主选择等价实现；只有边界变化才 DECISION_REQUIRED。没有摘录 = 渲染失败，不得 create。禁止占位句「本包未附摘录」。
+**4. 具体改法**：函数/类型/控制流；兼容旧调用的硬约束。不得复制第 2 段禁令当改法。
+**5. allowed_paths**：只列文件，禁止目录。点名不可改的文件。
+**6. SC 全文**：每条 `id` + `change` + `holds` + `expect` + `anchor_paths`。禁止「去 ~/.claude/.goal 自己找」。
+**7. 验证命令**：可复制的真实命令。禁止 `console.log` 占位，禁止「先读 AGENTS.md 再决定跑什么」，禁止只用 `gh pr diff`。
+**8. 做完之后（自动，不要问 lead）：mem-probe → 现读 routing.json 派 e2e / GPT 单审 → candidate 只是检查点 → 同一 owner 开远端 ready PR、跟当前 PR 的 CI/review 到 PR Ready，再由 lead 做最终验收。只有异常接管时才注册 Mini；owner 未收到接管确认不得清理现场。
+**9. 禁做**：硬停六条 + 本 PR 产品禁令 + 「未读 goal / 未读 routing.json 不得开工」+ 不得改总表 / `allowed_paths` / `base` + 假设破裂必须 blocked 上报，禁止就地改方案。含「可自决 / 必须停」两张表。
 **10. 回报格式**：第⑩节 exact JSON（candidate 检查点 + pr_ready + decision_required）。
 
 总表（一份，每个子 session 也带上自己那一行）：并行/串行、合并顺序、全局禁做、lead id。
@@ -194,31 +198,35 @@ Lead 验收时现读 live routing.json：交卷 `e2e.model` / `review.model` 既
 
 ## ⑧ 子 session 闭环与 lead 指挥
 
+PR Ready 正常完成后 owner 正常返回 lead 验收；开 PR ≠ 发盯梢，只有异常升级才注册 Mini。
+
 owner session 只许在这五种情况下停。其中 2–5 进入 DECISION_REQUIRED（保留 owner 身份和现场，不算完成）；第 1 种是正常完成，接管确认后按协议清理归档：
 
-1. 本 PR 的当前提交已通过 lead 本机验收（SC、e2e、独立审查和规模门），且同一提交的远端非 draft PR 已确认：这称为 PR Ready，即可以交给 Mini，不代表 GitHub 审核反馈已全部处理完。candidate 只是检查点，交卷后不得停、不得卸责。合法 `pr_ready` 入账并收到 Mini 接管确认后 owner 正常结束，不是 DECISION_REQUIRED。只有名册文件写入不算接管确认；没有接管证据不得清场或释放责任。
+1. owner 已在同一提交完成 SC、e2e、独立审查、规模门和必要 CI/review 收口，且远端非 draft PR 的 head 对得上：这称为 PR Ready。candidate 只是检查点，lead 只在终点验收。正常 `pr_ready` 不要求 Mini 接管。
 2. 硬停六条。
 3. **本 session 自报**累计打到 `budgetPauseUsd`（可 `--no-budget-pause`）。不是 lead 跨 session 加总。
 4. **未读 goal skill 或未读 routing.json**：不得开工。停，提交 decision_required，写明卡在开工闸第 1 步还是第 2 步。禁止 jump 等 lead 放行。
-5. **假设破裂**：SC、接口兼容、授权或跨 PR 依赖与第 3/4 段不符。立刻 `blocked` + decision_required：哪条假设破了、影响哪些文件、是否波及别组。禁止就地改方案继续写。域内等价实现不算假设破裂，可以自主选择。无权改总表、无权改 `allowed_paths`、无权换 `base`——这三件事只能 lead 走第⑱节 replan。
+5. **假设破裂**：只有 SC、对外接口兼容、授权、跨 PR 依赖、`allowed_paths` 或 `base` 需要改变时才 blocked + decision_required。现场与 handoff 摘录不一致但仍在原 SC、接口和写入范围内时，owner 必须定点重读并自主选择等价实现，不得把正常调试退回 lead。
 
 连续 3 轮零增量：不得空转，也不得收工。必须发一条 decision_required 摊开卡点。Lead 只给一个决定，同一 owner 继续。
 
 PI owner（含 grok）遇到 worker 429 / 崩溃 / 创建失败：自己按第⑦段恢复，记录原 worker、已尝试动作、预算和下一次唤醒条件。可恢复等待不报完成，不因单次失败问 lead，也不盲目重建窗口。上层未授权的错误码不得换 provider。
 
-Lead 在全部 PI session 归档、Mini 名册写完之前不得结束。owner get_session_runtime 变 idle 且没有 PR_READY → send_to_session(target_session_id=原owner) 恢复原窗（queued 不重发；steer_session 只用于正在运行的窗口）：「未到停点，继续；卡点报我」。owner 问「要开始吗 / 能不能并行」→ 驳回，这些不是决策题。越域 / 改了别人的 PR → 验收失败，给予充分交接后 `failed→pending` 重派。
+Lead 在全部 owner 完成终点验收或进入明确异常升级前不得结束。owner idle 且没有 PR_READY 时，先读取原 owner 最后状态；只有确认挂起、预算暂停、硬停或工具不可恢复，才恢复原窗或注册 Mini，不把普通施工 idle 当成逐轮催工。
 
-「可验收」= candidate 交卷合法 + e2e PASS + GPT 单审 unresolved==0 + size-gate ≠ STOP，这只是检查点，**还没有** GitHub URL。同一 owner 继续开远端 ready PR；`confirm-pr-open.mjs` 确认非 draft 且 head 对得上。开 PR ≠ 发盯梢。本组 `note-event pr_ready` 之后才注册 Mini 名册并 `note-event watch_registered`，再清本地，最后归档这些 PI session。合入不是本 skill 的收尾。Mini 被叫醒后走 goal skill 场景 E（盯梢 pr-fix）：拉 PR 反馈 → 在名册指定 clone 里 `git worktree add` → 修 → push → 回帖。CI 全绿且 review 无未解决项时，Mini 只发「可合并」通知，merge 由人点；`config/mini-watch.json` 的 `auto_merge` 本轮只读，false 时零影响。盯梢 create 标题必须走 `sessionTitle`：`{项目名}-{中文任务名}丨 {MMDD}`。Mini 也使用 per-PR 单次 claim；create 回执未知时禁止超时回收再建，已绑定 session 只 jump。
+「可验收」= owner 交卷合法 + e2e PASS + GPT 单审 unresolved==0 + size-gate ≠ STOP + 必要 CI/review 已收口 + 非 draft PR head 对得上。candidate 只是检查点；owner 自己开 PR 并继续收口。正常路径不注册 Mini、不清理 owner；只有异常升级时才注册 Mini。
 
 子 session 派 tester/reviewer **之前**自己跑 `mem-probe.mjs`。Lead 在同一波并行 create 多个 session 前也跑一次 mem-probe，按 `pending = 本波 PR 数 × 2` 估槽。同批 ≥2 worker 用 `create_workers` 批量派发，禁连续 `create_worker` 单发。
 
 ## ⑨ 台账与状态机
 
+Mini 仅作为异常升级路径；正常 owner 自己推进到 PR Ready。
+
 组 = 一个 PR。`GROUP_KEYS` exact，新增 `session_id` / `title` / `pr_url` / `provider_id`（未派发前 null）。未列键 `SCHEMA` 拒。
 
 `GROUP_STATES`：`pending | dispatched | executing | blocked | e2e | review | accepted | pr-open | local-cleaned | archived | failed`。旧的 `delivered` / `review_pass` / `verified` 删除。
 
-映射：dispatched = session 已 create 且 Art 已钉；executing = 子 session 在干活（前置：已有本组成立的 `gate_goal`）；blocked = 卡点上报；e2e/review = 子闭环阶段；accepted = 本地 candidate accepted（检查点，不是 PR Ready）；pr-open = 远端已开；local-cleaned = Mini 新鲜首扫已确认接管且本地 worktree/分支已清；archived = PI session 已归档。`create_worker` 对应的 dispatched 前置：已有本组成立的 `gate_routing`。`accepted→pr-open` 必须消费 `confirm-pr-open.mjs` 成功回执（`--pr-open-receipt`：OPEN、`isDraft===false`、head 对上台账 tip；缺/null 一律拒）。`pr-open→local-cleaned` 要求本组成立的 `watch_registered`，并消费 `wrapup-cleanup.mjs` 成功回执（`--cleanup-receipt`：ok、未 skip、未删远端；脚本核当前分支、拒 dirty、删完复核 worktree/branch 不在）。`local-cleaned→archived` 必须消费 `archive_sessions` 成功回执（`--archive-receipt`：archived=true 且 session_id 对得上）。local_validated 消费 ready-check --group 回执（本组提交/基线/代次/manifest 绑定，其他组版本前进不使它失效）；pr_ready 另消费一次五分钟内的 confirm-pr-open 回执，必须晚于 pr_opened。
+映射：dispatched = session 已 create 且 Art 已钉；executing = 子 session 在干活；blocked = 卡点上报；e2e/review = 子闭环阶段；local_validated = owner 自己完成本机七门验收；accepted = 兼容旧台账的 lead 检查点，不再是正常 owner 的必经闸；pr-open = 远端已开；local-cleaned = 异常接管确认后才可清本地；archived = PI session 已归档。
 
 三份收尾回执与 Mini `register.mjs` 回执都必须带铸造时的 `ledger_version` + 本组 `assignment_seq`；入账时 `ledger_version` 不得大于当前台账 version（其它组先入账导致 version 前进仍可入账），且 `checked_at` 必须是可解析时间并晚于本组前置事件。旧代回执不得重放。`confirm-pr-open.mjs` / `wrapup-cleanup.mjs` 必须带 `--now` / `--ledger-version` / `--assignment-seq`，stdout 才能直接当回执入账。
 
@@ -232,7 +240,7 @@ Lead 在全部 PI session 归档、Mini 名册写完之前不得结束。owner g
 
 ready-check 先每 PR、再 run：对每个 group 用该组 worktree 跑门；单 PR 通过后独立写 LOCAL_PR_VALIDATED，不等其它组；兼容旧整批入口才写 run 级 `READY_FOR_LATER_SUBMIT_PR_SKILL`。这行是验收门过了的机器信号，意思是 owner 可以继续开远端 PR 并在 PR Ready 后归档；不是「交给以后的提交 PR skill」，也不是 lead 可以 git merge。旧 `accepted` / run `ready` 不得原地改名冒充 PR Ready。七门按 PR 各算一遍。L2 相对该 PR 的 `identity.base`。run 级 ready 额外一条：总表里的波次顺序已记录；真正合入不由本 skill 执行。
 
-watch_registered 还必须消费 takeover（schedule_id、first_scan_ack、last_scan_at、config_sha256）：last_scan_at 必须晚于 pr_ready.at，十分钟内且不在未来。只有 REGISTERED/ALREADY 文件不够。lead 在每颗 Ready 后发 Mini；Mini 首扫确认前 owner 保留现场、保持待接管状态，不与 Mini 同时继续写同一 PR。
+异常 watch_registered 还必须消费 takeover；正常路径不发 Mini。
 
 Lock+tmp+rename+CAS 与 `LedgerError` 码沿用。`budget_note` 事件可留，但 lead 不跨 session 加总账单。
 
@@ -282,7 +290,7 @@ fallbacks_tried [{route, model, provider_id, error}] 无降级写 []；禁止 tr
 
 ## ⑭ 与提交 PR 的边界
 
-本 skill 做：拆 PR、派唯一 owner session、内联执行契约、e2e worker、GPT 单审、owner 开远端 ready PR 并推到 PR Ready、每 PR 的 size/format/intent 闸（真实 candidate）、写 `.pr-intent.md`、ssh Mini 跑本仓 `scripts/pr-watch/register.mjs`（按 `config/mini-watch.json`）注册盯梢名册、`watch_registered`、wrapup-cleanup、`archive_sessions`（只归档 PI session）。
+本 skill 做：拆 PR、派唯一 owner session、内联执行契约、e2e worker、GPT 单审、owner 开远端 ready PR 并推到 PR Ready；只有异常接管时才注册 watch_registered、清理和归档。
 
 本 skill 不合入，不跑三机同步。本 skill 不做：三审、改 submit-pr skill、resume 旧 Mini 盯梢班车、自动 `gh pr merge`。子 session 不得自行 merge。三审仍不在本 skill。
 
@@ -334,3 +342,5 @@ Lead 按四类选，不自由发挥：
 - 调度 env：`PATH` 含 `/opt/homebrew/bin`（非交互 ssh 下 `gh` 必须找得到）；`AE_WATCH_STATE_DIR` / `AE_WATCH_SNAPSHOT_CMD` 按配置的 `state_dir` 与本仓 `deploy/wrappers/gh-snapshot.mjs`。
 - Mini 被叫醒后走 goal skill 场景 E（盯梢 pr-fix）。CI 绿 + review 清零时只发「可合并」通知，merge 由人点。
 - `config/mini-watch.json` `old_schedule_ids_blocklist` 里的旧两条调度保持 paused 不动，禁止 resume。
+
+补充约束：正常路径不注册 Mini；仅异常升级时消费 register 回执。子 session 不合入，PR Ready 后 owner 正常返回 lead 验收。归档 PI 使用 archive_sessions，并由 confirm-session-archived.mjs 校验。

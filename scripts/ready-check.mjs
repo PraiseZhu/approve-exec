@@ -151,7 +151,7 @@ function checkLedgerPartition(ledger, manifest, manifestError, gaps) {
     gaps.push({ gate: 'ledger-partition', detail: '台账无任何组（零工作运行，拒绝 READY）' });
   }
 
-  const notAccepted = groups.filter((g) => g.state !== 'accepted');
+  const notAccepted = groups.filter((g) => !['accepted', 'local_validated', 'pr-open', 'local-cleaned', 'archived'].includes(g.state));
   if (notAccepted.length > 0) {
     gaps.push({ gate: 'ledger-partition', detail: `组非 accepted: ${notAccepted.map((g) => `${g.group_id}=${g.state}`).join(', ')}` });
   }
@@ -498,9 +498,9 @@ function main() {
       if (ledger.pr_plan) {
         assertBaselineReady(ledger, args.group, manifest);
       }
-      if (group.state !== 'accepted' || !group.base || !group.worktree
+      if (!['review', 'local_validated', 'accepted', 'pr-open'].includes(group.state) || !group.base || !group.worktree
         || realpathSync(group.worktree) !== realpathSync(args.repo)) {
-        throw new Error('单 PR 验收要求 accepted、明确 base 和匹配的 worktree');
+        throw new Error('单 PR 验收要求 review/local_validated、明确 base 和匹配的 worktree');
       }
       groupReceipt = { group_id: args.group, assignment_seq: group.assignment_seq ?? 0,
         manifest_core_hash: ledger.manifest_core_hash, base: group.base,

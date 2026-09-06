@@ -119,7 +119,7 @@ export function renderPrHandoff({
     ...(forbiddenExtra ?? []),
     '未读 goal / 未读 routing.json 不得开工',
     '不得改总表 / allowed_paths / base（只能 lead 走 replan）',
-    '假设破裂必须 blocked 上报：仅指 SC、接口兼容、授权或跨 PR 依赖变化；域内等价实现可自决',
+    '假设破裂必须 blocked 上报：仅指 SC、对外接口兼容、授权、跨 PR 依赖、allowed_paths 或 base 变化；现场摘录变化但域内等价实现可自决',
   ];
 
   const scLines = renderScText(packet).split('\n');
@@ -146,7 +146,7 @@ export function renderPrHandoff({
     ['6. SC 全文', scLines.join('\n')],
     ['7. 验证命令', packet.verify_cmds.join('\n')],
     ['8. 做完之后（自动，不要问 lead）', [
-      'candidate 只是检查点，不是终点。同一 owner 继续到机器可证明的 PR Ready。',
+      'candidate 只是检查点，不是终点。同一 owner 继续到机器可证明的 PR Ready，并由 lead 在终点验收。',
       'goal 场景 C 的 SC PASS 只是子阶段完成，不是 owner 整体任务完成。仅当所有 SC 都有 PASS 证据且没有 hard_stop、预算暂停或 blocked 时，才正常返回同一 owner 继续审查和 PR Ready 收尾；不得通过切换阶段绕过停止条件。',
       '授权以本次任务已给出的来源、目标仓、分支和动作为准，开工包应注明；已明确授权的提交、推送、创建/更新目标 PR 直接执行，不重复请示。只有对应动作确实未获授权时才停下请求决定，PR Ready 终点本身不产生新增授权。',
       'goal 内 push／回帖仍要求投递消息中合法的独立行 OWNER_STANDING_AUTH: PR_PUSH_AND_REPLY 声明，仅覆盖当前 PR 的普通 push 和回帖，不授权创建 PR 或 merge；这段说明不是授权声明，不得自行补造声明。',
@@ -158,7 +158,7 @@ export function renderPrHandoff({
       '可自决：不改变 SC、接口兼容、授权和跨 PR 依赖的域内实现选型；派 read-only sub / e2e / review worker；本机测试红和 review unresolved>0 在 allowed_paths 内修到绿；已授权的 feature branch push 与目标 PR create/update。',
       '429 / Too Many Requests 按 Retry-After 和现有预算在原路由等待重试，记录下一次唤醒；worker 崩溃先查原 worker 状态再恢复。创建失败结果不明时先查绑定，不盲目重复创建。只有 NO_PROVIDER_FOR_AGENT / PROVIDER_ROUTE_UNAVAILABLE / BUDGET_MODEL_REQUIRES_API_MODE 才按现读该档 fallbacks 换 provider、不换代次。每次实际降级写入 fallbacks_tried；未走降级保留空数组并说明原因，禁止空数组就问 lead。',
       '必须停（DECISION_REQUIRED，保留原 owner 绑定）：硬停六条；hash/身份自检失败；SC、接口兼容、授权或跨 PR 依赖发生变化；allowed_paths 不够；授权不足；已授权恢复策略和预算耗尽；连续 3 轮零增量。只发一条 decision_required，附已尝试动作和 fallbacks_tried，等 lead 一个决定后同一 owner 继续。等待期间保留任务状态、阻塞原因和唤醒条件，不报完成。',
-      '按第⑩节提交 candidate 后不得完成、不得归档、不得问 lead 下一步。lead 仅验收本组当前提交的本机证据；不通过仍由同一 owner 修复。PR Ready 指本机 SC/e2e/独立审查通过且对应非 draft PR 已确认，不代表 GitHub 反馈全部处理完。lead 验收通过后才发本组 Mini 盯梢，后续 GitHub CI/review 由 Mini 负责。Mini 确认接管之前保留本机现场，不以名册文件写入冒充接管成功。子 session 不合入。merge 由人点。',
+      '按第⑩节提交 candidate 后不得完成、不得归档、不得问 lead 下一步。owner 自己修复、开非 draft PR，并跟进当前 PR 的必要 CI/review 到收口；PR Ready 指本机 SC/e2e/独立审查、必要门禁和远端 head 均已确认。lead 只在最终 PR Ready 时验收。Mini 仅在 owner 挂起、预算暂停、硬停或外部接管时接手；子 session 不合入，merge 由人点。',
     ].join('\n')],
     ['9. 禁做', forbidden.map((f) => `- ${f}`).join('\n')],
     ['10. 回报格式', [
