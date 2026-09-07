@@ -990,7 +990,7 @@ function phaseTransitionAllowed(ledger, targetPhase) {
 const READY_RECEIPT_KEYS = Object.freeze(['candidate_sha', 'ledger_version', 'checked_at']);
 export const PR_RECEIPT_KEYS = Object.freeze([
   'pr_id', 'session_id', 'candidate_sha', 'pr_url', 'e2e_status',
-  'review_unresolved', 'size_result', 'ledger_version', 'checked_at',
+  'size_result', 'ledger_version', 'checked_at',
 ]);
 export const PR_OPEN_RECEIPT_KEYS = Object.freeze([
   'url', 'number', 'headRefOid', 'isDraft', 'state', 'branch', 'checked_at',
@@ -1015,11 +1015,10 @@ const GOAL_SKILL_PATHS = Object.freeze([
 const ROUTING_PATH_LIVE = '/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json';
 const ROUTING_PATH_LINK = '/Users/praise/.agents/skills/orca-fanout/routing.json';
 const PR_HANDOFF_DELIVERY_KEYS = Object.freeze([
-  'branch', 'tip_sha', 'scs', 'goal_skill_path', 'e2e', 'review', 'size_gate', 'fallbacks_tried',
+  'branch', 'tip_sha', 'scs', 'goal_skill_path', 'e2e', 'size_gate', 'fallbacks_tried',
 ]);
 const FALLBACKS_TRIED_ITEM_KEYS = Object.freeze(['route', 'model', 'provider_id', 'error']);
 const PR_HANDOFF_E2E_KEYS = Object.freeze(['status', 'candidate_sha', 'model', 'route_source']);
-const PR_HANDOFF_REVIEW_KEYS = Object.freeze(['unresolved', 'candidate_sha', 'model', 'route_source']);
 const PR_HANDOFF_SIZE_KEYS = Object.freeze(['result', 'candidate_sha']);
 const PR_HANDOFF_SC_KEYS = Object.freeze(['id', 'status']);
 
@@ -1265,7 +1264,7 @@ export function latestPrHandoffDelivery(ledger, groupId) {
     const ev = ledger.events[i];
     if (ev.type === 'owner_rework' && ev.detail?.group_id === groupId) return null;
     if (ev.type !== 'delivery' || ev.detail?.group_id !== groupId) continue;
-    if (!(ev.detail?.e2e && ev.detail?.review && ev.detail?.size_gate && ev.detail?.branch && ev.detail?.tip_sha)) continue;
+    if (!(ev.detail?.e2e && ev.detail?.size_gate && ev.detail?.branch && ev.detail?.tip_sha)) continue;
     if (ev.detail?.pr_url) continue;
     if (seq !== undefined && ev.detail?.assignment_seq !== seq) continue;
     return ev.detail;
@@ -1409,11 +1408,11 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
       || opened?.detail?.headRefOid !== sha || candidate?.tip_sha !== sha) {
       throw new LedgerError('PRECONDITION', 'pr_ready 必须绑定本组同代已验收 candidate、pr-open 回执和当前 tip_sha；提交变化须重新验收');
     }
-    if (candidate.e2e?.status !== 'pass' || candidate.review?.unresolved !== 0
-      || candidate.size_gate?.result === 'STOP' || g.review?.unresolved !== 0
+    if (candidate.e2e?.status !== 'pass'
+      || candidate.size_gate?.result === 'STOP'
       || !candidate.scs?.length || candidate.scs.some((sc) => sc.status !== 'pass')
-      || [candidate.e2e, candidate.review, candidate.size_gate].some((result) => result?.candidate_sha !== sha)) {
-      throw new LedgerError('PRECONDITION', 'pr_ready 要求本组同一提交的 SC/e2e/review/size 全部通过本机验收');
+      || [candidate.e2e, candidate.size_gate].some((result) => result?.candidate_sha !== sha)) {
+      throw new LedgerError('PRECONDITION', 'pr_ready 要求本组同一提交的 SC/e2e/size 全部通过本机验收');
     }
     const receipt = readPrOpenReceipt(parsed.receipt);
     assertReceiptBoundToLedger(receipt, ledger, parsed.group_id, 'pr_ready');
@@ -1445,10 +1444,10 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
     assertReceiptBoundToLedger(receipt, ledger, parsed.group_id, 'local_validated');
     const candidate = latestPrHandoffDelivery(ledger, parsed.group_id);
     if (!candidate || candidate.tip_sha !== group.tip_sha || candidate.e2e?.status !== 'pass'
-      || candidate.review?.unresolved !== 0 || candidate.size_gate?.result === 'STOP'
+      || candidate.size_gate?.result === 'STOP'
       || !candidate.scs?.length || candidate.scs.some((entry) => entry.status !== 'pass')
-      || [candidate.e2e, candidate.review, candidate.size_gate].some((entry) => entry.candidate_sha !== group.tip_sha)) {
-      throw new LedgerError('PRECONDITION', 'local_validated 要求同提交全部 SC/e2e/单审/size 通过');
+      || [candidate.e2e, candidate.size_gate].some((entry) => entry.candidate_sha !== group.tip_sha)) {
+      throw new LedgerError('PRECONDITION', 'local_validated 要求同提交全部 SC/e2e/size 通过');
     }
     const predecessor = latestGroupEvent(ledger, parsed.group_id, 'accepted') ? 'accepted' : 'delivery';
     assertReceiptAfterEvent(receipt, ledger, parsed.group_id, predecessor, 'local_validated');
@@ -1824,7 +1823,7 @@ export function setState({
       // accepted 是 lead 的验收闸，不只是「有一张交卷」：candidate 必须是可提交
       // 的完整绿证据。record-delivery 仍允许把失败/未跑结果交上来供 lead 诊断，
       // 但不能借 accepted 状态把它们当成已验收。所有 candidate SHA 也必须绑定同一
-      // 树，避免 e2e/review/size 各自验了不同候选后拼成一张假绿交卷。
+      // 树，避免 e2e/size 各自验了不同候选后拼成一张假绿交卷。
       const badScs = Array.isArray(handoff.scs)
         ? handoff.scs.filter((sc) => sc?.status !== 'pass').map((sc) => sc?.id ?? '<missing>')
         : ['<missing>'];
@@ -1833,10 +1832,6 @@ export function setState({
       }
       if (handoff.e2e?.status !== 'pass') {
         return `缺失前置：→accepted 要求 e2e.status=pass（当前 ${handoff.e2e?.status ?? '缺失'}）`;
-      }
-      if (handoff.review?.unresolved !== 0 || g.review.unresolved !== 0) {
-        const unresolved = handoff.review?.unresolved ?? g.review.unresolved;
-        return `缺失前置：→accepted 要求 unresolved==0（当前 ${unresolved}）`;
       }
       if (handoff.size_gate?.result === 'STOP') {
         return '缺失前置：→accepted 要求 size_gate.result != STOP（当前 STOP）';
@@ -1849,11 +1844,10 @@ export function setState({
         ['tip_sha', tip],
         ['ledger.tip_sha', g.tip_sha],
         ['e2e.candidate_sha', handoff.e2e?.candidate_sha],
-        ['review.candidate_sha', handoff.review?.candidate_sha],
         ['size_gate.candidate_sha', handoff.size_gate?.candidate_sha],
       ].filter(([, sha]) => sha !== tip).map(([name, sha]) => `${name}=${sha ?? '缺失'}`);
       if (mismatched.length > 0) {
-        return `缺失前置：→accepted 要求 e2e/review/size candidate_sha 全部等于 tip_sha=${tip}（不一致: ${mismatched.join(', ')}）`;
+        return `缺失前置：→accepted 要求 e2e/size candidate_sha 全部等于 tip_sha=${tip}（不一致: ${mismatched.join(', ')}）`;
       }
     }
     if (to === 'pr-open' && ['accepted', 'local_validated'].includes(from)) {
@@ -2008,7 +2002,6 @@ export function setState({
             route_source: parsedDetail?.route_source ?? ROUTING_PATH_LIVE,
             routing_sha256: sha,
             e2e_model: parsedDetail?.e2e_model ?? null,
-            review_model: parsedDetail?.review_model ?? null,
             assignment_seq: g.assignment_seq ?? 0,
           },
         });
@@ -2300,10 +2293,7 @@ function renderVerifyPacket({ packet, group, wave, integratedWave, identity }) {
 // ---------- record-delivery：worker 交卷进台账的唯一通道 ----------
 const EXEC_DELIVERY_KEYS = Object.freeze(['status', 'tip_sha', 'scs']);
 const EXEC_SC_KEYS = Object.freeze(['sc_id', 'status', 'evidence']);
-// candidate_sha 是审查交卷的必填契约字段：ready-check ③ 按交卷类别消费（执行组绑
-// review 类最后一条 delivery）的 detail.candidate_sha 绑定候选 HEAD——缺它则绑定形同虚设
-// （F1 跨组断链补充），缺失/非 40hex 一律拒，禁止从台账派生默认（被审查对象由审查方在
-// 交卷里显式声明）。
+// 审查交卷键集只给 classifyDelivery 识别后 fail-closed 拒绝（本地不再跑 GPT/Claude 单审）。
 const REVIEW_DELIVERY_KEYS = Object.freeze(['rounds', 'findings_total', 'unresolved', 'fix_commits', 'candidate_sha']);
 const VERIFY_DELIVERY_KEYS = Object.freeze(['scs', 'integration_review', 'candidate_sha']);
 const INTEGRATION_REVIEW_KEYS = Object.freeze(['status', 'notes']);
@@ -2383,20 +2373,9 @@ function validatePrHandoffDelivery(data, packet) {
     throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 e2e.model 必须是非空字符串');
   }
   assertRouteSource(data.e2e.route_source, '终态交卷 e2e.route_source');
-  if (data.review === null || typeof data.review !== 'object' || Array.isArray(data.review)) {
-    throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 review 必须是对象');
+  if (Object.prototype.hasOwnProperty.call(data, 'review')) {
+    throw new LedgerError('DELIVERY_SCHEMA', '终态交卷不得含 review（本地不再跑 GPT/Claude 单审）');
   }
-  assertKeys(data.review, PR_HANDOFF_REVIEW_KEYS, '终态交卷 review');
-  if (!Number.isSafeInteger(data.review.unresolved) || data.review.unresolved < 0) {
-    throw new LedgerError('DELIVERY_SCHEMA', `终态交卷 review.unresolved 必须是非负安全整数（当前: ${data.review.unresolved}）`);
-  }
-  if (typeof data.review.candidate_sha !== 'string' || !TIP_SHA_RE.test(data.review.candidate_sha)) {
-    throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 review.candidate_sha 非 40 位十六进制');
-  }
-  if (typeof data.review.model !== 'string' || data.review.model.length === 0) {
-    throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 review.model 必须是非空字符串');
-  }
-  assertRouteSource(data.review.route_source, '终态交卷 review.route_source');
   if (data.size_gate === null || typeof data.size_gate !== 'object' || Array.isArray(data.size_gate)) {
     throw new LedgerError('DELIVERY_SCHEMA', '终态交卷 size_gate 必须是对象');
   }
@@ -2606,33 +2585,8 @@ function assertScIdSet(scEntries, packet, what) {
   }
 }
 
-function validateReviewDelivery(data) {
-  if (!Number.isSafeInteger(data.rounds) || data.rounds < 1) {
-    throw new LedgerError('DELIVERY_SCHEMA', '审查组交卷 rounds 必须是正安全整数，至少完成一轮单审');
-  }
-  // rounds/findings_total/unresolved 都是整数语义字段（台账 review 层为整数契约），
-  // 非负整数一把抓：字符串/小数/布尔/负值全部拒
-  for (const k of ['rounds', 'findings_total', 'unresolved']) {
-    if (!Number.isSafeInteger(data[k]) || data[k] < 0) {
-      throw new LedgerError('DELIVERY_SCHEMA', `审查组交卷 ${k} 必须是非负安全整数（≤ ${Number.MAX_SAFE_INTEGER}，当前: ${data[k]}）`);
-    }
-  }
-  if (!Array.isArray(data.fix_commits)) {
-    throw new LedgerError('DELIVERY_SCHEMA', '审查组交卷 fix_commits 必须是数组');
-  }
-  for (const c of data.fix_commits) {
-    if (typeof c !== 'string') {
-      throw new LedgerError('DELIVERY_SCHEMA', '审查组交卷 fix_commits 元素必须是字符串');
-    }
-  }
-  // candidate_sha 必填（exact 契约，不许默认）：ready-check ③ 按交卷类别消费（执行组绑
-  // review 类最后一条 delivery）的 detail.candidate_sha 绑定 HEAD，审查方必须在交卷里显式声明所审查候选
-  if (typeof data.candidate_sha !== 'string' || !TIP_SHA_RE.test(data.candidate_sha)) {
-    throw new LedgerError(
-      'DELIVERY_SCHEMA',
-      `审查组交卷 candidate_sha 非 40 位十六进制（当前: ${data.candidate_sha ?? '缺失'}）——审查交卷必须绑定所审查候选 SHA，禁止默认`
-    );
-  }
+function validateReviewDelivery(_data) {
+  throw new LedgerError('DELIVERY_SCHEMA', '本地不再接受审查组交卷（禁止 GPT/Claude 单审）；只交 e2e candidate');
 }
 
 function validateVerifyDelivery(data, packet) {
@@ -2780,23 +2734,7 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
         },
       });
     } else if (kind === 'review') {
-      g.review.rounds = data.rounds;
-      g.review.unresolved = data.unresolved;
-      cur.events.push({
-        type: 'delivery',
-        at: now,
-        // F1 修复：detail.candidate_sha 是 ready-check ③ 审查交卷绑定的读取点；tip_sha 取台账当前值
-        // （组已交付 tip，未交付即 null——fail-closed，出口门 ① 对账/③ 绑定会拒绝）
-        detail: {
-          group_id: group,
-          tip_sha: g.tip_sha,
-          candidate_sha: data.candidate_sha,
-          rounds: data.rounds,
-          findings_total: data.findings_total,
-          unresolved: data.unresolved,
-          fix_commits: data.fix_commits.length,
-        },
-      });
+      throw new LedgerError('DELIVERY_SCHEMA', '本地不再接受审查组交卷（禁止 GPT/Claude 单审）；只交 e2e candidate');
     } else if (kind === 'pr-handoff') {
       if (!latestGroupEvent(cur, group, 'gate_goal') || !latestGroupEvent(cur, group, 'gate_routing')) {
         throw new LedgerError(
@@ -2805,8 +2743,6 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
         );
       }
       g.tip_sha = data.tip_sha;
-      g.review.unresolved = data.review.unresolved;
-      g.review.rounds = Math.max(1, g.review.rounds);
       cur.events.push({
         type: 'delivery',
         at: now,
@@ -2817,13 +2753,11 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
           scs: data.scs,
           goal_skill_path: data.goal_skill_path,
           e2e: data.e2e,
-          review: data.review,
           size_gate: data.size_gate,
           fallbacks_tried: data.fallbacks_tried,
           session_id: g.session_id,
           candidate_sha: data.tip_sha,
           e2e_status: data.e2e.status,
-          review_unresolved: data.review.unresolved,
           size_result: data.size_gate.result,
           ledger_version: expected,
           checked_at: now,

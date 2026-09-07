@@ -32,8 +32,8 @@ function fixture(context) {
   const common = { group_id: group.group_id, assignment_seq: 0 };
   ledger.events.push(
     { type: 'delivery', at: '2026-09-06T10:00:00.000Z', detail: { ...common, branch: group.branch, tip_sha: SHA,
-      e2e: { status: 'pass' }, review: { unresolved: 0 }, size_gate: { result: 'PASS' },
-      scs: group.sc_ids.map((id) => ({ sc_id: id, status: 'pass', evidence: 'fixture verification' })) } },
+      e2e: { status: 'pass' }, size_gate: { result: 'PASS' },
+      scs: group.sc_ids.map((id) => ({ id, status: 'pass' })) } },
     { type: 'local_validated', at: '2026-09-06T10:01:00.000Z', detail: { ...common, tip_sha: SHA, base: SHA, manifest_core_hash: ledger.manifest_core_hash } },
     { type: 'pr_opened', at: '2026-09-06T10:02:00.000Z', detail: { ...common, pr_url: group.pr_url, headRefOid: SHA } },
     { type: 'pr_ready', at: '2026-09-06T10:03:00.000Z', detail: { ...common, pr_url: group.pr_url, current_pr_head_sha: SHA, receipt: receiptPath } },

@@ -100,7 +100,6 @@ test('新版 PR 全链：真实格式计划、唯一 owner、核查先行、完�
     scs: input.manifest.scs.map(sc => ({ id: sc.id, status: 'pass' })),
     goal_skill_path: '/Users/praise/.agents/skills/goal/SKILL.md',
     e2e: { status: 'pass', candidate_sha: input.sha, model: 'fixture', route_source: readDefaults().routingPath },
-    review: { unresolved: 0, candidate_sha: input.sha, model: 'fixture', route_source: readDefaults().routingPath },
     size_gate: { result: 'PASS', candidate_sha: input.sha }, fallbacks_tried: [] };
   const deliver = payload => recordDelivery({ ledgerPath: input.ledgerPath, group: input.groupId, now: NOW, payload });
   assert.throws(() => deliver({ ...candidate, scs: candidate.scs.filter(sc => !sc.id.includes('acceptance')) }), /SC|sc/);
@@ -113,7 +112,7 @@ test('新版 PR 全链：真实格式计划、唯一 owner、核查先行、完�
   const ledger = readLedger(input.ledgerPath);
   assert.equal(ledger.waves.length, 1);
   assert.equal(ledger.waves[0].groups[0].session_id, 'staged-owner');
-  assert.equal(ledger.waves[0].groups[0].review.rounds, 1);
+  assert.equal(ledger.waves[0].groups[0].review.rounds, 0);
   assert.equal(ledger.waves[0].integrated_tip, null);
   assert.equal(latestPrHandoffDelivery(ledger, input.groupId).scs.length, 14);
   const verdictPath = join(input.dir, 'verdict.json');
@@ -227,7 +226,8 @@ test('skill owner 集成夹具: 单次派窗→模拟工具回执绑定→goal �
   const input = { ...f, kind: 'routing', routingPath, ownerModel: 'gpt-fixture' };
   assert.throws(() => ownerGate({ ...input, teamResult: { worker_permission_mode: 'auto' } }), /bypassPermissions/);
   const output = ownerGate({ ...input, teamResult: { worker_permission_mode: 'bypassPermissions' } });
-  assert.equal(output.review.model, 'conditional-review');
+  assert.equal(output.e2e.model, 'fixture-route');
+  assert.equal(output.review, undefined);
   assert.equal(readLedger(f.ledgerPath).events.at(-1).type, 'gate_routing');
   setState({ ledgerPath:f.ledgerPath, group:'g4', to:'e2e', now:NOW });
   const ownerBefore = readLedger(f.ledgerPath).waves[0].groups[0];

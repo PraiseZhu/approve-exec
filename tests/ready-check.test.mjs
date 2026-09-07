@@ -263,7 +263,6 @@ test('单 PR 七门：其他组未完成不阻塞；本组身份、提交与真�
     data.ledger.events.push({ type: 'delivery', detail: {
       group_id: 'g1', assignment_seq: 0, branch: group.branch, tip_sha: repo.sha,
       e2e: { status: 'pass', candidate_sha: repo.sha },
-      review: { unresolved: 0, candidate_sha: repo.sha },
       size_gate: { result: 'PASS', candidate_sha: repo.sha },
     } });
   });
@@ -441,51 +440,39 @@ test('F-M: 台账组 sc_ids 与 manifest.scs 不一致 → exit 2 gap verdict-an
   expectGaps(runReady(repo, env), ['verdict-anchors'], '台账组 sc_ids 与 manifest.scs 不一致必须点名');
 });
 
-test('gap3: review.rounds 超上限（4 > reviewMaxRounds）→ exit 2 gap review-clean', (t) => {
+test('gap3: 本地单审计数不再挡 READY（rounds 超限 / unresolved>0 仍过）', (t) => {
   const repo = makeRepo(t);
   const env = buildEnv(t, repo, (p) => {
     p.ledger.waves[1].groups[0].review.rounds = 4;
-    return p;
-  });
-  expectGaps(runReady(repo, env), ['review-clean'], 'rounds 超限');
-});
-
-test('gap3: review.unresolved>0 → exit 2 gap review-clean', (t) => {
-  const repo = makeRepo(t);
-  const env = buildEnv(t, repo, (p) => {
     p.ledger.waves[0].groups[0].review.unresolved = 1;
     return p;
   });
-  expectGaps(runReady(repo, env), ['review-clean'], 'unresolved=1');
+  const res = runReady(repo, env);
+  assert.equal(res.status, 0, `本地不再要求单审，rounds/unresolved 不得挡 READY\n${res.stderr}`);
 });
 
-test('gap3: 审查交卷（review 类 delivery）candidate_sha 过期（verify 绑当前 SHA 不顶替）→ exit 2 gap review-clean', (t) => {
+test('gap3: e2e/pr-handoff 交卷 candidate_sha 过期 → exit 2 gap review-clean', (t) => {
   const repo = makeRepo(t);
   const env = buildEnv(t, repo, (p) => {
-    // 缺陷组合：review 交卷（delivered 时入账）绑过期 SHA；verify 交卷（review_pass 时入账、
-    // 排在最后一条）绑当前 HEAD。旧实现取「最后一条交卷」= verify → 放行；修复后必须按
-    // review 类交卷取，点名 review 实际绑定的旧 SHA。夹具 g1 已含 verify 交卷（绑当前 HEAD）。
     const ev = p.ledger.events.find((e) => e.type === 'delivery' && e.detail?.group_id === 'g1'
-      && typeof e.detail?.rounds === 'number');
-    assert.ok(ev, '夹具 g1 必须存在 review 类 delivery 事件');
-    ev.detail.candidate_sha = 'a'.repeat(40); // SHA 过期夹具（③）
+      && e.detail?.e2e && e.detail?.size_gate);
+    assert.ok(ev, '夹具 g1 必须存在 pr-handoff/e2e 类 delivery 事件');
+    ev.detail.candidate_sha = 'a'.repeat(40);
     return p;
   });
-  expectGaps(runReady(repo, env), ['review-clean'], '审查交卷绑定 SHA 过期');
+  expectGaps(runReady(repo, env), ['review-clean'], 'e2e 交卷绑定 SHA 过期');
 });
 
-test('gap3: 组无 review 类交卷（仅 exec+verify delivery）→ exit 2 gap review-clean 且点名类别序列', (t) => {
+test('gap3: 组无 pr-handoff 类交卷（仅 exec+verify delivery）→ exit 2 gap review-clean 且点名类别序列', (t) => {
   const repo = makeRepo(t);
   const env = buildEnv(t, repo, (p) => {
-    // D2 fail-closed：组没有 review 类交卷时不得回落到「最后一条」或「视为通过」——
-    // 否则 exec/verify 交卷会冒充审查绑定。消息必须带组名与实际类别序列。
     p.ledger.events = p.ledger.events.filter((e) => !(e.type === 'delivery' && e.detail?.group_id === 'g1'
-      && typeof e.detail?.rounds === 'number'));
+      && e.detail?.e2e && e.detail?.size_gate));
     return p;
   });
   const res = runReady(repo, env);
-  expectGaps(res, ['review-clean'], '无 review 类交卷必须 fail-closed');
-  assert.match(res.stderr, /g1 无 review 类交卷/, '必须点名组名');
+  expectGaps(res, ['review-clean'], '无 pr-handoff 类交卷必须 fail-closed');
+  assert.match(res.stderr, /g1 无 pr-handoff 类交卷/, '必须点名组名');
   assert.match(res.stderr, /exec, verify/, '必须点名实际 delivery 类别序列');
 });
 
@@ -956,8 +943,8 @@ const MUTATION_PREDICTIONS = [
   // 无 review 类交卷）都变绿假通过而红
   { id: '变异⑪', label: '③ 审查交卷绑定按该类组结论交卷（review 旧 SHA 不被 verify 顶替）', from: 'const lastBinding = binding[binding.length - 1];',
     to: 'const lastBinding = deliveries[deliveries.length - 1];',
-    red: ['gap3: 审查交卷（review 类 delivery）candidate_sha 过期（verify 绑当前 SHA 不顶替）→ exit 2 gap review-clean',
-          'gap3: 组无 review 类交卷（仅 exec+verify delivery）→ exit 2 gap review-clean 且点名类别序列'] },
+    red: ['gap3: e2e/pr-handoff 交卷 candidate_sha 过期 → exit 2 gap review-clean',
+          'gap3: 组无 pr-handoff 类交卷（仅 exec+verify delivery）→ exit 2 gap review-clean 且点名类别序列'] },
 ];
 
 // 复制 scripts/tests/config 到临时目录并对脚本副本应用变异；返回 { file, dir }——

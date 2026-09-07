@@ -16,9 +16,8 @@ ready-gaps 不存放完整 JSON 副本：所有 gap 夹具 = **ready-full 复制
 | verdict 缺 SC | verdict.scs 删 sc-p1f | verdict-anchors |
 | 锚点文件不存在 | evidence[1].file 改 `evidence/anchors/missing.txt` | verdict-anchors |
 | summary 不一致 | evidence[0].summary 改 `bogus` | verdict-anchors |
-| rounds 超限 | g2.review.rounds = 4（> reviewMaxRounds） | review-clean |
-| unresolved>0 | g1.review.unresolved = 1 | review-clean |
-| 审查绑定 SHA 过期 | g1 最后一条 delivery 的 candidate_sha 改 `a`×40 | review-clean |
+| rounds 超限 / unresolved>0 | 组 review 计数（本地不再核单审） | 不挡 READY |
+| e2e 绑定 SHA 过期 | g1 pr-handoff/e2e 类 delivery 的 candidate_sha 改 `a`×40 | review-clean |
 | e2e 文件缺失 | 删除 e2e-report.json | e2e-report |
 | e2e status fail | e2e.status = "fail" | e2e-report |
 | e2e SHA 过期 | e2e.candidate_sha 改 `a`×40 | e2e-report |

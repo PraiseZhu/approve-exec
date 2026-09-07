@@ -156,9 +156,6 @@ function currentEvidence({ ledgerPath, ledger, groupId }) {
     || receipt.headRefOid !== group.tip_sha || receipt.state !== 'OPEN' || receipt.isDraft !== false) {
     throw new LedgerError('PRECONDITION', 'pr_ready receipt 不是当前 OPEN 非 draft PR');
   }
-  if (group.review?.unresolved !== 0) {
-    throw new LedgerError('PRECONDITION', '当前组本机 review/verify 未通过，拒绝发 Mini signal');
-  }
   const executionManifest = readExecutionManifestForSignal(ledger);
   const executionPacket = LedgerApi.findPacket(executionManifest, groupId);
   const executionScIds = Array.isArray(executionPacket.scs_inline)
@@ -169,13 +166,16 @@ function currentEvidence({ ledgerPath, ledger, groupId }) {
     throw new LedgerError('PRECONDITION', 'execution manifest 的当前 PR SC 集合与 ledger group.sc_ids 不一致');
   }
   const handoff = latestPrHandoffDelivery(ledger, groupId);
+  if (handoff?.e2e?.status !== 'pass') {
+    throw new LedgerError('PRECONDITION', '当前组本机 e2e 未通过，拒绝发 Mini signal');
+  }
   const handoffScIds = Array.isArray(handoff?.scs)
     ? handoff.scs.map((sc) => sc?.sc_id ?? sc?.id).filter((id) => typeof id === 'string')
     : [];
   if (!handoff || !Array.isArray(handoff.scs) || handoff.tip_sha !== group.tip_sha
     || canonicalJson([...handoffScIds].sort()) !== canonicalJson([...executionScIds].sort())
     || handoff.scs.some((sc) => sc?.status !== 'pass') || handoff.e2e?.status !== 'pass'
-    || handoff.review?.unresolved !== 0 || !['PASS', 'WARN'].includes(handoff.size_gate?.result)) {
+    || !['PASS', 'WARN'].includes(handoff.size_gate?.result)) {
     throw new LedgerError('PRECONDITION', '当前 PR 缺 execution manifest 对齐且全部 SC pass 的真实交卷');
   }
   const executionPlanHash = ledger.pr_plan?.plan_hash ?? null;

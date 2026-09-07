@@ -66,7 +66,7 @@ test('render-pr-handoff: SC 阶段结束后的收尾说明保留授权与硬停�
   const afterSc = out.split('## 8. 做完之后（自动，不要问 lead）\n')[1].split('\n## 9. 禁做')[0];
   assert.match(afterSc, /SC PASS 只是子阶段完成，不是 owner 整体任务完成/);
   assert.match(afterSc, /所有 SC 都有 PASS 证据且没有 hard_stop、预算暂停或 blocked/);
-  assert.match(afterSc, /正常返回同一 owner 继续审查和 PR Ready 收尾/);
+  assert.match(afterSc, /正常返回同一 owner 继续本地 e2e 和 PR Ready 收尾/);
   assert.match(afterSc, /不得通过切换阶段绕过停止条件/);
   assert.match(afterSc, /已明确授权的提交、推送、创建\/更新目标 PR 直接执行，不重复请示/);
   assert.match(afterSc, /只有对应动作确实未获授权时才停下请求决定/);

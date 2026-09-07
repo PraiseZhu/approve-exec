@@ -102,15 +102,12 @@ export function ownerGate({ ledgerPath, groupId, kind, now, teamResult, ownerMod
   if (teamMode(teamResult) !== 'bypassPermissions') {
     throw new LedgerError('PRECONDITION', 'start_team 实际返回必须确认 worker_permission_mode=bypassPermissions');
   }
-  if (typeof ownerModel !== 'string' || !ownerModel.trim()) throw new LedgerError('ARGS', '必须提供当前 owner model 以选择 review 条件档');
+  if (typeof ownerModel !== 'string' || !ownerModel.trim()) throw new LedgerError('ARGS', '必须提供当前 owner model');
   const raw = readFileSync(routingPath, 'utf8');
   const routing = JSON.parse(raw);
-  const family = ownerModel.split('/').at(-1);
-  const review = family.startsWith('gpt-') && routing.review?.when_lead?.gpt
-    ? routing.review.when_lead.gpt : routing.review;
   const e2e = routing.e2e;
-  for (const selected of [e2e, review]) for (const key of ['agent', 'model', 'effort', 'provider_id']) {
-    if (typeof selected?.[key] !== 'string' || !selected[key]) throw new LedgerError('ROUTING', '现读路由缺 ' + key);
+  for (const key of ['agent', 'model', 'effort', 'provider_id']) {
+    if (typeof e2e?.[key] !== 'string' || !e2e[key]) throw new LedgerError('ROUTING', '现读 e2e 路由缺 ' + key);
   }
   const hash = sha256(raw);
   writeLedgerAtomic(ledgerPath, ledger.version, (current) => {
@@ -120,11 +117,11 @@ export function ownerGate({ ledgerPath, groupId, kind, now, teamResult, ownerMod
     }
     current.events.push({ type: 'gate_routing', at: now, detail: { group_id: groupId,
       assignment_seq: group.assignment_seq ?? 0, route_source: routingPath, routing_sha256: hash,
-      e2e_model: e2e.model, review_model: review.model, worker_permission_mode: 'bypassPermissions' } });
+      e2e_model: e2e.model, worker_permission_mode: 'bypassPermissions' } });
     current.version = ledger.version + 1;
     return current;
   });
-  return { ok: true, kind, routing_sha256: hash, e2e, review, worker_permission_mode: 'bypassPermissions' };
+  return { ok: true, kind, routing_sha256: hash, e2e, worker_permission_mode: 'bypassPermissions' };
 }
 
 if (isMain(import.meta.url)) {

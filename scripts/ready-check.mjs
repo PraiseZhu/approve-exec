@@ -22,16 +22,10 @@
 //                        ledger groups sc_ids 三集合对账一致后才遍历；每条 SC 在 verdict 中 status=pass；
 //                        verdict.candidate_sha == HEAD；证据锚点强校验：evidence.file realpath 后在 repo 内
 //                        （防仓内 symlink 指向仓外文件冒充锚点）+ summary 与 output_records 内嵌记录逐字一致
-//   ③ review-clean      每组 review.rounds ≤ config.reviewMaxRounds 且 unresolved==0；
-//                        两层内容等值（修复 sc-p2e：组级审查绑各组 worktree tip → V 波集成
-//                        squash/rebase → P 席打包 commit 必然产生新 HEAD，旧「结论交卷
-//                        candidate_sha == HEAD」的 SHA 精确等值判据让 READY 结构上不可达；
-//                        要守的语义是「审过的内容 == 最终提交的内容」）：
-//                          L1 组路径域内容等值——每组「该类组的结论交卷」绑定的 candidate_sha
-//                              （已审 tip，执行组 = review 类交卷同类多条取最后一条；验收组 =
-//                              verify 类交卷，组类型按 manifest packet.scs_inline 全 kind=verify
-//                              判定，同 render-packet；结论交卷缺失 → fail-closed 点名组名与
-//                              delivery 类别序列）到当前 HEAD 的 diff 落在该组 packet.allowed_paths
+//   ③ review-clean      本地不再要求 GPT/Claude 单审。本闸只证「e2e 过的内容 == 最终提交的内容」：
+//                          L1 组路径域内容等值——每组结论交卷绑定的 candidate_sha
+//                              （执行组 = pr-handoff/e2e 类交卷同类多条取最后一条；验收组 =
+//                              verify 类交卷）到当前 HEAD 的 diff 落在该组 packet.allowed_paths
 //                              内必须为空；不为空 → FAIL 点名组名与路径；
 //                          L2 全树封闭性——HEAD 相对台账 baseline_tip 的 diff 必须全部落在
 //                              「全组 allowed_paths 并集 ∪ P 席打包白名单（graph.json
@@ -52,7 +46,7 @@
 //
 // CLI: node scripts/ready-check.mjs --repo <R> --ledger <L> --manifest <M> --verdict <V>
 //      --e2e-report <E> --presubmit-dir <D> [--now <ISO时间戳>] [--receipt <receipt 路径>]
-//      [--config <C 默认 config/defaults.json>]
+//      [--config <C> 仍接受，本地不再读 reviewMaxRounds]
 //
 // 输入容错：ledger/manifest/verdict/e2e-report 任一不可解析 → 转对应 gate 的 gap 占位，
 // 不依赖其内容的 gate 照常运行（前项失败不跳过后项），全部收束后再 exit 2。
@@ -276,7 +270,7 @@ function checkVerdictAnchors(verdict, manifest, manifestError, ledger, repoRoot,
 }
 
 // delivery 事件落盘时无显式类别字段（run-ledger 各写点分别落不同键），类别按 detail 形状判：
-//   review:    rounds（record-delivery 审查交卷；validateReviewDelivery 强制非负安全整数）
+//   review:    rounds（旧审查交卷形状；record-delivery 一律拒，本闸不消费）
 //   verify:    integration_review_status（record-delivery 验收交卷）
 //   exec:      status + tip_sha + scs（record-delivery 执行交卷）
 //   prewalk:   first_edit + read_paths + landmines + open_unknowns（第 4 类现场，不绑审查）
@@ -284,7 +278,7 @@ function checkVerdictAnchors(verdict, manifest, manifestError, ledger, repoRoot,
 // 五者互斥；其余形状一律 unknown（fail-closed 点名，不猜测）。
 function deliveryCategory(d) {
   const detail = d?.detail || {};
-  if (detail.pr_url && detail.e2e && detail.review && detail.size_gate) return 'pr-handoff';
+  if (detail.e2e && detail.size_gate && detail.branch && detail.tip_sha) return 'pr-handoff';
   if (typeof detail.rounds === 'number') return 'review';
   if (typeof detail.integration_review_status === 'string') return 'verify';
   if (
@@ -318,42 +312,23 @@ function isVerifyGroup(packet) {
 //   L2 全树封闭性——HEAD 相对台账 baseline_tip 的 diff 必须全部落在「全组 allowed_paths
 //      并集 ∪ P 席打包白名单（graph.json phases.P.packaging_paths）」内；baseline_tip=null
 //      （兼容模式）→ stderr WARN 点名跳过（与 run-ledger init 兼容模式既有处理风格一致）。
-function checkReviewClean(ledger, manifest, repoRoot, headSha, reviewMaxRounds, packagingPaths, gaps) {
+function checkReviewClean(ledger, manifest, repoRoot, headSha, packagingPaths, gaps) {
   // F-O: 台账不可解析时本 gate 自身点名不可用，不拖垮不依赖台账的后项
   if (!ledger) { gaps.push({ gate: 'review-clean', detail: '台账不可用（文件不存在或不可解析）' }); return; }
   const groups = (ledger.waves || []).flatMap((w) => w.groups || []);
   const events = ledger.events || [];
   const packets = manifest?.dispatch?.packets || [];
   for (const g of groups) {
-    const review = g.review || {};
-    if (typeof review.unresolved !== 'number' || review.unresolved !== 0) {
-      gaps.push({ gate: 'review-clean', detail: `${g.group_id} review.unresolved=${review.unresolved} != 0` });
-    }
-    if (typeof review.rounds !== 'number' || review.rounds > reviewMaxRounds) {
-      gaps.push({ gate: 'review-clean', detail: `${g.group_id} review.rounds=${review.rounds} > reviewMaxRounds=${reviewMaxRounds}` });
-    }
     const deliveries = events.filter((e) => e.type === 'delivery' && e.detail?.group_id === g.group_id);
-    // 绑定对象是「该类组的审查结论交卷」本身，不是「最后一条交卷」：执行组生命周期允许
-    // review 交卷在 delivered 入账（candidate_sha 可能是审查时的旧树）、verify 交卷在
-    // review_pass 入账（candidate_sha = 当时 HEAD）且排在 review 之后——拿最后一条会把
-    // verify 的 SHA 顶替掉 review 实际审查所绑的旧 SHA，「审查绑在当前候选」被后来的验收
-    // 交卷遮成恒真。验收组无 review 阶段，其结论交卷就是 verify（无后续交卷，无遮蔽面）。
-    // 同类多条（多轮审查各入账一次）取最后一条：最后一轮的 candidate_sha 才是审查结论所绑
-    // 的树，之前轮次的旧树已被后续轮次覆盖修正。
     const packet = packets.find((p) => p.group_id === g.group_id);
     const groupIsVerify = isVerifyGroup(packet);
-    if (!groupIsVerify && (!Number.isSafeInteger(review.rounds) || review.rounds < 1)) {
-      gaps.push({ gate: 'review-clean', detail: g.group_id + ' 必须至少完成一轮单审' });
-    }
-    const bindingKind = groupIsVerify ? 'verify' : 'review';
+    const bindingKind = groupIsVerify ? 'verify' : 'pr-handoff';
     const binding = deliveries.filter((d) => deliveryCategory(d) === bindingKind);
     const lastBinding = binding[binding.length - 1];
     if (!lastBinding) {
-      // D2 fail-closed：该组结论交卷缺失不得回落到「最后一条」或「视为通过」——否则
-      // delivered 登记/exec/verify（执行组）会冒充审查绑定；消息带组名与实际类别序列。
       gaps.push({ gate: 'review-clean', detail: `${g.group_id} 无 ${bindingKind} 类交卷（${groupIsVerify ? '验收组' : '执行组'}，delivery 类别序列: ${deliveries.map(deliveryCategory).join(', ') || '无'}）` });
     } else if (typeof lastBinding.detail.candidate_sha !== 'string') {
-      gaps.push({ gate: 'review-clean', detail: `${g.group_id} 审查交卷（${bindingKind} 类 delivery）缺 candidate_sha 绑定` });
+      gaps.push({ gate: 'review-clean', detail: `${g.group_id} e2e 交卷（${bindingKind} 类 delivery）缺 candidate_sha 绑定` });
     } else {
       // L1 组路径域内容等值：已审 tip（该组结论交卷绑定的 candidate_sha，即审查时的树）→
       // 当前 HEAD 在组 allowed_paths 内必须零 diff。集成 squash/rebase/P 席打包都会产生新
@@ -465,13 +440,6 @@ function main() {
     console.error(`ready-check: --now 必须是 ISO 时间戳（形如 2026-08-09T04:00:00.000Z）: ${args.now}`);
     process.exit(2);
   }
-  const config = readJsonOrNull(args.config);
-  if (!config || typeof config.reviewMaxRounds !== 'number') {
-    console.error('ready-check: config 缺失或 reviewMaxRounds 非数字（fail-closed，拒绝猜测默认值）');
-    process.exit(2);
-  }
-  const reviewMaxRounds = config.reviewMaxRounds;
-
   // gate ③ 第 2 层（全树封闭性）的打包白名单唯一真相源 = graph.json P 席位 packaging_paths
   // （默认至少含 .pr-intent.md，由 graph.test.mjs 结构断言锁死）。缺失/非数组 = 配置损坏，
   // fail-closed 点名，不静默降级到内置默认值。
@@ -512,12 +480,13 @@ function main() {
       const events = ledger.events.filter((event) => event.detail?.group_id === args.group
         && (event.detail.assignment_seq ?? 0) === (group.assignment_seq ?? 0));
       const candidate = latestPrHandoffDelivery(ledger, args.group);
-      if (!candidate || candidate.review?.candidate_sha !== group.tip_sha
-        || candidate.review?.unresolved !== 0) throw new Error('单 PR 缺当前 candidate 审查证据');
-      const projectedReview = { type: 'delivery', detail: { group_id: args.group, rounds: group.review.rounds,
-        candidate_sha: candidate.review.candidate_sha } };
+      if (!candidate || candidate.e2e?.status !== 'pass'
+        || candidate.e2e?.candidate_sha !== group.tip_sha) throw new Error('单 PR 缺当前 candidate e2e 证据');
+      const projectedE2e = { type: 'delivery', detail: { group_id: args.group,
+        candidate_sha: candidate.e2e.candidate_sha, e2e: candidate.e2e, size_gate: candidate.size_gate,
+        branch: candidate.branch, tip_sha: candidate.tip_sha } };
       ledger = { ...ledger, baseline_tip: group.base, waves: [{ wave: 1, groups: [group] }],
-        events: [...events, projectedReview] };
+        events: [...events, projectedE2e] };
       manifest = { ...manifest, scs: manifest.scs.filter((sc) => group.sc_ids.includes(sc.id)),
         dispatch: { ...manifest.dispatch, packets: [packet] } };
     } catch (error) {
@@ -565,7 +534,7 @@ function main() {
   const gaps = [];
   checkLedgerPartition(ledger, manifest, manifestError, gaps, Boolean(args.group));
   checkVerdictAnchors(verdict, manifest, manifestError, ledger, args.repo, headSha, gaps);
-  checkReviewClean(ledger, manifest, args.repo, headSha, reviewMaxRounds, packagingPaths, gaps);
+  checkReviewClean(ledger, manifest, args.repo, headSha, packagingPaths, gaps);
   checkE2eReport(e2eReport, headSha, gaps);
   checkPresubmitGates(args.presubmitDir, headSha, gaps);
   checkGitClean(args.repo, gaps);

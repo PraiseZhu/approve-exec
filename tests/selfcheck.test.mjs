@@ -37,7 +37,7 @@ const FIX = {
 };
 
 test('批准执行触发行要求本机验收后由 lead 授权 Mini', () => {
-  assert.ok(TRIGGER_LINE.includes('本机 owner 完成 SC/e2e/单审'));
+  assert.ok(TRIGGER_LINE.includes('本机 owner 完成 SC/e2e'));
   assert.match(TRIGGER_LINE, /发送唯一 Mini 盯梢授权/);
   assert.doesNotMatch(TRIGGER_LINE, /验收通过后再开远端 PR、注册 Mini/);
 });
