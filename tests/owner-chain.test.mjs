@@ -14,6 +14,7 @@ import { ownerGate } from '../scripts/owner-gate.mjs';
 import { checkSite } from '../scripts/site-check.mjs';
 import { assertTakeover } from '../scripts/pr-watch/takeover.mjs';
 import { miniWatchConfigSha256 } from '../scripts/lib/mini-watch-config.mjs';
+import { issueLeadSignal } from '../scripts/pr-watch/lead-signal.mjs';
 
 const NOW = '2026-09-05T00:00:00Z';
 function fixture(t, staged = false, probeExit = 0) {
@@ -108,10 +109,11 @@ test('新版 PR 全链：真实格式计划、唯一 owner、核查先行、完�
   deliver(incomplete);
   assert.throws(() => transition('accepted'), /全部 SC/);
   deliver(candidate);
-  transition('accepted');
+  assert.throws(() => transition('local_validated'), /七门回执/);
   const ledger = readLedger(input.ledgerPath);
   assert.equal(ledger.waves.length, 1);
   assert.equal(ledger.waves[0].groups[0].session_id, 'staged-owner');
+  assert.equal(ledger.waves[0].groups[0].review.rounds, 1);
   assert.equal(ledger.waves[0].integrated_tip, null);
   assert.equal(latestPrHandoffDelivery(ledger, input.groupId).scs.length, 14);
   const verdictPath = join(input.dir, 'verdict.json');
@@ -138,6 +140,21 @@ test('新版 PR 全链：真实格式计划、唯一 owner、核查先行、完�
   receipt.execution_plan_hash = ledger.pr_plan.plan_hash;
   writeFileSync(receiptPath, JSON.stringify(receipt));
   noteEvent({ ledgerPath: input.ledgerPath, now: validatedAt, event: 'local_validated', detail: { group_id: input.groupId, receipt: receiptPath } });
+  assert.equal(readLedger(input.ledgerPath).waves[0].groups[0].state, 'local_validated');
+  const openedAt = '2026-09-05T00:00:02Z';
+  const readyAt = '2026-09-05T00:00:03Z';
+  const remoteReceipt = { url: 'https://github.com/PraiseZhu/approve-exec/pull/7', number: 7,
+    headRefOid: input.sha, isDraft: false, state: 'OPEN', branch: 'feat/fixture', checked_at: openedAt,
+    ledger_version: readLedger(input.ledgerPath).version, assignment_seq: 0 };
+  setState({ ledgerPath: input.ledgerPath, group: input.groupId, to: 'pr-open', now: openedAt, prOpenReceipt: remoteReceipt });
+  const remoteReceiptPath = join(input.dir, 'remote-receipt.json');
+  writeFileSync(remoteReceiptPath, JSON.stringify({ ...remoteReceipt, checked_at: readyAt }));
+  noteEvent({ ledgerPath: input.ledgerPath, now: readyAt, event: 'pr_ready', detail: {
+    group_id: input.groupId, pr_url: remoteReceipt.url, current_pr_head_sha: input.sha, receipt: remoteReceiptPath } });
+  const signal = issueLeadSignal({ ledgerPath: input.ledgerPath, groupId: input.groupId, leadSessionId: 'lead-test',
+    senderSessionId: 'lead-test', hostSessionId: 'lead-test', now: '2026-09-05T00:00:04Z' }).signal;
+  assert.equal(signal.evidence.execution_plan_hash, ledger.pr_plan.plan_hash);
+  assert.equal(signal.owner_session_id, 'staged-owner');
   writeFileSync(join(input.repo, 'budget.test.mjs'), 'export const fixture = true;\n');
   invoke('add', 'budget.test.mjs');
   invoke('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', 'oversize fixture');

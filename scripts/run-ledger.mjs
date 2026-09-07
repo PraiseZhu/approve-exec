@@ -96,7 +96,7 @@ export const FAILED_EVENT_TYPES = Object.freeze([
   'budget_note',         // 预算耗尽
 ]);
 export const GROUP_STATES = Object.freeze([
-  'pending', 'dispatched', 'executing', 'blocked', 'e2e', 'review', 'accepted', 'pr-open', 'local-cleaned', 'archived', 'failed',
+  'pending', 'dispatched', 'executing', 'blocked', 'e2e', 'review', 'local_validated', 'accepted', 'pr-open', 'local-cleaned', 'archived', 'failed',
 ]);
 export const PHASE_ORDER = Object.freeze([
   'splitting', 'dispatching', 'running', 'accepting', 'ready',
@@ -1402,7 +1402,7 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
     if (typeof sha !== 'string' || !TIP_SHA_RE.test(sha)) {
       throw new LedgerError('ARGS', 'pr_ready.current_pr_head_sha 必须是 40 位十六进制');
     }
-    const accepted = latestGroupEvent(ledger, parsed.group_id, 'accepted');
+    const accepted = latestGroupEvent(ledger, parsed.group_id, 'accepted') ?? latestGroupEvent(ledger, parsed.group_id, 'local_validated');
     const opened = latestGroupEvent(ledger, parsed.group_id, 'pr_opened');
     const candidate = latestPrHandoffDelivery(ledger, parsed.group_id);
     if (sha !== g.tip_sha || accepted?.detail?.tip_sha !== sha
@@ -1443,7 +1443,15 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
     }
     assertManifestBound(ledger, readExecutionManifest(ledger), 'local_validated');
     assertReceiptBoundToLedger(receipt, ledger, parsed.group_id, 'local_validated');
-    assertReceiptAfterEvent(receipt, ledger, parsed.group_id, 'accepted', 'local_validated');
+    const candidate = latestPrHandoffDelivery(ledger, parsed.group_id);
+    if (!candidate || candidate.tip_sha !== group.tip_sha || candidate.e2e?.status !== 'pass'
+      || candidate.review?.unresolved !== 0 || candidate.size_gate?.result === 'STOP'
+      || !candidate.scs?.length || candidate.scs.some((entry) => entry.status !== 'pass')
+      || [candidate.e2e, candidate.review, candidate.size_gate].some((entry) => entry.candidate_sha !== group.tip_sha)) {
+      throw new LedgerError('PRECONDITION', 'local_validated 要求同提交全部 SC/e2e/单审/size 通过');
+    }
+    const predecessor = latestGroupEvent(ledger, parsed.group_id, 'accepted') ? 'accepted' : 'delivery';
+    assertReceiptAfterEvent(receipt, ledger, parsed.group_id, predecessor, 'local_validated');
     ev.detail = { ...parsed, ...receipt, tip_sha: group.tip_sha };
   }
   if (event === 'watch_registered') {
@@ -1497,6 +1505,10 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
   }
   assertEventSchema(ev);
   return writeLedgerAtomic(ledgerPath, expected, (cur) => {
+    if (event === 'local_validated') {
+      const validatedGroup = findGroup(cur, parsed.group_id);
+      if (validatedGroup.state === 'review') validatedGroup.state = 'local_validated';
+    }
     cur.events.push(ev);
     return { ...cur, version: expected + 1 };
   });
@@ -1793,14 +1805,11 @@ export function setState({
       }
     }
     if (to === 'local_validated' && from === 'review') {
-      const handoff = latestPrHandoffDelivery(ledger, group);
-      if (!handoff) return '缺失前置：→local_validated 要求 candidate record-delivery';
-      g.state = 'local_validated';
-      cur.events.push({
-        type: 'local_validated',
-        at: now,
-        detail: { group_id: group, session_id: g.session_id, tip_sha: g.tip_sha, assignment_seq: g.assignment_seq ?? 0 },
-      });
+      const validation = latestGroupEvent(ledger, group, 'local_validated');
+      if (!validation?.detail?.receipt || validation.detail.tip_sha !== g.tip_sha
+        || validation.detail.base !== g.base || validation.detail.manifest_core_hash !== ledger.manifest_core_hash) {
+        return '缺失前置：先由 note-event local_validated 消费真实七门回执，不得直接改状态';
+      }
     } else if (to === 'accepted' && from === 'review') {
       if (!latestGroupEvent(ledger, group, 'gate_goal')) {
         return '缺失前置：→accepted 要求本组成立的 gate_goal';
@@ -2598,6 +2607,9 @@ function assertScIdSet(scEntries, packet, what) {
 }
 
 function validateReviewDelivery(data) {
+  if (!Number.isSafeInteger(data.rounds) || data.rounds < 1) {
+    throw new LedgerError('DELIVERY_SCHEMA', '审查组交卷 rounds 必须是正安全整数，至少完成一轮单审');
+  }
   // rounds/findings_total/unresolved 都是整数语义字段（台账 review 层为整数契约），
   // 非负整数一把抓：字符串/小数/布尔/负值全部拒
   for (const k of ['rounds', 'findings_total', 'unresolved']) {
@@ -2794,6 +2806,7 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
       }
       g.tip_sha = data.tip_sha;
       g.review.unresolved = data.review.unresolved;
+      g.review.rounds = Math.max(1, g.review.rounds);
       cur.events.push({
         type: 'delivery',
         at: now,

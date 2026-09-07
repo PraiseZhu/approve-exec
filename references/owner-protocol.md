@@ -30,13 +30,34 @@ prepare 使用台账路径旁固定的 .owners 目录。持久 claim 的作用�
 ## 一个 PR 的验收与接手
 
 1. 同一 owner 走 executing→e2e→review，提交本组 candidate（record-delivery）。提交内 branch、tip_sha、scs、goal_skill_path、e2e、review、size_gate、fallbacks_tried 按渲染器第10段 schema；最终证据必须绑定同一提交。
-2. owner 自己判断并满足原 SC、优先级和授权；candidate 不是完工，不需要 lead 中途 accepted。owner 继续修复、开 PR 并跟进必要 CI/review；lead 只在最终 PR Ready 时集中验收。
+2. owner 自主完成原 SC、优先级和已授权收尾，不逐步回 lead 请示。lead 在本机交卷完成后对该 PR 的全部 priority/SC、e2e、单审与当前 head 作独立验收；无验收不得发 Mini 信号。
 3. owner 对本组运行 ready-check.mjs --group <组> --ledger <台账> --manifest <final> --repo <本组worktree> --verdict <真实SC验收JSON> --e2e-report <真实报告> --presubmit-dir <size/format/intent目录> --receipt <输出路径> --now <当前ISO时间>。成功是 LOCAL_PR_VALIDATED；note-event local_validated --detail 的 group_id/receipt 消费这份回执。其它组尚未完成不阻塞本组。
 4. owner 提交/推送/开对应非 draft PR，运行 confirm-pr-open.mjs --repo <owner/repo> --branch <branch> --head <已验收SHA> --now <当前ISO时间> --ledger-version <当前版本> --assignment-seq <本组代次>；真实 stdout 给 local_validated→pr-open（accepted 仅兼容旧台账） 的 --pr-open-receipt。
-5. 重新运行 confirm-pr-open 获取新鲜 OPEN/非draft/head 回执；owner 继续跟进必要 CI/review，直到当前 head 收口，再 note-event pr_ready。PR Ready 是 owner 完成的终点，不是交给 Mini 的中转点。
-6. 正常 Ready 不发 Mini。只有 owner 挂起、预算暂停、硬停或外部接管条件成立时，lead 才注册 Mini，并保留原 owner 现场直到真实接管确认。
-7. `watch_registered` 只属于异常接管路径。正常路径由原 owner 负责后续 GitHub CI/review 修复。
+5. 重新运行 confirm-pr-open 获取新鲜 OPEN/非draft/head 回执后 note-event pr_ready，表示本机可交接。云端 CI/review 不在本机继续修复，cloud_ready 与本机 pr_ready 分开。
+6. 对应任务 lead 验收通过后，生成绑定本 PR、head、owner session/title 和全部 SC 证据的 lead signal；confirm-watch-registered 必须验证该信号及本人身份后才向 Mini 注册。接管确认前保留本机 owner 现场。
+7. watch_registered 是正常接手回执。Mini 每 PR 一个持久 session，title 必须与本机 owner 完全一致，首次反馈 create、后续 jump 同一 session_id；无有效授权不得派修复，queued 不等于已接收或完成。
 8. 接管确认后 owner 才 wrapup-cleanup（不删远端分支），lead archive_sessions 并消费真实归档回执。GitHub 合入另需用户授权；本任务 skill 不自动 merge。
+
+## lead 发信号与 Mini 接收
+
+lead 先调用 Cindy 的 get_session_runtime({})，不指定其他 session，把真实非敏感回执保存为本任务 sender-runtime.json。PI、Claude 和 Codex 共用这一入口；Codex 也可使用宿主 CODEX_SESSION_ID，但它必须与原派工记录中的 lead ID 相同。脚本核对原 owner claim 的 handoff、request hash、owner session、代次和当前全部验收证据；自报 role=lead 不成立。
+
+完成本机验收后，lead 执行以下命令。signal.json 保存原始输出；重试使用同一份，不按新时间重复铸造。
+
+```bash
+node scripts/pr-watch/lead-signal.mjs --ledger <ledger.json> --group <group_id> --lead-session-id <真实lead_ID> --sender-runtime <sender-runtime.json> --now <当前ISO时间> > <signal.json>
+node scripts/confirm-watch-registered.mjs --ledger <ledger.json> --group <group_id> --lead-signal @<signal.json> --sender-runtime <sender-runtime.json> --owner <owner> --repo <repo> --pr <number> --branch <branch> --now <当前ISO时间> --ledger-version <当前版本> --assignment-seq <当前代次>
+```
+
+信号只授权当前 PR 的普通 push 和当前 PR 内回帖，不授权合并、自动合并、启用 auto-merge、调用 gh pr merge、force push、删远端、扩写入范围或处理其它 PR。只有用户对指定 PR 的当次明确授权才允许合并；PR Ready、cloud_ready、required checks 通过或管理员权限均不构成授权。远端 OPEN/非 draft/head 的确认必须在铸造信号前五分钟内；缺旧任务原始 claim 或验收证据时不自动补造授权。
+
+Mini 收到反馈后按投递包先准备 PR worktree，提炼反馈 SC，把绑定 dispatch_id/session_id/head_sha 的 SC JSON 放到该名册的 receipts 子目录，再执行 ack-received。SC id 必须精确覆盖全部反馈 id、CI 红与冲突；该 ack 仅表示收到 SC，不表示修复完成。核到实际文件后才推进反馈游标；host 的 target_session_id、queued、success 均不等于已接收 SC。结果未知保留原 outbox，绝不自动重复 create。
+
+全部 SC PASS 后另存完成输入，不覆盖原 SC 接收文件。使用本 skill 的 scripts/pr-watch/finalize.mjs --state-dir <名册> --owner <owner> --repo <repo> --pr <pr> --session-id <Mini身份> --dispatch-id <本次ID> --feedback-head <派发SHA> --receipt @<SC-PASS输入路径>；它核验真实 HEAD、干净分支、push remote、OPEN 非 draft PR 和精确 SC 集合后才普通 push，并生成 receipts/<dispatch_id>.post-fix.json。不得手写该输出。再通过 session-watch.mjs ack-post-fix --head <完成SHA> 消费同一完成回执，清除 post_fix_pending。合法无需改码允许同一 head/no_changes:true，不造空 commit。
+
+云端可合并必须同时满足全部真实 snapshot 门禁、mergeable=true、没有新反馈、没有待确认修复；新 head/新反馈/CI 红/取数失败使旧标记失效。生产调度启动前校验 config 中的 Mini hostname，本机即使误启动相同脚本也不能派发。始终不自动合并。
+
+这是 T1 流程约束和可追溯记录，不是密码学认证：同一 OS 用户能改源码或伪造本地文件，脚本无法阻止主动绕过。不将内容 hash 称为签名，不将夹具测试称为真实跨机模型运行。
 
 ## 显式 PR 归属与阶段
 

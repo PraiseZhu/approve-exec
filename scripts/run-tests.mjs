@@ -23,7 +23,9 @@ export const TEST_FILES = [
   'decision-broker.test.mjs',
   'e2e-dryrun.test.mjs',
   'evolution-note.test.mjs',
+  'finalize.test.mjs',
   'graph.test.mjs',
+  'lead-signal.test.mjs',
   'mem-probe.test.mjs',
   'owner-chain.test.mjs',
   'pr-plan.test.mjs',
@@ -35,7 +37,9 @@ export const TEST_FILES = [
   'session-dispatch.test.mjs',
   'session-watch.test.mjs',
   'skill-doc.test.mjs',
+  'snapshot.test.mjs',
   'vnext-owner-contract.test.mjs',
+  'worktree-preparation.test.mjs',
   'wrapup-cleanup.test.mjs',
 ];
 // confirm-watch-registered / confirm-session-archived 的用例落在 wrapup-cleanup.test.mjs，不另开文件。

@@ -122,9 +122,9 @@ test('第③段：DISPATCH_MODES 含 session；E=session；LEAD_SELF=V/P；WORKE
   const archiveAt = flow.indexOf('archive_sessions');
   assert.ok(wrapupAt >= 0 && archiveAt >= 0, '③段收尾应含 wrapup / archive');
   assert.ok(wrapupAt < archiveAt, '③段必须先清本地、最后归档 PI');
-  assert.ok(s3.includes('watch_registered') || s3.includes('Mini'), '③段应说明 Mini 仅异常升级');
+  assert.ok(s3.includes('watch_registered') || s3.includes('Mini'), '③段应说明 Mini 的接管回执');
   assert.ok(s3.includes('confirm-session-archived.mjs'), '③段应收口 archive_sessions 回执脚本');
-  assert.ok(s3.includes('Mini') && s3.includes('异常升级'), '③段应声明 Mini 不是正常路径接管者');
+  assert.ok(s3.includes('Mini') && s3.includes('仅对应任务 lead'), '③段应声明只有对应 lead 能授权 Mini 接管');
 });
 
 test('第⑥段：send_to_session create + Art 钉 + 标题正则', () => {
@@ -201,7 +201,7 @@ test('第⑨段：新组状态机 + identity 五段 + PR_RECEIPT_KEYS', () => {
     '⑨段应声明 Mini 名册先于清场');
   assert.ok(s9.includes('confirm-pr-open.mjs') && s9.includes('wrapup-cleanup.mjs') && s9.includes('confirm-session-archived.mjs'),
     '⑨段应收口开 PR / 清本地 / 归档的真实回执');
-  assert.ok(s9.includes('Mini 仅作为') || s9.includes('异常升级'), '⑨段应声明 Mini 只走异常升级路径');
+  assert.ok(s9.includes('Mini 是 lead 授权后的正常云端反馈修复者'), '⑨段应声明 Mini 的正常反馈责任');
   assert.ok(s9.includes('register.mjs') && s9.includes('ledger_version') && s9.includes('assignment_seq'),
     '⑨段 Mini 名册应吃 register 回执，并绑定 ledger_version/assignment_seq');
   assert.ok(s9.includes('READY_FOR_LATER_SUBMIT_PR_SKILL'), '⑨段 run 级 ready 文案应保留 READY_FOR_LATER_SUBMIT_PR_SKILL 作为验收许可信号');
@@ -241,6 +241,12 @@ test('第⑫段：--dry-run 不调 send_to_session', () => {
 test('第⑤段：开工包第 8 步禁止子 session 合入', () => {
   const s5 = sectionBetween(MARKERS[4], MARKERS[5]);
   assert.ok(s5.includes('子 session 不合入') || s5.includes('不得自行 merge'), '⑤段应写明子 session 不合入');
+});
+
+test('合并红线：只有用户当次明确授权才能合并', () => {
+  assert.match(skillDoc, /合并红线/);
+  assert.match(skillDoc, /只有用户本人对指定 PR 的明确、当次授权/);
+  assert.match(skillDoc, /gh pr merge/);
 });
 
 test('第⑭段：本 skill 不合入、不跑三机同步，不改 submit-pr', () => {

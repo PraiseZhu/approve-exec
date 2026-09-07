@@ -125,31 +125,58 @@ try {
 
   const rcs = ghGet(`repos/${owner}/${repo}/pulls/${pr}/comments?per_page=50`, { paginate: true });
   const ics = ghGet(`repos/${owner}/${repo}/issues/${pr}/comments?per_page=50`, { paginate: true });
-  const comments = [...rcs, ...ics].map((c) => ({
-    id: String(c.id), body: c.body ?? '',
+  const comments = [...rcs.map((entry) => ({ ...entry, source: 'review' })), ...ics.map((entry) => ({ ...entry, source: 'issue' }))].map((c) => ({
+    id: `${c.source}:${c.id}`, body: c.body ?? '',
     author_is_self: selfLogin != null && c.user?.login === selfLogin
   }));
 
-  const checkRuns = (ghGet(`repos/${owner}/${repo}/commits/${headSha}/check-runs`).check_runs ?? []).map((c) => ({
+  const checkRuns = ghGet(`repos/${owner}/${repo}/commits/${headSha}/check-runs?per_page=100`, { paginate: true }).flatMap((page) => {
+    if (!Array.isArray(page.check_runs)) throw new Error('check_runs 响应不完整');
+    return page.check_runs;
+  }).map((c) => ({
     context: c.name,
     state: c.status !== 'completed' ? 'pending' : (c.conclusion === 'success' ? 'success' : c.conclusion ?? 'error'),
     head_sha: headSha, completed_at: c.completed_at ?? c.started_at ?? null, run_id: String(c.id)
   }));
-  const statuses = (ghGet(`repos/${owner}/${repo}/commits/${headSha}/status`).statuses ?? []).map((s) => ({
+  const statuses = ghGet(`repos/${owner}/${repo}/commits/${headSha}/statuses?per_page=100`, { paginate: true }).map((s) => ({
     context: s.context, state: s.state, head_sha: headSha, completed_at: s.updated_at ?? null, run_id: String(s.id)
   }));
   const checks = [...checkRuns, ...statuses];
   let required = [];
   const reqFile = process.env.REQUIRED_CONTEXTS_FILE;
   if (reqFile && existsSync(reqFile)) required = JSON.parse(readFileSync(reqFile, 'utf8'))[`${owner}/${repo}`] ?? [];
+  if (!required.length) {
+    let requiredOutput;
+    try {
+      requiredOutput = execFileSync(GH, ['pr', 'checks', pr, '--repo', `${owner}/${repo}`, '--required', '--json', 'name'], { encoding: 'utf8' });
+    } catch (error) {
+      if (![1, 8].includes(error.status) || !error.stdout?.trim()) throw error;
+      requiredOutput = error.stdout;
+    }
+    const requiredChecks = JSON.parse(requiredOutput);
+    if (!Array.isArray(requiredChecks) || requiredChecks.some((entry) => typeof entry.name !== 'string' || !entry.name)) {
+      throw new Error('required checks 响应不完整');
+    }
+    required = [...new Set(requiredChecks.map((entry) => entry.name))];
+  }
   const ci = required.length
     ? (() => { const r = ciReadiness({ headSha, checks, required }); return { green: r.green, failing: r.green ? [] : [r.reason], head_sha: headSha }; })()
     : { green: false, failing: ['required contexts 未配置（fail-closed）'], head_sha: headSha };
+  ci.blocked = required.length === 0;
+  ci.pending = !ci.blocked && !ci.green && (ci.failing.some((reason) => reason.includes('缺席')) || ci.failing.some((reason) => reason.endsWith('=pending')));
+  ci.required = required;
 
   // F10-R: reviewThreads → remote_findings 归一化（E1/E2 采集输入）
   let remoteFindings = [];
+  let reviewComplete = false;
+  let unresolvedReviewCount = null;
   try {
     const threads = fetchAllThreads(owner, repo, pr);
+    if (threads.some((thread) => typeof thread.isResolved !== 'boolean' || typeof thread.isOutdated !== 'boolean')) {
+      throw new Error('reviewThreads 解决状态缺失');
+    }
+    reviewComplete = true;
+    unresolvedReviewCount = threads.filter((thread) => !thread.isResolved).length;
     remoteFindings = threads.map((t) => {
       const first = t.comments?.nodes?.[0] ?? {};
       return {
@@ -170,7 +197,8 @@ try {
   }
 
   process.stdout.write(JSON.stringify({
-    state, head_sha: headSha, ci, reviews, comments,
+    state, head_sha: headSha, draft: prData.draft, ci, reviews, comments,
+    review_complete: reviewComplete, unresolved_review_count: unresolvedReviewCount,
     labels: (prData.labels ?? []).map((l) => l.name),
     mergeable: prData.mergeable === false ? false : (prData.mergeable === true ? true : null),
     remote_findings: remoteFindings

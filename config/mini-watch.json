@@ -4,6 +4,7 @@
   "hosts": {
     "mini": {
       "ssh_host": "Praise-Mini",
+      "hostname": "PraisedeMac-mini.local",
       "state_dir": "/Users/praise/pr-autopilot-runtime/state",
       "register_bin": "/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/approve-exec/scripts/pr-watch/register.mjs",
       "provider_id": "super-grok",
