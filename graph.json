@@ -8,7 +8,8 @@
     },
     "R": {
       "route": "review",
-      "dispatch": "worker"
+      "dispatch": "lead-self",
+      "independence": "mini-cloud-review-not-local-worker"
     },
     "V": {
       "route": "e2e",

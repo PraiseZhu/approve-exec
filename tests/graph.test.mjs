@@ -21,8 +21,8 @@ const MODEL_ID_PATTERN = /deepseek|gpt-|claude-|gemini|grok|qwen|llama|kimi|glm-
 const DISPATCH_MODES = ['lead-self', 'worker', 'session'];
 
 const SEATS = ['E', 'R', 'V', 'T', 'P'];
-const LEAD_SELF_SEATS = ['V', 'P'];
-const WORKER_SEATS = ['R', 'T'];
+const LEAD_SELF_SEATS = ['R', 'V', 'P'];
+const WORKER_SEATS = ['T'];
 
 function validateGraph(g) {
   if (!g || typeof g !== 'object' || Array.isArray(g)) {
@@ -58,7 +58,7 @@ function validateGraph(g) {
     if (seat === 'R') {
       for (const banned of ['model', 'effort', 'pre_command', 'command']) {
         if (Object.hasOwn(s, banned)) {
-          return { ok: false, reason: `R.${banned} 禁止出现（R 由子 session 现读 review 档，不钉 model/command）` };
+          return { ok: false, reason: `R.${banned} 禁止出现（R 本地不派 reviewer，不钉 model/command）` };
         }
       }
     }
@@ -118,7 +118,7 @@ test('route 值均为 routing.json 顶层 key 集的子集（subset 判定）', 
   assert.equal(graph.phases.P.route, 'pr_merge');
 });
 
-test('席位 dispatch：E=session，R/T=worker，V/P=lead-self', () => {
+test('席位 dispatch：E=session，T=worker，R/V/P=lead-self', () => {
   assert.equal(graph.phases.E.dispatch, 'session');
   assert.equal(graph.phases.E.goal, 'goal-scenario-c');
   for (const seat of LEAD_SELF_SEATS) {

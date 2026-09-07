@@ -133,12 +133,11 @@
       "at": "2026-08-09T01:00:00.000Z",
       "detail": {
         "group_id": "g1",
+        "branch": "feat/g1",
         "tip_sha": "__HEAD_SHA__",
         "candidate_sha": "__HEAD_SHA__",
-        "rounds": 1,
-        "findings_total": 0,
-        "unresolved": 0,
-        "fix_commits": 0
+        "e2e": { "status": "pass", "candidate_sha": "__HEAD_SHA__" },
+        "size_gate": { "result": "PASS", "candidate_sha": "__HEAD_SHA__" }
       }
     },
     {
@@ -146,12 +145,11 @@
       "at": "2026-08-09T01:00:00.000Z",
       "detail": {
         "group_id": "g2",
+        "branch": "feat/g2",
         "tip_sha": "__HEAD_SHA__",
         "candidate_sha": "__HEAD_SHA__",
-        "rounds": 2,
-        "findings_total": 0,
-        "unresolved": 0,
-        "fix_commits": 0
+        "e2e": { "status": "pass", "candidate_sha": "__HEAD_SHA__" },
+        "size_gate": { "result": "PASS", "candidate_sha": "__HEAD_SHA__" }
       }
     },
     {
@@ -201,7 +199,6 @@
         "route_source": "/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json",
         "routing_sha256": "e88009fec5d61472d41554b8c0238c6eedd1395d8b301cbc1524d121dc386c23",
         "e2e_model": "codex/gpt-5.6-luna",
-        "review_model": "codex/gpt-5.6-sol",
         "assignment_seq": 0
       }
     },
@@ -232,7 +229,6 @@
         "route_source": "/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json",
         "routing_sha256": "e88009fec5d61472d41554b8c0238c6eedd1395d8b301cbc1524d121dc386c23",
         "e2e_model": "codex/gpt-5.6-luna",
-        "review_model": "codex/gpt-5.6-sol",
         "assignment_seq": 0
       }
     },

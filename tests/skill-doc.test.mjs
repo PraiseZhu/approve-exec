@@ -103,16 +103,16 @@ test('第②段：输入门三要素 + fail-closed 指路 task-priority，缺则
   assert.ok(s2.includes('不开跑'), '输入门段应声明缺要素时不开跑');
 });
 
-test('第③段：DISPATCH_MODES 含 session；E=session；LEAD_SELF=V/P；WORKER=R/T', () => {
+test('第③段：DISPATCH_MODES 含 session；E=session；LEAD_SELF=R/V/P；WORKER=T', () => {
   const s3 = sectionBetween(MARKERS[2], MARKERS[3]);
   assert.ok(s3.includes('session'), '③段应声明 session 派工模式');
   assert.ok(s3.includes('DISPATCH_MODES'), '③段应点名 DISPATCH_MODES');
   assert.ok(/E[\s\S]{0,80}`session`/.test(s3) || s3.includes('E 席 `dispatch=session`') || s3.includes('| E | `session`'),
     '③段应声明 E.dispatch=session');
-  assert.ok(s3.includes('LEAD_SELF_SEATS') && s3.includes('V') && s3.includes('P'),
-    '③段应声明 LEAD_SELF_SEATS = V、P');
-  assert.ok(s3.includes('WORKER_SEATS') && /R/.test(s3) && /T/.test(s3),
-    '③段应声明 WORKER_SEATS = R、T');
+  assert.ok(s3.includes('LEAD_SELF_SEATS') && s3.includes('R') && s3.includes('V') && s3.includes('P'),
+    '③段应声明 LEAD_SELF_SEATS = R、V、P');
+  assert.ok(s3.includes('WORKER_SEATS') && s3.includes('T') && !s3.includes('WORKER_SEATS = R、T'),
+    '③段应声明 WORKER_SEATS = T（本地不再派 reviewer）');
   assert.ok(s3.includes('以每次现读的所选档为准'),
     '③段按实际路由取值，不得用旧 agent 枚举覆盖 routing.json');
   assert.ok(s3.includes('0.7') && s3.includes('SiteScout'), '③段流程应含 0.7 SiteScout');
@@ -160,7 +160,7 @@ test('第⑧段：create_workers ≥2 禁连续 create_worker 单发', () => {
     /≥2 worker[\s\S]*?禁连续[\s\S]*?create_worker[\s\S]*?单发/.test(s8),
     '⑧段应含「≥2 worker 禁连续 create_worker 单发」纪律链',
   );
-  assert.ok(s8.includes('mem-probe'), '⑧段应要求派 tester/reviewer 前跑 mem-probe');
+  assert.ok(s8.includes('mem-probe'), '⑧段应要求派 tester 前跑 mem-probe');
   assert.ok(s8.includes('这五种情况'), '⑧段应声明五类停');
   assert.ok(s8.includes('PR Ready') && (s8.includes('正常返回') || s8.includes('正常完成')),
     '⑧段第 1 种停必须是 PR Ready 正常完成，不是 DECISION_REQUIRED');
@@ -215,9 +215,10 @@ test('第⑩段：开工闸收据 + 终态交卷 exact schema', () => {
   const s10 = sectionBetween(MARKERS[9], MARKERS[10]);
   assert.ok(s10.includes('gate_goal') && s10.includes('gate_routing'), '⑩段应给出两类开工闸收据');
   assert.ok(s10.includes('goal_skill_sha256') && s10.includes('routing_sha256'), '⑩段收据必须含 sha256');
-  for (const key of ['branch', 'tip_sha', 'scs', 'goal_skill_path', 'e2e', 'review', 'size_gate', 'fallbacks_tried']) {
+  for (const key of ['branch', 'tip_sha', 'scs', 'goal_skill_path', 'e2e', 'size_gate', 'fallbacks_tried']) {
     assert.ok(s10.includes(key), `candidate 交卷应含键 ${key}`);
   }
+  assert.equal(s10.includes('review          {unresolved'), false, '⑩段不得再要求本地单审 review 对象');
   assert.ok(s10.includes('禁止 tried_fallbacks') || s10.includes('禁止用 tried_fallbacks'),
     '⑩段交卷字段必须是 fallbacks_tried，并禁止混用 tried_fallbacks');
   assert.ok(s10.includes('不得含 pr_url'), '⑩段应禁止 candidate 交卷带 pr_url');

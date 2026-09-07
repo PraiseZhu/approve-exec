@@ -158,7 +158,7 @@ function gateGoalDetail() {
 function gateRoutingDetail() {
   return JSON.stringify({
     route_source: ROUTING_LIVE, routing_sha256: GATE_ROUTING_SHA,
-    e2e_model: 'codex/gpt-5.6-luna', review_model: 'codex/gpt-5.6-sol',
+    e2e_model: 'codex/gpt-5.6-luna',
   });
 }
 
@@ -172,7 +172,6 @@ function prHandoffFor(env, group, branch) {
     scs: packet.scs_inline.map((s) => ({ id: s.id, status: 'pass' })),
     goal_skill_path: GOAL_SKILL_PI,
     e2e: { status: 'pass', candidate_sha: tip, model: 'codex/gpt-5.6-luna', route_source: ROUTING_LIVE },
-    review: { unresolved: 0, candidate_sha: tip, model: 'codex/gpt-5.6-sol', route_source: ROUTING_LIVE },
     size_gate: { result: 'PASS', candidate_sha: tip },
     fallbacks_tried: [],
   };
@@ -212,12 +211,6 @@ function walkGroupToAccepted(env, group, workerLabel) {
   }
   rr = cliLedger('set-state', env.ledgerPath, '--group', group, '--to', 'e2e', '--detail', gateRoutingDetail(), '--now', FIXED_NOW);
   assert.equal(rr.status, 0, `${group} →e2e 应 exit 0: ${rr.stderr}`);
-  if (!isVerify) {
-    rr = cliLedger('record-delivery', env.ledgerPath, '--group', group, '--payload', JSON.stringify({
-      rounds: 1, findings_total: 0, unresolved: 0, fix_commits: [], candidate_sha: env.headSha,
-    }), '--now', FIXED_NOW);
-    assert.equal(rr.status, 0, `${group} 审查交卷应 exit 0: ${rr.stderr}`);
-  }
   rr = cliLedger('set-state', env.ledgerPath, '--group', group, '--to', 'review', '--now', FIXED_NOW);
   assert.equal(rr.status, 0, `${group} →review 应 exit 0: ${rr.stderr}`);
   if (isVerify) {

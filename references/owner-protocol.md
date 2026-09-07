@@ -22,15 +22,15 @@ prepare 使用台账路径旁固定的 .owners 目录。持久 claim 的作用�
 
 - 先核自己的 runtime 与 ledger.session_id、worktree、branch、base；确认 Art、完整包身份无误。绑定或 dispatched 登记尚未到达时，读台账等待，保留该 owner；不要写代码或重复派窗。
 - 真实读取自己的 goal skill；新版先执行文末 owner-gate.mjs baseline，通过后再执行随包给出的 owner-gate.mjs goal 命令，旧版不补造 baseline。脚本重算文件 hash、检查干净基线、CAS 入账 gate_goal 并推进 executing。不得补造已有改动之前的开工证据，不用 jump 等逐步放行。
-- 自主完成本 PR 的 SC。可以开只读 sub 获取信息，也可提前派 tester/reviewer 验证。提前验证不能替代最终当前提交的全量 SC/e2e/review。
-- 首次及每次重新派 worker 前，现读共享 routing.json，执行 start_team({worker_permission_mode:"bypassPermissions"}) 并确认实际返回。用 owner-gate.mjs routing --owner-model <当前模型ID> --team-result <真实工具结果JSON> 连同台账/组/时间入账。脚本输出当前 e2e/review 档；agent、model、effort、provider_id 原样传给 Orca。GPT owner 使用 review.when_lead.gpt（存在时）。配置缺项或 auto 不得冒充通过。
+- 自主完成本 PR 的 SC。可以开只读 sub 获取信息，也可提前派 tester 验证。提前验证不能替代最终当前提交的全量 SC/e2e。本地禁止派 reviewer。
+- 首次及每次重新派 worker 前，现读共享 routing.json，执行 start_team({worker_permission_mode:"bypassPermissions"}) 并确认实际返回。用 owner-gate.mjs routing --owner-model <当前模型ID> --team-result <真实工具结果JSON> 连同台账/组/时间入账。脚本输出当前 e2e 档；agent、model、effort、provider_id 原样传给 Orca。只派 tester（e2e 档），禁止派 reviewer。配置缺项或 auto 不得冒充通过。
 正常 owner 不因 PR Ready 停写；只有真实 Mini 接管后才禁止本机重做。
 - 每次等待保留原任务 ID、状态、已尝试动作和下次唤醒条件；使用当前工具的等待/回执机制。无等待能力时如实报能力缺失，不能声称有后台自动唤醒。连续三轮无新证据，或授权/SC/接口/跨 PR 依赖改变，只发一个 DECISION_REQUIRED。停止的是受阻动作，不是宣布任务完成。
 
 ## 一个 PR 的验收与接手
 
-1. 同一 owner 走 executing→e2e→review，提交本组 candidate（record-delivery）。提交内 branch、tip_sha、scs、goal_skill_path、e2e、review、size_gate、fallbacks_tried 按渲染器第10段 schema；最终证据必须绑定同一提交。
-2. owner 自主完成原 SC、优先级和已授权收尾，不逐步回 lead 请示。lead 在本机交卷完成后对该 PR 的全部 priority/SC、e2e、单审与当前 head 作独立验收；无验收不得发 Mini 信号。
+1. 同一 owner 走 executing→e2e→review，提交本组 candidate（record-delivery）。提交内 branch、tip_sha、scs、goal_skill_path、e2e、size_gate、fallbacks_tried 按渲染器第10段 schema；最终证据必须绑定同一提交。组状态名 `review` 只是本机验收前检查点，不再表示本地 GPT/Claude 单审。
+2. owner 自主完成原 SC、优先级和已授权收尾，不逐步回 lead 请示。lead 在本机交卷完成后对该 PR 的全部 priority/SC、e2e 与当前 head 作独立验收；无验收不得发 Mini 信号。
 3. owner 对本组运行 ready-check.mjs --group <组> --ledger <台账> --manifest <final> --repo <本组worktree> --verdict <真实SC验收JSON> --e2e-report <真实报告> --presubmit-dir <size/format/intent目录> --receipt <输出路径> --now <当前ISO时间>。成功是 LOCAL_PR_VALIDATED；note-event local_validated --detail 的 group_id/receipt 消费这份回执。其它组尚未完成不阻塞本组。
 4. owner 提交/推送/开对应非 draft PR，运行 confirm-pr-open.mjs --repo <owner/repo> --branch <branch> --head <已验收SHA> --now <当前ISO时间> --ledger-version <当前版本> --assignment-seq <本组代次>；真实 stdout 给 local_validated→pr-open（accepted 仅兼容旧台账） 的 --pr-open-receipt。
 5. 重新运行 confirm-pr-open 获取新鲜 OPEN/非draft/head 回执后 note-event pr_ready，表示本机可交接。云端 CI/review 不在本机继续修复，cloud_ready 与本机 pr_ready 分开。
@@ -82,4 +82,4 @@ Mini 收到反馈后按投递包先准备 PR worktree，提炼反馈 SC，把绑
 
 ## 保证边界
 
-这是 T1 skill 脚本检查：防意外错派、重复恢复、过期证据、误清现场；不能阻止拥有同一文件权限的 agent 故意手改台账，也不能证明 LLM 阅读过程。只读 sub 不替代正式 tester/reviewer。bypassPermissions 仅是 worker 工具权限模式，不扩大任务允许的文件、动作或用户授权。
+这是 T1 skill 脚本检查：防意外错派、重复恢复、过期证据、误清现场；不能阻止拥有同一文件权限的 agent 故意手改台账，也不能证明 LLM 阅读过程。只读 sub 不替代正式 tester。bypassPermissions 仅是 worker 工具权限模式，不扩大任务允许的文件、动作或用户授权。

@@ -1,20 +1,20 @@
 ---
 name: approve-exec
-description: 批准执行——只吃 task-priority final manifest；lead 拆 PR、写开工包、派独立 PI owner session、裁决例外；E 由 owner session 走 goal 场景 C 并自主推到 PR Ready；R/T 由 owner 现读 routing.json 派 worker；lead 不改产品代码、不代执行。触发词：批准执行。
+description: 批准执行——只吃 task-priority final manifest；lead 拆 PR、写开工包、派独立 PI owner session、裁决例外；E 由 owner session 走 goal 场景 C 并自主推到 PR Ready；T 由 owner 现读 routing.json 派 e2e worker；本地不再派 GPT/Claude 单审；lead 不改产品代码、不代执行。触发词：批准执行。
 trigger: 批准执行
 ---
 
 # approve-exec — lead 编排守则
 
-**lead 按本文编排**：把 task-priority final manifest 拆成每 PR 一个独立 owner session。本机 owner 完成实现、全部 priority/SC、本地 e2e、单审、提交、普通 push 与 OPEN 非 draft PR；lead 验收该 PR 的全部证据后发送唯一 Mini 盯梢授权。授权接手后云端 CI/review 与审查机反馈由 Mini 的同名 PR 专属 session 修正，本机 owner 和 lead 不追云端反馈。candidate 是检查点；不得自行 merge。
+**lead 按本文编排**：把 task-priority final manifest 拆成每 PR 一个独立 owner session。本机 owner 完成实现、全部 priority/SC、本地 e2e、提交、普通 push 与 OPEN 非 draft PR；lead 验收该 PR 的全部证据后发送唯一 Mini 盯梢授权。授权接手后云端 CI/review 与审查机反馈由 Mini 的同名 PR 专属 session 修正，本机 owner 和 lead 不追云端反馈。candidate 是检查点；不得自行 merge。本地不再派 GPT/Claude 单审。
 
 **合并红线（最高优先级）**：任何 lead、owner、reviewer、tester、Mini session、watcher、worker 或本 skill 都不得合并、自动合并、启用 auto-merge、点击合并或调用 gh pr merge。只有用户本人对指定 PR 的明确、当次授权才允许合并；PR Ready、cloud_ready、required checks 通过、管理员权限或开工包中的提交/推送授权，均不构成合并授权。后续由用户手动合并插件承接该动作；插件上线前只能报告“可合并”，不得代替用户合并。
 
-Lead 只做判断：拆 PR、写开工包、派独立 session、裁决例外、验收、发送盯梢授权、确认接手后归档 owner。功能代码、SC、e2e、单审、开远端 PR 由本机 owner 执行；云端反馈修复由 Mini 执行。无 lead 授权不得注册或派发；每 PR 一个 Mini session，title 原样继承本机 owner。
+Lead 只做判断：拆 PR、写开工包、派独立 session、裁决例外、验收、发送盯梢授权、确认接手后归档 owner。功能代码、SC、e2e、开远端 PR 由本机 owner 执行；云端反馈修复由 Mini 执行。无 lead 授权不得注册或派发；每 PR 一个 Mini session，title 原样继承本机 owner。
 
 真实派窗与 owner 入账的命令、恢复边界见 references/owner-protocol.md（派发前必读，完整内容随 handoff 发送）。保证等级是 T1 skill 纪律与脚本校验，不是宿主强制隔离。
 
-生态链：task-priority（出 manifest）→ **本 skill（拆 PR + 写完整 handoff + 派唯一 owner）** → owner 用 goal 场景 C 完成实现与 SC 验证，再由同一 owner 完成已授权的审查和 PR Ready 收尾。三审仍不在本 skill。
+生态链：task-priority（出 manifest）→ **本 skill（拆 PR + 写完整 handoff + 派唯一 owner）** → owner 用 goal 场景 C 完成实现与 SC 验证，再由同一 owner 完成本地 e2e 和已授权的 PR Ready 收尾。三审仍不在本 skill。本地不再派 GPT/Claude 单审。
 
 **阶段与授权交接**：SC PASS 是 goal 子阶段完成，不是 owner 整体任务完成。仅当所有 SC 都有 PASS 证据且没有 hard_stop、预算暂停或 blocked 时，才正常返回同一 owner 继续收尾；不得通过切换阶段绕过停止条件。开工包应注明已有授权的来源、目标仓、分支和动作；本次任务已明确授权的提交、推送、创建/更新目标 PR 直接执行，不重复请示。只有对应动作确实未获授权时才停下请求决定，PR Ready 终点本身不产生新增授权。goal 内 push／回帖仍遵守 goal 的精确声明及当前 PR 窄范围，不能为省去请示自行补造声明，也不借此授权创建 PR 或 merge。
 
@@ -26,7 +26,7 @@ Lead 只做判断：拆 PR、写开工包、派独立 session、裁决例外、�
 
 - frontmatter：`name: approve-exec`，触发词「批准执行」。
 - 用法：`批准执行`（用当前最新 final manifest 真派）/ `批准执行 --dry-run`（只出拆分表 + 开工包 + 将要 create 的参数，不调 `send_to_session`）/ `批准执行 --resume <run_id>` / `批准执行 --no-budget-pause`（写入包文，关闭该子 session 的自报暂停）。
-- 本 skill 是 **lead 编排层**：Lead 禁止改 `allowed_paths` 里的产品代码，禁止替子 session 修 bug，禁止替子 session 开 PR。E 席 `dispatch=session`；R/T 席 `dispatch=worker`（由**owner session** 派）；V/P 席 `dispatch=lead-self`（只读验收 / 写裁决台账；.pr-intent.md 由 owner 写）。owner 调本 skill 脚本校验并直接入账，不逐步跳回 lead。lead 的编排、验收裁决和登记不是产品执行。
+- 本 skill 是 **lead 编排层**：Lead 禁止改 `allowed_paths` 里的产品代码，禁止替子 session 修 bug，禁止替子 session 开 PR。E 席 `dispatch=session`；T 席 `dispatch=worker`（由**owner session** 派本地 e2e）；R 席 `dispatch=lead-self`（本地不派 reviewer；云端审查由 Mini 盯梢）；V/P 席 `dispatch=lead-self`（只读验收 / 写裁决台账；.pr-intent.md 由 owner 写）。owner 调本 skill 脚本校验并直接入账，不逐步跳回 lead。lead 的编排、验收裁决和登记不是产品执行。
 - **开工闸（PI owner session）**：未交过账的 `gate_goal` / `gate_routing` = 未执行 = 不得开工。组状态不得离开 `dispatched`。收据走 owner-gate.mjs 校验并直接入账，禁止 jump 进 lead 聊天等放行。包文第 0 块必须逐字含：
 
 ```
@@ -40,19 +40,19 @@ Lead 只做判断：拆 PR、写开工包、派独立 session、裁决例外、�
 1. 调用你自己的 goal skill。必须真的 Read 这个文件，读完按其正文走场景 C：
    /Users/praise/.agents/skills/goal/SKILL.md
    未 Read 这一文件 = 未调用 goal skill = 不得改 allowed_paths 里的任何文件。
-2. 首次派 tester/reviewer 之前（允许提前验证；最终仍须验证当前提交的完整 SC）：必须真的现读同一份 routing.json。
+2. 首次派 tester 之前（允许提前验证；最终仍须验证当前提交的完整 SC）：必须真的现读同一份 routing.json。
    先跑 `model-route show`
    或 Read
    /Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json
    （等价软链 /Users/praise/.agents/skills/orca-fanout/routing.json）
    未读这一文件、也未跑 model-route show = 不得 create_worker / create_workers。
-3. tester 用现读 **e2e** 档的 agent/model/effort；reviewer 用现读 **review** 档。
+3. tester 用现读 **e2e** 档的 agent/model/effort。本地只跑 e2e，禁止派 reviewer，禁止本地 GPT/Claude 单审。
    禁止把包里的模型 ID 抄进 create_worker。
 
 检查你是否真的执行（自报「我读了」不算；必须先交收据）：
 
 - 第 1 步完成后、改任何代码之前：提交 payload 类型 `gate_goal`，带 goal_skill_path + goal_skill_sha256（对该文件 utf-8 字节做 sha256，64 位 hex）。收据走本 skill 的 owner-gate.mjs 校验并直接入账，禁止 jump 进 lead 聊天，禁止等待 lead 审核。
-- 第 2 步完成后、create_worker 之前：提交 payload 类型 `gate_routing`，带 route_source + routing_sha256（对 routing.json utf-8 字节做 sha256）+ e2e_model + review_model（从刚读到的 JSON 抄 primary，不是从本包快照抄）。同样自动入账，不经 lead 聊天。
+- 第 2 步完成后、create_worker 之前：提交 payload 类型 `gate_routing`，带 route_source + routing_sha256（对 routing.json utf-8 字节做 sha256）+ e2e_model（从刚读到的 JSON 抄 e2e 档 primary，不是从本包快照抄）。同样自动入账，不经 lead 聊天。
 - owner-gate.mjs 会用磁盘上的同一文件重算 sha256。对不上、缺收据、或收据到达前 worktree 已有新 commit = 未执行 = 不得开工。
 
 未读 goal skill、或未读 routing.json、或本地 hash 自检失败：不得开工。不得写代码、不得开 PR、不得派 worker。停，提交 decision_required，写明卡在第几步。禁止问 lead「要开始吗」。
@@ -77,7 +77,7 @@ task-priority final manifest
   → 3.5 开工闸：新版先 baseline 核查通过，再 gate_goal 自动入账才允许改代码；gate_routing 自动入账后才允许派 worker（不等 lead 聊天放行）
   → 4. owner session：自己的 goal 场景 C 把本 PR 的 SC 跑绿
         → mem-probe → 现读 routing.json 派 tester（e2e 档）
-        → 现读 routing.json 派 reviewer（review 档 = GPT 单审）
+        → 本地不派 reviewer；GPT/Claude 单审取消
         → candidate 只是检查点；owner 自己完成本机验证并直接开远端非 draft PR，lead 不在中途放行
   → 5. Lead 只读每 PR 的自动入账证据与 DECISION_REQUIRED（失败则给一个决定，同一 owner 继续，直到 PR_READY）
   → 6. owner 开远端 ready PR（非 draft）；`confirm-pr-open.mjs` 由 owner 执行并消费回执，不是 lead 代跑。开 PR ≠ 发盯梢。
@@ -94,12 +94,12 @@ task-priority final manifest
 | 席 | dispatch | 谁跑 |
 |---|---|---|
 | E | `session` | 独立 PI session；`goal=goal-scenario-c` |
-| R | `worker` | **子 session** 现读 review 档派 GPT 单审 |
+| R | `lead-self` | 本地不派 reviewer；云端审查由 Mini 盯梢，不在本机 GPT/Claude 单审 |
 | T | `worker` | **子 session** 现读 e2e 档派 tester |
 | V | `lead-self` | lead 只读验收（ready-check / receipt），不改产品代码；happy path 零产品执行 |
 | P | `lead-self` | lead 验收全部 priority/SC 后发送 Mini 盯梢授权；.pr-intent.md、开远端 PR 和 PR Ready 收口由 owner 执行；确认 Mini 接手后才清场、归档 PI。graph `route=pr_merge` 只是路由档名，不是 git merge |
 
-`DISPATCH_MODES` = `lead-self` / `worker` / `session`。LEAD_SELF_SEATS = V、P。WORKER_SEATS = R、T。E 不是 lead-self。graph 内不出现具体模型 ID；R 不钉 `model`/`pre_command`/`command`。routing.json 的 agent/model/provider 以每次现读的所选档为准，不把旧 agent 枚举当作限制；独立 owner 的创建使用 send_to_session.agent_kind。
+`DISPATCH_MODES` = `lead-self` / `worker` / `session`。LEAD_SELF_SEATS = R、V、P。WORKER_SEATS = T。E 不是 lead-self。graph 内不出现具体模型 ID；R 不钉 `model`/`pre_command`/`command`。routing.json 的 agent/model/provider 以每次现读的所选档为准，不把旧 agent 枚举当作限制；独立 owner 的创建使用 send_to_session.agent_kind。
 
 ## ④ 拆 PR、并行与合并顺序
 
@@ -130,7 +130,7 @@ task-priority final manifest
 **5. allowed_paths**：只列文件，禁止目录。点名不可改的文件。
 **6. SC 全文**：每条 `id` + `change` + `holds` + `expect` + `anchor_paths`。禁止「去 ~/.claude/.goal 自己找」。
 **7. 验证命令**：可复制的真实命令。禁止 `console.log` 占位，禁止「先读 AGENTS.md 再决定跑什么」，禁止只用 `gh pr diff`。
-**8. 做完之后（自动，不要问 lead）：mem-probe → 现读 routing.json 派 e2e / 单审 → candidate 检查点 → 本机 owner 验证并 push、确认 OPEN 非 draft PR → lead 验收全部 priority/SC 后发唯一盯梢授权 → Mini 同名 PR session 修复云端 CI/review；owner 未收到接管确认不得清理现场，也不与 Mini 同写分支。
+**8. 做完之后（自动，不要问 lead）：mem-probe → 现读 routing.json 派 e2e（禁止本地单审） → candidate 检查点 → 本机 owner 验证并 push、确认 OPEN 非 draft PR → lead 验收全部 priority/SC 后发唯一盯梢授权 → Mini 同名 PR session 修复云端 CI/review；owner 未收到接管确认不得清理现场，也不与 Mini 同写分支。
 **9. 禁做**：硬停六条 + 本 PR 产品禁令 + 「未读 goal / 未读 routing.json 不得开工」+ 不得改总表 / `allowed_paths` / `base` + 假设破裂必须 blocked 上报，禁止就地改方案。含「可自决 / 必须停」两张表。
 **10. 回报格式**：第⑩节 exact JSON（candidate 检查点 + pr_ready + decision_required）。
 
@@ -181,7 +181,7 @@ Art = Super Grok（`provider_id=art`，模型 id `grok-4.6`），不是 cindy-ar
 
 ## ⑦ 模型现读纪律
 
-派 worker 前，owner 必须确认可调用 Orca 工具，显式执行 start_team({ worker_permission_mode: "bypassPermissions" })，并确认返回的权限模式仍为 bypassPermissions。返回 auto、能力缺失或无法确认时不得创建 worker；不得用 routing.json 的模型配置冒充权限确认。只读 sub 可用于取信息，不能替代指定的 tester/reviewer 路由。
+派 worker 前，owner 必须确认可调用 Orca 工具，显式执行 start_team({ worker_permission_mode: "bypassPermissions" })，并确认返回的权限模式仍为 bypassPermissions。返回 auto、能力缺失或无法确认时不得创建 worker；不得用 routing.json 的模型配置冒充权限确认。只读 sub 可用于取信息，不能替代指定的 tester 路由。本地禁止派 reviewer。
 
 PI 会话没有 `~/.claude/rules/orca-model-routing.md` 注入。保证靠开工包命令 + PI `AGENTS.md` 触发表 + 交卷对账。`config/defaults.json` 的 `routingPath` 指向同一文件：
 
@@ -190,13 +190,13 @@ PI 会话没有 `~/.claude/rules/orca-model-routing.md` 注入。保证靠开工
 PI 侧软链 `/Users/praise/.agents/skills/orca-fanout/routing.json`；`model-route show` 读的就是这一份。
 
 - tester → role=tester，用现读 **e2e** 档的 agent/model/effort
-- reviewer → role=reviewer，用现读 **review** 档（这就是 GPT 单审）
+- 禁止派 reviewer；本地不再跑 GPT/Claude 单审。云端审查由 Mini 盯梢。
 - 禁止把 luna / sol / 任何模型 ID 抄进 create_worker；包里若有「渲染当时快照」只供对照，create_worker 以现读为准
 - **可恢复失败先自行恢复，不等于任意错误都换 provider。** HTTP 429 / Too Many Requests 按 Retry-After 和既有预算在原路由等待重试；worker 崩溃或异常终止先核原 worker 状态并恢复；创建失败结果不明先查原绑定，不盲目重复创建。等待必须记录下一次唤醒条件，不能报完成。
 - 只有 `NO_PROVIDER_FOR_AGENT` / `PROVIDER_ROUTE_UNAVAILABLE` / `BUDGET_MODEL_REQUIRES_API_MODE` 才按现读该档 fallbacks 顺序换 provider、不换代次。每次实际降级记录原因和 fallbacks_tried；未走降级时允许空数组并说明原因，禁止空数组就问 lead。未识别错误、授权不足或恢复预算耗尽才发一条 DECISION_REQUIRED，保留原 owner。
 - **不要做的**：绕过共享 routing.json 自造 agent 枚举或给 PI 另做一份路由表；把 luna/sol 写进本 SKILL 当永久默认；primary 429 后空着手问 lead「要不要限流解除」
 
-Lead 验收时现读 live routing.json：交卷 `e2e.model` / `review.model` 既不是当前 primary、也不在该档 fallbacks 里 → 验收失败，指令重派，不准当 ready。
+Lead 验收时现读 live routing.json：交卷 `e2e.model` 既不是当前 e2e 档 primary、也不在该档 fallbacks 里 → 验收失败，指令重派，不准当 ready。本地不核 `review.model`。
 
 ## ⑧ 子 session 闭环与 lead 指挥
 
@@ -204,7 +204,7 @@ PR Ready 表示本机验收与 OPEN 非 draft PR 已完成；开 PR ≠ 发盯�
 
 owner session 只许在这五种情况下停。其中 2–5 进入 DECISION_REQUIRED（保留 owner 身份和现场，不算完成）；第 1 种是正常完成，接管确认后按协议清理归档：
 
-1. owner 已在同一提交完成全部 priority/SC、e2e、独立单审与规模门，且远端 OPEN 非 draft PR head 一致：记本机 pr_ready，交 lead 验收。授权交接后不再跟进云端 CI/review；Mini 接手确认前保留现场，不得与 Mini 同写分支。
+1. owner 已在同一提交完成全部 priority/SC、e2e 与规模门，且远端 OPEN 非 draft PR head 一致：记本机 pr_ready，交 lead 验收。授权交接后不再跟进云端 CI/review；Mini 接手确认前保留现场，不得与 Mini 同写分支。
 2. 硬停六条。
 3. **本 session 自报**累计打到 `budgetPauseUsd`（可 `--no-budget-pause`）。不是 lead 跨 session 加总。
 4. **未读 goal skill 或未读 routing.json**：不得开工。停，提交 decision_required，写明卡在开工闸第 1 步还是第 2 步。禁止 jump 等 lead 放行。
@@ -216,9 +216,9 @@ PI owner（含 grok）遇到 worker 429 / 崩溃 / 创建失败：自己按第�
 
 Lead 在全部 PR 完成本机验收并获得 Mini 接管回执或明确报告阻塞前不得宣布完整收口。owner idle 不是自动注册授权；没有完整验收和对应 lead signal 时不注册，不把普通施工 idle 当逐轮催工。
 
-「可验收」= 本 PR 全部 priority/SC 交卷合法 + e2e PASS + 独立单审 unresolved==0 + size-gate ≠ STOP + OPEN/非 draft PR head 一致。云端反馈不属于本机交卷前置；由 lead 验收后授权 Mini 继续修正。
+「可验收」= 本 PR 全部 priority/SC 交卷合法 + e2e PASS + size-gate ≠ STOP + OPEN/非 draft PR head 一致。云端反馈不属于本机交卷前置；由 lead 验收后授权 Mini 继续修正。本地不要求 GPT/Claude 单审。
 
-子 session 派 tester/reviewer **之前**自己跑 `mem-probe.mjs`。Lead 在同一波并行 create 多个 session 前也跑一次 mem-probe，按 `pending = 本波 PR 数 × 2` 估槽。同批 ≥2 worker 用 `create_workers` 批量派发，禁连续 `create_worker` 单发。
+子 session 派 tester **之前**自己跑 `mem-probe.mjs`。Lead 在同一波并行 create 多个 session 前也跑一次 mem-probe，按 `pending = 本波 PR 数` 估槽（每 PR 只派 e2e，不再另派 reviewer）。同批 ≥2 worker 用 `create_workers` 批量派发，禁连续 `create_worker` 单发。
 
 ## ⑨ 台账与状态机
 
@@ -238,7 +238,7 @@ Mini 是 lead 授权后的正常云端反馈修复者；本机 owner 仅推进�
 
 `PHASE_ORDER` 改成 run 级：`splitting | dispatching | running | accepting | ready`。组级状态机在 group 上。
 
-`PR_RECEIPT_KEYS` exact：`pr_id, session_id, candidate_sha, pr_url, e2e_status, review_unresolved, size_result, ledger_version, checked_at`。candidate 交卷阶段还没有 `pr_url`。`pr_url` 在 accepted→pr-open 时才写入。缺 `gate_goal` / `gate_routing` 事件的组，ready-check 直接 GAP，不得 accepted。
+`PR_RECEIPT_KEYS` exact：`pr_id, session_id, candidate_sha, pr_url, e2e_status, size_result, ledger_version, checked_at`。candidate 交卷阶段还没有 `pr_url`。`pr_url` 在 accepted→pr-open 时才写入。缺 `gate_goal` / `gate_routing` 事件的组，ready-check 直接 GAP，不得 accepted。
 
 ready-check 先每 PR、再 run：对每个 group 用该组 worktree 跑门；单 PR 通过后独立写 LOCAL_PR_VALIDATED，不等其它组；兼容旧整批入口才写 run 级 `READY_FOR_LATER_SUBMIT_PR_SKILL`。这行是验收门过了的机器信号，意思是 owner 可以继续开远端 PR 并在 PR Ready 后归档；不是「交给以后的提交 PR skill」，也不是 lead 可以 git merge。旧 `accepted` / run `ready` 不得原地改名冒充 PR Ready。七门按 PR 各算一遍。L2 相对该 PR 的 `identity.base`。run 级 ready 额外一条：总表里的波次顺序已记录；真正合入不由本 skill 执行。
 
@@ -252,10 +252,10 @@ Lock+tmp+rename+CAS 与 `LedgerError` 码沿用。`budget_note` 事件可留，�
 
 ```
 gate_goal     {type:"gate_goal", goal_skill_path, goal_skill_sha256}
-gate_routing  {type:"gate_routing", route_source, routing_sha256, e2e_model, review_model}
+gate_routing  {type:"gate_routing", route_source, routing_sha256, e2e_model}
 ```
 
-owner-gate.mjs 对磁盘文件 `/Users/praise/.agents/skills/goal/SKILL.md`（realpath 后与 live `.../claude-active/goal/SKILL.md` 同一 inode 也算）算 sha256，与 `gate_goal` 逐字比对。不过 → `overreach_rejected`。`gate_goal.at` 之前该 worktree 相对 `identity.base` 已有非文档 diff → 越域，指令 revert。`gate_routing` 对 `/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json`；收据里的 `e2e_model` / `review_model` 必须等于该文件当前 primary（或 fallbacks 之一）。不过 → 不得 `create_worker`。由 owner 自己调用 owner-gate.mjs，不需要宿主 gateway；脚本能核文件 hash 和返回的权限模式，不把它说成宿主拦截或阅读过程证明。
+owner-gate.mjs 对磁盘文件 `/Users/praise/.agents/skills/goal/SKILL.md`（realpath 后与 live `.../claude-active/goal/SKILL.md` 同一 inode 也算）算 sha256，与 `gate_goal` 逐字比对。不过 → `overreach_rejected`。`gate_goal.at` 之前该 worktree 相对 `identity.base` 已有非文档 diff → 越域，指令 revert。`gate_routing` 对 `/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json`；收据里的 `e2e_model` 必须等于该文件当前 e2e 档 primary（或 fallbacks 之一）。不过 → 不得 `create_worker`。由 owner 自己调用 owner-gate.mjs，不需要宿主 gateway；脚本能核文件 hash 和返回的权限模式，不把它说成宿主拦截或阅读过程证明。
 
 candidate `record-delivery --payload` exact（验收前，**不得含 pr_url**）：
 
@@ -267,7 +267,6 @@ goal_skill_path 必须是 /Users/praise/.agents/skills/goal/SKILL.md
                  （或同一 inode 的 /Users/praise/.claude/skills/goal/SKILL.md
                   / /Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/goal/SKILL.md）
 e2e             {status, candidate_sha, model, route_source}
-review          {unresolved, candidate_sha, model, route_source}
 size_gate       {result: 非空字符串, candidate_sha: 40hex}
 fallbacks_tried [{route, model, provider_id, error}] 无降级写 []；禁止 tried_fallbacks
 ```
@@ -292,7 +291,7 @@ fallbacks_tried [{route, model, provider_id, error}] 无降级写 []；禁止 tr
 
 ## ⑭ 与提交 PR 的边界
 
-本 skill 做：拆 PR、派唯一 owner、内联执行契约、本地 e2e、单审、owner 开 OPEN 非 draft PR；lead 验收全部 priority/SC 后发唯一盯梢授权，Mini 每 PR 一个同名 session 修复云端反馈；有效接管后才清本地和归档。
+本 skill 做：拆 PR、派唯一 owner、内联执行契约、本地 e2e、owner 开 OPEN 非 draft PR；lead 验收全部 priority/SC 后发唯一盯梢授权，Mini 每 PR 一个同名 session 修复云端反馈；有效接管后才清本地和归档。本地不再跑 GPT/Claude 单审。
 
 本 skill 不合入，不跑三机同步。本 skill 不做：三审、改 submit-pr skill、resume 旧 Mini 盯梢班车、自动 `gh pr merge`。子 session 不得自行 merge。三审仍不在本 skill。
 

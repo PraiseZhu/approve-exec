@@ -131,7 +131,7 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
   assert.equal(r.status, 0, r.stderr);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'e2e', '--now', T, '--detail', JSON.stringify({
     route_source: ROUTING_LIVE, routing_sha256: GATE_ROUTING_SHA,
-    e2e_model: 'codex/gpt-5.6-luna', review_model: 'codex/gpt-5.6-sol',
+    e2e_model: 'codex/gpt-5.6-luna', 
   }));
   assert.equal(r.status, 0, r.stderr);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'review', '--now', T);
@@ -143,7 +143,6 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
     scs: packet.scs_inline.map((s) => ({ id: s.id, status: 'pass' })),
     goal_skill_path: GOAL_SKILL_PI,
     e2e: { status: 'pass', candidate_sha: SHA1, model: 'codex/gpt-5.6-luna', route_source: ROUTING_LIVE },
-    review: { unresolved: 0, candidate_sha: SHA1, model: 'codex/gpt-5.6-sol', route_source: ROUTING_LIVE },
     size_gate: { result: 'PASS', candidate_sha: SHA1 },
     fallbacks_tried: [],
   }), '--now', T);
@@ -351,7 +350,7 @@ test('cleanup 回执在其它写入先推高 version 后仍可消费（不绑全
   assert.equal(r.status, 0, r.stderr);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'e2e', '--now', T, '--detail', JSON.stringify({
     route_source: ROUTING_LIVE, routing_sha256: GATE_ROUTING_SHA,
-    e2e_model: 'codex/gpt-5.6-luna', review_model: 'codex/gpt-5.6-sol',
+    e2e_model: 'codex/gpt-5.6-luna', 
   }));
   assert.equal(r.status, 0, r.stderr);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'review', '--now', T);
@@ -363,7 +362,6 @@ test('cleanup 回执在其它写入先推高 version 后仍可消费（不绑全
     scs: packet.scs_inline.map((s) => ({ id: s.id, status: 'pass' })),
     goal_skill_path: GOAL_SKILL_PI,
     e2e: { status: 'pass', candidate_sha: SHA1, model: 'codex/gpt-5.6-luna', route_source: ROUTING_LIVE },
-    review: { unresolved: 0, candidate_sha: SHA1, model: 'codex/gpt-5.6-sol', route_source: ROUTING_LIVE },
     size_gate: { result: 'PASS', candidate_sha: SHA1 },
     fallbacks_tried: [],
   }), '--now', T);
@@ -487,7 +485,7 @@ test('pr-open 时区偏移不得绕过晚于 accepted 的 epoch 比较', () => {
   assert.equal(r.status, 0, r.stderr);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'e2e', '--now', T, '--detail', JSON.stringify({
     route_source: ROUTING_LIVE, routing_sha256: GATE_ROUTING_SHA,
-    e2e_model: 'codex/gpt-5.6-luna', review_model: 'codex/gpt-5.6-sol',
+    e2e_model: 'codex/gpt-5.6-luna', 
   }));
   assert.equal(r.status, 0, r.stderr);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'review', '--now', T);
@@ -499,7 +497,6 @@ test('pr-open 时区偏移不得绕过晚于 accepted 的 epoch 比较', () => {
     scs: packet.scs_inline.map((s) => ({ id: s.id, status: 'pass' })),
     goal_skill_path: GOAL_SKILL_PI,
     e2e: { status: 'pass', candidate_sha: SHA1, model: 'codex/gpt-5.6-luna', route_source: ROUTING_LIVE },
-    review: { unresolved: 0, candidate_sha: SHA1, model: 'codex/gpt-5.6-sol', route_source: ROUTING_LIVE },
     size_gate: { result: 'PASS', candidate_sha: SHA1 },
     fallbacks_tried: [],
   }), '--now', T);

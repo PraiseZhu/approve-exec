@@ -122,7 +122,6 @@ function gateRoutingDetail() {
     route_source: ROUTING_LIVE,
     routing_sha256: GATE_ROUTING_SHA,
     e2e_model: 'codex/gpt-5.6-luna',
-    review_model: 'codex/gpt-5.6-sol',
   });
 }
 
@@ -141,12 +140,6 @@ function prHandoffPayload(group, extras = {}) {
       status: extras.e2e_status ?? 'pass',
       candidate_sha: tip,
       model: extras.e2e_model ?? 'codex/gpt-5.6-luna',
-      route_source: extras.route_source ?? ROUTING_LIVE,
-    },
-    review: {
-      unresolved: extras.unresolved ?? 0,
-      candidate_sha: tip,
-      model: extras.review_model ?? 'codex/gpt-5.6-sol',
       route_source: extras.route_source ?? ROUTING_LIVE,
     },
     size_gate: { result: extras.size_result ?? 'PASS', candidate_sha: tip },
@@ -326,7 +319,7 @@ function injectGateEvents(ledger, groupId) {
       type: 'gate_routing', at: T,
       detail: {
         group_id: groupId, route_source: ROUTING_LIVE, routing_sha256: GATE_ROUTING_SHA,
-        e2e_model: 'codex/gpt-5.6-luna', review_model: 'codex/gpt-5.6-sol',
+        e2e_model: 'codex/gpt-5.6-luna', 
         assignment_seq: seq,
       },
     });
@@ -1033,7 +1026,7 @@ test('sc-p1d: executing→e2e 缺 gate_routing 拒', () => {
   assert.match(r.stderr, /gate_routing/);
 });
 
-test('sc-p1d: unresolved>0 时 accepted 拒', () => {
+test('sc-p1d: 组 review.unresolved>0 不挡 accepted（本地不再核单审）', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
   assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
@@ -1048,12 +1041,14 @@ test('sc-p1d: unresolved>0 时 accepted 拒', () => {
     const r = cli('set-state', ledgerPath, '--group', g, '--to', to, ...extra, '--now', T);
     assert.equal(r.status, 0, r.stderr);
   }
-  const handoff = prHandoffPayload(g, { ledgerPath, unresolved: 2 });
+  const forged = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  forged.waves[0].groups[0].review.unresolved = 2;
+  writeFileSync(ledgerPath, `${JSON.stringify(forged, null, 2)}\n`);
+  const handoff = prHandoffPayload(g, { ledgerPath });
   let r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify(handoff), '--now', T);
   assert.equal(r.status, 0, `candidate 交卷应 exit 0: ${r.stderr}`);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'accepted', '--now', T);
-  assert.equal(r.status, 2, 'unresolved>0 时 accepted 必须 exit 2');
-  assert.match(r.stderr, /unresolved==0/);
+  assert.equal(r.status, 0, `组 review.unresolved>0 不得再挡 accepted: ${r.stderr}`);
 });
 
 test('sc-p1d: accepted 拒绝非绿 candidate（SC/e2e/size/branch/SHA 未闭环）', () => {
@@ -2111,11 +2106,9 @@ test('sc-p1h: 执行组合法交卷入账成功且台账对应字段逐项等于
   ], 'delivery detail.scs 必须结构化摘要交卷结果');
 });
 
-test('sc-p1h: 审查组合法交卷——unresolved 由此机器写入 review.unresolved（唯一入账通道）', () => {
+test('本地不再接受审查组交卷', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
-  // 生命周期门（① 升级）：review 交卷只允许 delivered——先派工交付到 delivered
-  // sc-p0a/b/c 迁移：合法派工前先身份+render（凭证闸前置）+快照（快照闸）
   assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
   renderGroup(ledgerPath, 'g4');
   let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--mem-snapshot', memSnapshotJson(), '--now', T);
@@ -2127,24 +2120,14 @@ test('sc-p1h: 审查组合法交卷——unresolved 由此机器写入 review.un
   r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'e2e', '--detail', gateRoutingDetail(), '--now', T);
   assert.equal(r.status, 0, r.stderr);
   const payload = { rounds: 2, findings_total: 5, unresolved: 3, fix_commits: ['abc'.repeat(13), 'def'.repeat(13)], candidate_sha: SHA1 };
+  const before = readFileSync(ledgerPath, 'utf8');
   r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
-  assert.equal(r.status, 0, `审查组交卷应 exit 0: ${r.stderr}`);
-  const g4 = readLedger(ledgerPath).waves[0].groups[0];
-  assert.equal(g4.review.rounds, 2, 'review.rounds 必须等于交卷值');
-  assert.equal(g4.review.unresolved, 3, 'review.unresolved 必须等于交卷值（唯一入账通道）');
-  // F1 契约：审查交卷 delivery detail 必须结构化且绑定 candidate_sha（ready-check ③ 读取点）。
-  // 取最后一条 delivery（set-state delivered 也落 delivery 事件，filter[0] 会取到它）
-  const deliveries = readLedger(ledgerPath).events.filter((e) => e.type === 'delivery');
-  const reviewDelivery = deliveries[deliveries.length - 1];
-  assert.equal(reviewDelivery.detail.group_id, 'g4');
-  assert.equal(reviewDelivery.detail.rounds, 2);
-  assert.equal(reviewDelivery.detail.unresolved, 3);
-  assert.equal(reviewDelivery.detail.candidate_sha, SHA1, '审查交卷 detail 必须绑定被审 candidate_sha（非派生默认）');
-  // delivery detail 契约下限 {group_id, tip_sha, candidate_sha}：组已交付时取台账当前 tip_sha
-  assert.equal(reviewDelivery.detail.tip_sha, SHA1, '组已有 tip 时审查交卷 detail.tip_sha 必须取台账当前值');
+  assert.equal(r.status, 2, '审查组交卷必须被拒');
+  assert.match(r.stderr, /不再接受审查组交卷/);
+  assert.equal(readFileSync(ledgerPath, 'utf8'), before);
 });
 
-test('sc-p1h: 审查交卷缺 candidate_sha 拒（exact 契约，不许默认）', () => {
+test('sc-p1h: 审查交卷缺 candidate_sha 仍拒（本地已取消单审）', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
   // 缺 candidate_sha：keys 集合与 REVIEW_DELIVERY_KEYS 不符 → classifyDelivery 无法唯一识别
@@ -2155,13 +2138,13 @@ test('sc-p1h: 审查交卷缺 candidate_sha 拒（exact 契约，不许默认）
   ]) {
     const before = readFileSync(ledgerPath, 'utf8');
     const r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
-    assert.equal(r.status, 2, '审查交卷缺 candidate_sha 必须 exit 2（exact 契约）');
+    assert.equal(r.status, 2, '审查交卷缺 candidate_sha 必须 exit 2');
     assert.match(r.stderr, /DELIVERY_SCHEMA/, '必须走 DELIVERY_SCHEMA 拒绝路径');
     assert.equal(readFileSync(ledgerPath, 'utf8'), before, '坏交卷后台账字节必须不变');
   }
 });
 
-test('sc-p1h: 审查交卷 candidate_sha 非 40hex 拒并点名（39 位/任意字符串）', () => {
+test('sc-p1h: 审查交卷 candidate_sha 非 40hex 仍拒（本地已取消单审）', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
   for (const bad of [SHA39, 'not-a-sha', 'A'.repeat(40), '']) {
@@ -2169,16 +2152,14 @@ test('sc-p1h: 审查交卷 candidate_sha 非 40hex 拒并点名（39 位/任意�
     const before = readFileSync(ledgerPath, 'utf8');
     const r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
     assert.equal(r.status, 2, `candidate_sha=${bad} 必须 exit 2`);
-    assert.match(r.stderr, /candidate_sha/, '必须点名 candidate_sha');
+    assert.match(r.stderr, /不再接受审查组交卷|candidate_sha|DELIVERY_SCHEMA/);
     assert.equal(readFileSync(ledgerPath, 'utf8'), before, '坏交卷后台账字节必须不变');
   }
 });
 
-test('sc-p1h: 审查交卷 candidate_sha 合法入账——detail 携带审查方声明值（非派生默认）', () => {
+test('sc-p1h: 审查交卷即使 candidate_sha 合法也拒', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
-  // 生命周期门（① 升级）：review 交卷只允许 delivered——先派工交付
-  // sc-p0a/b/c 迁移：合法派工前先身份+render（凭证闸前置）+快照（快照闸）
   assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
   renderGroup(ledgerPath, 'g4');
   let r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'dispatched', '--worker-label', 'w1', '--mem-snapshot', memSnapshotJson(), '--now', T);
@@ -2188,14 +2169,11 @@ test('sc-p1h: 审查交卷 candidate_sha 合法入账——detail 携带审查�
   r = cli('set-state', ledgerPath, '--group', 'g4', '--to', 'e2e', '--detail', gateRoutingDetail(), '--now', T);
   assert.equal(r.status, 0, r.stderr);
   const payload = { rounds: 1, findings_total: 1, unresolved: 0, fix_commits: [], candidate_sha: SHA2 };
+  const before = readFileSync(ledgerPath, 'utf8');
   r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
-  assert.equal(r.status, 0, `审查交卷应 exit 0: ${r.stderr}`);
-  const deliveries = readLedger(ledgerPath).events.filter((e) => e.type === 'delivery');
-  const delivery = deliveries[deliveries.length - 1]; // 最后一条 = 审查交卷（set-state delivered 在前）
-  assert.equal(delivery.detail.candidate_sha, SHA2, 'candidate_sha 必须等于交卷 payload 值（审查方声明，非台账派生）');
-  // delivery detail 契约下限：{group_id, tip_sha, candidate_sha} 三键齐备
-  assert.equal(delivery.detail.group_id, 'g4');
-  assert.ok(Object.prototype.hasOwnProperty.call(delivery.detail, 'tip_sha'), 'detail 必须含 tip_sha 键');
+  assert.equal(r.status, 2, '审查交卷必须被拒');
+  assert.match(r.stderr, /不再接受审查组交卷/);
+  assert.equal(readFileSync(ledgerPath, 'utf8'), before);
 });
 
 test('sc-p1h: 验收组合法交卷——verify.status/evidence_ref 入账', () => {
@@ -2287,14 +2265,14 @@ test('sc-p1h: tip_sha 39 位拒（40hex 格式）', () => {
   assert.equal(readFileSync(ledgerPath, 'utf8'), before);
 });
 
-test('单审 rounds=0 不能冒充审查交卷', () => {
+test('单审 payload 一律拒（本地不再跑 GPT/Claude 单审）', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
   const before = readFileSync(ledgerPath, 'utf8');
   const payload = { rounds: 0, findings_total: 0, unresolved: 0, fix_commits: [], candidate_sha: SHA1 };
   const result = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
   assert.equal(result.status, 2);
-  assert.match(result.stderr, /至少完成一轮单审/);
+  assert.match(result.stderr, /不再接受审查组交卷/);
   assert.equal(readFileSync(ledgerPath, 'utf8'), before);
 });
 
@@ -2306,7 +2284,7 @@ test('sc-p1h: unresolved 非数字拒', () => {
     const before = readFileSync(ledgerPath, 'utf8');
     const r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
     assert.equal(r.status, 2, `unresolved=${JSON.stringify(bad)} 必须 exit 2`);
-    assert.match(r.stderr, /unresolved 必须是非负安全整数/);
+    assert.match(r.stderr, /不再接受审查组交卷|DELIVERY_SCHEMA/);
     assert.equal(readFileSync(ledgerPath, 'utf8'), before, '坏交卷后台账字节必须不变');
   }
 });
@@ -2721,17 +2699,16 @@ test('①: verified 组 record-delivery 拒（exec/review/verify 三类交卷全
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
   forgeG4Verified(ledgerPath);
-  const payloads = [
-    execDeliveryPayload(), // exec 类（改写 tip_sha）
-    { rounds: 1, findings_total: 1, unresolved: 0, fix_commits: [], candidate_sha: SHA1 }, // review 类（改写 review.rounds）
-    prHandoffPayload('g4', { ledgerPath }), // candidate 交卷不得在 accepted 后再写
+  const cases = [
+    { payload: execDeliveryPayload(), message: /生命周期门/ },
+    { payload: { rounds: 1, findings_total: 1, unresolved: 0, fix_commits: [], candidate_sha: SHA1 }, message: /不再接受审查组交卷/ },
+    { payload: prHandoffPayload('g4', { ledgerPath }), message: /生命周期门/ },
   ];
-  for (const payload of payloads) {
+  for (const { payload, message } of cases) {
     const before = readFileSync(ledgerPath, 'utf8');
     const r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
     assert.equal(r.status, 2, 'accepted 组交卷必须 exit 2');
-    assert.match(r.stderr, /accepted|生命周期门/, '必须点名终态或生命周期门');
-    assert.match(r.stderr, /生命周期门/, '必须点名生命周期门（终态不在任何交卷类别允许集）');
+    assert.match(r.stderr, message, '审查类走 schema 拒；其余必须点名生命周期门');
     assert.equal(readFileSync(ledgerPath, 'utf8'), before, '拒写后台账字节必须不变（不落事件）');
   }
   const g = readLedger(ledgerPath).waves[0].groups[0];
@@ -2756,13 +2733,11 @@ test('①: 交卷生命周期矩阵——每类交卷在每个非法状态 exit 
   const ALL_STATES = ['pending', 'dispatched', 'executing', 'blocked', 'e2e', 'review', 'accepted', 'pr-open', 'local-cleaned', 'archived', 'failed'];
   const allowedByKind = {
     exec: ['dispatched', 'executing'],
-    review: ['e2e', 'review'],
     verify: ['review', 'accepted'],
     'pr-handoff': ['review'],
   };
   const payloadByKind = {
     exec: () => execDeliveryPayload(),
-    review: () => ({ rounds: 1, findings_total: 1, unresolved: 0, fix_commits: [], candidate_sha: SHA1 }),
     verify: () => g4VerifyPayload(),
     'pr-handoff': () => prHandoffPayload('g4'),
   };
@@ -2785,6 +2760,17 @@ test('①: 交卷生命周期矩阵——每类交卷在每个非法状态 exit 
     forgeG4State(ledgerPath, allowed[0]);
     const r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payloadByKind[kind]()), '--now', T);
     assert.equal(r.status, 0, `${kind}@${allowed[0]}（合法格）应 exit 0: ${r.stderr}`);
+  }
+  const reviewPayload = { rounds: 1, findings_total: 1, unresolved: 0, fix_commits: [], candidate_sha: SHA1 };
+  for (const state of ['pending', 'e2e', 'review']) {
+    const dir = newTmpDir();
+    const { ledgerPath } = initLedgerFor(dir);
+    forgeG4State(ledgerPath, state);
+    const before = readFileSync(ledgerPath, 'utf8');
+    const r = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(reviewPayload), '--now', T);
+    assert.equal(r.status, 2, `review@${state} 必须 exit 2（schema 拒审查交卷）`);
+    assert.match(r.stderr, /不再接受审查组交卷/, `review@${state} 必须点名审查交卷已取消`);
+    assert.equal(readFileSync(ledgerPath, 'utf8'), before, `review@${state} 拒写后台账字节必须不变`);
   }
 });
 
@@ -3462,7 +3448,7 @@ test('watch_registered: init 后改夹具副本 mini-watch.json 必须拒（三�
     })],
     ['set-state', ledgerPath, '--group', g, '--to', 'e2e', '--now', T, '--detail', JSON.stringify({
       route_source: ROUTING_LIVE, routing_sha256: GATE_ROUTING_SHA,
-      e2e_model: 'codex/gpt-5.6-luna', review_model: 'codex/gpt-5.6-sol',
+      e2e_model: 'codex/gpt-5.6-luna', 
     })],
     ['set-state', ledgerPath, '--group', g, '--to', 'review', '--now', T],
   ];
@@ -3477,7 +3463,6 @@ test('watch_registered: init 后改夹具副本 mini-watch.json 必须拒（三�
     scs: packet.scs_inline.map((s) => ({ id: s.id, status: 'pass' })),
     goal_skill_path: GOAL_SKILL_PI,
     e2e: { status: 'pass', candidate_sha: SHA1, model: 'codex/gpt-5.6-luna', route_source: ROUTING_LIVE },
-    review: { unresolved: 0, candidate_sha: SHA1, model: 'codex/gpt-5.6-sol', route_source: ROUTING_LIVE },
     size_gate: { result: 'PASS', candidate_sha: SHA1 },
     fallbacks_tried: [],
   }), '--now', T);
@@ -3603,7 +3588,7 @@ const RL_MUTATION_PREDICTIONS = [
       'sc-p1d: 合法链全通（dispatched→executing→e2e→review→accepted）',
       'sc-p1d: dispatched→executing 缺 gate_goal 拒',
       'sc-p1d: executing→e2e 缺 gate_routing 拒',
-      'sc-p1d: unresolved>0 时 accepted 拒',
+      'sc-p1d: 组 review.unresolved>0 不挡 accepted（本地不再核单审）',
       'sc-p1d: accepted 拒绝非绿 candidate（SC/e2e/size/branch/SHA 未闭环）',
       'sc-p1d: 非法跳转矩阵全部 exit 2 且落 illegal_transition 事件',
       'sc-p1d: failed→pending 后 rounds==0 且 tip_sha/worker_label/身份三键清空（重派不继承旧计数/旧身份）',
@@ -3625,8 +3610,8 @@ const RL_MUTATION_PREDICTIONS = [
       // F1 变异下保持绿（语义合法收缩，测试注释同步说明）。
       'F-J: 对照——packet.scs_inline 无重复时，交卷缺一/多一/重复仍按计数比对拒（原有 exact 语义保留）',
       'sc-p1h: record-delivery 交卷文件路径（--payload @file）解析',
-      'sc-p1h: 审查交卷 candidate_sha 合法入账——detail 携带审查方声明值（非派生默认）',
-      'sc-p1h: 审查组合法交卷——unresolved 由此机器写入 review.unresolved（唯一入账通道）',
+      'sc-p1h: 审查交卷即使 candidate_sha 合法也拒',
+      '本地不再接受审查组交卷',
       'sc-p1h: 执行组合法交卷入账成功且台账对应字段逐项等于交卷值',
       'sc-p1h: 验收组合法交卷——verify.status/evidence_ref 入账',
       '①: 重派链 failed→pending 后 exec 重新交卷放行（生命周期门不挡重派正常链路）',
