@@ -158,7 +158,7 @@ export function renderPrHandoff({
       '可自决：不改变 SC、接口兼容、授权和跨 PR 依赖的域内实现选型；派 read-only sub / e2e / review worker；本机测试红和 review unresolved>0 在 allowed_paths 内修到绿；已授权的 feature branch push 与目标 PR create/update。',
       '429 / Too Many Requests 按 Retry-After 和现有预算在原路由等待重试，记录下一次唤醒；worker 崩溃先查原 worker 状态再恢复。创建失败结果不明时先查绑定，不盲目重复创建。只有 NO_PROVIDER_FOR_AGENT / PROVIDER_ROUTE_UNAVAILABLE / BUDGET_MODEL_REQUIRES_API_MODE 才按现读该档 fallbacks 换 provider、不换代次。每次实际降级写入 fallbacks_tried；未走降级保留空数组并说明原因，禁止空数组就问 lead。',
       '必须停（DECISION_REQUIRED，保留原 owner 绑定）：硬停六条；hash/身份自检失败；SC、接口兼容、授权或跨 PR 依赖发生变化；allowed_paths 不够；授权不足；已授权恢复策略和预算耗尽；连续 3 轮零增量。只发一条 decision_required，附已尝试动作和 fallbacks_tried，等 lead 一个决定后同一 owner 继续。等待期间保留任务状态、阻塞原因和唤醒条件，不报完成。',
-      '按第⑩节提交 candidate 后不得完成、不得归档、不得问 lead 下一步。owner 自己修复、开非 draft PR，并跟进当前 PR 的必要 CI/review 到收口；PR Ready 指本机 SC/e2e/独立审查、必要门禁和远端 head 均已确认。lead 只在最终 PR Ready 时验收。Mini 仅在 owner 挂起、预算暂停、硬停或外部接管时接手；子 session 不合入，merge 由人点。',
+      '按第⑩节提交 candidate 后继续已授权的本机验证、提交、普通 push 与 OPEN 非 draft PR 确认；本机 pr_ready 交 lead 验收全部 priority/SC。仅对应任务 lead 发 Mini 盯梢授权，Mini 用与本机 owner 完全一致的标题和每 PR 一个 session 修复云端 CI/review。接管后本机不追反馈；必要门禁和远端 head 均已确认。子 session 不合入；任何角色不得自动合并、启用 auto-merge 或调用 gh pr merge，只有用户对指定 PR 的当次明确授权才允许合并。',
     ].join('\n')],
     ['9. 禁做', forbidden.map((f) => `- ${f}`).join('\n')],
     ['10. 回报格式', [

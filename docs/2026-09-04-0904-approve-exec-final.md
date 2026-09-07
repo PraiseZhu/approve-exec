@@ -1,5 +1,7 @@
 # 0904 批准执行问题终稿（Sol 裁决版）
 
+> 2026-09-06：本文保留为历史裁决，不再作为派工依据。现行职责与授权以 SKILL.md 和 references/owner-protocol.md 为准：本机完成 PR Ready；原任务 lead 验收并授权 Mini；Mini 同名独立 session 追云端反馈。本机 watcher 持续暂停，禁止恢复旧班车或派本机 owner 追云端。任何 agent 不得自行合并，只有用户当次明确授权才允许合并。
+
 日期：2026-09-05  
 状态：Final decision / target contract  
 实现状态：**尚未落地，不能据本文声称当前系统已经修好**  

@@ -62,10 +62,14 @@ test('handoff 含停等验收 / 缺 PR Ready 拒', () => {
     '## 6. SC 全文', 'sc-1',
     '## 7. 验证命令', 'node scripts/run-tests.mjs',
     '## 8. 做完之后（自动，不要问 lead）', '可自决\n必须停\ncandidate 只是检查点\nPR Ready\n429 / 崩溃 / 创建失败按 fallbacks 换 provider、不换代次\nfallbacks_tried 禁止空数组就问 lead',
+    '只有用户对指定 PR 的当次明确授权才允许合并',
     '## 9. 禁做', 'x',
     '## 10. 回报格式', 'pr_ready',
   ].join('\n');
   assert.equal(assertHandoffComplete(base).ok, true);
+  for (const forbidden of ['可合则合', '审查干净后直接 gh pr merge', '授权 session 独立合并']) {
+    assert.throws(() => assertHandoffComplete(base + '\n' + forbidden), /独立合并指令/);
+  }
   assert.throws(() => assertHandoffComplete(`${base}\n停等验收`), LedgerError);
   assert.throws(() => assertHandoffComplete(`${base}\n限流解除后再开 review`), LedgerError);
   assert.throws(() => assertHandoffComplete(base.replace('429 / 崩溃 / 创建失败按 fallbacks 换 provider、不换代次\nfallbacks_tried 禁止空数组就问 lead', '')), LedgerError);
@@ -85,16 +89,14 @@ test('盯梢必须等本组 pr_ready，不是开 PR 即发、也不是等整批 
   assert.match(skill, /4 个 PR|谁 Ready 发谁/);
 });
 
-test('盯梢 create 标题走 sessionTitle，不是 owner/repo#号 盯梢', () => {
+test('盯梢缺 lead signal 时拒绝自动生成 session 标题并派发', () => {
   assert.equal(titlePrefixForRepo('xindong/mivo-canvas-plugin'), 'MivoPlugin');
   assert.equal(watchTaskName(461), '盯梢修复461');
-  const create = planDispatch({
+  assert.throws(() => planDispatch({
     decision: 'actionable',
     state: { owner: 'xindong', repo: 'mivo-canvas-plugin', pr_number: 461, session_id: null, mmdd: '0905' },
     signals: ['comment'],
     newItems: { comments: [{ id: 'c1', body: 'fix' }] },
     gatewayAvailable: true,
-  });
-  assert.equal(create.title, 'MivoPlugin-盯梢修复461丨 0905');
-  assert.doesNotMatch(create.title, /xindong\/mivo-canvas-plugin#461 盯梢/);
+  }), (error) => error?.code === 'LEAD_SIGNAL_INVALID');
 });

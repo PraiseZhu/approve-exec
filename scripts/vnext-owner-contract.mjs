@@ -220,6 +220,12 @@ export function assertHandoffComplete(text, { why, how, excerpts, verify_cmds, t
     throw new LedgerError('PACKET_INCOMPLETE', '开工包必须声明 candidate 只是检查点');
   }
   const section8 = sectionBody(text, '8. 做完之后（自动，不要问 lead）');
+  if (!section8.includes('只有用户对指定 PR 的当次明确授权才允许合并')) {
+    throw new LedgerError('PACKET_INCOMPLETE', '开工包必须明确合并授权只能来自用户，不得由 lead 转授');
+  }
+  if (/可合则合|直接\s+gh\s+pr\s+merge|(?:允许|授权|可以).{0,12}(?:自行|独立|自动)合并/.test(text)) {
+    throw new LedgerError('PACKET_INCOMPLETE', '开工包含独立合并指令，与用户合并授权红线冲突');
+  }
   const fallbackNeedles = ['429', '崩溃', '创建失败', 'fallbacks', '换 provider', '不换代次', 'fallbacks_tried'];
   const missingFallback = fallbackNeedles.filter((n) => !section8.includes(n));
   if (missingFallback.length > 0 || !FALLBACK_REQUIRED_RE.test(section8)) {

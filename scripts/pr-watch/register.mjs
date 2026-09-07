@@ -8,9 +8,10 @@ import { existsSync, readFileSync, renameSync, unlinkSync, appendFileSync, mkdir
 import { join, dirname } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { readJson, writeJsonAtomic, parseArgs, fail, nowIso, isMain} from '../lib/common.mjs';
+import { readJson, writeJsonAtomic, parseArgs, fail, nowIso, isMain, hashObject } from '../lib/common.mjs';
 import { withLock } from '../lib/state-lock.mjs';
 import { validateBranchName, validateRemoteName, validateRepoFullName } from '../lib/git-checks.mjs';
+import { assertLeadSignalForRegistration, deriveWatchTitleFields } from './lead-signal.mjs';
 // 状态文件新增字段（审② F6/F7）: cursors（按类游标）/ pending_dispatch（两阶段状态机）
 
 // ===== 状态文件名编码 v3（2026-08-08 GPT R3: v2 clean 折叠非单射，mame/_ 与 mame/- 同路径碰撞）=====
@@ -171,7 +172,7 @@ export function migrateAllLegacyStateFiles(stateDir, journalFile = null) {
   return out;
 }
 
-export function registerPr({ stateDir, owner, repo, prNumber, branch, registeredBy, pushRepo, pushRemote }) {
+export function registerPr({ stateDir, owner, repo, prNumber, branch, registeredBy, pushRepo, pushRemote, leadSignal }) {
   // SC-FIX-2 (2026-08-08): PR 号必须是正整数——0/负数/非整数生成的状态文件名不满足
   // STATE_FILE_NAME_RE（PR 段 \d+），引擎扫描永不命中 = 可注册不可扫的空转，注册即拒绝。
   // SC-FIX-4 (2026-08-08): 规范类型与表示守卫——Number 强转会放行异形输入
@@ -222,6 +223,12 @@ export function registerPr({ stateDir, owner, repo, prNumber, branch, registered
     const repoErrs = validateRepoFullName(pushRepo, 'push_repo');
     if (repoErrs.length) throw new Error(`注册拒绝: push_repo 未过绑定守卫——${repoErrs.join('; ')}`);
   }
+  const validatedLeadSignal = leadSignal === undefined || leadSignal === null
+    ? null
+    : assertLeadSignalForRegistration({ signal: leadSignal, owner, repo, prNumber: prNum, branch });
+  const titleFields = validatedLeadSignal
+    ? deriveWatchTitleFields(owner, repo, validatedLeadSignal.owner_title)
+    : null;
   // R3 修复: 按身份解析先于加锁——旧命名文件（含折叠字符的 v2 注册）先原子迁移到新编码名，
   // 新名已存在则直接复用（同一身份幂等 already；不同身份必然不同名，不 already 不覆盖）。
   // SC-FIX-1 (2026-08-08): 解析结果可能命中「他身份」文件（v2 clean 折叠碰撞: mame/_#N 的
@@ -243,6 +250,17 @@ export function registerPr({ stateDir, owner, repo, prNumber, branch, registered
       // 拒绝，绝不覆写/复用。锁外预判与锁内复核之间被并发抢占（TOCTOU）时由本复核兜底。
       if (!identityMatches(prev, owner, repo, prNum)) {
         throw new Error(`注册冲突: ${owner}/${repo}#${prNum} 的状态文件 ${resolvedFile} 内容属于其他身份（${prev.owner}/${prev.repo}#${prev.pr_number}）——不覆写不复用（fail-closed），人工核对后处理`);
+      }
+      if (validatedLeadSignal) {
+        if (!prev.lead_signal) {
+          throw new Error('注册拒绝: 旧 state 缺 lead_signal；不重置游标、不改绑身份（fail-closed）');
+        }
+        if (hashObject(prev.lead_signal) !== hashObject(validatedLeadSignal)) {
+          throw new Error('注册拒绝: 已绑定不同 lead_signal；拒绝重放或改绑（fail-closed）');
+        }
+        if (prev.task_name !== titleFields.task_name || prev.mmdd !== titleFields.mmdd) {
+          throw new Error('注册拒绝: Mini 标题字段与 owner_title 不一致（fail-closed）');
+        }
       }
       // 审⑥-F1-⑥: push_repo 三态——undefined=保留旧值 / null=显式清空（CLI --clear-push-repo）/ 字符串=设置
       const wantPushRepo = pushRepo === undefined ? (prev.push_repo ?? null) : pushRepo;
@@ -273,7 +291,8 @@ export function registerPr({ stateDir, owner, repo, prNumber, branch, registered
         branch, push_repo: wantPushRepo, push_remote: pushRemote,
         // 审⑪-P1: epoch 跨迁移/重注册保留（同一注册身份）；legacy 缺失时补生成。
         // 真正销单后重新注册走下方新建分支 = 新 epoch，旧 dispatch id 空间永不复用。
-        registration_epoch: prev.registration_epoch ?? randomBytes(8).toString('hex')
+        registration_epoch: prev.registration_epoch ?? randomBytes(8).toString('hex'),
+        ...(validatedLeadSignal ? { lead_signal: validatedLeadSignal } : {}),
       };
       const migrated = prev.schema_version !== 'v2' || wiringChanged || !prev.registration_epoch;
       if (migrated) writeJsonAtomic(file, next);
@@ -287,7 +306,12 @@ export function registerPr({ stateDir, owner, repo, prNumber, branch, registered
       push_repo: pushRepo ?? null, // cindy 场景: 修复 push 目标 fork 全名（finalize 绑 remote URL 用）
       push_remote: pushRemote,     // 修复 worktree 里的 push remote 名（mivo=origin / cindy=fork）
       registered_at: nowIso(),
-      registered_by: registeredBy ?? 'unknown',
+      registered_by: validatedLeadSignal?.lead_session_id ?? registeredBy ?? 'unknown',
+      ...(validatedLeadSignal ? {
+        lead_signal: validatedLeadSignal,
+        task_name: titleFields.task_name,
+        mmdd: titleFields.mmdd,
+      } : {}),
       cursors: null,               // 按类游标（W-3 审②-F7 版），首扫后写入
       pending_dispatch: null,      // 两阶段状态机（F6）: dispatch→ack 才推进游标
       first_scan_ack: null,        // 回执要素④
@@ -379,8 +403,8 @@ export function unregisterPr({ stateDir, owner, repo, prNumber, reason, journalF
 
 if (isMain(import.meta.url)) {
   const args = parseArgs(process.argv.slice(2));
-  const need = ['state-dir', 'owner', 'repo', 'pr', 'branch', 'push-remote']; // 审⑤-F4: branch/push-remote CLI 必填
-  if (need.some((k) => !args[k])) fail('用法: register.mjs --state-dir <dir> --owner <o> --repo <r> --pr <N> --branch <b> --push-remote <origin|fork> [--push-repo owner/name | --clear-push-repo] [--verify --lease <file> --schedule-check "<cmd>"]');
+  const need = ['state-dir', 'owner', 'repo', 'pr', 'branch', 'push-remote', 'lead-signal'];
+  if (need.some((key) => !args[key])) fail('用法: register.mjs --state-dir <dir> --owner <o> --repo <r> --pr <N> --branch <b> --push-remote <origin|fork> --lead-signal <json> [--push-repo owner/name | --clear-push-repo] [--verify --lease <file> --schedule-check "<cmd>"]');
   mkdirSync(args['state-dir'], { recursive: true });
   // 审⑥-F1-⑥: --clear-push-repo 显式清空（fork→origin 纠错）；不传任何 push-repo 参数 = 保留旧值
   const pushRepoArg = args['clear-push-repo'] ? null : (args['push-repo'] ?? undefined);
@@ -388,7 +412,8 @@ if (isMain(import.meta.url)) {
     stateDir: args['state-dir'], owner: args.owner, repo: args.repo,
     prNumber: args.pr, branch: args.branch, pushRepo: pushRepoArg,
     pushRemote: args['push-remote'],
-    registeredBy: args.by ?? 'cli'
+    registeredBy: args.by ?? 'cli',
+    leadSignal: args['lead-signal'],
   });
   process.stdout.write(`${already ? 'ALREADY' : 'REGISTERED'} ${file}\n`);
   if (args.verify) {

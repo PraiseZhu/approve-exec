@@ -2287,6 +2287,17 @@ test('sc-p1h: tip_sha 39 位拒（40hex 格式）', () => {
   assert.equal(readFileSync(ledgerPath, 'utf8'), before);
 });
 
+test('单审 rounds=0 不能冒充审查交卷', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  const before = readFileSync(ledgerPath, 'utf8');
+  const payload = { rounds: 0, findings_total: 0, unresolved: 0, fix_commits: [], candidate_sha: SHA1 };
+  const result = cli('record-delivery', ledgerPath, '--group', 'g4', '--payload', JSON.stringify(payload), '--now', T);
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /至少完成一轮单审/);
+  assert.equal(readFileSync(ledgerPath, 'utf8'), before);
+});
+
 test('sc-p1h: unresolved 非数字拒', () => {
   const dir = newTmpDir();
   const { ledgerPath } = initLedgerFor(dir);
@@ -3417,6 +3428,7 @@ test('watch_registered: init 后改夹具副本 mini-watch.json 必须拒（三�
   mkdirSync(join(tree, 'tests/fixtures'), { recursive: true });
   cpSync(join(ROOT, 'scripts/run-ledger.mjs'), join(tree, 'scripts/run-ledger.mjs'));
   cpSync(join(ROOT, 'scripts/pr-watch'), join(tree, 'scripts/pr-watch'), { recursive: true });
+  cpSync(join(ROOT, 'scripts/vnext-owner-contract.mjs'), join(tree, 'scripts/vnext-owner-contract.mjs'));
   cpSync(join(ROOT, 'scripts/lib'), join(tree, 'scripts/lib'), { recursive: true });
   cpSync(join(ROOT, 'scripts/lib/mini-watch-config.mjs'), join(tree, 'scripts/lib/mini-watch-config.mjs'));
   writeFileSync(join(tree, 'config/defaults.json'), readFileSync(join(ROOT, 'config/defaults.json'), 'utf8'));
@@ -3529,6 +3541,7 @@ test('组F-1: 非规范化路径调用必须实际执行 init 并创建台账（
   mkdirSync(join(dir, 'config'), { recursive: true });
   cpSync(join(ROOT, 'scripts/run-ledger.mjs'), join(dir, 'scripts/run-ledger.mjs'));
   cpSync(join(ROOT, 'scripts/pr-watch'), join(dir, 'scripts/pr-watch'), { recursive: true });
+  cpSync(join(ROOT, 'scripts/vnext-owner-contract.mjs'), join(dir, 'scripts/vnext-owner-contract.mjs'));
   cpSync(join(ROOT, 'scripts/lib'), join(dir, 'scripts/lib'), { recursive: true });
   cpSync(join(ROOT, 'scripts/lib/mini-watch-config.mjs'), join(dir, 'scripts/lib/mini-watch-config.mjs'));
   writeFileSync(join(dir, 'config/defaults.json'), readFileSync(join(ROOT, 'config/defaults.json'), 'utf8'));

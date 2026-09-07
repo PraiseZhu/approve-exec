@@ -976,6 +976,7 @@ function copyTreeForMutation(t, mutateScript) {
   // full 测试的链尾 run-ledger validate（F2 回归锚点）需要真实 run-ledger.mjs 副本
   writeFileSync(join(dir, 'scripts/run-ledger.mjs'), readFileSync(join(root, 'scripts/run-ledger.mjs'), 'utf8'));
   cpSync(join(root, 'scripts/pr-watch'), join(dir, 'scripts/pr-watch'), { recursive: true });
+  cpSync(join(root, 'scripts/vnext-owner-contract.mjs'), join(dir, 'scripts/vnext-owner-contract.mjs'));
   cpSync(join(root, 'scripts/lib'), join(dir, 'scripts/lib'), { recursive: true });
   mkdirSync(join(dir, 'scripts/lib'), { recursive: true });
   writeFileSync(join(dir, 'scripts/lib/mini-watch-config.mjs'), readFileSync(join(root, 'scripts/lib/mini-watch-config.mjs'), 'utf8'));

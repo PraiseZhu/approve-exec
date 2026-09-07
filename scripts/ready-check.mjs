@@ -134,7 +134,7 @@ function isInsideRepo(repoRoot, relPath) {
 // ---------- 七项判据（每项独立函数，变异点字符串唯一） ----------
 
 // ① 台账互斥全分区对账
-function checkLedgerPartition(ledger, manifest, manifestError, gaps) {
+function checkLedgerPartition(ledger, manifest, manifestError, gaps, allowReview = false) {
   // F-O: 输入不可解析转 gap 占位而非提前 exit——不依赖其内容的后项（④⑤⑥⑦）照常运行
   if (!ledger) { gaps.push({ gate: 'ledger-partition', detail: '台账文件不存在或不可解析' }); return; }
   if (!manifest) {
@@ -151,7 +151,8 @@ function checkLedgerPartition(ledger, manifest, manifestError, gaps) {
     gaps.push({ gate: 'ledger-partition', detail: '台账无任何组（零工作运行，拒绝 READY）' });
   }
 
-  const notAccepted = groups.filter((g) => !['accepted', 'local_validated', 'pr-open', 'local-cleaned', 'archived'].includes(g.state));
+  const notAccepted = groups.filter((g) => !['accepted', 'local_validated', 'pr-open', 'local-cleaned', 'archived'].includes(g.state)
+    && !(allowReview && g.state === 'review'));
   if (notAccepted.length > 0) {
     gaps.push({ gate: 'ledger-partition', detail: `组非 accepted: ${notAccepted.map((g) => `${g.group_id}=${g.state}`).join(', ')}` });
   }
@@ -341,6 +342,9 @@ function checkReviewClean(ledger, manifest, repoRoot, headSha, reviewMaxRounds, 
     // 的树，之前轮次的旧树已被后续轮次覆盖修正。
     const packet = packets.find((p) => p.group_id === g.group_id);
     const groupIsVerify = isVerifyGroup(packet);
+    if (!groupIsVerify && (!Number.isSafeInteger(review.rounds) || review.rounds < 1)) {
+      gaps.push({ gate: 'review-clean', detail: g.group_id + ' 必须至少完成一轮单审' });
+    }
     const bindingKind = groupIsVerify ? 'verify' : 'review';
     const binding = deliveries.filter((d) => deliveryCategory(d) === bindingKind);
     const lastBinding = binding[binding.length - 1];
@@ -559,7 +563,7 @@ function main() {
 
   // 七项逐项独立检查，全部跑完再收束（不因前项失败跳过后项）
   const gaps = [];
-  checkLedgerPartition(ledger, manifest, manifestError, gaps);
+  checkLedgerPartition(ledger, manifest, manifestError, gaps, Boolean(args.group));
   checkVerdictAnchors(verdict, manifest, manifestError, ledger, args.repo, headSha, gaps);
   checkReviewClean(ledger, manifest, args.repo, headSha, reviewMaxRounds, packagingPaths, gaps);
   checkE2eReport(e2eReport, headSha, gaps);

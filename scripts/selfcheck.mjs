@@ -30,7 +30,7 @@ const AGENTS = ['pi', 'codex', 'claude-code'];
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 const ROUTES = ['execute', 'review', 'e2e', 'pr_merge'];
 // sc-p2c change ② 的触发行原文（整行逐字匹配，防描述被改写后入口失效）
-export const TRIGGER_LINE = '| 批准执行 | `approve-exec` | 直接执行不确认。只吃 task-priority final manifest，缺输入 fail-closed 指路；lead 拆 PR、写开工包、派独立 PI owner session、终点验收；E 由 owner session 走 goal 场景 C 并自主推到 PR Ready；R/T 由 owner 现读 routing.json 派 worker；lead 不改产品代码、不代执行；正常路径不注册 Mini，只有异常接管才注册并清场。本 skill 不合入、不跑三机同步 |';
+export const TRIGGER_LINE = '| 批准执行 | `approve-exec` | 直接执行不确认。只吃 task-priority final manifest，缺输入 fail-closed 指路；lead 拆 PR、派 owner、验收全部 priority/SC 并发送唯一 Mini 盯梢授权；本机 owner 完成 SC/e2e/单审与 OPEN 非 draft PR，Mini 每 PR 一个同名 session 修复云端 CI/review；接管确认后清场。本 skill 不合入、不跑三机同步 |';
 // LIVE_LINK 推导：从 config.goalSkillRoot 派生 —— dirname(goalSkillRoot) 即 skills/claude-active 目录，
 // approve-exec 与 goal 同处该目录（与 task-priority 同款：skills 目录内 symlink）。
 // 禁止按仓库在磁盘上的嵌套深度猜层级（'../..' 相对 root）：主 checkout（approve-exec-src）与 worktree

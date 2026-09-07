@@ -8,6 +8,8 @@ import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { LedgerError, parseTimestamp, WATCH_RECEIPT_KEYS } from './run-ledger.mjs';
 import { loadMiniWatchConfig, miniHost, miniWatchConfigSha256 } from './lib/mini-watch-config.mjs';
+import { validateRemoteName, validateRepoFullName } from './lib/git-checks.mjs';
+import { assertLeadSignalForRegistration, parseLeadSignalInput, validateLeadSignal, readSenderRuntime } from './pr-watch/lead-signal.mjs';
 
 const STATE_NAME_RE = /^([A-Za-z0-9.%!~*'()-]+)__([A-Za-z0-9.%!~*'()-]+)__(\d+)\.json$/;
 const REGISTER_LINE_RE = /^(REGISTERED|ALREADY)\s+(\/\S+\.json)\s*$/;
@@ -34,6 +36,10 @@ export function parseWatchArgs(argv) {
     const a = argv[i];
     if (!a.startsWith('--')) throw new LedgerError('ARGS', `非法参数: ${a}`);
     const key = a.slice(2);
+    if (key === 'clear-push-repo') {
+      flags[key] = true;
+      continue;
+    }
     const value = argv[i + 1];
     if (value === undefined || value.startsWith('--')) throw new LedgerError('ARGS', `参数 --${key} 缺值`);
     flags[key] = value;
@@ -78,6 +84,7 @@ export function identityFromStateFile(stateFile) {
 
 export function confirmWatchRegistered({
   stdout, owner, repo, prNumber, branch, now, ledgerVersion, assignmentSeq, takeover,
+  ledgerPath, groupId, leadSignal, senderSessionId,
 } = {}) {
   parseTimestamp(now, 'confirm-watch-registered --now');
   if (typeof owner !== 'string' || owner.length === 0) throw new LedgerError('ARGS', 'owner 必须是非空字符串');
@@ -88,6 +95,13 @@ export function confirmWatchRegistered({
     throw new LedgerError('ARGS', `pr 必须是正整数（当前: ${prNumber}）`);
   }
   const parsed = parseRegisterStdout(stdout);
+  if (leadSignal !== undefined && leadSignal !== null) {
+    if (typeof ledgerPath !== 'string' || ledgerPath.length === 0 || typeof groupId !== 'string' || groupId.length === 0) {
+      throw new LedgerError('ARGS', 'lead-signal 注册确认必须同时提供 ledger 与 group');
+    }
+    validateLeadSignal({ ledgerPath, groupId, signal: leadSignal, senderSessionId, now });
+    assertLeadSignalForRegistration({ signal: leadSignal, owner, repo, prNumber, branch });
+  }
   assertTakeover(takeover, { now });
   const id = identityFromStateFile(parsed.stateFile);
   if (id.owner !== owner.toLowerCase() || id.repo !== repo.toLowerCase() || id.pr_number !== expectedPr) {
@@ -135,7 +149,28 @@ export function assertMiniRegisterBin(registerBin) {
   return bin;
 }
 
-function runRegister({ host, registerBin, stateDir, owner, repo, pr, branch, pushRemote, sshRunner }) {
+function parsePushWiring(flags) {
+  const pushRemote = flags['push-remote'] ?? 'origin';
+  if (typeof pushRemote !== 'string' || validateRemoteName(pushRemote).length) {
+    throw new LedgerError('ARGS', 'push-remote 非法（当前: ' + pushRemote + '）');
+  }
+  const clearPushRepo = flags['clear-push-repo'] === true;
+  if (clearPushRepo && flags['push-repo'] !== undefined) {
+    throw new LedgerError('ARGS', '--clear-push-repo 不能与 --push-repo 同时使用');
+  }
+  const pushRepo = clearPushRepo ? null : flags['push-repo'];
+  if (pushRepo !== undefined && pushRepo !== null) {
+    if (typeof pushRepo !== 'string' || validateRepoFullName(pushRepo, 'push_repo').length) {
+      throw new LedgerError('ARGS', 'push-repo 非法（当前: ' + pushRepo + '）');
+    }
+  }
+  if (pushRemote !== 'origin' && !pushRepo) {
+    throw new LedgerError('ARGS', '非 origin push-remote 必须显式提供 push-repo，拒绝将 fork 推到上游');
+  }
+  return { pushRemote, pushRepo, clearPushRepo };
+}
+
+function runRegister({ host, registerBin, stateDir, owner, repo, pr, branch, pushRepo, clearPushRepo, pushRemote, leadSignal, sshRunner }) {
   const sshBin = watchCfg().ssh_bin;
   const ssh = sshRunner ?? ((args) => spawnSync(sshBin, args, { encoding: 'utf8' }));
   const remoteCmd = [
@@ -146,6 +181,8 @@ function runRegister({ host, registerBin, stateDir, owner, repo, pr, branch, pus
     '--pr', String(pr),
     '--branch', branch,
     '--push-remote', pushRemote,
+    ...(clearPushRepo ? ['--clear-push-repo'] : pushRepo !== undefined ? ['--push-repo', pushRepo] : []),
+    ...(leadSignal ? ['--lead-signal', JSON.stringify(leadSignal)] : []),
   ].map((part) => `'${String(part).replace(/'/g, `'\\''`)}'`).join(' ');
   const r = ssh(['-o', 'BatchMode=yes', host, remoteCmd]);
   if (r.status !== 0) {
@@ -163,11 +200,31 @@ export function assertMiniHost(host) {
   return value;
 }
 
-export function runWatchCli(argv, { sshRunner } = {}) {
+export function runWatchCli(argv, { sshRunner, requireLeadAuthorization = false } = {}) {
   const flags = parseWatchArgs(argv);
   if (flags.stdout !== undefined) {
     throw new LedgerError('ARGS', '--stdout 不是生产 CLI 参数；测试请直接调 confirmWatchRegistered()');
   }
+  const leadSignal = flags['lead-signal'] === undefined ? null : parseLeadSignalInput(flags['lead-signal']);
+  const senderSessionId = flags['sender-session-id'] ?? (flags['sender-runtime'] ? readSenderRuntime(flags['sender-runtime']) : process.env.CODEX_SESSION_ID);
+  if (requireLeadAuthorization && (!flags.ledger || !flags.group || !leadSignal)) {
+    throw new LedgerError('ARGS', '生产注册必须提供 --ledger --group --lead-signal');
+  }
+  if (leadSignal && (!flags.ledger || !flags.group)) {
+    throw new LedgerError('ARGS', 'lead-signal 必须绑定本机 --ledger 与 --group 后才能注册');
+  }
+  if (leadSignal) {
+    validateLeadSignal({
+      ledgerPath: flags.ledger,
+      groupId: flags.group,
+      signal: leadSignal,
+      senderSessionId,
+      senderRuntimePath: flags['sender-runtime'],
+      now: flags.now,
+    });
+    assertLeadSignalForRegistration({ signal: leadSignal, owner: flags.owner, repo: flags.repo, prNumber: flags.pr, branch: flags.branch });
+  }
+  const pushWiring = parsePushWiring(flags);
   const stateDir = assertMiniWatchStateDir(flags['state-dir'] ?? mini().state_dir);
   const registerBin = assertMiniRegisterBin(flags['register-bin']);
   const host = assertMiniHost(flags.host);
@@ -179,7 +236,10 @@ export function runWatchCli(argv, { sshRunner } = {}) {
     repo: flags.repo,
     pr: flags.pr,
     branch: flags.branch,
-    pushRemote: flags['push-remote'] ?? 'origin',
+    pushRepo: pushWiring.pushRepo,
+    clearPushRepo: pushWiring.clearPushRepo,
+    pushRemote: pushWiring.pushRemote,
+    leadSignal,
     sshRunner,
   });
   // Registration is idempotent; missing heartbeat means retry only this read,
@@ -204,13 +264,17 @@ export function runWatchCli(argv, { sshRunner } = {}) {
     ledgerVersion: flags['ledger-version'],
     assignmentSeq: flags['assignment-seq'],
     takeover,
+    ledgerPath: flags.ledger,
+    groupId: flags.group,
+    leadSignal,
+    senderSessionId,
   });
   return out;
 }
 
 function runCli(argv) {
   try {
-    const out = runWatchCli(argv);
+    const out = runWatchCli(argv, { requireLeadAuthorization: true });
     process.stdout.write(`${JSON.stringify(out)}\n`);
     return 0;
   } catch (err) {
