@@ -71,7 +71,7 @@ task-priority final manifest
   → 0. 输入门
   → 0.5 可选：批准执行 --dry-run
   → 0.7 SiteScout（只读探查，产出 site-report.json；冲突图吃真实写入路径）
-  → 1. 核对显式 PR 归属（不猜组名；估计含测试新增＋删除 <800 行；冲突图校验并行/串行；写合并顺序）
+  → 1. 核对显式 PR 归属（不猜组名；记录非测试 diff 的 800 行预警/1600 行硬闸；冲突图校验并行/串行；写合并顺序）
   → 2. 每个 PR 写开工包（render-pr-handoff.mjs）
   → 3. send_to_session 派独立 PI owner session（先 owner-dispatch prepare 写一次性 claim，完整包 create 一次，再 bind 真实工具回执；未知结果不重派）→ 立刻钉 Art
   → 3.5 开工闸：新版先 baseline 核查通过，再 gate_goal 自动入账才允许改代码；gate_routing 自动入账后才允许派 worker（不等 lead 聊天放行）
@@ -110,7 +110,7 @@ task-priority final manifest
 1. **隐藏依赖先分波**。波与波串行；后波的 base = 前波已合入或已 rebase 的 tip。
 2. **同一波内按精确写入路径建冲突图**，只检查显式归属的不同 PR 是否冲突，不把连通分量自动合并为 PR。同一 PR 内部阶段共享路径不算跨 PR 冲突；不同 PR 路径不相交才能并行开工。
 3. **跨仓默认可并行**。
-4. **规模**：计划期只能估计。Mivo 必须按含测试的 added+deleted 严格 `<800`；新版 ready-check 对本 PR 明确基线到 candidate 的全部 diff 复核，800 行即拒，原 presubmit size/format/intent 门也保留。超预算返回重新拆计划并明确新 PR 归属，不自动另开 session，不许豁免、不许丢给 Fable。
+4. **规模**：计划期只能估计。Mivo 的 size-gate 统计非测试 diff 行数（added+deleted）：`800` 行起为预警，`1600` 行起为硬 STOP；配置缺失回退 `budgetLines=1600`、`warnRatio=0.5`，非法配置 fail-closed。新版 ready-check 对本 PR 明确基线到 candidate 的全部 diff 复核，达到硬上限返回重新拆计划并明确新 PR 归属，不自动另开 session，不许豁免、不许丢给 Fable。预警不等于放行，仍需在交接记录中保留 size-gate 结果。
 
 合并顺序单独写进总表，和「能不能并行写代码」分开。子 session **不得自行 merge**。本 skill 也不合入。正常路径由本机 owner 跟到 PR Ready，经任务 lead 验收授权后由 Mini 盯梢到云端可合并；本机不再追云端反馈。只有用户对指定 PR 的当次明确授权才允许合并。
 
@@ -287,7 +287,7 @@ fallbacks_tried [{route, model, provider_id, error}] 无降级写 []；禁止 tr
 
 ## ⑬ 不停机条款（仅五类停）
 
-仅第⑧节五类停。硬停六条（autonomous-execution）仍是人独占，禁止进 Fable、禁止豁免 800 行/输入门。size-gate `STOP` 只能再拆 PR，不能进 sidecar。假设破裂走第 5 类停 + 第⑱节 replan，不进 sidecar。
+仅第⑧节五类停。硬停六条（autonomous-execution）仍是人独占，禁止进 Fable、禁止豁免 size-gate 1600 行硬闸/输入门。size-gate `STOP` 只能再拆 PR，不能进 sidecar；800 行只是预警，必须保留证据并评估拆分。假设破裂走第 5 类停 + 第⑱节 replan，不进 sidecar。
 
 ## ⑭ 与提交 PR 的边界
 
@@ -309,7 +309,7 @@ grok 作为 lead **本来会停下来主动问用户拍板**时，才把题交�
 
 用户说「发 worker fable5」时走本 sidecar，**禁止 `create_worker` 调 Fable**（禁止 `create_worker` role=任意、model=`claude-fable-5`）。
 
-**唯一入场条件**：lead 必须能写出「若无代理，grok 将停下来问用户的原句」。查资料、执行、审查、策略优化、规则已有唯一答案、「要开始吗 / 能不能并行」、机械故障（缺文件/缺 receipt）一律不得开 sidecar。人独占（autonomous-execution 硬停六条、A 类 routing fail-closed、子 session 自报预算暂停、800 行/输入门豁免、密钥与组织配置）`human_exclusive=true`，停给用户，禁止进 Fable。
+**唯一入场条件**：lead 必须能写出「若无代理，grok 将停下来问用户的原句」。查资料、执行、审查、策略优化、规则已有唯一答案、「要开始吗 / 能不能并行」、机械故障（缺文件/缺 receipt）一律不得开 sidecar。人独占（autonomous-execution 硬停六条、A 类 routing fail-closed、子 session 自报预算暂停、size-gate 1600 行硬闸/输入门豁免、密钥与组织配置）`human_exclusive=true`，停给用户，禁止进 Fable。
 
 **充分 handoff**：必须是六块 canonical object（现场 / 已改或 `no_changes` / 瓶颈与已排除 / 完整执行过程 / 原问句 / 选项+约束），每块必须是非空字符串或非空对象（空串/空对象拒），broker 存 `handoff_hash` + `context_hash`。去重键 `decision_key` 含 run/manifest/phase/wave/groups/问句/选项/约束/`context_hash`，禁止裸问句去重。
 
@@ -328,7 +328,7 @@ Lead 按四类选，不自由发挥：
 - **repack**：只影响本组 → 重出包，同 session `steer` 或 `failed→pending` 重派。
 - **resplit**：拆错（路径撞 / 漏依赖）→ 停同波未 `accepted` 的下游，按新冲突图重切；废组 `failed→pending` 后不再派。
 - **land-first**：方案变更且下游依赖 → 该组先落地或作废重做；下游全部 `failed→pending` 换 base 重出包，禁止在旧 base 上继续。
-- **split-new**：超 800 行 → 现有 size-gate `STOP` 路径不变。
+- **split-new**：达到 1600 行硬上限 → 现有 size-gate `STOP` 路径不变；达到 800 行先记 `WARN`，不得误写成 STOP，但应评估拆分并保留预警证据。
 
 下游冻结：任一组因假设破裂 `blocked` → 依赖它的同波 / 后波组不得 `gate_goal` 放行。前波 tip 变化 → 后波未开工组必须换 base 重出包。已合入才发现偏航：不回滚 main，开修正 PR，`replan_note` 记因果。
 
