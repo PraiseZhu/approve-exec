@@ -77,7 +77,7 @@ Mini 收到反馈后按投递包先准备 PR worktree，提炼反馈 SC，把绑
 - `site-check.mjs --ledger <新台账> --site <报告>`：报告绑定 manifest_core_hash 和 execution_plan_hash；per_sc.group_id 使用业务 PR，路径按原阶段授权检查。probe 为只读。跨 PR 依赖决定前后波，同 PR 依赖保留在内部。
 - renderer 从台账出包，包含全部阶段、全部 SC、各阶段路径与验证命令，以及 execution_plan_hash。claim 同时绑定原计划和执行计划，恢复必须重读归属表；同一 PR 转阶段只继续原 owner。
 - owner 在 dispatched 后先运行 `owner-gate.mjs baseline --ledger <台账> --group <业务PR> --now <ISO>`。脚本在原基线干净工作树逐项执行 probe.verify 的 cmd/args，无 shell，单条超时两分钟；前后 HEAD/branch/status 不符或任一失败即拒。记录结果码和输出 hash，不保存原始输出。之后才能通过 goal 开工闸进入实现。
-- Ready 必须包含全部 probe/fix/verify SC 的 PASS 证据，不接受只有 fix 的交卷。新版执行单元另按 git diff 的全部新增＋删除严格 `<800` 检查，包含测试；二进制无法计数时拒绝自动通过。验收回执额外绑定 execution_plan_hash。
+- Ready 必须包含全部 probe/fix/verify SC 的 PASS 证据，不接受只有 fix 的交卷。新版执行单元按 git diff 的全部新增＋删除执行 size-gate：800 行起预警，1600 行起硬 STOP，包含测试；二进制无法计数时拒绝自动通过。验收回执额外绑定 execution_plan_hash。
 - 旧台账保持旧版语义，不添加 pr_plan、不合并 owner、不修改 claim。发现旧任务已经派出会话或存在工作树时保留现场，单独裁决。尚未派出的阶段计划使用原 final 与独立归属表新建台账，不复用旧凭据。
 
 ## 保证边界

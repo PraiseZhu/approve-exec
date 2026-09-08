@@ -505,10 +505,12 @@ function main() {
     const size = runGit(args.repo, ['diff', '--numstat', '--no-renames', ledger.baseline_tip, headSha, '--']);
     const rows = size.stdout.split('\n').filter(Boolean).map(row => row.split('\t').slice(0, 2));
     if (size.status !== 0 || rows.some(row => row.length !== 2 || row.some(value => !/^\d+$/.test(value)))
-      || rows.reduce((total, row) => total + Number(row[0]) + Number(row[1]), 0) >= 800) {
-      console.error('GAP: pr-total-lines: 含测试的新增＋删除必须严格 <800，无法计数亦拒绝');
+      || rows.reduce((total, row) => total + Number(row[0]) + Number(row[1]), 0) >= 1600) {
+      console.error('GAP: pr-total-lines: 含测试的新增＋删除达到 1600 行硬上限，无法计数亦拒绝');
       process.exit(2);
     }
+    const totalLines = rows.reduce((total, row) => total + Number(row[0]) + Number(row[1]), 0);
+    if (totalLines >= 800) console.warn(`WARN: pr-total-lines: 新增＋删除 ${totalLines} 行，达到 800 行预警线但未达到 1600 行硬上限`);
   }
   if (args.group) {
     const group = findGroup(ledger, args.group);
