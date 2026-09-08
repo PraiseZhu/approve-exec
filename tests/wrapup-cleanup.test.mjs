@@ -84,6 +84,46 @@ test('wrapup-cleanup: 远端 SHA 不对则跳过且不删 remote', () => {
   assert.equal(calls.some((a) => a[0] === 'worktree' && a[1] === 'remove'), false);
 });
 
+test('wrapup-cleanup: delivered-local-only 拒绝调用者伪造 delivery 证据', () => {
+  const calls = [];
+  let remoteReads = 0;
+  const gitRunner = (args) => {
+    calls.push(args);
+    if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/x';
+    if (args[0] === 'status') return '';
+    if (args[0] === 'rev-parse' && args[1] === 'HEAD') return SHA;
+    if (args[0] === 'ls-remote') { remoteReads += 1; return `${SHA}\trefs/heads/feat/x`; }
+    if (args[0] === 'rev-parse' && args.includes('--git-common-dir')) return '/repo/.git';
+    if (args[0] === 'worktree' && args[1] === 'list') return 'worktree /repo\n';
+    if (args[0] === 'branch' && args[1] === '--list') return '';
+    return '';
+  };
+  const delivery = { repo: 'xindong/mivo-canvas-plugin', owner: 'xindong', owner_assignment: true, repo_ref: 'refs/heads/feat/x', e2e_sha: SHA, keep: false, locked: false, pr: { state: 'OPEN', isDraft: false, branch: 'feat/x', head_sha: SHA, owner: 'xindong', repo: 'mivo-canvas-plugin' } };
+  assert.throws(() => wrapupCleanup({ worktree: '/wt/feat', branch: 'feat/x', gitRunner, now: NOW, ...STAMP, mode: 'delivered-local-only', delivery }), LedgerError);
+  assert.equal(remoteReads, 0);
+  assert.equal(calls.some((args) => args.includes('--delete')), false);
+});
+
+test('wrapup-cleanup: delivered-local-only 删除 worktree 失败时恢复 CAS 分支', () => {
+  const calls = [];
+  let removed = false;
+  const gitRunner = (args) => {
+    calls.push(args);
+    if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'feat/x';
+    if (args[0] === 'status') return '';
+    if (args[0] === 'rev-parse' && args[1] === 'HEAD') return SHA;
+    if (args[0] === 'rev-parse' && args.includes('--git-common-dir')) return '/repo/.git';
+    if (args[0] === 'worktree' && args[1] === 'list') return `worktree /repo\n\nworktree /wt/feat\nHEAD ${SHA}\nbranch refs/heads/feat/x\n`;
+    if (args[0] === 'ls-remote') return `${SHA}\trefs/heads/feat/x`;
+    if (args[0] === 'update-ref' && args[1] === '-d') return '';
+    if (args[0] === 'worktree' && args[1] === 'remove') { removed = true; throw new Error('simulated remove failure'); }
+    return '';
+  };
+  assert.throws(() => wrapupCleanup({ worktree: '/wt/feat', branch: 'feat/x', now: NOW, ...STAMP, mode: 'delivered-local-only', ledgerPath: '/missing', group: 'g', repo: 'xindong/mivo-canvas-plugin', gitRunner }), LedgerError);
+  assert.equal(removed, false);
+  assert.equal(calls.some((args) => args[0] === 'update-ref' && args[1] === '-d'), false, '证据失败不得触发删除');
+});
+
 test('confirm-pr-open: gh pr view 用分支名，不用 --head', () => {
   const binDir = mkdtempSync(join(tmpdir(), 'gh-bin-'));
   const gh = join(binDir, 'gh');
@@ -259,6 +299,13 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
     receipt: watchReceipt,
   }), '--now', AFTER);
   assert.equal(r.status, 0, r.stderr);
+  const cleanupTooSoon = join(dir, 'cleanup-too-soon.json');
+  writeFileSync(cleanupTooSoon, `${JSON.stringify({
+    ok: true, skipped: false, branch: 'feat/run-ledger', worktree: '/wt/g4', sha: SHA1,
+    remoteDeleted: false, checked_at: LATER, ...stamp(),
+  })}\n`);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'local-cleaned', '--now', T, '--cleanup-receipt', cleanupTooSoon);
+  assert.equal(r.status, 2, 'cleanup 回执不得早于或等于 pr_ready');
   const cleanupReceipt = join(dir, 'cleanup-receipt.json');
   writeFileSync(cleanupReceipt, `${JSON.stringify({
     ok: true,
@@ -390,18 +437,6 @@ test('cleanup 回执在其它写入先推高 version 后仍可消费（不绑全
     pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
     current_pr_head_sha: SHA1, receipt: prOpenReceipt,
   }), '--now', LATER);
-  assert.equal(r.status, 0, r.stderr);
-  const watchReceipt = join(dir, 'watch-receipt.json');
-  writeFileSync(watchReceipt, `${JSON.stringify({
-    ok: true, owner: 'xindong', repo: 'mivo-canvas-plugin', pr_number: 1, branch: 'feat/run-ledger',
-    state_file: '/mini/runtime/state/xindong__mivo-canvas-plugin__1.json',
-    session_id: null, checked_at: AFTER, takeover: takeoverAt(AFTER), mini_watch_config_sha256: miniWatchConfigSha256(), ...stamp(),
-  })}\n`);
-  r = cli('note-event', ledgerPath, '--event', 'watch_registered', '--detail', JSON.stringify({
-    group_id: g,
-    pr_url: 'https://github.com/xindong/mivo-canvas-plugin/pull/1',
-    receipt: watchReceipt,
-  }), '--now', AFTER);
   assert.equal(r.status, 0, r.stderr);
   const cleanupReceipt = join(dir, 'cleanup-stale-version.json');
   writeFileSync(cleanupReceipt, `${JSON.stringify({

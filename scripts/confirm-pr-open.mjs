@@ -7,6 +7,7 @@ import { LedgerError, parseTimestamp } from './run-ledger.mjs';
 
 const GITHUB_PR_URL_RE = /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+/;
 const SHA_RE = /^[0-9a-f]{40}$/;
+const MIVO_REPO = 'xindong/mivo-canvas-plugin';
 
 export function parseConfirmArgs(argv) {
   const flags = {};
@@ -41,14 +42,30 @@ export function assertReadyPr({ url, state, isDraft, headRefOid, expectedHead, b
   return out;
 }
 
-function runGh(repo, branch, ghBin = process.env.GH_BIN ?? 'gh') {
-  const r = spawnSync(ghBin, [
+function runGh(repo, branch, ghBin = process.env.GH_BIN ?? 'gh', runner = spawnSync) {
+  const r = runner(ghBin, [
     'pr', 'view', branch, '--repo', repo, '--json', 'url,state,headRefOid,isDraft,number',
   ], { encoding: 'utf8' });
   if (r.status !== 0) {
     throw new LedgerError('PRECONDITION', `gh pr view 失败: ${(r.stderr || r.stdout || '').trim()}`);
   }
   return JSON.parse(r.stdout);
+}
+
+function assertMivoGreen({ repo, pr, head, ghBin = process.env.GH_BIN ?? 'gh', runner }) {
+  if (!SHA_RE.test(head ?? '')) throw new LedgerError('ARGS', 'Mivo 交付必须提供有效的已验收 head SHA');
+  if (pr.headRefOid !== head || pr.url !== `https://github.com/${repo}/pull/${pr.number}`) {
+    throw new LedgerError('PRECONDITION', 'Mivo PR 身份或提交与交付对象不一致');
+  }
+  const result = runner(ghBin, ['pr', 'checks', String(pr.number), '--repo', repo,
+    '--required', '--json', 'name,state,bucket'], { encoding: 'utf8' });
+  if (result.status !== 0) throw new LedgerError('PRECONDITION', 'Mivo 必需 CI 未通过或查询失败，不能交付 Mini');
+  const checks = JSON.parse(result.stdout);
+  if (!Array.isArray(checks) || checks.length === 0 || checks.some(check =>
+    typeof check.name !== 'string' || !check.name.trim() || check.bucket !== 'pass' ||
+    !['SUCCESS', 'success'].includes(check.state))) {
+    throw new LedgerError('PRECONDITION', 'Mivo 必需 CI 缺失、未成功或尚在等待，不能交付 Mini');
+  }
 }
 
 function requireStamp(value, name) {
@@ -59,7 +76,7 @@ function requireStamp(value, name) {
   return n;
 }
 
-export function confirmPrOpen({ repo, branch, head, ghBin, now, ledgerVersion, assignmentSeq } = {}) {
+export function confirmPrOpen({ repo, branch, head, ghBin, now, ledgerVersion, assignmentSeq, runner = spawnSync } = {}) {
   if (typeof repo !== 'string' || !repo.includes('/')) {
     throw new LedgerError('ARGS', `repo 必须是 owner/name（当前: ${repo}）`);
   }
@@ -67,7 +84,17 @@ export function confirmPrOpen({ repo, branch, head, ghBin, now, ledgerVersion, a
     throw new LedgerError('ARGS', 'branch 必须是非空字符串');
   }
   parseTimestamp(now, 'confirm-pr-open --now');
-  const raw = runGh(repo, branch, ghBin);
+  let raw = runGh(repo, branch, ghBin, runner);
+  if (repo === MIVO_REPO) {
+    assertReadyPr({ ...raw, expectedHead: head });
+    assertMivoGreen({ repo, pr: raw, head, ghBin, runner });
+    // Required checks belong to a commit; re-read after the potentially slow query.
+    const after = runGh(repo, String(raw.number), ghBin, runner);
+    if (after.url !== raw.url || after.number !== raw.number || after.headRefOid !== raw.headRefOid) {
+      throw new LedgerError('PRECONDITION', 'Mivo PR 在 CI 验证期间变化，必须重新验证');
+    }
+    raw = after;
+  }
   return {
     ...assertReadyPr({
       url: raw.url,

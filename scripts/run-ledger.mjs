@@ -1878,8 +1878,8 @@ export function setState({
       if (typeof g.pr_url !== 'string' || !GITHUB_PR_URL_RE.test(g.pr_url)) {
         return '缺失前置：→local-cleaned 要求组上已有 GitHub PR URL';
       }
-      if (!latestGroupEvent(ledger, group, 'watch_registered')) {
-        return '缺失前置：→local-cleaned 要求本组成立的 watch_registered（Mini 名册先于清场）';
+      if (!latestGroupEvent(ledger, group, 'pr_ready')) {
+        return '缺失前置：→local-cleaned 要求本组成立的 pr_ready（本机绿色交付后即可清场，不再等 Mini 名册）';
       }
       if (cleanupReceipt === undefined) {
         return '缺失前置：→local-cleaned 要求 wrapup-cleanup 成功回执（--cleanup-receipt <path>）';
@@ -1895,7 +1895,7 @@ export function setState({
       }
       try {
         assertReceiptBoundToLedger(cleanupReceipt, ledger, group, 'cleanup receipt');
-        assertReceiptAfterEvent(cleanupReceipt, ledger, group, 'watch_registered', 'cleanup receipt');
+        assertReceiptAfterEvent(cleanupReceipt, ledger, group, 'pr_ready', 'cleanup receipt');
       } catch (err) {
         if (err instanceof LedgerError) return `缺失前置：${err.message}`;
         throw err;

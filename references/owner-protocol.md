@@ -33,10 +33,10 @@ prepare 使用台账路径旁固定的 .owners 目录。持久 claim 的作用�
 2. owner 自主完成原 SC、优先级和已授权收尾，不逐步回 lead 请示。lead 在本机交卷完成后对该 PR 的全部 priority/SC、e2e 与当前 head 作独立验收；无验收不得发 Mini 信号。
 3. owner 对本组运行 ready-check.mjs --group <组> --ledger <台账> --manifest <final> --repo <本组worktree> --verdict <真实SC验收JSON> --e2e-report <真实报告> --presubmit-dir <size/format/intent目录> --receipt <输出路径> --now <当前ISO时间>。成功是 LOCAL_PR_VALIDATED；note-event local_validated --detail 的 group_id/receipt 消费这份回执。其它组尚未完成不阻塞本组。
 4. owner 提交/推送/开对应非 draft PR，运行 confirm-pr-open.mjs --repo <owner/repo> --branch <branch> --head <已验收SHA> --now <当前ISO时间> --ledger-version <当前版本> --assignment-seq <本组代次>；真实 stdout 给 local_validated→pr-open（accepted 仅兼容旧台账） 的 --pr-open-receipt。
-5. 重新运行 confirm-pr-open 获取新鲜 OPEN/非draft/head 回执后 note-event pr_ready，表示本机可交接。云端 CI/review 不在本机继续修复，cloud_ready 与本机 pr_ready 分开。
-6. 对应任务 lead 验收通过后，生成绑定本 PR、head、owner session/title 和全部 SC 证据的 lead signal；confirm-watch-registered 必须验证该信号及本人身份后才向 Mini 注册。接管确认前保留本机 owner 现场。
-7. watch_registered 是正常接手回执。Mini 每 PR 一个持久 session，title 必须与本机 owner 完全一致，首次反馈 create、后续 jump 同一 session_id；无有效授权不得派修复，queued 不等于已接收或完成。
-8. 接管确认后 owner 才 wrapup-cleanup（不删远端分支），lead archive_sessions 并消费真实归档回执。GitHub 合入另需用户授权；本任务 skill 不自动 merge。
+5. 重新运行 confirm-pr-open 获取新鲜 OPEN/非draft/head 回执；Mivo 还必须证明当前提交必需 CI 全绿。随后 note-event pr_ready，表示本机可交接。审查机结论不在本机继续等待。
+6. 对应任务 lead 验收通过后，立即派 native cleanup sub，不再铸造 Mini lead signal / register。
+7. Mini Cindy 常驻程序以 PR nodeid 维护唯一修复 session，title 为 `{项目名}-{任务名}丨修复丨YYYY-MM-DD`；本协议不创建第二个 session。
+8. wrapup-cleanup --mode delivered-local-only 只清本地（不删远端分支），成功后 lead archive_sessions 并消费真实归档回执。GitHub 合入另需用户授权；本任务 skill 不自动 merge。
 
 ## lead 发信号与 Mini 接收
 

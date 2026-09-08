@@ -117,14 +117,13 @@ test('第③段：DISPATCH_MODES 含 session；E=session；LEAD_SELF=R/V/P；WOR
     '③段按实际路由取值，不得用旧 agent 枚举覆盖 routing.json');
   assert.ok(s3.includes('0.7') && s3.includes('SiteScout'), '③段流程应含 0.7 SiteScout');
   const flow = s3.slice(s3.indexOf('→ 6.'), s3.indexOf('席位真相源'));
-  const registerAt = flow.indexOf('register.mjs');
   const wrapupAt = flow.indexOf('wrapup-cleanup.mjs');
   const archiveAt = flow.indexOf('archive_sessions');
   assert.ok(wrapupAt >= 0 && archiveAt >= 0, '③段收尾应含 wrapup / archive');
   assert.ok(wrapupAt < archiveAt, '③段必须先清本地、最后归档 PI');
   assert.ok(s3.includes('watch_registered') || s3.includes('Mini'), '③段应说明 Mini 的接管回执');
   assert.ok(s3.includes('confirm-session-archived.mjs'), '③段应收口 archive_sessions 回执脚本');
-  assert.ok(s3.includes('Mini') && s3.includes('仅对应任务 lead'), '③段应声明只有对应 lead 能授权 Mini 接管');
+  assert.ok(s3.includes('Mini') && (s3.includes('不再 register') || s3.includes('常驻')), '③段应声明 Mini 常驻且本 skill 不再 register');
 });
 
 test('第⑥段：send_to_session create + Art 钉 + 标题正则', () => {
@@ -164,8 +163,8 @@ test('第⑧段：create_workers ≥2 禁连续 create_worker 单发', () => {
   assert.ok(s8.includes('这五种情况'), '⑧段应声明五类停');
   assert.ok(s8.includes('PR Ready') && (s8.includes('正常返回') || s8.includes('正常完成')),
     '⑧段第 1 种停必须是 PR Ready 正常完成，不是 DECISION_REQUIRED');
-  assert.ok(s8.includes('开 PR ≠ 发盯梢') || s8.includes('pr_ready` 之后才注册'),
-    '⑧段不得在仅开 PR 后立刻注册 Mini 盯梢');
+  assert.ok(s8.includes('开 PR ≠ Mini 修复开始') || s8.includes('开 PR ≠ 发盯梢') || s8.includes('pr_ready` 之后才注册'),
+    '⑧段不得在仅开 PR 后立刻当作 Mini 修复开始');
   assert.ok(s8.includes('429') && s8.includes('唤醒条件'),
     '⑧段应要求可恢复等待有唤醒条件');
   assert.ok(s8.includes('假设破裂'), '⑧段应含第 5 类停：假设破裂');
@@ -191,19 +190,19 @@ test('第⑨段：新组状态机 + identity 五段 + PR_RECEIPT_KEYS', () => {
   assert.ok(s9.includes('note-event'), '⑨段应声明 note-event 入账通道');
   assert.ok(s9.includes('watch_registered'), '⑨段应点名 watch_registered');
   assert.ok(s9.includes('pr_ready'), '⑨段应点名 pr_ready');
-  assert.ok(s9.includes('谁 Ready 发谁') || s9.includes('本组已有 `pr_ready`') || s9.includes('尚未 `pr_ready`'),
-    '⑨段应声明 Mini 盯梢按本 PR Ready 发，不得开 PR 即发');
-  assert.ok(s9.includes('重放 Ready 前铸的 Mini 回执') || (s9.includes('checked_at') && s9.includes('pr_ready.at')),
-    '⑨段应声明 watch 回执不得早于 pr_ready（禁止重放 Ready 前 Mini 回执）');
+  assert.ok(s9.includes('谁 Ready 谁清场') || s9.includes('谁 Ready 发谁') || s9.includes('本组已有 `pr_ready`') || s9.includes('尚未 `pr_ready`'),
+    '⑨段应声明按本 PR Ready 独立收尾');
+  assert.ok(s9.includes('不再要求 Mini 名册先于清场') || s9.includes('pr_ready') && s9.includes('local-cleaned'),
+    '⑨段应声明清场前置是 pr_ready');
   assert.ok(s9.includes('phase=ready') && s9.includes('仍可在 ready 之后写入'),
     '⑨段应声明验收后收尾不受 run 级 ready 冻结挡住');
-  assert.ok(s9.includes('Mini 名册先于清场') || s9.includes('watch_registered'),
-    '⑨段应声明 Mini 名册先于清场');
+  assert.ok(s9.includes('Mini 名册先于清场') || s9.includes('watch_registered') || s9.includes('不再要求 Mini 名册'),
+    '⑨段应交代 watch_registered 兼容或不再作为清场前置');
   assert.ok(s9.includes('confirm-pr-open.mjs') && s9.includes('wrapup-cleanup.mjs') && s9.includes('confirm-session-archived.mjs'),
     '⑨段应收口开 PR / 清本地 / 归档的真实回执');
-  assert.ok(s9.includes('Mini 是 lead 授权后的正常云端反馈修复者'), '⑨段应声明 Mini 的正常反馈责任');
-  assert.ok(s9.includes('register.mjs') && s9.includes('ledger_version') && s9.includes('assignment_seq'),
-    '⑨段 Mini 名册应吃 register 回执，并绑定 ledger_version/assignment_seq');
+  assert.ok(s9.includes('Mini Cindy 常驻程序是云端反馈修复者') || s9.includes('Mini 是 lead 授权后的正常云端反馈修复者'), '⑨段应声明 Mini 的正常反馈责任');
+  assert.ok(s9.includes('ledger_version') && s9.includes('assignment_seq'),
+    '⑨段收尾回执应绑定 ledger_version/assignment_seq');
   assert.ok(s9.includes('READY_FOR_LATER_SUBMIT_PR_SKILL'), '⑨段 run 级 ready 文案应保留 READY_FOR_LATER_SUBMIT_PR_SKILL 作为验收许可信号');
   assert.ok(s9.includes('archive_sessions') || skillDoc.includes('archive_sessions'),
     '正文应点名 archive_sessions 归档 PI session');

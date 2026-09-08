@@ -58,7 +58,8 @@ test('render-pr-handoff: 0–10 段齐全，含开工闸与绝对路径', () => 
   assert.match(out, /只有 NO_PROVIDER_FOR_AGENT/);
   assert.match(out, /Retry-After/);
   assert.match(out, /必要门禁和远端 head 均已确认/);
-  assert.match(out, /仅对应任务 lead 发 Mini 盯梢授权/);
+  assert.match(out, /Mini Cindy 常驻程序按 PR 唯一修复 session/);
+  assert.match(out, /lead 验收后立即清本地并归档该 owner/);
 });
 
 test('render-pr-handoff: SC 阶段结束后的收尾说明保留授权与硬停边界', () => {
