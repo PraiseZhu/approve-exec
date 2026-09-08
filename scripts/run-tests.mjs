@@ -27,6 +27,7 @@ export const TEST_FILES = [
   'graph.test.mjs',
   'lead-signal.test.mjs',
   'mem-probe.test.mjs',
+  'mivo-green-handoff.test.mjs',
   'owner-chain.test.mjs',
   'pr-plan.test.mjs',
   'ready-check.test.mjs',

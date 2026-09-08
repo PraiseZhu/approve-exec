@@ -6,11 +6,11 @@ trigger: 批准执行
 
 # approve-exec — lead 编排守则
 
-**lead 按本文编排**：把 task-priority final manifest 拆成每 PR 一个独立 owner session。本机 owner 完成实现、全部 priority/SC、本地 e2e、提交、普通 push 与 OPEN 非 draft PR；lead 验收该 PR 的全部证据后发送唯一 Mini 盯梢授权。授权接手后云端 CI/review 与审查机反馈由 Mini 的同名 PR 专属 session 修正，本机 owner 和 lead 不追云端反馈。candidate 是检查点；不得自行 merge。本地不再派 GPT/Claude 单审。
+**lead 按本文编排**：把 task-priority final manifest 拆成每 PR 一个独立 owner session。本机 owner 完成实现、全部 priority/SC、本地 e2e、提交、普通 push 与 OPEN 非 draft PR，并等当前提交必需 CI 全绿后写 pr_ready；lead 验收后立即派 sub 清本地并归档该 owner。云端审查反馈、冲突与复审由 Mini 常驻 Cindy 按 PR 唯一 session 接管，本机不再注册盯梢。candidate 是检查点；不得自行 merge。本地不再派 GPT/Claude 单审。
 
 **合并红线（最高优先级）**：任何 lead、owner、reviewer、tester、Mini session、watcher、worker 或本 skill 都不得合并、自动合并、启用 auto-merge、点击合并或调用 gh pr merge。只有用户本人对指定 PR 的明确、当次授权才允许合并；PR Ready、cloud_ready、required checks 通过、管理员权限或开工包中的提交/推送授权，均不构成合并授权。后续由用户手动合并插件承接该动作；插件上线前只能报告“可合并”，不得代替用户合并。
 
-Lead 只做判断：拆 PR、写开工包、派独立 session、裁决例外、验收、发送盯梢授权、确认接手后归档 owner。功能代码、SC、e2e、开远端 PR 由本机 owner 执行；云端反馈修复由 Mini 执行。无 lead 授权不得注册或派发；每 PR 一个 Mini session，title 原样继承本机 owner。
+Lead 只做判断：拆 PR、写开工包、派独立 session、裁决例外、验收、派 native cleanup sub、归档该 PR 的 owner。功能代码、SC、e2e、开远端 PR 与必需 CI 确认由本机 owner 执行；云端反馈修复由 Mini Cindy 常驻程序执行。本 skill 不再 register Mini；每 PR 仍只允许一个 Mini 修复 session，title 为 `{项目名}-{任务名}丨修复丨YYYY-MM-DD`。
 
 真实派窗与 owner 入账的命令、恢复边界见 references/owner-protocol.md（派发前必读，完整内容随 handoff 发送）。保证等级是 T1 skill 纪律与脚本校验，不是宿主强制隔离。
 
@@ -80,24 +80,24 @@ task-priority final manifest
         → 本地不派 reviewer；GPT/Claude 单审取消
         → candidate 只是检查点；owner 自己完成本机验证并直接开远端非 draft PR，lead 不在中途放行
   → 5. Lead 只读每 PR 的自动入账证据与 DECISION_REQUIRED（失败则给一个决定，同一 owner 继续，直到 PR_READY）
-  → 6. owner 开远端 ready PR（非 draft）；`confirm-pr-open.mjs` 由 owner 执行并消费回执，不是 lead 代跑。开 PR ≠ 发盯梢。
-  → 6.5 owner 在已验收提交上确认 OPEN/非 draft/head 后写 note-event pr_ready，表示本机交付完成；lead 验收全部 priority/SC，不等待云端 CI/review 收口。
-  → 7. 仅对应任务 lead 铸造 lead signal，并按配置注册 Mini；首扫与有效接管回执确认后写 watch_registered。
-  → 8. 各 session `wrapup-cleanup.mjs` 清本地 worktree/分支（不删远端）→ 回报
-  → 9. lead `archive_sessions` 归档 PI session 后，用 `confirm-session-archived.mjs --result <工具 JSON>` 出回执再入账（lead 自己由用户归档；仅该 PR 的 PR_READY 后）
+  → 6. owner 开远端 ready PR（非 draft）；`confirm-pr-open.mjs` 由 owner 执行并消费回执，不是 lead 代跑。Mivo 必须查询当前提交 `--required` checks 全绿后再交卷。开 PR ≠ Mini 修复开始。
+  → 6.5 owner 在已验收提交上确认 OPEN/非 draft/head/必需 CI 后写 note-event pr_ready，表示本机交付完成；lead 验收全部 priority/SC，不等待审查机结论。
+  → 7. lead 不再 register Mini；`watch_registered` 仅兼容旧台账读取。Mivo 交付后 Mini 常驻 Cindy 按 PR nodeid 唯一 session 采集反馈。
+  → 8. lead 派 native sub 跑 `wrapup-cleanup.mjs --mode delivered-local-only` 清本地 worktree/分支（不删远端）→ 回报
+  → 9. lead `archive_sessions` 归档该 PR 的 PI session 后，用 `confirm-session-archived.mjs --result <工具 JSON>` 出回执再入账；不等其他 PR
 ```
 
-正常路径是 lead 验收后授权 Mini 接手；信号只由对应任务 lead 发送。Mini 持续探测不等于自行授权，本机不得运行反馈修复班车。
+正常路径是 lead 验收本机 pr_ready 后立即清本地并归档该 owner；Mini Cindy 常驻程序独立扫本人 open PR，本 skill 不再发送盯梢授权。
 
 席位真相源是 `graph.json`（五席，精确键集 E/R/V/T/P；Fable 不是第六席）：
 
 | 席 | dispatch | 谁跑 |
 |---|---|---|
 | E | `session` | 独立 PI session；`goal=goal-scenario-c` |
-| R | `lead-self` | 本地不派 reviewer；云端审查由 Mini 盯梢，不在本机 GPT/Claude 单审 |
+| R | `lead-self` | 本地不派 reviewer；云端审查由 Mini Cindy 常驻修复，不在本机 GPT/Claude 单审 |
 | T | `worker` | **子 session** 现读 e2e 档派 tester |
 | V | `lead-self` | lead 只读验收（ready-check / receipt），不改产品代码；happy path 零产品执行 |
-| P | `lead-self` | lead 验收全部 priority/SC 后发送 Mini 盯梢授权；.pr-intent.md、开远端 PR 和 PR Ready 收口由 owner 执行；确认 Mini 接手后才清场、归档 PI。graph `route=pr_merge` 只是路由档名，不是 git merge |
+| P | `lead-self` | lead 验收全部 priority/SC 后派 native cleanup sub 并归档该 owner；.pr-intent.md、开远端 PR 和 PR Ready 收口由 owner 执行。graph `route=pr_merge` 只是路由档名，不是 git merge |
 
 `DISPATCH_MODES` = `lead-self` / `worker` / `session`。LEAD_SELF_SEATS = R、V、P。WORKER_SEATS = T。E 不是 lead-self。graph 内不出现具体模型 ID；R 不钉 `model`/`pre_command`/`command`。routing.json 的 agent/model/provider 以每次现读的所选档为准，不把旧 agent 枚举当作限制；独立 owner 的创建使用 send_to_session.agent_kind。
 
@@ -200,11 +200,11 @@ Lead 验收时现读 live routing.json：交卷 `e2e.model` 既不是当前 e2e 
 
 ## ⑧ 子 session 闭环与 lead 指挥
 
-PR Ready 表示本机验收与 OPEN 非 draft PR 已完成；开 PR ≠ 发盯梢，lead 验收后发送 Mini 盯梢授权，不能把它误作云端审查通过。Mini 的 cloud_ready 另绑定当前 head 的 CI 绿、审查取数完整和未解决线程为零。
+PR Ready 表示本机验收、OPEN 非 draft PR 与当前提交必需 CI 已完成；开 PR ≠ Mini 修复开始，lead 验收后立即清本地归档，不能把它误作审查机通过。审查机独立打/撤 `review:merge-ready`。
 
-owner session 只许在这五种情况下停。其中 2–5 进入 DECISION_REQUIRED（保留 owner 身份和现场，不算完成）；第 1 种是正常完成，接管确认后按协议清理归档：
+owner session 只许在这五种情况下停。其中 2–5 进入 DECISION_REQUIRED（保留 owner 身份和现场，不算完成）；第 1 种是正常完成，pr_ready 后由 lead 清场归档：
 
-1. owner 已在同一提交完成全部 priority/SC、e2e 与规模门，且远端 OPEN 非 draft PR head 一致：记本机 pr_ready，交 lead 验收。授权交接后不再跟进云端 CI/review；Mini 接手确认前保留现场，不得与 Mini 同写分支。
+1. owner 已在同一提交完成全部 priority/SC、e2e 与规模门，且远端 OPEN 非 draft PR head 一致、必需 CI 全绿：记本机 pr_ready，交 lead 验收。本机释放写入权后不再跟进云端 CI/review。
 2. 硬停六条。
 3. **本 session 自报**累计打到 `budgetPauseUsd`（可 `--no-budget-pause`）。不是 lead 跨 session 加总。
 4. **未读 goal skill 或未读 routing.json**：不得开工。停，提交 decision_required，写明卡在开工闸第 1 步还是第 2 步。禁止 jump 等 lead 放行。
@@ -214,27 +214,27 @@ owner session 只许在这五种情况下停。其中 2–5 进入 DECISION_REQU
 
 PI owner（含 grok）遇到 worker 429 / 崩溃 / 创建失败：自己按第⑦段恢复，记录原 worker、已尝试动作、预算和下一次唤醒条件。可恢复等待不报完成，不因单次失败问 lead，也不盲目重建窗口。上层未授权的错误码不得换 provider。
 
-Lead 在全部 PR 完成本机验收并获得 Mini 接管回执或明确报告阻塞前不得宣布完整收口。owner idle 不是自动注册授权；没有完整验收和对应 lead signal 时不注册，不把普通施工 idle 当逐轮催工。
+Lead 在该 PR 完成本机验收、local-cleaned 与 archived 前不得宣布该 PR 收口；其他独立 owner 不等待。owner idle 不是 Mini 授权；本 skill 不再 register。
 
-「可验收」= 本 PR 全部 priority/SC 交卷合法 + e2e PASS + size-gate ≠ STOP + OPEN/非 draft PR head 一致。云端反馈不属于本机交卷前置；由 lead 验收后授权 Mini 继续修正。本地不要求 GPT/Claude 单审。
+「可验收」= 本 PR 全部 priority/SC 交卷合法 + e2e PASS + size-gate ≠ STOP + OPEN/非 draft PR head 一致 + 当前提交必需 CI 全绿。云端审查反馈不属于本机交卷前置。本地不要求 GPT/Claude 单审。
 
 子 session 派 tester **之前**自己跑 `mem-probe.mjs`。Lead 在同一波并行 create 多个 session 前也跑一次 mem-probe，按 `pending = 本波 PR 数` 估槽（每 PR 只派 e2e，不再另派 reviewer）。同批 ≥2 worker 用 `create_workers` 批量派发，禁连续 `create_worker` 单发。
 
 ## ⑨ 台账与状态机
 
-Mini 是 lead 授权后的正常云端反馈修复者；本机 owner 仅推进到本机 pr_ready 并等待接管回执。
+Mini Cindy 常驻程序是云端反馈修复者；本机 owner 仅推进到本机 pr_ready，随后由 lead 清本地并归档。
 
 组 = 一个 PR。`GROUP_KEYS` exact，新增 `session_id` / `title` / `pr_url` / `provider_id`（未派发前 null）。未列键 `SCHEMA` 拒。
 
 `GROUP_STATES`：`pending | dispatched | executing | blocked | e2e | review | accepted | pr-open | local-cleaned | archived | failed`。旧的 `delivered` / `review_pass` / `verified` 删除。
 
-映射：dispatched = session 已 create 且 Art 已钉；executing = 子 session 在干活；blocked = 卡点上报；e2e/review = 子闭环阶段；local_validated = owner 自己完成本机七门验收；accepted = 兼容旧台账的 lead 检查点，不再是正常 owner 的必经闸；pr-open = 远端已开；local-cleaned = Mini 授权接管确认后才可清本地；archived = PI session 已归档。
+映射：dispatched = session 已 create 且 Art 已钉；executing = 子 session 在干活；blocked = 卡点上报；e2e/review = 子闭环阶段；local_validated = owner 自己完成本机七门验收；accepted = 兼容旧台账的 lead 检查点，不再是正常 owner 的必经闸；pr-open = 远端已开；local-cleaned = 本机 pr_ready 后 lead 清本地；archived = PI session 已归档。
 
 三份收尾回执与 Mini `register.mjs` 回执都必须带铸造时的 `ledger_version` + 本组 `assignment_seq`；入账时 `ledger_version` 不得大于当前台账 version（其它组先入账导致 version 前进仍可入账），且 `checked_at` 必须是可解析时间并晚于本组前置事件。旧代回执不得重放。`confirm-pr-open.mjs` / `wrapup-cleanup.mjs` 必须带 `--now` / `--ledger-version` / `--assignment-seq`，stdout 才能直接当回执入账。
 
 `set-state --identity` 允许键：`{worktree, branch, base, session_id, title}`。`identityDigest` 输入段顺序：`seq → worktree → branch → base → session_id`（session_id 未定时用空串，create 后必须重写 identity 再记 dispatch）。
 
-`EVENT_TYPES` 新增：`session_created`、`session_steer`、`gate_goal`、`gate_routing`、`pr_opened`、`accepted`、`pr_ready`、`local_cleaned`、`session_archived`、`watch_registered`、`site_report`、`replan_note`。旧 `delivery` 仍是子 session candidate 交卷的唯一真写入口（`record-delivery`）。`gate_goal` / `gate_routing` 的 detail 必须含 `group_id` + 对应 sha256；缺 sha256 拒。`site_report` / `replan_note` / `pr_ready` / `watch_registered` 只经 `note-event` 入账，不进 set-state 成功流。`pr_ready` 只允许在本组 `pr-open` 入账，表示这一颗 PR 已机器可证明 Ready；不得用 run 级 `phase=ready` 或「四个 PR 都 push 了」代替。`watch_registered` 只允许在本组已有 `pr_ready` 之后入账，必须消费 `confirm-watch-registered.mjs` 产出的回执（该脚本只认本仓 `scripts/pr-watch/register.mjs` 的 `REGISTERED/ALREADY <abs.json>` stdout，主机 / state_dir / register_bin / ssh_bin 按 `config/mini-watch.json` 断言实际值 === 配置值）。仅 `pr-open`、本组尚未 `pr_ready` → 拒，避免本机未 Ready 时 Mini 已跟进导致双边改同一 PR 分叉。`watch_registered` 回执 `checked_at` 必须晚于本组 `pr_ready.at`，禁止补记 Ready 后重放 Ready 前铸的 Mini 回执。同一次任务 4 个 PR：谁 Ready 发谁的盯梢，未 Ready 的不得 register。不得本机 `existsSync` 读 Mini 路径，不得只核 pr 号。不得引用 `config/mini-watch.json` `old_schedule_ids_blocklist` 里的旧班车 id。`local-cleaned→archived` 必须消费 `confirm-session-archived.mjs` 产出的回执（输入是 `archive_sessions` 工具 JSON，不是手写 archived=true）。run 级 `phase=ready` 是验收门过了的冻结；组级 `pr-open` / `pr_ready` / `local-cleaned` / `archived` 与 `watch_registered` 仍可在 ready 之后写入，但必须带对应脚本回执，禁止只填 URL / 只报事件名。
+`EVENT_TYPES` 新增：`session_created`、`session_steer`、`gate_goal`、`gate_routing`、`pr_opened`、`accepted`、`pr_ready`、`local_cleaned`、`session_archived`、`watch_registered`、`site_report`、`replan_note`。旧 `delivery` 仍是子 session candidate 交卷的唯一真写入口（`record-delivery`）。`gate_goal` / `gate_routing` 的 detail 必须含 `group_id` + 对应 sha256；缺 sha256 拒。`site_report` / `replan_note` / `pr_ready` / `watch_registered` 只经 `note-event` 入账，不进 set-state 成功流。`pr_ready` 只允许在本组 `pr-open` 入账，表示这一颗 PR 已机器可证明 Ready；不得用 run 级 `phase=ready` 或「四个 PR 都 push 了」代替。`watch_registered` 仅兼容旧台账读取，新路径不再要求 Mini 名册先于清场。`→local-cleaned` 要求本组成立的 `pr_ready` 与 wrapup-cleanup 成功回执。同一次任务 4 个 PR：谁 Ready 谁清场归档，未 Ready 的独立继续。`local-cleaned→archived` 必须消费 `confirm-session-archived.mjs` 产出的回执（输入是 `archive_sessions` 工具 JSON，不是手写 archived=true）。run 级 `phase=ready` 是验收门过了的冻结；组级 `pr-open` / `pr_ready` / `local-cleaned` / `archived` 与兼容的 `watch_registered` 仍可在 ready 之后写入，但必须带对应脚本回执，禁止只填 URL / 只报事件名。
 
 `PHASE_ORDER` 改成 run 级：`splitting | dispatching | running | accepting | ready`。组级状态机在 group 上。
 
@@ -242,7 +242,7 @@ Mini 是 lead 授权后的正常云端反馈修复者；本机 owner 仅推进�
 
 ready-check 先每 PR、再 run：对每个 group 用该组 worktree 跑门；单 PR 通过后独立写 LOCAL_PR_VALIDATED，不等其它组；兼容旧整批入口才写 run 级 `READY_FOR_LATER_SUBMIT_PR_SKILL`。这行是验收门过了的机器信号，意思是 owner 可以继续开远端 PR 并在 PR Ready 后归档；不是「交给以后的提交 PR skill」，也不是 lead 可以 git merge。旧 `accepted` / run `ready` 不得原地改名冒充 PR Ready。七门按 PR 各算一遍。L2 相对该 PR 的 `identity.base`。run 级 ready 额外一条：总表里的波次顺序已记录；真正合入不由本 skill 执行。
 
-watch_registered 必须消费本 PR lead signal 和有效 takeover 首扫回执；不得以 REGISTERED 文件、queued 或空名册冒充接管。lead signal 一次授权当前 PR 后，后续反馈继续进同一 Mini session，无需每条回到本机 lead。
+`watch_registered` 旧回执仍可读，但新 Mivo 路径不再把它当清场前置。Mini Cindy 以 PR nodeid 建唯一修复 session，title 为 `{项目名}-{任务名}丨修复丨YYYY-MM-DD`；本 skill 不代创建该 session。
 
 Lock+tmp+rename+CAS 与 `LedgerError` 码沿用。`budget_note` 事件可留，但 lead 不跨 session 加总账单。
 
