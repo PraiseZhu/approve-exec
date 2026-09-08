@@ -6,7 +6,7 @@ trigger: 批准执行
 
 # approve-exec — lead 编排守则
 
-**lead 按本文编排**：把 task-priority final manifest 拆成每 PR 一个独立 owner session。本机 owner 完成实现、全部 priority/SC、本地 e2e、提交、普通 push 与 OPEN 非 draft PR，并等当前提交必需 CI 全绿后写 pr_ready；lead 验收后立即派 sub 清本地并归档该 owner。云端审查反馈、冲突与复审由 Mini 常驻 Cindy 按 PR 唯一 session 接管，本机不再注册盯梢。candidate 是检查点；不得自行 merge。本地不再派 GPT/Claude 单审。
+**lead 按本文编排**：把 task-priority final manifest 拆成每 PR 一个独立 owner session。本机 owner 完成实现、全部 priority/SC、本地 e2e 和普通 push；Mivo PR 先保持 Draft，只有当前提交 required CI 全绿且审查机进场证据齐备后才转为 Ready for review，再写 pr_ready。lead 验收后立即派 sub 清本地并归档该 owner。云端审查反馈、冲突与复审由 Mini 常驻 Cindy 按 PR 唯一 session 接管，本机不再注册盯梢。candidate 是检查点；不得自行 merge。本地不再派 GPT/Claude 单审。
 
 **合并红线（最高优先级）**：任何 lead、owner、reviewer、tester、Mini session、watcher、worker 或本 skill 都不得合并、自动合并、启用 auto-merge、点击合并或调用 gh pr merge。只有用户本人对指定 PR 的明确、当次授权才允许合并；PR Ready、cloud_ready、required checks 通过、管理员权限或开工包中的提交/推送授权，均不构成合并授权。后续由用户手动合并插件承接该动作；插件上线前只能报告“可合并”，不得代替用户合并。
 
@@ -71,16 +71,17 @@ task-priority final manifest
   → 0. 输入门
   → 0.5 可选：批准执行 --dry-run
   → 0.7 SiteScout（只读探查，产出 site-report.json；冲突图吃真实写入路径）
-  → 1. 核对显式 PR 归属（不猜组名；记录非测试 diff 的 800 行预警/1600 行硬闸；冲突图校验并行/串行；写合并顺序）
+  → 1. 核对显式 PR 归属（不猜组名；记录目标仓 merge-base 规模门与 ready-check 含测试总量门；冲突图校验并行/串行；写合并顺序）
   → 2. 每个 PR 写开工包（render-pr-handoff.mjs）
   → 3. send_to_session 派独立 PI owner session（先 owner-dispatch prepare 写一次性 claim，完整包 create 一次，再 bind 真实工具回执；未知结果不重派）→ 立刻钉 Art
+  → 3.1 lead 按 owner-protocol 的“整包续跑登记”绑定本 run 的 script-only 调度；已有真实 schedule 回执则复用，不重复创建
   → 3.5 开工闸：新版先 baseline 核查通过，再 gate_goal 自动入账才允许改代码；gate_routing 自动入账后才允许派 worker（不等 lead 聊天放行）
   → 4. owner session：自己的 goal 场景 C 把本 PR 的 SC 跑绿
         → mem-probe → 现读 routing.json 派 tester（e2e 档）
         → 本地不派 reviewer；GPT/Claude 单审取消
-        → candidate 只是检查点；owner 自己完成本机验证并直接开远端非 draft PR，lead 不在中途放行
+        → candidate 只是检查点；owner 自己完成本机验证、push 与 Draft PR 收尾，满足第 6 步双门后转 Ready，lead 不在中途放行
   → 5. Lead 只读每 PR 的自动入账证据与 DECISION_REQUIRED（失败则给一个决定，同一 owner 继续，直到 PR_READY）
-  → 6. owner 开远端 ready PR（非 draft）；`confirm-pr-open.mjs` 由 owner 执行并消费回执，不是 lead 代跑。Mivo 必须查询当前提交 `--required` checks 全绿后再交卷。开 PR ≠ Mini 修复开始。
+  → 6. owner 先开或保持 Draft PR；当前提交 required CI 全绿且审查机进场证据满足后，owner 将 PR 转为 Ready for review（非 draft），再由 `confirm-pr-open.mjs` 消费 OPEN/head 回执。该脚本由 owner 执行，不是 lead 代跑。开 PR ≠ Mini 修复开始。
   → 6.5 owner 在已验收提交上确认 OPEN/非 draft/head/必需 CI 后写 note-event pr_ready，表示本机交付完成；lead 验收全部 priority/SC，不等待审查机结论。
   → 7. lead 不再 register Mini；`watch_registered` 仅兼容旧台账读取。Mivo 交付后 Mini 常驻 Cindy 按 PR nodeid 唯一 session 采集反馈。
   → 8. lead 派 native sub 跑 `wrapup-cleanup.mjs --mode delivered-local-only` 清本地 worktree/分支（不删远端）→ 回报
@@ -110,13 +111,16 @@ task-priority final manifest
 1. **隐藏依赖先分波**。波与波串行；后波的 base = 前波已合入或已 rebase 的 tip。
 2. **同一波内按精确写入路径建冲突图**，只检查显式归属的不同 PR 是否冲突，不把连通分量自动合并为 PR。同一 PR 内部阶段共享路径不算跨 PR 冲突；不同 PR 路径不相交才能并行开工。
 3. **跨仓默认可并行**。
-4. **规模**：计划期只能估计。Mivo 的 size-gate 统计非测试 diff 行数（added+deleted）：`800` 行起为预警，`1600` 行起为硬 STOP；配置缺失回退 `budgetLines=1600`、`warnRatio=0.5`，非法配置 fail-closed。新版 ready-check 对本 PR 明确基线到 candidate 的全部 diff 复核，达到硬上限返回重新拆计划并明确新 PR 归属，不自动另开 session，不许豁免、不许丢给 Fable。预警不等于放行，仍需在交接记录中保留 size-gate 结果。
+4. **规模**：计划期只能估计，执行时分别满足两道门，不混用统计口径。
+   - 目标仓非测试门：从该 PR 的 merge-base 树读取 `scripts/ci/size-gate.mjs` 与 `agent-use/docs/pr-rules.json` 的 `sizeGate`，按实际脚本的排除规则统计 added+deleted。WARN/STOP 阈值及缺配置回退值由该基线的脚本和配置决定，非法配置 fail-closed；不能抄本 skill 的常数，也不能用候选分支自改配置放宽本 PR。
+   - 本 skill 总量门：新版 `ready-check.mjs` 复核本 PR 明确基线到 candidate 的全部 added+deleted，包含测试；`800` 行起 WARN，`1600` 行起 STOP，无法计数也拒绝。此门不替代目标仓非测试门。
+   任一道门达到 STOP，返回重新拆计划并明确新 PR 归属，不自动另开 session，不许豁免、不许丢给 Fable。WARN 不等于 STOP，仍需评估拆分并在交接记录中保留两道门的结果、基线与阈值。
 
-合并顺序单独写进总表，和「能不能并行写代码」分开。子 session **不得自行 merge**。本 skill 也不合入。正常路径由本机 owner 跟到 PR Ready，经任务 lead 验收授权后由 Mini 盯梢到云端可合并；本机不再追云端反馈。只有用户对指定 PR 的当次明确授权才允许合并。
+合并顺序单独写进总表，和「能不能并行写代码」分开。子 session **不得自行 merge**。本 skill 也不合入。正常路径由本机 owner 跟到 PR Ready，任务 lead 验收后立即派 native cleanup sub 清本地并归档该 owner；Mini Cindy 常驻程序独立处理云端反馈，本机不再 register、不等待 Mini 接管。只有用户对指定 PR 的当次明确授权才允许合并。
 
 ## ⑤ 开工包
 
-子 session 不合入；正常路径由任务 lead 在本机验收后授权 Mini 接手，只有该 lead 可以发送盯梢信号。
+子 session 不合入；正常路径由任务 lead 在本机验收后立即清本地并归档该 owner。本 skill 不发送 Mini 盯梢信号，也不以 Mini 注册或接管作为本机收尾前置。
 
 用户可见开工包由 `scripts/render-pr-handoff.mjs` 渲染。旧 `renderExecPacket` 不再作为用户可见开工包。缺块、乱序、缺绝对路径 = 渲染失败，不得 create session。
 
@@ -130,7 +134,7 @@ task-priority final manifest
 **5. allowed_paths**：只列文件，禁止目录。点名不可改的文件。
 **6. SC 全文**：每条 `id` + `change` + `holds` + `expect` + `anchor_paths`。禁止「去 ~/.claude/.goal 自己找」。
 **7. 验证命令**：可复制的真实命令。禁止 `console.log` 占位，禁止「先读 AGENTS.md 再决定跑什么」，禁止只用 `gh pr diff`。
-**8. 做完之后（自动，不要问 lead）：mem-probe → 现读 routing.json 派 e2e（禁止本地单审） → candidate 检查点 → 本机 owner 验证并 push、确认 OPEN 非 draft PR → lead 验收全部 priority/SC 后发唯一盯梢授权 → Mini 同名 PR session 修复云端 CI/review；owner 未收到接管确认不得清理现场，也不与 Mini 同写分支。
+**8. 做完之后（自动，不要问 lead）：mem-probe → 现读 routing.json 派 e2e（禁止本地单审） → candidate 检查点 → 本机 owner 完成全部 SC/e2e/本地门禁并 push、确认 OPEN 非 draft PR；Mivo 等当前提交 required CI 全绿后写 pr_ready → lead 验收全部 priority/SC 后立即派 native cleanup sub 清本地并归档该 owner。Mini Cindy 常驻程序按 PR 唯一 session 独立修复云端反馈；本机不 register、不等待接管，也不继续同写分支。
 **9. 禁做**：硬停六条 + 本 PR 产品禁令 + 「未读 goal / 未读 routing.json 不得开工」+ 不得改总表 / `allowed_paths` / `base` + 假设破裂必须 blocked 上报，禁止就地改方案。含「可自决 / 必须停」两张表。
 **10. 回报格式**：第⑩节 exact JSON（candidate 检查点 + pr_ready + decision_required）。
 
@@ -164,7 +168,7 @@ create **没有 `provider_id` 字段**。create 后 `provider_id` 为 null 是�
 
 Art = Super Grok（`provider_id=art`，模型 id `grok-4.6`），不是 cindy-art 画图插件。
 
-标题格式：`{项目名}-{中文任务名}丨 {MMDD}`。分隔符是 `丨`，日期两位月日、前面一个空格。任务段必须含至少一个汉字。例：`MivoPlugin-存图补图修复丨 0902`。盯梢修复窗用同一套 `sessionTitle`，禁止再拼 `owner/repo#号 盯梢`。
+标题格式：`{项目名}-{中文任务名}丨 {MMDD}`。分隔符是 `丨`，日期两位月日、前面一个空格。任务段必须含至少一个汉字。例：`MivoPlugin-存图补图修复丨 0902`。Mini 常驻修复窗使用 `{项目名}-{任务名}丨修复丨YYYY-MM-DD`，本 skill 不代创建，也不复用 owner 的标题来猜会话身份。
 
 | 仓 | 标题前缀 |
 |---|---|
@@ -200,11 +204,11 @@ Lead 验收时现读 live routing.json：交卷 `e2e.model` 既不是当前 e2e 
 
 ## ⑧ 子 session 闭环与 lead 指挥
 
-PR Ready 表示本机验收、OPEN 非 draft PR 与当前提交必需 CI 已完成；开 PR ≠ Mini 修复开始，lead 验收后立即清本地归档，不能把它误作审查机通过。审查机独立打/撤 `review:merge-ready`。
+PR Ready 表示本机验收、当前提交 required CI 全绿、审查机进场证据齐备，以及 OPEN 非 draft PR head 一致；开 PR ≠ Mini 修复开始，lead 验收后立即清本地归档，不能把它误作审查机最终通过。审查机独立打/撤 `review:merge-ready`。
 
 owner session 只许在这五种情况下停。其中 2–5 进入 DECISION_REQUIRED（保留 owner 身份和现场，不算完成）；第 1 种是正常完成，pr_ready 后由 lead 清场归档：
 
-1. owner 已在同一提交完成全部 priority/SC、e2e 与规模门，且远端 OPEN 非 draft PR head 一致、必需 CI 全绿：记本机 pr_ready，交 lead 验收。本机释放写入权后不再跟进云端 CI/review。
+1. owner 已在同一提交完成全部 priority/SC、e2e 与规模门，且审查机进场证据齐备、远端 OPEN 非 draft PR head 一致、必需 CI 全绿：记本机 pr_ready，交 lead 验收。本机释放写入权后不再跟进云端 CI/review。
 2. 硬停六条。
 3. **本 session 自报**累计打到 `budgetPauseUsd`（可 `--no-budget-pause`）。不是 lead 跨 session 加总。
 4. **未读 goal skill 或未读 routing.json**：不得开工。停，提交 decision_required，写明卡在开工闸第 1 步还是第 2 步。禁止 jump 等 lead 放行。
@@ -214,7 +218,7 @@ owner session 只许在这五种情况下停。其中 2–5 进入 DECISION_REQU
 
 PI owner（含 grok）遇到 worker 429 / 崩溃 / 创建失败：自己按第⑦段恢复，记录原 worker、已尝试动作、预算和下一次唤醒条件。可恢复等待不报完成，不因单次失败问 lead，也不盲目重建窗口。上层未授权的错误码不得换 provider。
 
-Lead 在该 PR 完成本机验收、local-cleaned 与 archived 前不得宣布该 PR 收口；其他独立 owner 不等待。owner idle 不是 Mini 授权；本 skill 不再 register。
+Lead 在该 PR 完成本机验收、local-cleaned 与 archived 前不得宣布该 PR 收口；其他独立 owner 不等待。owner idle 不是 Mini 授权；本 skill 不再 register。已部署的宿主 `lead-continuation.py` 使用显式配置绑定 lead session、ledger 与状态源，每 5 分钟以 script-only（零模型）读取结构化进度和工具回执；正常 owner 阶段变化只更新进度，不逐轮唤醒 lead。`pr_ready`、决策、清理归档或后继可派信号变化才唤醒 lead；没有进展满 30 分钟后续跑一次，同一指纹最多 3 次且每次间隔 30 分钟，仍无进展才记 `blocked`。只有所有 PR 都有真实归档回执才可将整包标记 complete；Cindy 离线或宿主脚本不可用时，不能保证后台自动推进。
 
 「可验收」= 本 PR 全部 priority/SC 交卷合法 + e2e PASS + size-gate ≠ STOP + OPEN/非 draft PR head 一致 + 当前提交必需 CI 全绿。云端审查反馈不属于本机交卷前置。本地不要求 GPT/Claude 单审。
 
@@ -230,7 +234,7 @@ Mini Cindy 常驻程序是云端反馈修复者；本机 owner 仅推进到本�
 
 映射：dispatched = session 已 create 且 Art 已钉；executing = 子 session 在干活；blocked = 卡点上报；e2e/review = 子闭环阶段；local_validated = owner 自己完成本机七门验收；accepted = 兼容旧台账的 lead 检查点，不再是正常 owner 的必经闸；pr-open = 远端已开；local-cleaned = 本机 pr_ready 后 lead 清本地；archived = PI session 已归档。
 
-三份收尾回执与 Mini `register.mjs` 回执都必须带铸造时的 `ledger_version` + 本组 `assignment_seq`；入账时 `ledger_version` 不得大于当前台账 version（其它组先入账导致 version 前进仍可入账），且 `checked_at` 必须是可解析时间并晚于本组前置事件。旧代回执不得重放。`confirm-pr-open.mjs` / `wrapup-cleanup.mjs` 必须带 `--now` / `--ledger-version` / `--assignment-seq`，stdout 才能直接当回执入账。
+三份收尾回执必须带铸造时的 `ledger_version` + 本组 `assignment_seq`；仅兼容历史任务的 Mini `register.mjs` 回执也保留相同校验，新任务不创建该回执。入账时 `ledger_version` 不得大于当前台账 version（其它组先入账导致 version 前进仍可入账），且 `checked_at` 必须是可解析时间并晚于本组前置事件。旧代回执不得重放。`confirm-pr-open.mjs` / `wrapup-cleanup.mjs` 必须带 `--now` / `--ledger-version` / `--assignment-seq`，stdout 才能直接当回执入账。
 
 `set-state --identity` 允许键：`{worktree, branch, base, session_id, title}`。`identityDigest` 输入段顺序：`seq → worktree → branch → base → session_id`（session_id 未定时用空串，create 后必须重写 identity 再记 dispatch）。
 
@@ -287,11 +291,11 @@ fallbacks_tried [{route, model, provider_id, error}] 无降级写 []；禁止 tr
 
 ## ⑬ 不停机条款（仅五类停）
 
-仅第⑧节五类停。硬停六条（autonomous-execution）仍是人独占，禁止进 Fable、禁止豁免 size-gate 1600 行硬闸/输入门。size-gate `STOP` 只能再拆 PR，不能进 sidecar；800 行只是预警，必须保留证据并评估拆分。假设破裂走第 5 类停 + 第⑱节 replan，不进 sidecar。
+仅第⑧节五类停。硬停六条（autonomous-execution）仍是人独占，禁止进 Fable、禁止豁免第④节任一道规模硬闸或输入门。size-gate `STOP` 只能再拆 PR，不能进 sidecar；`WARN` 必须保留证据并评估拆分，不得误写成 STOP。假设破裂走第 5 类停 + 第⑱节 replan，不进 sidecar。
 
 ## ⑭ 与提交 PR 的边界
 
-本 skill 做：拆 PR、派唯一 owner、内联执行契约、本地 e2e、owner 开 OPEN 非 draft PR；lead 验收全部 priority/SC 后发唯一盯梢授权，Mini 每 PR 一个同名 session 修复云端反馈；有效接管后才清本地和归档。本地不再跑 GPT/Claude 单审。
+本 skill 做：拆 PR、派唯一 owner、内联执行契约、本地 e2e、owner 开 OPEN 非 draft PR；Mivo owner 确认当前提交 required CI 全绿后写 pr_ready。lead 验收全部 priority/SC 后立即派 native cleanup sub 清本地并归档该 owner。Mini 常驻程序每 PR 一个唯一修复 session 独立处理云端反馈，本 skill 不 register、不等待接管。本地不再跑 GPT/Claude 单审。
 
 本 skill 不合入，不跑三机同步。本 skill 不做：三审、改 submit-pr skill、resume 旧 Mini 盯梢班车、自动 `gh pr merge`。子 session 不得自行 merge。三审仍不在本 skill。
 
@@ -301,7 +305,7 @@ fallbacks_tried [{route, model, provider_id, error}] 无降级写 []；禁止 tr
 
 ## ⑯ 防越域与验收
 
-Lead 允许：读码、写开工包、派/收回 session、只读验收证据、按第⑱节 replan、PR_READY 后 `archive_sessions` 归档 PI session。不允许：改产品代码、替子 session 修 bug、替 owner 开 PR、追 CI/review、手工搬 receipt、git merge、resume 旧盯梢班车、Mini 名册未写就清本地。happy path 产品执行调用数为 0；编排派窗、验收决定、发 Mini 与归档是 lead 的职责。越域 commit 验收失败。`gate_goal` 过账后才允许 worktree 出现本 PR 的新 commit。该 PR diff 触碰了别组 site-report 里的 read 依赖文件 → 即使在自己 `allowed_paths` 内也标「需重协调」，下游不得开工直到 lead 重发包。
+Lead 允许：读码、写开工包、派/收回 session、只读验收证据、按第⑱节 replan；验收本组 pr_ready 后立即派 native cleanup sub，清本地成功后用 `archive_sessions` 归档 PI session。不允许：改产品代码、替子 session 修 bug、替 owner 开 PR、追 CI/review、手工搬 receipt、git merge、resume 旧盯梢班车、缺 pr_ready 或未验收就清本地。本 skill 不 register、不等待 Mini 接管。happy path 产品执行调用数为 0；编排派窗、验收决定、派清场 sub 与归档是 lead 的职责。越域 commit 验收失败。`gate_goal` 过账后才允许 worktree 出现本 PR 的新 commit。该 PR diff 触碰了别组 site-report 里的 read 依赖文件 → 即使在自己 `allowed_paths` 内也标「需重协调」，下游不得开工直到 lead 重发包。
 
 ## ⑰ Fable 决策 sidecar（非第六席）
 
@@ -309,7 +313,7 @@ grok 作为 lead **本来会停下来主动问用户拍板**时，才把题交�
 
 用户说「发 worker fable5」时走本 sidecar，**禁止 `create_worker` 调 Fable**（禁止 `create_worker` role=任意、model=`claude-fable-5`）。
 
-**唯一入场条件**：lead 必须能写出「若无代理，grok 将停下来问用户的原句」。查资料、执行、审查、策略优化、规则已有唯一答案、「要开始吗 / 能不能并行」、机械故障（缺文件/缺 receipt）一律不得开 sidecar。人独占（autonomous-execution 硬停六条、A 类 routing fail-closed、子 session 自报预算暂停、size-gate 1600 行硬闸/输入门豁免、密钥与组织配置）`human_exclusive=true`，停给用户，禁止进 Fable。
+**唯一入场条件**：lead 必须能写出「若无代理，grok 将停下来问用户的原句」。查资料、执行、审查、策略优化、规则已有唯一答案、「要开始吗 / 能不能并行」、机械故障（缺文件/缺 receipt）一律不得开 sidecar。人独占（autonomous-execution 硬停六条、A 类 routing fail-closed、子 session 自报预算暂停、第④节任一道规模硬闸或输入门豁免、密钥与组织配置）`human_exclusive=true`，停给用户，禁止进 Fable。
 
 **充分 handoff**：必须是六块 canonical object（现场 / 已改或 `no_changes` / 瓶颈与已排除 / 完整执行过程 / 原问句 / 选项+约束），每块必须是非空字符串或非空对象（空串/空对象拒），broker 存 `handoff_hash` + `context_hash`。去重键 `decision_key` 含 run/manifest/phase/wave/groups/问句/选项/约束/`context_hash`，禁止裸问句去重。
 
@@ -328,13 +332,15 @@ Lead 按四类选，不自由发挥：
 - **repack**：只影响本组 → 重出包，同 session `steer` 或 `failed→pending` 重派。
 - **resplit**：拆错（路径撞 / 漏依赖）→ 停同波未 `accepted` 的下游，按新冲突图重切；废组 `failed→pending` 后不再派。
 - **land-first**：方案变更且下游依赖 → 该组先落地或作废重做；下游全部 `failed→pending` 换 base 重出包，禁止在旧 base 上继续。
-- **split-new**：达到 1600 行硬上限 → 现有 size-gate `STOP` 路径不变；达到 800 行先记 `WARN`，不得误写成 STOP，但应评估拆分并保留预警证据。
+- **split-new**：第④节任一道规模门达到各自硬上限 → 现有 size-gate `STOP` 路径不变；仅达到相应预警线时记 `WARN`，不得误写成 STOP，但应评估拆分并保留预警证据。
 
 下游冻结：任一组因假设破裂 `blocked` → 依赖它的同波 / 后波组不得 `gate_goal` 放行。前波 tip 变化 → 后波未开工组必须换 base 重出包。已合入才发现偏航：不回滚 main，开修正 PR，`replan_note` 记因果。
 
 **自进化**：每轮 run 收尾、摘要之前，把拆错 / 假设破裂 / 补救不对记进 `evolution/ledger.json`（唯一写通道 `scripts/evolution-note.mjs`）。三档 `by-design` / `proposal` / `auto`；扩权与拿不准永不自动落地。默认不 git push。登记进 Cindy「每周自进化 Skills」（`ledger-triage.mjs` `SOURCES`）。
 
-## Mini 运维前置（人手一次，不写进本轮代码）
+## 历史 Mini 运维前置（仅兼容旧任务，新任务不执行）
+
+以下是旧注册调度的运维记录，仅供已有历史名册排障；不是当前 owner 派发、pr_ready、清本地或归档的前置。新任务由 Mini Cindy 常驻程序独立处理云端反馈，本 skill 不安装调度、不发 lead signal、不 register，也不等待 Mini 接管。
 
 - 在 Mini 新建一条 **script 模式**调度，名字用 `config/mini-watch.json` `hosts.mini.schedule_name`，不得与旧班车重名。
 - 四元组取自 `config/mini-watch.json` `hosts.mini` 的 `agent_kind` / `model` / `effort` / `provider_id`（不要再手抄进脚本或本文其它段）。
@@ -344,4 +350,4 @@ Lead 按四类选，不自由发挥：
 - Mini 被叫醒后走 goal skill 场景 E（盯梢 pr-fix）。CI 绿 + review 清零时只发「可合并」通知，merge 由人点。
 - `config/mini-watch.json` `old_schedule_ids_blocklist` 里的旧两条调度保持 paused 不动，禁止 resume。
 
-补充约束：缺 lead 授权、Mini 调度不可用、首扫未确认或投递结果未知时明确阻塞；不伪造注册，不恢复旧班车，不自动 merge。归档 PI 使用 archive_sessions，并由 confirm-session-archived.mjs 校验。
+历史兼容约束：旧名册缺原始 lead 授权、Mini 调度不可用、首扫未确认或投递结果未知时，只阻塞该历史协议的受阻动作，不把旧条件带入新任务的本机收尾；不伪造注册，不恢复旧班车，不自动 merge。当前归档 PI 使用 archive_sessions，并由 confirm-session-archived.mjs 校验。

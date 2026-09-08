@@ -147,6 +147,7 @@ export function renderPrHandoff({
     ['7. 验证命令', packet.verify_cmds.join('\n')],
     ['8. 做完之后（自动，不要问 lead）', [
       'candidate 只是检查点，不是终点。同一 owner 继续到机器可证明的 PR Ready，并由 lead 在终点验收。',
+      '启动执行时，若当前宿主实际暴露 create_goal/get_goal 工具，先检查并沿用本任务的 active Goal；没有本任务 Goal 时启动一个，目标必须覆盖本包全部 SC、本地 e2e、普通 push、当前提交必需 CI 绿、审查机进场与 PR Ready。不得在 SC PASS 检查点把整体 Goal 标成 complete。若宿主未暴露这些工具，明确记录能力缺口并按内联契约继续，不把读过 goal skill 声称为已启动宿主 Goal。',
       'goal 场景 C 的 SC PASS 只是子阶段完成，不是 owner 整体任务完成。仅当所有 SC 都有 PASS 证据且没有 hard_stop、预算暂停或 blocked 时，才正常返回同一 owner 继续本地 e2e 和 PR Ready 收尾；不得通过切换阶段绕过停止条件。',
       '授权以本次任务已给出的来源、目标仓、分支和动作为准，开工包应注明；已明确授权的提交、推送、创建/更新目标 PR 直接执行，不重复请示。只有对应动作确实未获授权时才停下请求决定，PR Ready 终点本身不产生新增授权。',
       'goal 内 push／回帖仍要求投递消息中合法的独立行 OWNER_STANDING_AUTH: PR_PUSH_AND_REPLY 声明，仅覆盖当前 PR 的普通 push 和回帖，不授权创建 PR 或 merge；这段说明不是授权声明，不得自行补造声明。',
@@ -158,7 +159,7 @@ export function renderPrHandoff({
       '可自决：不改变 SC、接口兼容、授权和跨 PR 依赖的域内实现选型；派 read-only sub / e2e worker；本机测试红在 allowed_paths 内修到绿；已授权的 feature branch push 与目标 PR create/update。禁止派 review worker。',
       '429 / Too Many Requests 按 Retry-After 和现有预算在原路由等待重试，记录下一次唤醒；worker 崩溃先查原 worker 状态再恢复。创建失败结果不明时先查绑定，不盲目重复创建。只有 NO_PROVIDER_FOR_AGENT / PROVIDER_ROUTE_UNAVAILABLE / BUDGET_MODEL_REQUIRES_API_MODE 才按现读该档 fallbacks 换 provider、不换代次。每次实际降级写入 fallbacks_tried；未走降级保留空数组并说明原因，禁止空数组就问 lead。',
       '必须停（DECISION_REQUIRED，保留原 owner 绑定）：硬停六条；hash/身份自检失败；SC、接口兼容、授权或跨 PR 依赖发生变化；allowed_paths 不够；授权不足；已授权恢复策略和预算耗尽；连续 3 轮零增量。只发一条 decision_required，附已尝试动作和 fallbacks_tried，等 lead 一个决定后同一 owner 继续。等待期间保留任务状态、阻塞原因和唤醒条件，不报完成。',
-      '按第⑩节提交 candidate 后继续已授权的本机验证、提交、普通 push 与 OPEN 非 draft PR 确认；Mivo 必须等当前提交必需 CI 全绿后再写 pr_ready，交 lead 验收全部 priority/SC。lead 验收后立即清本地并归档该 owner；Mini Cindy 常驻程序按 PR 唯一修复 session 处理云端审查反馈。本机不追反馈；必要门禁和远端 head 均已确认。子 session 不合入；任何角色不得自动合并、启用 auto-merge 或调用 gh pr merge，只有用户对指定 PR 的当次明确授权才允许合并。',
+      '按第⑩节提交 candidate 后继续已授权的本机验证、提交、普通 push 与 Draft PR 收尾；Mivo 必须等当前提交必需 CI 全绿且审查机进场证据齐备后转为 OPEN 非 draft，再写 pr_ready，交 lead 验收全部 priority/SC。lead 验收后立即清本地并归档该 owner；Mini Cindy 常驻程序按 PR 唯一修复 session 处理云端审查反馈。本机不追反馈；必要门禁和远端 head 均已确认。子 session 不合入；任何角色不得自动合并、启用 auto-merge 或调用 gh pr merge，只有用户对指定 PR 的当次明确授权才允许合并。',
     ].join('\n')],
     ['9. 禁做', forbidden.map((f) => `- ${f}`).join('\n')],
     ['10. 回报格式', [

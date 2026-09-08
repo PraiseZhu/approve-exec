@@ -259,13 +259,17 @@ test('第⑭段：本 skill 不合入、不跑三机同步，不改 submit-pr', 
   assert.ok(s14.includes('archive_sessions') || s14.includes('归档') || skillDoc.includes('archive_sessions'), '⑭段应点名归档 PI session');
 });
 
-test('第⑯段：lead 允许验收后开远端并归档 PI，禁止改产品代码', () => {
+test('第⑯段：owner 开远端，lead 验收 pr_ready 后清场归档且不等待 Mini', () => {
   const s16 = sectionBetween(MARKERS[15], MARKERS[16]);
   assert.ok(s16.includes('archive_sessions'), '⑯段应允许归档 PI session');
   assert.ok(s16.includes('不允许：改产品代码'), '⑯段仍禁止改产品代码');
   assert.ok(s16.includes('git merge') || s16.includes('不合入'), '⑯段应禁止 lead git merge');
-  assert.ok(s16.includes('Mini 名册未写就清本地') || s16.includes('先注册 Mini'),
-    '⑯段应禁止 Mini 名册未写就清本地');
+  assert.match(s16, /验收本组 pr_ready 后立即派 native cleanup sub[\s\S]*清本地成功后用 `archive_sessions`/,
+    '⑯段应按本组 pr_ready 验收、native cleanup、归档的顺序收尾');
+  assert.ok(s16.includes('替 owner 开 PR'), '⑯段应禁止 lead 替 owner 开远端 PR');
+  assert.ok(s16.includes('不 register、不等待 Mini 接管'), '⑯段应声明本机收尾不等待 Mini 注册或接管');
+  assert.equal(s16.includes('Mini 名册未写就清本地'), false, '⑯段不得保留 Mini 名册先于本机清场的旧禁令');
+  assert.equal(s16.includes('先注册 Mini'), false, '⑯段不得要求先注册 Mini');
 });
 
 test('第⑮段：保证等级 T1，不夸大成宿主拦截', () => {

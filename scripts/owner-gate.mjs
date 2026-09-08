@@ -61,7 +61,7 @@ export function ownerGate({ ledgerPath, groupId, kind, now, teamResult, ownerMod
   }
   if (ledger.pr_plan) assertBaselineReady(ledger, groupId, plan);
   if (kind === 'rework') {
-    if (ledger.phase === 'ready' || !['e2e', 'review', 'accepted', 'pr-open'].includes(group.state)
+    if (ledger.phase === 'ready' || !['e2e', 'review', 'local_validated', 'accepted', 'pr-open'].includes(group.state)
       || latestGroupEvent(ledger, groupId, 'pr_ready') || latestGroupEvent(ledger, groupId, 'watch_registered')) {
       throw new LedgerError('PRECONDITION', '已移交或旧run冻结不得本机重做；只有本机验证中的同一owner可重做');
     }
