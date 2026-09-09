@@ -9,8 +9,8 @@ from pathlib import Path
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--ledger',required=True);parser.add_argument('--group',required=True)
-    parser.add_argument('--checkpoint',required=True);parser.add_argument('--phase',required=True,choices=['executing','waiting-ci','waiting-window','decision','blocked','delivered','archived'])
-    parser.add_argument('--step',required=True);parser.add_argument('--head');parser.add_argument('--passed-sc',action='append',default=[])
+    parser.add_argument('--checkpoint',required=True);parser.add_argument('--phase',choices=['reconciling','executing','waiting-ci','waiting-window','decision','blocked','delivered','archived'])
+    parser.add_argument('--initialize-from-ledger',action='store_true');parser.add_argument('--step');parser.add_argument('--head');parser.add_argument('--passed-sc',action='append',default=[])
     parser.add_argument('--repo');parser.add_argument('--pr-number',type=int);parser.add_argument('--resume-after-epoch',type=float)
     for name in ['delivery-receipt','release-receipt','archive-receipt','archive-tool-result','decision-id','decision-evidence']:parser.add_argument('--'+name)
     args=parser.parse_args()
@@ -19,6 +19,11 @@ def main():
     ledger=json.loads(ledger_path.read_text());groups=[g for w in ledger.get('waves',[]) for g in w.get('groups',[]) if g.get('group_id')==args.group]
     if len(groups)!=1 or not groups[0].get('session_id'):raise ValueError('bound owner ledger required')
     group=groups[0]
+    if args.initialize_from_ledger:
+        if target.exists():raise ValueError('initialization refuses existing checkpoint')
+        if args.phase or args.step or args.head or args.passed_sc:raise ValueError('initialization derives only observed ledger state')
+        args.phase='reconciling';args.step='reconcile-ledger-state:'+str(group.get('state','unknown'))
+    if not args.phase or not args.step:raise ValueError('phase and step required')
     point={'schemaVersion':1,'group_id':args.group,'session_id':group['session_id'],'assignment_seq':group.get('assignment_seq',0),
            'phase':args.phase,'progress':{'step':args.step,'head':args.head,'passed_scs':sorted(set(args.passed_sc))}}
     if args.phase=='waiting-ci':

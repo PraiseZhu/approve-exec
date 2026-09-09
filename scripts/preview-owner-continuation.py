@@ -33,14 +33,14 @@ def main():
                 if not owner['manifest_core_hash']:issues.append({'group_id':gid,'reason':'manifest binding missing'})
                 if not checkpoint.exists():
                     issues.append({'group_id':gid,'reason':'owner must initialize checkpoint with writer'})
-                    checkpoints.append({'group_id':gid,'checkpoint_path':str(checkpoint),'command':['python3',str(Path(__file__).with_name('owner-checkpoint.py')),'--ledger',str(path),'--group',gid,'--checkpoint',str(checkpoint),'--phase','executing','--step','resume-bound-ledger-'+str(group.get('state'))]})
+                    checkpoints.append({'group_id':gid,'checkpoint_path':str(checkpoint),'command':['python3',str(Path(__file__).with_name('owner-checkpoint.py')),'--ledger',str(path),'--group',gid,'--checkpoint',str(checkpoint),'--initialize-from-ledger']})
                 owners.append(owner)
     mapped={o['group_id'] for o in owners}
-    issues.extend({'group_id':gid,'reason':'approved future/other assignment lacks configured ledger; do not silently omit'} for gid in expected if gid not in mapped)
+    pending=[{'group_id':v['pr_id'],'reason':'approved assignment has no bound owner; lead must decide dispatch', 'status_path':legacy['status_path'],'status_item_sha256':hashlib.sha256(json.dumps(v,sort_keys=True,separators=(',', ':')).encode()).hexdigest()} for v in values if v['pr_id'] not in mapped]
     result={'schemaVersion':2,'preview_only':True,'package_id':args.package_id,'lead_session_id':legacy['lead_session_id'],
             'session_metadata_db':args.session_metadata_db,'authorization_path':args.authorization,
             'authorization_sha256':hashlib.sha256(Path(args.authorization).read_bytes()).hexdigest(),
-            'schedule_timeout_sec':len(owners)*45+60,'expected_group_ids':expected,'owners':owners,'stalled_after_sec':1800,'retry_after_sec':300}
+            'scopePending':pending,'schedule_timeout_sec':len(owners)*45+60,'expected_group_ids':expected,'owners':owners,'stalled_after_sec':1800,'retry_after_sec':300}
     print(json.dumps({'ready':not issues,'issues':issues,'config':result,'checkpoint_initialization':checkpoints},ensure_ascii=False,indent=2))
 
 if __name__=='__main__':

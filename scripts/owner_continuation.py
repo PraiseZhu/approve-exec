@@ -63,6 +63,13 @@ def validate_config(cfg):
         identities.add(owner['group_id']); sessions.add(owner['session_id'])
         if type(owner.get('assignment_seq')) is not int or owner['assignment_seq'] < 0:
             raise ValueError('owner assignment required')
+    pending = cfg.get('scopePending', [])
+    if not isinstance(pending, list):
+        raise ValueError('scopePending must be explicit assignments')
+    for item in pending:
+        if not isinstance(item, dict) or not item.get('group_id') or item['group_id'] in identities or not item.get('reason') or not isinstance(item.get('status_path'), str) or not Path(item['status_path']).is_absolute() or not item.get('status_item_sha256'):
+            raise ValueError('pending scope identity/evidence invalid')
+        identities.add(item['group_id'])
     if set(cfg.get('expected_group_ids', [])) != identities or len(cfg.get('expected_group_ids', [])) != len(identities):
         raise ValueError('full approved group scope must match owner mapping')
     if cfg['lead_session_id'] in sessions:
@@ -83,7 +90,7 @@ def owner_checkpoint(owner):
     point = read(owner['checkpoint_path'])
     if point.get('schemaVersion') != 1 or any(point.get(k) != owner[k] for k in ['group_id', 'session_id', 'assignment_seq']):
         raise ValueError('owner checkpoint identity changed')
-    if point.get('phase') not in ['executing', 'waiting-ci', 'waiting-window', 'decision', 'delivered', 'archived', 'blocked']:
+    if point.get('phase') not in ['reconciling', 'executing', 'waiting-ci', 'waiting-window', 'decision', 'delivered', 'archived', 'blocked']:
         raise ValueError('unknown owner checkpoint phase')
     progress = point.get('progress')
     if not isinstance(progress, dict) or not isinstance(progress.get('step'), str) or not progress['step']:
@@ -210,6 +217,9 @@ def run(cfg, state, *, rpc, now, write, metadata_fn=metadata, evidence_fn=eviden
     if state.get('package_id') != cfg['package_id']:
         raise ValueError('continuation state belongs to another package')
     outcomes, decisions, completed = {}, [], []
+    for item in cfg.get('scopePending', []):
+        outcomes['scope:' + item['group_id']] = 'decision'
+        decisions.append({'owner': item['group_id'], 'event': {'id': 'scope-pending:' + digest(item), 'evidence_path': item['status_path'], 'reason': item['reason']}})
     for owner in cfg['owners']:
         key = owner['group_id'] + ':' + str(owner['assignment_seq'])
         try:
@@ -261,6 +271,8 @@ def run(cfg, state, *, rpc, now, write, metadata_fn=metadata, evidence_fn=eviden
             message = ('Continue your already authorized owner assignment; finish the remaining SC and local delivery contract. '
                        'Do not ask lead for routine steps. Do not merge or take over Mini-owned feedback. '
                        'Read only your bound checkpoint and ledger: ' + owner['checkpoint_path'] + ' ; ' + owner['ledger_path'])
+            if point['phase'] == 'reconciling':
+                message = 'Reconcile your actual bound ledger and current PR first; this initialization claims no SC or phase completion. Continue only remaining authorized local work after checking ownership, then write a truthful checkpoint. Read ' + owner['ledger_path']
             if point['phase'] == 'delivered':
                 message = 'Delivery is already verified. Only complete the explicitly authorized cleanup/archive contract; never modify product, remote branch, or Mini review work. Read ' + owner['checkpoint_path']
             outcome = dispatch(cfg, state, request, owner['session_id'], message, rpc, now, write, metadata_fn)
@@ -274,7 +286,7 @@ def run(cfg, state, *, rpc, now, write, metadata_fn=metadata, evidence_fn=eviden
         except (ValueError, OSError, sqlite3.Error, KeyError, subprocess.SubprocessError) as error:
             outcomes[key] = 'blocked-evidence'
             decisions.append({'owner': key, 'event': {'id': 'evidence:' + digest(str(error)), 'evidence_path': owner.get('checkpoint_path'), 'reason': str(error)[:200]}})
-    all_done = len(completed) == len(cfg['owners'])
+    all_done = not cfg.get('scopePending') and len(completed) == len(cfg['owners'])
     events = ([{'event': {'id': 'package-complete', 'completed': completed}}] if all_done else decisions)
     acknowledged = state.setdefault('lead_events', [])
     fresh = [e for e in events if digest(e) not in acknowledged]

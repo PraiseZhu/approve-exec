@@ -107,7 +107,7 @@ Mivo 的 review-trust 由已部署审查控制面提供，必须包含 repo/work
 
 部署必须核对真实 scheduler timeoutMs 与配置 schedule_timeout_sec 一致且不少于 owners×45+60 秒；13 owners 最低645秒。旧60秒配置不能沿用，不改变原频率。配置字段不证明宿主已更新，部署preview须另核metadata，若不符拒绝启用。
 
-先运行 `python3 scripts/preview-owner-continuation.py --config <既有配置绝对路径> --authorization <原批准文件绝对路径> --session-metadata-db <已确认DB绝对路径> --package-id <原任务包ID>`。只输出 JSON，不写配置/state。preview_only=true 禁止执行；列出的未来/替代任务缺 ledger 时必须补正确绑定或另有明确处置，不能静默删项。
+先运行 `python3 scripts/preview-owner-continuation.py --config <既有配置绝对路径> --authorization <原批准文件绝对路径> --session-metadata-db <已确认DB绝对路径> --package-id <原任务包ID>`。只输出 JSON，不写配置/state。preview_only=true 禁止执行；列出的未来/替代任务缺 ledger 时保留 scopePending（group_id、status_path、原 status item hash、reason）；仅向 lead 升级一次派工决策，不阻止已有 owner 续推，也绝不允许整包 complete。不得静默删项。初始化命令使用 --initialize-from-ledger，仅写 reconciling 与实际 ledger state，不伪造执行阶段、head 或已通过 SC；已有 checkpoint 拒绝覆盖。
 
 owner 绑定后运行 handoff 中的 `owner-checkpoint.py` 命令。每次实质阶段变更都重写：
 

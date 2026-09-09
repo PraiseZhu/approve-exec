@@ -132,6 +132,8 @@ class OwnerContinuationTests(unittest.TestCase):
         result=subprocess.run(['python3','-B',str(ROOT/'scripts/preview-owner-continuation.py'),'--config',str(cfg),'--authorization',self.cfg['authorization_path'],'--session-metadata-db',str(self.db),'--package-id','package-1'],capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr);preview=json.loads(result.stdout)
         self.assertFalse(preview['ready']);self.assertIn('PR3',preview['config']['expected_group_ids'])
+        self.assertEqual(preview['config']['scopePending'][0]['group_id'],'PR3')
+        self.assertIn('--initialize-from-ledger',preview['checkpoint_initialization'][0]['command'])
         with self.assertRaisesRegex(ValueError,'preview config'):m.validate_config(preview['config'])
     def test_approved_legacy_archive_uses_existing_receipts_and_preserves_ledger(self):
         self.cfg['owners'][0]['completion']='approved-legacy-archive'
@@ -194,5 +196,31 @@ class OwnerContinuationTests(unittest.TestCase):
         self.assertEqual(result,'busy');self.assertEqual(self.client.calls,[])
         self.assertEqual(self.state['intents']['r']['attempts'],3)
         self.assertNotIn('g',self.state['intents']['r'].get('used_grants',[]))
+
+
+    def test_pending_scope_does_not_block_bound_owners_and_notifies_lead_once(self):
+        self.cfg['expected_group_ids'].append('PR3')
+        self.cfg['scopePending']=[{'group_id':'PR3','reason':'unassigned','status_path':str(self.root/'status.json'),'status_item_sha256':'pinned'}]
+        self.run_tick();self.run_tick(101)
+        targets=[p['target_session_id'] for _,p in self.client.calls]
+        self.assertEqual(targets.count('owner1'),1);self.assertEqual(targets.count('owner2'),1);self.assertEqual(targets.count('lead'),1)
+        self.point(0,phase='delivered');self.point(1,phase='delivered')
+        self.run_tick(102,evidence_fn=lambda _: {'verified':True})
+        self.assertNotEqual(self.state['status'],'complete')
+        self.assertEqual(self.state['outcomes']['scope:PR3'],'decision')
+    def test_pending_scope_duplicate_or_unidentified_cannot_hide_assignment(self):
+        self.cfg['scopePending']=[{'group_id':'PR1','reason':'unassigned','status_path':str(self.root/'status.json'),'status_item_sha256':'pinned'}]
+        with self.assertRaisesRegex(ValueError,'pending scope identity'):self.run_tick()
+    def test_initialize_checkpoint_claims_only_reconciliation_and_never_completion(self):
+        owner=self.cfg['owners'][0];path=Path(owner['checkpoint_path']);path.unlink()
+        before=Path(owner['ledger_path']).read_bytes()
+        command=['python3','-B',str(ROOT/'scripts/owner-checkpoint.py'),'--ledger',owner['ledger_path'],'--group','PR1','--checkpoint',str(path),'--initialize-from-ledger']
+        p=subprocess.run(command,capture_output=True,text=True)
+        self.assertEqual(p.returncode,0,p.stderr)
+        point=json.loads(path.read_text())
+        self.assertEqual(point['phase'],'reconciling');self.assertEqual(point['progress']['passed_scs'],[]);self.assertIsNone(point['progress']['head'])
+        self.assertEqual(before,Path(owner['ledger_path']).read_bytes())
+        p=subprocess.run(command,capture_output=True,text=True)
+        self.assertNotEqual(p.returncode,0);self.assertIn('existing checkpoint',p.stderr)
 
 if __name__=='__main__':unittest.main()
