@@ -158,7 +158,11 @@ def dispatch(cfg, state, key, target, message, rpc, now, write, metadata_fn):
     intents = state.setdefault('intents', {})
     pending = [(request, item) for request, item in intents.items() if item.get('target_session_id') == target and item.get('status') in ['unknown', 'rejected']]
     if pending:
-        key, intent = pending[0]
+        prior_key, prior_intent = pending[0]
+        if prior_key != key and prior_key != state.get('legacy_request_id'):
+            return 'blocked-prior-request'
+        if prior_key != key: key = prior_key
+        intent = prior_intent
     else:
         intent = intents.get(key)
     if intent and intent['status'] == 'delivered':
@@ -298,10 +302,10 @@ def run(cfg, state, *, rpc, now, write, metadata_fn=metadata, evidence_fn=eviden
             outcomes[key] = outcome
             if outcome.startswith('blocked-'):
                 decisions.append({'owner': key, 'event': {'id': outcome, 'evidence_path': owner['checkpoint_path']}})
-            if outcome == 'dispatched':
+            if outcome in ['dispatched', 'already-delivered']:
                 if row.get('last_dispatched_progress') == progress:
                     row['stalled_attempts'] = attempt
-                row.update(last_dispatched_progress=progress, last_dispatch_at=now)
+                row.update(last_dispatched_progress=progress, last_dispatch_at=row.get('last_dispatch_at', now))
         except (ValueError, OSError, sqlite3.Error, KeyError, subprocess.SubprocessError) as error:
             outcomes[key] = 'blocked-evidence'
             decisions.append({'owner': key, 'event': {'id': 'evidence:' + digest(str(error)), 'evidence_path': owner.get('checkpoint_path'), 'reason': str(error)[:200]}})
