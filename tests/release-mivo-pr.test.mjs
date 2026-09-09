@@ -9,7 +9,7 @@ import { prepareMivoPr, releaseMivoPr, confirmMivoRelease, MIVO_REPO, validateMi
 import { readPrOpenReceipt } from '../scripts/run-ledger.mjs';
 import { wrapupCleanup } from '../scripts/wrapup-cleanup.mjs';
 const at = '2026-09-09T10:00:00Z', released = '2026-09-09T10:01:00Z';
-function fixture(t) {
+function fixture(t, native = false) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'mivo-release-')));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const repo = path.join(root, 'repo'); fs.mkdirSync(repo);
@@ -28,8 +28,15 @@ function fixture(t) {
   const controls = { '.github/workflows/code-review.yml': 'on:\n  workflow_dispatch:\n  pull_request_target:\n    types: [ready_for_review]\n',
     '.github/scripts/build_control_manifest.mjs': 'fixture', '.github/scripts/review_dispatch_context.py': 'fixture', '.github/scripts/review_public_evidence.py': 'fixture' };
   const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+  if (native) {
+    delete controls['.github/scripts/review_dispatch_context.py']; delete controls['.github/scripts/review_public_evidence.py'];
+    controls['.github/scripts/review_native_export.mjs'] = 'native export'; controls['.github/scripts/review_native_history.mjs'] = 'native history';
+    controls['.github/workflows/code-review.yml'] = 'on:\n  pull_request_target:\n    types: [ready_for_review]\njobs:\n  native_attestation:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/attest-build-provenance@pinned\n    env:\n      PIN: vars.REVIEW_PR_CONTROL_SHA\n      HISTORY: vars.NATIVE_EVIDENCE_TRUST_JSON\n';
+  }
   const reviewTrust = { repo: MIVO_REPO, codeSha: base, workflowId: 100, workflowPath: '.github/workflows/code-review.yml', dispatchCompatible: true,
     workflowSha256: digest(controls['.github/workflows/code-review.yml']), sourceManifest: Object.fromEntries(Object.entries(controls).map(([k,v]) => [k,digest(v)])) };
+  if (native) { reviewTrust.protocol = 'current-review-v1'; delete reviewTrust.dispatchCompatible; reviewTrust.native = { sourceSha: 'a'.repeat(40) }; }
+  const variables = { REVIEW_PR_CONTROL_SHA: 'a'.repeat(40), NATIVE_EVIDENCE_TRUST_JSON: JSON.stringify({ sourceManifest: reviewTrust.sourceManifest }) };
   const gh = args => {
     const key = args[1];
     if (key === 'view') return { ...live };
@@ -52,8 +59,9 @@ function fixture(t) {
     if (key.includes('/contents/docs/sync/required-checks.json')) return { type: 'file', encoding: 'base64', content: Buffer.from(JSON.stringify({ on_main: ['unit'], pr_only: [] })).toString('base64') };
     if (key.includes('/check-runs?')) return [{ check_runs: [{ id: 1, name: 'unit', head_sha: live.headRefOid, status: 'completed', conclusion: ciState, started_at: at, app: { id: 2, slug: 'fixture' } }] }];
     if (key.includes('/statuses?')) return [[]];
+    if (key.includes('/actions/variables/')) { const name = key.split('/').at(-1); return { name, value: variables[name] }; }
     if (key.includes('/actions/workflows/')) return { id: 100, path: '.github/workflows/code-review.yml', state: 'active' };
-    if (key.includes('/contents/.github/workflows/')) return { type: 'file', encoding: 'base64', content: Buffer.from('on:\n  workflow_dispatch:\n  pull_request_target:\n    types: [ready_for_review]\n').toString('base64') };
+    if (key.includes('/contents/.github/workflows/')) return { type: 'file', encoding: 'base64', content: Buffer.from(controls['.github/workflows/code-review.yml']).toString('base64') };
     throw new Error(`unexpected mock ${args}`);
   };
   const report = { schemaVersion: 1, kind: 'mivo-local-validation', repo: MIVO_REPO, number: 563, head,
@@ -62,7 +70,7 @@ function fixture(t) {
   fs.writeFileSync(validationReport, JSON.stringify(report));
   const prepare = () => prepareMivoPr({ repo: MIVO_REPO, pr: 563, head, validationReport, reviewTrust, out: candidate, now: at, gh });
   const releasePr = () => releaseMivoPr({ candidateReceipt: candidate, out: release, now: released, gh });
-  return { root, repo, bare, wt, head, branch, git, live, gh, events, prepare, releasePr, candidate, release, report, validationReport, reviewTrust,
+  return { variables, controls, root, repo, bare, wt, head, branch, git, live, gh, events, prepare, releasePr, candidate, release, report, validationReport, reviewTrust,
     mutations: () => mutations, lose: () => { lost = true; }, nondeliver: () => { deliver = false; }, red: () => { ciState = 'failure'; } };
 }
 test('Draft A release then Mini B permits v2 confirm and local-only cleanup despite B red CI', t => {
@@ -164,4 +172,25 @@ test('lost Ready response and immediate Mini B remains unknown with one mutation
   const release = () => releaseMivoPr({ candidateReceipt: f.candidate, out: f.release, now: released, gh, worktree: f.wt });
   assert.throws(release); assert.throws(release); assert.equal(f.mutations(), 1);
   assert.equal(fs.existsSync(f.release), false); assert.equal(fs.existsSync(`${f.release}.mutation.json`), false);
+});
+
+test('current-review-v1 release accepts native PRtarget without legacy dispatch helpers', t => {
+  const f = fixture(t, true); f.prepare(); f.releasePr(); assert.equal(f.mutations(), 1);
+});
+test('current-review-v1 rejects native source pin drift before release', t => {
+  const f = fixture(t, true); f.variables.REVIEW_PR_CONTROL_SHA = 'b'.repeat(40);
+  assert.throws(f.prepare, /source variable pin mismatch/); assert.equal(f.mutations(), 0);
+});
+test('current-review-v1 rejects history manifest drift before release', t => {
+  const f = fixture(t, true); f.variables.NATIVE_EVIDENCE_TRUST_JSON = JSON.stringify({ sourceManifest: { '.github/workflows/code-review.yml': 'b'.repeat(64) } });
+  assert.throws(f.prepare, /history source manifest mismatch/); assert.equal(f.mutations(), 0);
+});
+test('current-review-v1 rejects missing native helper and hosted attestation', t => {
+  const f = fixture(t, true); delete f.reviewTrust.sourceManifest['.github/scripts/review_native_export.mjs'];
+  assert.throws(f.prepare, /trusted helper missing/); assert.equal(f.mutations(), 0);
+  const g = fixture(t, true);
+  g.controls['.github/workflows/code-review.yml'] = g.controls['.github/workflows/code-review.yml'].replace('runs-on: ubuntu-latest', 'runs-on: self-hosted');
+  g.reviewTrust.workflowSha256 = createHash('sha256').update(g.controls['.github/workflows/code-review.yml']).digest('hex');
+  g.reviewTrust.sourceManifest['.github/workflows/code-review.yml'] = g.reviewTrust.workflowSha256;
+  assert.throws(g.prepare, /native entry\/attestation/); assert.equal(g.mutations(), 0);
 });

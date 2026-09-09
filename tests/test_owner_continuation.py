@@ -220,6 +220,9 @@ class OwnerContinuationTests(unittest.TestCase):
         point=json.loads(path.read_text())
         self.assertEqual(point['phase'],'reconciling');self.assertEqual(point['progress']['passed_scs'],[]);self.assertIsNone(point['progress']['head'])
         self.assertEqual(before,Path(owner['ledger_path']).read_bytes())
+        self.run_tick()
+        dispatched=next(p for _,p in self.client.calls if p['target_session_id']=='owner1')
+        self.assertIn(str(path),dispatched['message']);self.assertIn('owner-checkpoint.py',dispatched['message']);self.assertIn('--phase',dispatched['message'])
         p=subprocess.run(command,capture_output=True,text=True)
         self.assertNotEqual(p.returncode,0);self.assertIn('existing checkpoint',p.stderr)
 
