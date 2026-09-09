@@ -32,7 +32,7 @@ prepare 使用台账路径旁固定的 .owners 目录。持久 claim 的作用�
 - 真实读取自己的 goal skill；新版先执行文末 owner-gate.mjs baseline，通过后再执行随包给出的 owner-gate.mjs goal 命令，旧版不补造 baseline。脚本重算文件 hash、检查干净基线、CAS 入账 gate_goal 并推进 executing。不得补造已有改动之前的开工证据，不用 jump 等逐步放行。
 - 自主完成本 PR 的 SC。可以开只读 sub 获取信息，也可提前派 tester 验证。提前验证不能替代最终当前提交的全量 SC/e2e。本地禁止派 reviewer。
 - 首次及每次重新派 worker 前，现读共享 routing.json，执行 start_team({worker_permission_mode:"bypassPermissions"}) 并确认实际返回。用 owner-gate.mjs routing --owner-model <当前模型ID> --team-result <真实工具结果JSON> 连同台账/组/时间入账。脚本输出当前 e2e 档；agent、model、effort、provider_id 原样传给 Orca。只派 tester（e2e 档），禁止派 reviewer。配置缺项或 auto 不得冒充通过。
-- candidate 是检查点，正常 owner 继续完成全部 SC/e2e/本地门禁、push 与 Draft PR 收尾；Mivo 必须等当前提交 required CI 全绿且审查机进场证据齐备后转为 OPEN 非 draft，再写 pr_ready。交卷后由 lead 验收并立即清本地、归档该 owner；本机不等待 Mini 接管，不继续同写分支。
+- candidate 是检查点，正常 owner 继续完成全部 SC/e2e/本地门禁、push 与 Draft PR 收尾；Mivo 必须等当前提交 required CI 全绿且审查workflow静态入口前提可用后转为 OPEN 非 draft，再写 pr_ready。交卷后由 lead 验收并立即清本地、归档该 owner；本机不等待 Mini 接管，不继续同写分支。
 - 每次等待保留原任务 ID、状态、已尝试动作和下次唤醒条件；宿主 `lead-continuation.py` 按显式配置绑定 lead session、ledger 与状态源，每 5 分钟以 script-only（零模型）消费结构化进度和工具回执。正常阶段变化只更新进度；`pr_ready`、决策、清理归档或后继可派信号变化才唤醒 lead。没有进展满 30 分钟后续跑一次，同一指纹最多 3 次且每次间隔 30 分钟，之后记 `blocked`。未读到真实工具回执不得手写 state；Cindy 离线或宿主脚本不可用时如实报告，不能声称有后台自动唤醒。连续三轮无新证据，或授权/SC/接口/跨 PR 依赖改变，只发一个 DECISION_REQUIRED。停止的是受阻动作，不是宣布任务完成；仅所有 PR 真实归档后才可标记整包 complete。
 
 ## 一个 PR 的验收与接手
@@ -40,8 +40,10 @@ prepare 使用台账路径旁固定的 .owners 目录。持久 claim 的作用�
 1. 同一 owner 走 executing→e2e→review，提交本组 candidate（record-delivery）。提交内 branch、tip_sha、scs、goal_skill_path、e2e、size_gate、fallbacks_tried 按渲染器第10段 schema；最终证据必须绑定同一提交。组状态名 `review` 只是本机验收前检查点，不再表示本地 GPT/Claude 单审。
 2. owner 自主完成原 SC、优先级和已授权收尾，不逐步回 lead 请示。lead 在本机交卷完成后对该 PR 的全部 priority/SC、e2e 与当前 head 作独立验收；无验收不得清本地或归档，不发送 Mini 信号。
 3. owner 对本组运行 ready-check.mjs --group <组> --ledger <台账> --manifest <final> --repo <本组worktree> --verdict <真实SC验收JSON> --e2e-report <真实报告> --presubmit-dir <size/format/intent目录> --receipt <输出路径> --now <当前ISO时间>。成功是 LOCAL_PR_VALIDATED；note-event local_validated --detail 的 group_id/receipt 消费这份回执。其它组尚未完成不阻塞本组。
-4. owner 提交/推送/开对应 Draft PR；Mivo 当前提交 required CI 全绿且审查机进场证据齐备后转 Ready。再运行 confirm-pr-open.mjs --repo <owner/repo> --branch <branch> --head <已验收SHA> --now <当前ISO时间> --ledger-version <当前版本> --assignment-seq <本组代次>；真实 stdout 给 local_validated→pr-open（accepted 仅兼容旧台账） 的 --pr-open-receipt。
-5. 重新运行 confirm-pr-open 获取新鲜 OPEN/非draft/head 回执；Mivo 还必须证明当前提交必需 CI 全绿且已有审查机进场证据。随后 note-event pr_ready，表示本机可交接。审查机最终结论不在本机继续等待。
+4. owner 提交/推送/开对应 Draft PR；Mivo 使用 `release-mivo-pr.mjs prepare --repo xindong/mivo-canvas-plugin --pr <number> --head <A> --validation-report <绝对路径> --review-trust <受控配置绝对路径> --out <candidate绝对路径>` 固定 A 的 SC/E2E、当前 required CI 和审查静态前提，再 `release --worktree <业务worktree绝对路径> --candidate-receipt <candidate绝对路径> --out <release绝对路径>`。未知 Ready 响应只复核原 journal，不重复 mutation。普通非 skill session 也可直接调用，无需 ledger。
+5. 运行 `confirm-pr-open.mjs --worktree <业务worktree绝对路径> --repo <owner/repo> --branch <branch> --head <A> --release-receipt <release绝对路径> --now <当前ISO时间> --ledger-version <当前版本> --assignment-seq <本组代次>`；真实 stdout 给 local_validated→pr-open 的 --pr-open-receipt。重新 confirm 后 note-event pr_ready，`current_pr_head_sha` 仍填写交付 A；v2 receipt 分别保存 deliveryHeadSha=A、observedHeadSha=B 及真实祖先关系。实际审查在 Ready 后进场，由 Mini 负责，不等待审查 run 或标签。本机释放后不得继续写产品。
+
+validation-report 格式为 `schemaVersion=1, kind=mivo-local-validation, repo, number, head, scs:[{id,status,evidence:[命令/回执锚点]}], e2e:{status,evidence}`。各项必须 pass；已批准例外使用 approved-exception 并保留 approvalRef、scope、originalStatus=fail/not_run/incomplete，不改写原失败。candidate 原字节与 release hash 绑定；历史 v1 仍按 exact head 原协议消费，不自动迁写。v2 清场要求本地 clean 且 HEAD=A、A 是当前远端 B 祖先和同一释放 epoch；B 的 CI 红由 Mini 跟进，不追溯污染 A。
 6. 对应任务 lead 验收通过后，立即派 native cleanup sub，不再铸造 Mini lead signal / register。
 7. Mini Cindy 常驻程序以 PR nodeid 维护唯一修复 session，沿用 `{项目名}-{中文任务名}丨 {MMDD}`：短中文任务名与 Asia/Shanghai 首次创建日固定，PR 号、nodeid 和修复角色留在 metadata。旧标题只经宿主 rename 纠正，保留原 session_id；本协议不创建第二个 session。
 8. 清场前用 `get_session_runtime` 读取原 owner 与已知本地 writer，确认都已结束执行、没有 pending 修改；仍在写入则保留现场等待。`wrapup-cleanup --mode delivered-local-only` 只清本地，不删远端分支。存在已知 ignored 目录时显式给 `--retain-dir <本仓 .worktrees 下不存在的新 sibling>` 和 `--retain-paths '["node_modules","cindyplugin/dist"]'`，脚本写保留 manifest 并移动这些内容；未知 ignored 或 keep/lock 拒绝，禁止升级 force。远端已经由 Mini 普通追加提交时，必须证明已验收提交、本地提交、远端提交的祖先关系；没有 Git 对象先常规 fetch 再校验，不猜祖先。成功后 lead `archive_sessions` 并消费真实归档回执。GitHub 合入另需用户授权；本任务 skill 不自动 merge。
@@ -93,3 +95,5 @@ Mini 收到反馈后按投递包先准备 PR worktree，提炼反馈 SC，把绑
 ## 保证边界
 
 这是 T1 skill 脚本检查：防意外错派、重复恢复、过期证据、误清现场；不能阻止拥有同一文件权限的 agent 故意手改台账，也不能证明 LLM 阅读过程。只读 sub 不替代正式 tester。bypassPermissions 仅是 worker 工具权限模式，不扩大任务允许的文件、动作或用户授权。
+
+Mivo 的 review-trust 由已部署审查控制面提供，必须包含 repo/workflowId/workflowPath/codeSha/workflowSha256/sourceManifest/dispatchCompatible。prepare/release 对实际 BASE 的审查控制面全文件集与 SHA256 清单逐项核对，读取 BASE 的 agent-use/docs/pr-rules.json 和 docs/sync/required-checks.json；缺配置或漂移均拒绝释放。不得从 PR head 自造受信任清单。

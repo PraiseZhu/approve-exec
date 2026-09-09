@@ -5,6 +5,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSyn
 import { pathToFileURL } from 'node:url';
 import { relative, dirname, isAbsolute, join, resolve } from 'node:path';
 import { LedgerError, latestGroupEvent, latestPrHandoffDelivery, parseTimestamp } from './run-ledger.mjs';
+import { validateMivoV2, verifyDeliveryEpoch, deliveryGh } from './release-mivo-pr.mjs';
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 
@@ -123,7 +124,7 @@ function ghPr({ repo, branch, ghBin = process.env.GH_BIN ?? 'gh', runner = spawn
   return JSON.parse(result.stdout);
 }
 
-function assertDeliveredEvidence({ delivery, branch, localSha, ledgerPath, group, repo, ghBin }) {
+function assertDeliveredEvidence({ delivery, branch, localSha, ledgerPath, group, repo, ghBin, ghRunner = spawnSync }) {
   if (repo !== 'xindong/mivo-canvas-plugin') throw new LedgerError('PRECONDITION', 'delivered-local-only 仅允许指定 Mivo 仓库');
   if (typeof ledgerPath !== 'string' || typeof group !== 'string') throw new LedgerError('ARGS', 'newmode 必须提供 --ledger 与 --group');
   let ledger;
@@ -136,16 +137,23 @@ function assertDeliveredEvidence({ delivery, branch, localSha, ledgerPath, group
   try { prReceipt = prEvent?.detail?.receipt ? JSON.parse(readFileSync(prEvent.detail.receipt, 'utf8')) : null; } catch (err) { throw new LedgerError('PRECONDITION', `无法读取 PR receipt: ${err.message}`); }
   const e2e = deliveryEvidence?.e2e;
   const acceptedSha = record?.tip_sha;
-  if (!record || !['pr-open', 'local-cleaned'].includes(record.state) || !SHA_RE.test(acceptedSha) || e2e?.status !== 'pass' || e2e.candidate_sha !== acceptedSha || deliveryEvidence?.tip_sha !== acceptedSha || !prReceipt || prReceipt.branch !== branch || prReceipt.headRefOid !== acceptedSha || prReceipt.isDraft !== false || prReceipt.state !== 'OPEN') {
+  if (prReceipt?.schemaVersion === 2) validateMivoV2(prReceipt);
+  if (!record || !['pr-open', 'local-cleaned'].includes(record.state) || !SHA_RE.test(acceptedSha) || e2e?.status !== 'pass' || e2e.candidate_sha !== acceptedSha || deliveryEvidence?.tip_sha !== acceptedSha || !prReceipt || prReceipt.branch !== branch || (prReceipt.deliveryHeadSha ?? prReceipt.headRefOid) !== acceptedSha || prReceipt.isDraft !== false || prReceipt.state !== 'OPEN') {
     throw new LedgerError('PRECONDITION', 'ledger 未证明本组同一提交已通过 e2e 且已建立 PR 回执');
   }
-  const pr = ghPr({ repo, branch, ghBin });
+  if (prReceipt.schemaVersion === 2) {
+    if (localSha !== acceptedSha) throw new LedgerError('PRECONDITION', 'v2 cleanup requires local HEAD equal to delivery A');
+    const pr = verifyDeliveryEpoch(prReceipt, args => deliveryGh(args, (binary, argv, options) => ghRunner(ghBin ?? binary, argv, options)));
+    if (delivery !== undefined) throw new LedgerError('PRECONDITION', 'newmode 不接受调用者 delivery 证据');
+    return { acceptedSha, livePrHeadSha: pr.headRefOid, prReceipt };
+  }
+  const pr = ghPr({ repo, branch, ghBin, runner: ghRunner });
   if (pr.state !== 'OPEN' || pr.isDraft !== false || !SHA_RE.test(pr.headRefOid) || pr.headRepositoryOwner?.login !== 'xindong' || pr.headRepository?.name !== 'mivo-canvas-plugin') throw new LedgerError('PRECONDITION', '实时 PR 已漂移、关闭、draft 或仓库不匹配');
   if (delivery !== undefined) throw new LedgerError('PRECONDITION', 'newmode 不接受调用者 delivery 证据');
   return { acceptedSha, livePrHeadSha: pr.headRefOid };
 }
 
-export function wrapupCleanup({ worktree, branch, remote = 'origin', gitRunner = git, now, ledgerVersion, assignmentSeq, mode, delivery, ledgerPath, group, repo, ghBin, retainDir, retainPaths } = {}) {
+export function wrapupCleanup({ worktree, branch, remote = 'origin', gitRunner = git, now, ledgerVersion, assignmentSeq, mode, delivery, ledgerPath, group, repo, ghBin, ghRunner, retainDir, retainPaths } = {}) {
   if (typeof worktree !== 'string' || !worktree.startsWith('/')) {
     throw new LedgerError('ARGS', `worktree 必须是绝对路径（当前: ${worktree}）`);
   }
@@ -175,10 +183,12 @@ export function wrapupCleanup({ worktree, branch, remote = 'origin', gitRunner =
   }
   let acceptedSha = localSha;
   let livePrHeadSha;
+  let deliveryReceipt;
   if (mode === 'delivered-local-only') {
-    const evidence = assertDeliveredEvidence({ delivery, branch, localSha, ledgerPath, group, repo, ghBin });
+    const evidence = assertDeliveredEvidence({ delivery, branch, localSha, ledgerPath, group, repo, ghBin, ghRunner });
     acceptedSha = evidence.acceptedSha;
     livePrHeadSha = evidence.livePrHeadSha;
+    deliveryReceipt = evidence.prReceipt;
   }
   let mainRepo;
   if (mode === 'delivered-local-only') {
@@ -205,6 +215,7 @@ export function wrapupCleanup({ worktree, branch, remote = 'origin', gitRunner =
     throw new LedgerError('PRECONDITION', `远端 ${remote}/${branch} 读不到 SHA（当前: ${remoteLine || '空'}）`);
   }
   if (remoteSha !== localSha) {
+    if (deliveryReceipt) gitRunner(['fetch', '--no-tags', '--no-write-fetch-head', remote, remoteSha], { cwd: mainRepo });
     try { gitRunner(['merge-base', '--is-ancestor', localSha, remoteSha], { cwd: mainRepo }); }
     catch { return { ok: false, skipped: true, reason: `远端 SHA ${remoteSha} 不是本地 ${localSha} 的后代，跳过删除`, branch, worktree, checked_at: now, ledger_version: version, assignment_seq: seq }; }
   }
@@ -215,6 +226,10 @@ export function wrapupCleanup({ worktree, branch, remote = 'origin', gitRunner =
   const finalRemoteSha = (finalRemoteLine.split(/\s+/)[0] || '').trim();
   if (finalBranch !== branch || finalSha !== localSha || finalStatus.length > 0 || !SHA_RE.test(finalRemoteSha)) throw new LedgerError('PRECONDITION', '删除前末刻复核失败，保留本地内容');
   if (mode === 'delivered-local-only' && livePrHeadSha !== finalRemoteSha) throw new LedgerError('PRECONDITION', '实时 PR head 与远端分支 SHA 不一致');
+  if (deliveryReceipt) {
+    const latest = verifyDeliveryEpoch(deliveryReceipt, args => deliveryGh(args, (binary, argv, options) => (ghRunner ?? spawnSync)(ghBin ?? binary, argv, options)));
+    if (latest.headRefOid !== finalRemoteSha) throw new LedgerError('PRECONDITION', 'v2 PR changed before cleanup');
+  }
   if (finalRemoteSha !== localSha) {
     try { gitRunner(['merge-base', '--is-ancestor', localSha, finalRemoteSha], { cwd: mainRepo }); }
     catch { throw new LedgerError('PRECONDITION', '删除前远端已分叉，保留本地内容'); }

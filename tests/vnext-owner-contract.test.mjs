@@ -86,7 +86,7 @@ test('本机逐 PR Ready 清场，Mini 按 CI/审查准入独立接管', () => {
   const skill = readFileSync(new URL('../SKILL.md', import.meta.url), 'utf8');
   assert.match(skill, /pr_ready/);
   assert.match(skill, /先保持 Draft/);
-  assert.match(skill, /required CI 全绿且审查机进场证据齐备后才转/);
+  assert.match(skill, /required CI 全绿且审查workflow静态入口前提可用后才转/);
   assert.match(skill, /不再 register Mini/);
   assert.match(skill, /谁 Ready 谁清场归档/);
 });

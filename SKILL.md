@@ -6,7 +6,7 @@ trigger: 批准执行
 
 # approve-exec — lead 编排守则
 
-**lead 按本文编排**：把 task-priority final manifest 拆成每 PR 一个独立 owner session。本机 owner 完成实现、全部 priority/SC、本地 e2e 和普通 push；Mivo PR 先保持 Draft，只有当前提交 required CI 全绿且审查机进场证据齐备后才转为 Ready for review，再写 pr_ready。lead 验收后立即派 sub 清本地并归档该 owner。云端审查反馈、冲突与复审由 Mini 常驻 Cindy 按 PR 唯一 session 接管，本机不再注册盯梢。candidate 是检查点；不得自行 merge。本地不再派 GPT/Claude 单审。
+**lead 按本文编排**：把 task-priority final manifest 拆成每 PR 一个独立 owner session。本机 owner 完成实现、全部 priority/SC、本地 e2e 和普通 push；Mivo PR 先保持 Draft，只有当前提交 required CI 全绿且审查workflow静态入口前提可用后才转为 Ready for review，再写 pr_ready。lead 验收后立即派 sub 清本地并归档该 owner。云端审查反馈、冲突与复审由 Mini 常驻 Cindy 按 PR 唯一 session 接管，本机不再注册盯梢。candidate 是检查点；不得自行 merge。本地不再派 GPT/Claude 单审。
 
 **合并红线（最高优先级）**：任何 lead、owner、reviewer、tester、Mini session、watcher、worker 或本 skill 都不得合并、自动合并、启用 auto-merge、点击合并或调用 gh pr merge。只有用户本人对指定 PR 的明确、当次授权才允许合并；PR Ready、cloud_ready、required checks 通过、管理员权限或开工包中的提交/推送授权，均不构成合并授权。后续由用户手动合并插件承接该动作；插件上线前只能报告“可合并”，不得代替用户合并。
 
@@ -81,7 +81,7 @@ task-priority final manifest
         → 本地不派 reviewer；GPT/Claude 单审取消
         → candidate 只是检查点；owner 自己完成本机验证、push 与 Draft PR 收尾，满足第 6 步双门后转 Ready，lead 不在中途放行
   → 5. Lead 只读每 PR 的自动入账证据与 DECISION_REQUIRED（失败则给一个决定，同一 owner 继续，直到 PR_READY）
-  → 6. owner 先开或保持 Draft PR；当前提交 required CI 全绿且审查机进场证据满足后，owner 将 PR 转为 Ready for review（非 draft），再由 `confirm-pr-open.mjs` 消费 OPEN/head 回执。该脚本由 owner 执行，不是 lead 代跑。开 PR ≠ Mini 修复开始。
+  → 6. owner 先开或保持 Draft PR；当前提交 required CI 全绿且审查workflow静态入口前提可用后，owner 将 PR 转为 Ready for review（非 draft），再由 `confirm-pr-open.mjs` 消费 OPEN/head 回执。该脚本由 owner 执行，不是 lead 代跑。开 PR ≠ Mini 修复开始。
   → 6.5 owner 在已验收提交上确认 OPEN/非 draft/head/必需 CI 后写 note-event pr_ready，表示本机交付完成；lead 验收全部 priority/SC，不等待审查机结论。
   → 7. lead 不再 register Mini；`watch_registered` 仅兼容旧台账读取。Mivo 交付后 Mini 常驻 Cindy 按 PR nodeid 唯一 session 采集反馈。
   → 8. lead 派 native sub 跑 `wrapup-cleanup.mjs --mode delivered-local-only` 清本地 worktree/分支（不删远端）→ 回报
@@ -204,11 +204,11 @@ Lead 验收时现读 live routing.json：交卷 `e2e.model` 既不是当前 e2e 
 
 ## ⑧ 子 session 闭环与 lead 指挥
 
-PR Ready 表示本机验收、当前提交 required CI 全绿、审查机进场证据齐备，以及 OPEN 非 draft PR head 一致；开 PR ≠ Mini 修复开始，lead 验收后立即清本地归档，不能把它误作审查机最终通过。审查机独立打/撤 `review:merge-ready`。
+PR Ready 表示本机验收、当前提交 required CI 全绿、审查workflow静态入口前提可用，以及 OPEN 非 draft PR head 一致；开 PR ≠ Mini 修复开始，lead 验收后立即清本地归档，不能把它误作审查机最终通过。审查机独立打/撤 `review:merge-ready`。
 
 owner session 只许在这五种情况下停。其中 2–5 进入 DECISION_REQUIRED（保留 owner 身份和现场，不算完成）；第 1 种是正常完成，pr_ready 后由 lead 清场归档：
 
-1. owner 已在同一提交完成全部 priority/SC、e2e 与规模门，且审查机进场证据齐备、远端 OPEN 非 draft PR head 一致、必需 CI 全绿：记本机 pr_ready，交 lead 验收。本机释放写入权后不再跟进云端 CI/review。
+1. owner 已在同一提交完成全部 priority/SC、e2e 与规模门，且审查workflow静态入口前提可用、远端 OPEN 非 draft PR head 一致、必需 CI 全绿：记本机 pr_ready，交 lead 验收。本机释放写入权后不再跟进云端 CI/review。
 2. 硬停六条。
 3. **本 session 自报**累计打到 `budgetPauseUsd`（可 `--no-budget-pause`）。不是 lead 跨 session 加总。
 4. **未读 goal skill 或未读 routing.json**：不得开工。停，提交 decision_required，写明卡在开工闸第 1 步还是第 2 步。禁止 jump 等 lead 放行。

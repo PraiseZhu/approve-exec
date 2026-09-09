@@ -3415,6 +3415,7 @@ test('watch_registered: init 后改夹具副本 mini-watch.json 必须拒（三�
   cpSync(join(ROOT, 'scripts/run-ledger.mjs'), join(tree, 'scripts/run-ledger.mjs'));
   cpSync(join(ROOT, 'scripts/pr-watch'), join(tree, 'scripts/pr-watch'), { recursive: true });
   cpSync(join(ROOT, 'scripts/vnext-owner-contract.mjs'), join(tree, 'scripts/vnext-owner-contract.mjs'));
+  for (const file of ['release-mivo-pr.mjs', 'mivo-control-source.mjs', 'mivo-pr-snapshot.mjs', 'mivo-ci.mjs', 'mivo-pr-policy.mjs']) cpSync(join(ROOT, 'scripts', file), join(tree, 'scripts', file));
   cpSync(join(ROOT, 'scripts/lib'), join(tree, 'scripts/lib'), { recursive: true });
   cpSync(join(ROOT, 'scripts/lib/mini-watch-config.mjs'), join(tree, 'scripts/lib/mini-watch-config.mjs'));
   writeFileSync(join(tree, 'config/defaults.json'), readFileSync(join(ROOT, 'config/defaults.json'), 'utf8'));
@@ -3527,6 +3528,7 @@ test('组F-1: 非规范化路径调用必须实际执行 init 并创建台账（
   cpSync(join(ROOT, 'scripts/run-ledger.mjs'), join(dir, 'scripts/run-ledger.mjs'));
   cpSync(join(ROOT, 'scripts/pr-watch'), join(dir, 'scripts/pr-watch'), { recursive: true });
   cpSync(join(ROOT, 'scripts/vnext-owner-contract.mjs'), join(dir, 'scripts/vnext-owner-contract.mjs'));
+  for (const file of ['release-mivo-pr.mjs', 'mivo-control-source.mjs', 'mivo-pr-snapshot.mjs', 'mivo-ci.mjs', 'mivo-pr-policy.mjs']) cpSync(join(ROOT, 'scripts', file), join(dir, 'scripts', file));
   cpSync(join(ROOT, 'scripts/lib'), join(dir, 'scripts/lib'), { recursive: true });
   cpSync(join(ROOT, 'scripts/lib/mini-watch-config.mjs'), join(dir, 'scripts/lib/mini-watch-config.mjs'));
   writeFileSync(join(dir, 'config/defaults.json'), readFileSync(join(ROOT, 'config/defaults.json'), 'utf8'));

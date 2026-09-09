@@ -964,6 +964,7 @@ function copyTreeForMutation(t, mutateScript) {
   writeFileSync(join(dir, 'scripts/run-ledger.mjs'), readFileSync(join(root, 'scripts/run-ledger.mjs'), 'utf8'));
   cpSync(join(root, 'scripts/pr-watch'), join(dir, 'scripts/pr-watch'), { recursive: true });
   cpSync(join(root, 'scripts/vnext-owner-contract.mjs'), join(dir, 'scripts/vnext-owner-contract.mjs'));
+  for (const file of ['release-mivo-pr.mjs', 'mivo-control-source.mjs', 'mivo-pr-snapshot.mjs', 'mivo-ci.mjs', 'mivo-pr-policy.mjs']) cpSync(join(root, 'scripts', file), join(dir, 'scripts', file));
   cpSync(join(root, 'scripts/lib'), join(dir, 'scripts/lib'), { recursive: true });
   mkdirSync(join(dir, 'scripts/lib'), { recursive: true });
   writeFileSync(join(dir, 'scripts/lib/mini-watch-config.mjs'), readFileSync(join(root, 'scripts/lib/mini-watch-config.mjs'), 'utf8'));
