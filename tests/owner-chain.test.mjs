@@ -185,6 +185,38 @@ test('新版核查失败不能开工，归属变化不能恢复旧 claim', t => 
   assert.throws(() => bindOwner({ ...input, claimId: request.claim_id, result: { target_session_id: 'failed-probe-owner' } }), /PR_MAP_HASH_MISMATCH/);
 });
 
+test('Mivo 首次 CI 红后 local_validated 可由同一 owner 回修', t => {
+  const input = fixture(t, true);
+  const request = prepareOwner(input);
+  bindOwner({ ...input, claimId: request.claim_id, result: { target_session_id: 'ci-red-owner' } });
+  renderPacket({ ledgerPath: input.ledgerPath, group: input.groupId, now: NOW });
+  setState({ ledgerPath: input.ledgerPath, group: input.groupId, to: 'dispatched', now: NOW,
+    memSnapshot: { used_slots: 0, platform_cap: 8, concurrency: 2, available_bytes: 16 * 1024 ** 3 } });
+  const goalPath = join(input.dir, 'goal.md'); writeFileSync(goalPath, 'test goal instruction');
+  ownerGate({ ...input, kind: 'baseline' });
+  ownerGate({ ...input, kind: 'goal', goalPath });
+  const routingPath = join(input.dir, 'routing.json');
+  writeFileSync(routingPath, JSON.stringify({ e2e: { agent: 'fixture', model: 'fixture-route', effort: 'high', provider_id: 'fixture' } }));
+  ownerGate({ ...input, kind: 'routing', routingPath, ownerModel: 'fixture-owner', teamResult: { worker_permission_mode: 'bypassPermissions' } });
+  setState({ ledgerPath: input.ledgerPath, group: input.groupId, to: 'e2e', now: NOW });
+  setState({ ledgerPath: input.ledgerPath, group: input.groupId, to: 'review', now: NOW });
+  const ledger = readLedger(input.ledgerPath);
+  const group = ledger.waves[0].groups[0];
+  group.state = 'local_validated';
+  ledger.events.push({ type: 'local_validated', at: NOW, detail: {
+    group_id: input.groupId, assignment_seq: group.assignment_seq, tip_sha: input.sha,
+  } });
+  ledger.version += 1;
+  writeFileSync(input.ledgerPath, JSON.stringify(ledger));
+  assert.equal(readLedger(input.ledgerPath).waves[0].groups[0].state, 'local_validated');
+  ownerGate({ ...input, kind: 'rework', reason: 'required CI failed on the pushed head' });
+  const after = readLedger(input.ledgerPath);
+  assert.equal(after.waves[0].groups[0].state, 'executing');
+  assert.equal(after.waves[0].groups[0].session_id, 'ci-red-owner');
+  assert.equal(after.waves[0].groups[0].assignment_seq, group.assignment_seq);
+  assert.equal(latestGroupEvent(after, input.groupId, 'local_validated'), null);
+});
+
 test('两个独立进程同时 prepare：只能发放一个 create 请求', async (t) => {
   const f=fixture(t);
   const script=fileURLToPath(new URL('../scripts/owner-dispatch.mjs',import.meta.url));

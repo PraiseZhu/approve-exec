@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, chmodSync, readFileSync, copyFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, chmodSync, readFileSync, copyFileSync, existsSync, mkdirSync, rmSync, realpathSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,6 +26,31 @@ const AFTER = '2026-08-09T00:00:02Z';
 const takeoverAt = (at) => ({ schedule_id: 'fixture-script', first_scan_ack: NOW, last_scan_at: at, config_sha256: miniWatchConfigSha256() });
 const STAMP = { ledgerVersion: 0, assignmentSeq: 0 };
 const PATH_SEP = process.platform === 'win32' ? ';' : ':';
+
+function fakeRetentionFixture(t, { unknown = false, symlink = false, failRemove = false, failUpdateRef = false, lateKeep = false, noIgnored = false } = {}) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'wrapup-fake-'))); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const wt = join(root, '.worktrees', 'owner'); const branch = 'feat/fake'; const SHA = 'a'.repeat(40); const remote = 'b'.repeat(40);
+  mkdirSync(join(wt, 'node_modules'), { recursive: true }); mkdirSync(join(wt, 'cindyplugin/dist'), { recursive: true });
+  writeFileSync(join(wt, 'node_modules/x'), 'keep'); writeFileSync(join(wt, 'cindyplugin/dist/x'), 'keep');
+  if (symlink) { rmSync(join(wt, 'cindyplugin'), { recursive: true, force: true }); mkdirSync(join(root, 'external/cindyplugin/dist'), { recursive: true }); symlinkSync(join(root, 'external/cindyplugin'), join(wt, 'cindyplugin')); }
+  if (unknown) { mkdirSync(join(wt, '_tmp')); writeFileSync(join(wt, '_tmp/x'), 'unknown'); }
+  let worktreeLists = 0; let removed = false;
+  const gitRunner = (args) => {
+    if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return branch;
+    if (args[0] === 'rev-parse' && args[1] === 'HEAD') return SHA;
+    if (args[0] === 'rev-parse' && args.includes('--git-common-dir')) return join(root, '.git');
+    if (args[0] === 'status') { if (lateKeep && args.includes('--ignored') && !args.includes('--')) writeFileSync(join(wt, '.worktree-keep'), 'late'); return args.includes('--ignored') && args.includes('--') ? `!! ${args.at(-1)}/` : ''; }
+    if (args[0] === 'ls-files') return noIgnored ? '' : (unknown ? '_tmp/\0' : '') + 'node_modules/\0cindyplugin/dist/\0';
+    if (args[0] === 'ls-remote') return `${remote}\trefs/heads/${branch}`;
+    if (args[0] === 'merge-base') return '';
+    if (args[0] === 'worktree' && args[1] === 'list') { worktreeLists += 1; if (lateKeep && worktreeLists > 1) writeFileSync(join(wt, '.worktree-keep'), 'late'); return removed ? `worktree ${root}\n` : `worktree ${root}\n\nworktree ${wt}\nHEAD ${SHA}\nbranch refs/heads/${branch}\n`; }
+    if (args[0] === 'worktree' && args[1] === 'remove') { if (failRemove) throw new Error('simulated removal failure'); rmSync(wt, { recursive: true, force: true }); removed = true; return ''; }
+    if (args[0] === 'update-ref') { if (failUpdateRef) throw new Error('simulated CAS failure'); return ''; }
+    if (args[0] === 'branch' && args[1] === '--list') return '';
+    return '';
+  };
+  return { root, wt, branch, SHA, remote, gitRunner };
+}
 
 test('confirm-pr-open: draft 拒、OPEN ready 过', () => {
   assert.throws(
@@ -66,6 +91,7 @@ test('wrapup-cleanup: 远端 SHA 不对则跳过且不删 remote', () => {
     if (args[0] === 'status') return '';
     if (args[0] === 'rev-parse' && args[1] === 'HEAD') return SHA;
     if (args[0] === 'ls-remote') return `${SHA2}\trefs/heads/feat/x`;
+    if (args[0] === 'merge-base') throw new Error('not an ancestor');
     return '';
   };
   const out = wrapupCleanup({
@@ -727,4 +753,84 @@ test('wrapup-cleanup: SHA 对得上才 remove worktree，不 push --delete', () 
   assert.equal(out.checked_at, NOW);
   assert.ok(calls.some((a) => a[0] === 'worktree' && a[1] === 'remove'));
   assert.equal(calls.some((a) => a.includes('--delete') || a[0] === 'push'), false);
+});
+
+test('wrapup-cleanup: 显式保留 ignored 目录且远端后代可清理（真实 Git）', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'wrapup-real-')));
+  try {
+    const repo = join(root, 'repo'); const bare = join(root, 'remote.git'); const wt = join(repo, '.worktrees', 'owner'); const branch = 'feat/descendant';
+    const git = (args, cwd = repo) => { const r = spawnSync('git', ['-c', 'commit.gpgsign=false', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', ...args], { cwd, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
+    mkdirSync(repo); git(['init', '-b', 'main']); writeFileSync(join(repo, '.gitignore'), '.worktrees/\nnode_modules/\ncindyplugin/dist/\n_tmp/\n'); writeFileSync(join(repo, 'base'), '1\n'); git(['add', '.']); git(['commit', '-m', 'base']);
+    git(['init', '--bare', bare]); git(['remote', 'add', 'origin', bare]); git(['worktree', 'add', '-b', branch, wt]); writeFileSync(join(wt, 'feature'), 'accepted\n'); git(['add', 'feature'], wt); git(['commit', '-m', 'accepted'], wt); const local = git(['rev-parse', 'HEAD'], wt); git(['push', 'origin', `HEAD:refs/heads/${branch}`], wt);
+    git(['switch', '-c', 'remote-fix', local]); writeFileSync(join(repo, 'remote'), 'descendant\n'); git(['add', 'remote']); git(['commit', '-m', 'remote descendant']); const remote = git(['rev-parse', 'HEAD']); git(['push', 'origin', `HEAD:refs/heads/${branch}`]);
+    mkdirSync(join(wt, 'node_modules')); mkdirSync(join(wt, 'cindyplugin/dist'), { recursive: true }); writeFileSync(join(wt, 'node_modules', 'x'), 'keep'); writeFileSync(join(wt, 'cindyplugin/dist', 'x'), 'keep');
+    const retained = join(repo, '.worktrees', 'retained-descendant');
+    mkdirSync(join(wt, '_tmp')); writeFileSync(join(wt, '_tmp', 'unknown'), 'must be declared');
+    assert.throws(() => wrapupCleanup({ worktree: wt, branch, now: NOW, ledgerVersion: 1, assignmentSeq: 0, retainDir: retained, retainPaths: ['node_modules', 'cindyplugin/dist'] }), /未显式保留/);
+    rmSync(join(wt, '_tmp'), { recursive: true, force: true });
+    const prUrl = 'https://github.com/xindong/mivo-canvas-plugin/pull/563';
+    const prReceiptPath = join(root, 'pr-open-receipt.json');
+    writeFileSync(prReceiptPath, JSON.stringify({ url: prUrl, number: 563, headRefOid: local, isDraft: false, state: 'OPEN', branch, checked_at: '2026-08-09T00:00:02Z', ledger_version: 1, assignment_seq: 0 }));
+    const ledgerPath = join(root, 'ledger.json');
+    writeFileSync(ledgerPath, JSON.stringify({ version: 1, waves: [{ groups: [{ group_id: 'PR01', state: 'pr-open', tip_sha: local, pr_url: prUrl, assignment_seq: 0 }] }], events: [
+      { type: 'delivery', detail: { group_id: 'PR01', assignment_seq: 0, branch, tip_sha: local, scs: [{ id: 'SC-A1', status: 'pass' }], e2e: { status: 'pass', candidate_sha: local }, size_gate: { result: 'PASS', candidate_sha: local } } },
+      { type: 'pr_ready', detail: { group_id: 'PR01', assignment_seq: 0, receipt: prReceiptPath } },
+    ] }));
+    const ghBin = join(root, 'gh-fixture');
+    writeFileSync(ghBin, `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(JSON.stringify({ state: 'OPEN', isDraft: false, headRefOid: remote, headRepositoryOwner: { login: 'xindong' }, headRepository: { name: 'mivo-canvas-plugin' } }))});\n`);
+    chmodSync(ghBin, 0o755);
+    const out = wrapupCleanup({ worktree: wt, branch, now: NOW, ledgerVersion: 1, assignmentSeq: 0, mode: 'delivered-local-only', ledgerPath, group: 'PR01', repo: 'xindong/mivo-canvas-plugin', ghBin, retainDir: retained, retainPaths: ['node_modules', 'cindyplugin/dist'] });
+    assert.equal(out.ok, true); assert.equal(existsSync(wt), false); assert.equal(git(['branch', '--list', branch]), ''); assert.equal(git(['ls-remote', 'origin', `refs/heads/${branch}`]).split(/\s+/)[0], remote); assert.equal(readFileSync(join(retained, 'node_modules/x'), 'utf8'), 'keep');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('wrapup-cleanup: 中间 symlink 与 collapsed unknown ignored 在移动前拒绝', (t) => {
+  const symlink = fakeRetentionFixture(t, { symlink: true });
+  assert.throws(() => wrapupCleanup({ worktree: symlink.wt, branch: symlink.branch, now: NOW, ledgerVersion: 1, assignmentSeq: 0, retainDir: join(symlink.root, '.worktrees/retained'), retainPaths: ['node_modules', 'cindyplugin/dist'], gitRunner: symlink.gitRunner }), /软链接/);
+  const unknown = fakeRetentionFixture(t, { unknown: true });
+  assert.throws(() => wrapupCleanup({ worktree: unknown.wt, branch: unknown.branch, now: NOW, ledgerVersion: 1, assignmentSeq: 0, retainDir: join(unknown.root, '.worktrees/retained'), retainPaths: ['node_modules', 'cindyplugin/dist'], gitRunner: unknown.gitRunner }), /未显式保留/);
+  assert.equal(existsSync(join(unknown.wt, 'node_modules')), true);
+});
+
+test('wrapup-cleanup: 移动后 worktree remove 失败会回滚保留目录', (t) => {
+  const f = fakeRetentionFixture(t, { failRemove: true });
+  const retained = join(f.root, '.worktrees/retained');
+  assert.throws(() => wrapupCleanup({ worktree: f.wt, branch: f.branch, now: NOW, ledgerVersion: 1, assignmentSeq: 0, retainDir: retained, retainPaths: ['node_modules', 'cindyplugin/dist'], gitRunner: f.gitRunner }), /simulated removal failure/);
+  assert.equal(existsSync(join(f.wt, 'node_modules/x')), true);
+  assert.equal(existsSync(join(retained, 'node_modules')), false);
+  assert.equal(JSON.parse(readFileSync(join(retained, '.approve-exec-retain-manifest.json'), 'utf8')).status, 'rolled_back');
+});
+
+test('wrapup-cleanup: 末刻出现 keep 时拒绝删除并回滚', (t) => {
+  const f = fakeRetentionFixture(t, { lateKeep: true });
+  const retained = join(f.root, '.worktrees/retained');
+    assert.throws(() => wrapupCleanup({ worktree: f.wt, branch: f.branch, now: NOW, ledgerVersion: 1, assignmentSeq: 0, retainDir: retained, retainPaths: ['node_modules', 'cindyplugin/dist'], gitRunner: f.gitRunner }), /末刻出现/);
+  assert.equal(existsSync(join(f.wt, 'node_modules/x')), true);
+  assert.equal(JSON.parse(readFileSync(join(retained, '.approve-exec-retain-manifest.json'), 'utf8')).status, 'rolled_back');
+});
+
+test('wrapup-cleanup: 无初始 artifact 也检查末刻新增 ignored', (t) => {
+  const f = fakeRetentionFixture(t, { lateKeep: true, noIgnored: true });
+  assert.throws(() => wrapupCleanup({ worktree: f.wt, branch: f.branch, now: NOW, ledgerVersion: 1, assignmentSeq: 0, retainDir: join(f.root, '.worktrees/retained'), retainPaths: ['missing'], gitRunner: f.gitRunner }), /末刻出现|本地内容/);
+  assert.equal(existsSync(join(f.wt, '.worktree-keep')), true);
+});
+
+test('wrapup-cleanup: worktree 已删但 CAS 失败时保留物标记 partial cleanup', (t) => {
+  const f = fakeRetentionFixture(t, { failUpdateRef: true });
+  const retained = join(f.root, '.worktrees/retained');
+  const receiptPath = join(f.root, 'pr-ready.json');
+  writeFileSync(receiptPath, JSON.stringify({ branch: f.branch, headRefOid: f.SHA, isDraft: false, state: 'OPEN' }));
+  const ledgerPath = join(f.root, 'ledger.json');
+  writeFileSync(ledgerPath, JSON.stringify({ version: 1, waves: [{ groups: [{ group_id: 'PR01', state: 'pr-open', tip_sha: f.SHA }] }], events: [
+    { type: 'delivery', detail: { group_id: 'PR01', assignment_seq: 0, branch: f.branch, tip_sha: f.SHA, scs: [{ id: 'SC-A1', status: 'pass' }], e2e: { status: 'pass', candidate_sha: f.SHA }, size_gate: { result: 'PASS', candidate_sha: f.SHA } } },
+    { type: 'pr_ready', detail: { group_id: 'PR01', receipt: receiptPath } },
+  ] }));
+  const ghBin = join(f.root, 'gh-fixture');
+  writeFileSync(ghBin, `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(JSON.stringify({ state: 'OPEN', isDraft: false, headRefOid: f.remote, headRepositoryOwner: { login: 'xindong' }, headRepository: { name: 'mivo-canvas-plugin' } }))});\n`);
+  chmodSync(ghBin, 0o755);
+  assert.throws(() => wrapupCleanup({ worktree: f.wt, branch: f.branch, now: NOW, ledgerVersion: 1, assignmentSeq: 0, mode: 'delivered-local-only', ledgerPath, group: 'PR01', repo: 'xindong/mivo-canvas-plugin', ghBin, retainDir: retained, retainPaths: ['node_modules', 'cindyplugin/dist'], gitRunner: f.gitRunner }), /simulated CAS failure/);
+  assert.equal(existsSync(f.wt), false);
+  assert.equal(existsSync(join(retained, 'node_modules/x')), true);
+  const manifest = JSON.parse(readFileSync(join(retained, '.approve-exec-retain-manifest.json'), 'utf8'));
+  assert.equal(manifest.status, 'retained_after_partial_cleanup');
 });

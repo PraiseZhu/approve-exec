@@ -910,7 +910,7 @@ const GROUP_TRANSITIONS = Object.freeze({
   blocked: ['executing', 'failed'],
   e2e: ['review', 'failed'],
   review: ['local_validated', 'accepted', 'failed'],
-  local_validated: ['pr-open', 'failed'],
+  local_validated: ['executing', 'pr-open', 'failed'],
   accepted: ['pr-open', 'failed'],
   'pr-open': ['local-cleaned', 'failed'],
   'local-cleaned': ['archived', 'failed'],

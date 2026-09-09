@@ -39,6 +39,7 @@ export const TEST_FILES = [
   'session-watch.test.mjs',
   'skill-doc.test.mjs',
   'snapshot.test.mjs',
+  'supplemental-cleanup.test.mjs',
   'vnext-owner-contract.test.mjs',
   'worktree-preparation.test.mjs',
   'wrapup-cleanup.test.mjs',

@@ -82,14 +82,16 @@ test('handoff 含停等验收 / 缺 PR Ready 拒', () => {
   assert.throws(() => assertHandoffComplete(moved), LedgerError);
 });
 
-test('盯梢必须等本组 pr_ready，不是开 PR 即发、也不是等整批 run ready', () => {
+test('本机逐 PR Ready 清场，Mini 按 CI/审查准入独立接管', () => {
   const skill = readFileSync(new URL('../SKILL.md', import.meta.url), 'utf8');
   assert.match(skill, /pr_ready/);
-  assert.match(skill, /开 PR ≠ 发盯梢|尚未 `pr_ready`|仅开 PR 不得发 Mini 盯梢|谁 Ready 发谁/);
-  assert.match(skill, /4 个 PR|谁 Ready 发谁/);
+  assert.match(skill, /先保持 Draft/);
+  assert.match(skill, /required CI 全绿且审查机进场证据齐备后才转/);
+  assert.match(skill, /不再 register Mini/);
+  assert.match(skill, /谁 Ready 谁清场归档/);
 });
 
-test('盯梢缺 lead signal 时拒绝自动生成 session 标题并派发', () => {
+test('历史盯梢协议仍拒绝缺 lead signal 的旧入口派发', () => {
   assert.equal(titlePrefixForRepo('xindong/mivo-canvas-plugin'), 'MivoPlugin');
   assert.equal(watchTaskName(461), '盯梢修复461');
   assert.throws(() => planDispatch({

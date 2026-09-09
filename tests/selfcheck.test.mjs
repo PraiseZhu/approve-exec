@@ -36,10 +36,13 @@ const FIX = {
   valid: join(root, 'tests/fixtures/routing-valid.json'),
 };
 
-test('批准执行触发行要求本机验收后由 lead 授权 Mini', () => {
+test('批准执行触发行要求 Mivo Draft→CI/审查机进场→Ready 后由 Mini 常驻接管', () => {
   assert.ok(TRIGGER_LINE.includes('本机 owner 完成 SC/e2e'));
-  assert.match(TRIGGER_LINE, /发送唯一 Mini 盯梢授权/);
-  assert.doesNotMatch(TRIGGER_LINE, /验收通过后再开远端 PR、注册 Mini/);
+  assert.match(TRIGGER_LINE, /先保持 Draft/);
+  assert.match(TRIGGER_LINE, /required CI 全绿且审查机进场证据齐备后才转 Ready/);
+  assert.match(TRIGGER_LINE, /Mini 常驻按 PR nodeid/);
+  assert.doesNotMatch(TRIGGER_LINE, /发送唯一 Mini 盯梢授权/);
+  assert.doesNotMatch(TRIGGER_LINE, /接管确认后清场/);
 });
 
 function runSelfcheck(args) {
