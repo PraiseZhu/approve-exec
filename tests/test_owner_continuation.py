@@ -109,12 +109,14 @@ class OwnerContinuationTests(unittest.TestCase):
         config=self.root/'config.json';config.write_text(json.dumps(self.cfg))
         frames=[{'protocol':'cindy-script/1','type':'start','context':{}},
                 {'protocol':'cindy-script/1','type':'call_result','id':'py-1','ok':True,'result':{'methods':['sessions.dispatch'],'granted':['sessions.dispatch']}},
-                {'protocol':'cindy-script/1','type':'call_result','id':'py-2','ok':True,'result':{'target_session_id':'owner1','wake_kind':'resumed'}}]
+                {'protocol':'cindy-script/1','type':'call_result','id':'py-2','ok':True,'result':{'target_session_id':'owner1','wake_kind':'already-active'}}]
         before=self.db.read_bytes()
         p=subprocess.run(['python3','-B',str(ROOT/'scripts/lead-continuation.py'),'--config',str(config)],input='\n'.join(map(json.dumps,frames))+'\n',capture_output=True,text=True,env={**os.environ,'CINDY_SCRIPT_PROTOCOL':'1'})
         self.assertEqual(p.returncode,0,p.stderr)
         calls=[json.loads(line) for line in p.stdout.splitlines() if json.loads(line).get('method')=='sessions.dispatch']
         self.assertEqual(len(calls),1);self.assertEqual(calls[0]['params']['target_session_id'],'owner1')
+        persisted=json.loads(Path(str(config)+'.state.json').read_text())
+        self.assertEqual(next(iter(persisted['intents'].values()))['status'],'delivered')
         self.assertEqual(before,self.db.read_bytes())
 
     def test_scope_subset_cannot_claim_full_package_completion(self):
@@ -225,5 +227,26 @@ class OwnerContinuationTests(unittest.TestCase):
         self.assertIn(str(path),dispatched['message']);self.assertIn('owner-checkpoint.py',dispatched['message']);self.assertIn('--phase',dispatched['message'])
         p=subprocess.run(command,capture_output=True,text=True)
         self.assertNotEqual(p.returncode,0);self.assertIn('existing checkpoint',p.stderr)
+
+    def test_actual_already_active_receipt_is_accepted_without_private_fields(self):
+        class ActiveRpc(Rpc):
+            def call(self,method,params):
+                self.calls.append((method,params))
+                return {'target_session_id':params['target_session_id'],'wake_kind':'already-active','target_title':'private title','message':'private body'}
+        rpc=ActiveRpc();self.run_tick(rpc=rpc)
+        self.assertTrue(all(i['status']=='delivered' for i in self.state['intents'].values()))
+        self.assertTrue(all(set(i['receipt'])=={'target_session_id','wake_kind'} for i in self.state['intents'].values()))
+    def test_unrecognized_receipt_retains_exact_safe_metadata_and_never_retries(self):
+        class UnknownRpc(Rpc):
+            def call(self,method,params):
+                self.calls.append((method,params))
+                return {'target_session_id':params['target_session_id'],'wake_kind':'future-mode','ok':True,'error':{'code':'UNRECOGNIZED','message':'private'},'message':'private body'}
+        rpc=UnknownRpc();self.run_tick(rpc=rpc);count=len(rpc.calls);self.run_tick(1000,rpc=rpc)
+        self.assertEqual(len(rpc.calls),count)
+        for i in self.state['intents'].values():
+            self.assertEqual(i['status'],'unknown');self.assertEqual(i['receipt']['wake_kind'],'future-mode')
+            self.assertEqual(i['receipt']['error_code'],'UNRECOGNIZED');self.assertNotIn('message',i['receipt'])
+        self.assertFalse(m.accepted({'target_session_id':'owner2','wake_kind':'already-active'},'owner1'))
+        self.assertFalse(m.accepted({'target_session_id':'owner1','wake_kind':'already-active','ok':False},'owner1'))
 
 if __name__=='__main__':unittest.main()
