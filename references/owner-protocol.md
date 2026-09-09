@@ -120,7 +120,7 @@ owner 绑定后运行 handoff 中的 `owner-checkpoint.py` 命令。每次实质
 
 每 owner 的 stall 只看 phase/step/head/passed_scs，忽略 checked_at、ledger.version 等观测；无变化 30 分钟才有一次有界续推，最多三次，再发单次决策。等待 CI、busy、窗口不消耗恢复次数。
 
-派发先持久化 intent。真实 broker 回执只接受相同 target_session_id 与 resumed/queued/steered wake_kind。明确 HOST_NOT_READY 或指定“伙伴能力刷新” PRECONDITION_FAILED 才可五分钟间隔最多三次；之后 recovery_grants 必须逐个绑定 request_id、target_session_id、grant_id、authorization_ref，单 grant 只允许一次实际重试，busy 不消耗 grant。unknown 缺 lookup 能力时保持 blocked，不清 intent、不重复发。
+派发先持久化 intent。真实 broker 回执只接受相同 target_session_id 与 resumed/queued/already-active wake_kind。明确 HOST_NOT_READY 或指定“伙伴能力刷新” PRECONDITION_FAILED 才可五分钟间隔最多三次；之后 recovery_grants 必须逐个绑定 request_id、target_session_id、grant_id、authorization_ref，单 grant 只允许一次实际重试，busy 不消耗 grant。unknown 缺 lookup 能力时保持 blocked，不清 intent、不重复发；只保留真实回执 target_session_id/wake_kind/ok/error_code 白名单字段，不保存标题或消息正文。旧回执若已被丢弃，不能仅凭源码推断补成 accepted。
 
 旧 state pending 的迁移保留 legacy 原对象。只有明确拒绝且 legacy_recovery.previous_state_digest 等于原对象 canonical JSON SHA256、含唯一 grant_id/authorization_ref，才解开旧 lead latch；未知响应即使配置 grant 也不得恢复重派。此迁移不是对真实宿主已恢复的证明。
 

@@ -132,7 +132,22 @@ def ready(owner, point, group, evidence_fn, legacy_archive_fn=None):
 
 
 def accepted(receipt, target):
-    return isinstance(receipt, dict) and receipt.get('target_session_id') == target and receipt.get('wake_kind') in ['resumed', 'queued', 'steered']
+    return isinstance(receipt, dict) and receipt.get('ok') is not False and not receipt.get('error') and not receipt.get('error_code') and receipt.get('target_session_id') == target and receipt.get('wake_kind') in ['resumed', 'queued', 'already-active']
+
+
+def receipt_metadata(value):
+    if not isinstance(value, dict):
+        return {'shape': type(value).__name__}
+    result = {}
+    for key in ['target_session_id', 'wake_kind']:
+        if isinstance(value.get(key), str):
+            result[key] = value[key][:200]
+    if isinstance(value.get('ok'), bool):
+        result['ok'] = value['ok']
+    code = value.get('error_code') or (value.get('error', {}).get('code') if isinstance(value.get('error'), dict) else None)
+    if isinstance(code, str):
+        result['error_code'] = code[:100]
+    return result
 
 
 def rejected(error):
@@ -188,10 +203,10 @@ def dispatch(cfg, state, key, target, message, rpc, now, write, metadata_fn):
         write(state)
         return 'confirmed-rejected' if rejected(error) else 'blocked-unknown-receipt'
     if accepted(receipt, target):
-        intent.update(status='delivered', receipt=receipt)
+        intent.update(status='delivered', receipt=receipt_metadata(receipt))
         write(state)
         return 'dispatched'
-    intent.update(receipt={'identity': 'unconfirmed'})
+    intent.update(receipt=receipt_metadata(receipt))
     write(state)
     return 'blocked-unknown-receipt'
 
