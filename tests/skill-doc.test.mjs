@@ -136,6 +136,9 @@ test('第⑥段：send_to_session create + Art 钉 + 标题正则', () => {
   assert.ok(s6.includes('丨'), '⑥段标题分隔符必须是 丨');
   assert.ok(s6.includes('{项目名}-{中文任务名}丨 {MMDD}'), '⑥段应给出标题格式');
   assert.ok(s6.includes('至少一个汉字'), '⑥段任务段必须含汉字');
+  assert.ok(s6.includes('Asia/Shanghai 首次创建日'), 'Mini 日期必须固定为本地首次创建日');
+  assert.ok(s6.includes('metadata') && s6.includes('保留 session_id'), 'Mini 技术身份留在 metadata，改名不得重建 session');
+  assert.ok(!skillDoc.includes('丨修复丨YYYY-MM-DD'), 'Mini 不得引入第二套标题格式');
 });
 
 test('第⑦段：现读同一份 routing.json，禁止把 luna/sol 当唯一派工值', () => {

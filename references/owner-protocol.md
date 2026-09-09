@@ -43,7 +43,7 @@ prepare 使用台账路径旁固定的 .owners 目录。持久 claim 的作用�
 4. owner 提交/推送/开对应 Draft PR；Mivo 当前提交 required CI 全绿且审查机进场证据齐备后转 Ready。再运行 confirm-pr-open.mjs --repo <owner/repo> --branch <branch> --head <已验收SHA> --now <当前ISO时间> --ledger-version <当前版本> --assignment-seq <本组代次>；真实 stdout 给 local_validated→pr-open（accepted 仅兼容旧台账） 的 --pr-open-receipt。
 5. 重新运行 confirm-pr-open 获取新鲜 OPEN/非draft/head 回执；Mivo 还必须证明当前提交必需 CI 全绿且已有审查机进场证据。随后 note-event pr_ready，表示本机可交接。审查机最终结论不在本机继续等待。
 6. 对应任务 lead 验收通过后，立即派 native cleanup sub，不再铸造 Mini lead signal / register。
-7. Mini Cindy 常驻程序以 PR nodeid 维护唯一修复 session，title 为 `{项目名}-{任务名}丨修复丨YYYY-MM-DD`；本协议不创建第二个 session。
+7. Mini Cindy 常驻程序以 PR nodeid 维护唯一修复 session，沿用 `{项目名}-{中文任务名}丨 {MMDD}`：短中文任务名与 Asia/Shanghai 首次创建日固定，PR 号、nodeid 和修复角色留在 metadata。旧标题只经宿主 rename 纠正，保留原 session_id；本协议不创建第二个 session。
 8. 清场前用 `get_session_runtime` 读取原 owner 与已知本地 writer，确认都已结束执行、没有 pending 修改；仍在写入则保留现场等待。`wrapup-cleanup --mode delivered-local-only` 只清本地，不删远端分支。存在已知 ignored 目录时显式给 `--retain-dir <本仓 .worktrees 下不存在的新 sibling>` 和 `--retain-paths '["node_modules","cindyplugin/dist"]'`，脚本写保留 manifest 并移动这些内容；未知 ignored 或 keep/lock 拒绝，禁止升级 force。远端已经由 Mini 普通追加提交时，必须证明已验收提交、本地提交、远端提交的祖先关系；没有 Git 对象先常规 fetch 再校验，不猜祖先。成功后 lead `archive_sessions` 并消费真实归档回执。GitHub 合入另需用户授权；本任务 skill 不自动 merge。
 
 ## 历史兼容：lead 发信号与 Mini 接收（新任务不执行）
