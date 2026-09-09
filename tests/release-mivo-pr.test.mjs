@@ -74,6 +74,10 @@ test('Draft A release then Mini B permits v2 confirm and local-only cleanup desp
   const receipt = confirmMivoRelease({ releaseReceipt: f.release, branch: f.branch, head: f.head, now: '2026-09-09T10:02:00Z', ledgerVersion: 1, assignmentSeq: 0, gh: f.gh, worktree: f.wt });
   assert.equal(receipt.deliveryHeadSha, f.head); assert.equal(receipt.observedHeadSha, b); assert.equal(receipt.ancestry, 'ancestor');
   const receiptPath = path.join(f.root, 'confirmed.json'); fs.writeFileSync(receiptPath, JSON.stringify(receipt)); assert.deepEqual(readPrOpenReceipt(receiptPath), receipt);
+  const deliveryInput = { mode: 'delivery', receipt: receiptPath, release: f.release, branch: f.branch, head: f.head, assignmentSeq: 0 };
+  const evidenceCli = new URL('../scripts/owner-continuation-evidence.mjs', import.meta.url).pathname;
+  assert.equal(JSON.parse(execFileSync('node', [evidenceCli], { input: JSON.stringify(deliveryInput), encoding: 'utf8' })).verified, true);
+  assert.throws(() => execFileSync('node', [evidenceCli], { input: JSON.stringify({ ...deliveryInput, head: b }), stdio: ['pipe', 'pipe', 'pipe'] }));
   const ledgerPath = path.join(f.root, 'ledger.json'); fs.writeFileSync(ledgerPath, JSON.stringify({ version: 1,
     waves: [{ groups: [{ group_id: 'g1', state: 'pr-open', tip_sha: f.head, assignment_seq: 0, pr_url: receipt.url }] }], events: [
       { type: 'delivery', detail: { group_id: 'g1', assignment_seq: 0, branch: f.branch, tip_sha: f.head, scs: [{ id: 'SC-1', status: 'pass' }], e2e: { status: 'pass', candidate_sha: f.head }, size_gate: { result: 'PASS', candidate_sha: f.head } } },

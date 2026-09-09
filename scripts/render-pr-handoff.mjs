@@ -49,7 +49,7 @@ export function renderScText(packet) {
 
 export function renderPrHandoff({
   packet, identity, leadSessionId, seq, repo, title, snapshot,
-  why, excerpts, how, forbiddenExtra, tableLine, executionPlanHash,
+  why, excerpts, how, forbiddenExtra, tableLine, executionPlanHash, continuation,
 }) {
   if (!packet || typeof packet !== 'object') {
     throw new LedgerError('PACKET_INCOMPLETE', 'render-pr-handoff 缺 packet');
@@ -146,7 +146,8 @@ export function renderPrHandoff({
     ['6. SC 全文', scLines.join('\n')],
     ['7. 验证命令', packet.verify_cmds.join('\n')],
     ['8. 做完之后（自动，不要问 lead）', [
-      'candidate 只是检查点，不是终点。同一 owner 继续到机器可证明的 PR Ready，并由 lead 在终点验收。',
+      'candidate 只是检查点，不是终点。同一 owner 继续到机器可证明的 PR Ready；启用 continuation v2 后，lead 仅在必要决策或整包最终验收时接收聚合事件。',
+      ...(continuation ? ['启用 continuation v2 时，绑定完成后先写 checkpoint；阶段变化、CI等待、真实决策和交付前必须更新。同一命令用新 --phase/--step 重跑；不得只留口头进度。命令：' + continuation.command] : []),
       '启动执行时，若当前宿主实际暴露 create_goal/get_goal 工具，先检查并沿用本任务的 active Goal；没有本任务 Goal 时启动一个，目标必须覆盖本包全部 SC、本地 e2e、普通 push、当前提交必需 CI 绿、两阶段释放与 PR Ready。不得在 SC PASS 检查点把整体 Goal 标成 complete。若宿主未暴露这些工具，明确记录能力缺口并按内联契约继续，不把读过 goal skill 声称为已启动宿主 Goal。',
       'goal 场景 C 的 SC PASS 只是子阶段完成，不是 owner 整体任务完成。仅当所有 SC 都有 PASS 证据且没有 hard_stop、预算暂停或 blocked 时，才正常返回同一 owner 继续本地 e2e 和 PR Ready 收尾；不得通过切换阶段绕过停止条件。',
       '授权以本次任务已给出的来源、目标仓、分支和动作为准，开工包应注明；已明确授权的提交、推送、创建/更新目标 PR 直接执行，不重复请示。只有对应动作确实未获授权时才停下请求决定，PR Ready 终点本身不产生新增授权。',
@@ -233,6 +234,7 @@ export function renderPrHandoffFromLedger({
   const identity = { worktree: wg.worktree, branch: wg.branch, base: wg.base };
   return renderPrHandoff({
     executionPlanHash: ledger.pr_plan?.plan_hash,
+    continuation: { command: 'python3 ' + [resolve(ROOT, 'scripts/owner-checkpoint.py'), '--ledger', resolve(ledgerPath), '--group', group, '--checkpoint', resolve(dirname(ledgerPath), 'owner-checkpoints', sha256(group) + '.json'), '--phase', 'executing', '--step', 'start-authorized-owner'].map(value => "'" + String(value).replaceAll("'", "'\"'\"'") + "'").join(' ') },
     packet,
     identity,
     leadSessionId,

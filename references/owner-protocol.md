@@ -97,3 +97,31 @@ Mini 收到反馈后按投递包先准备 PR worktree，提炼反馈 SC，把绑
 这是 T1 skill 脚本检查：防意外错派、重复恢复、过期证据、误清现场；不能阻止拥有同一文件权限的 agent 故意手改台账，也不能证明 LLM 阅读过程。只读 sub 不替代正式 tester。bypassPermissions 仅是 worker 工具权限模式，不扩大任务允许的文件、动作或用户授权。
 
 Mivo 的 review-trust 由已部署审查控制面提供，必须包含 repo/workflowId/workflowPath/codeSha/workflowSha256/sourceManifest/dispatchCompatible。prepare/release 对实际 BASE 的审查控制面全文件集与 SHA256 清单逐项核对，读取 BASE 的 agent-use/docs/pr-rules.json 和 docs/sync/required-checks.json；缺配置或漂移均拒绝释放。不得从 PR head 自造受信任清单。
+
+
+## continuation v2：owner 直接续推
+
+此节只在明确批准并部署 schemaVersion=2 配置时生效，替代旧协议逐 PR 通知 lead 的默认方式。lead 只接必要决策与整包最终聚合；正常实现、测试、push、CI等待由原 owner 与脚本推进。原 v1 配置保持兼容，不自动迁移。
+
+配置示例在 `config/owner-continuation.example.json`。必须绑定 package_id、授权文件字节 hash、expected_group_ids 完整范围、每组 ledger/manifest_core_hash/session_id/assignment_seq 和 checkpoint_path。SQLite 路径必须是已确认的 Cindy DB，脚本以 mode=ro/query_only 只读明确 session 的 id/status/active_turn_pid，不读会话正文。busy 最后时刻复核不派发；此读取与宿主派发之间没有原子 CAS，保证仍为 T1，不能夸大成宿主隔离。
+
+部署必须核对真实 scheduler timeoutMs 与配置 schedule_timeout_sec 一致且不少于 owners×45+60 秒；13 owners 最低645秒。旧60秒配置不能沿用，不改变原频率。配置字段不证明宿主已更新，部署preview须另核metadata，若不符拒绝启用。
+
+先运行 `python3 scripts/preview-owner-continuation.py --config <既有配置绝对路径> --authorization <原批准文件绝对路径> --session-metadata-db <已确认DB绝对路径> --package-id <原任务包ID>`。只输出 JSON，不写配置/state。preview_only=true 禁止执行；列出的未来/替代任务缺 ledger 时必须补正确绑定或另有明确处置，不能静默删项。
+
+owner 绑定后运行 handoff 中的 `owner-checkpoint.py` 命令。每次实质阶段变更都重写：
+
+- `--phase executing --step <当前已授权动作> --head <当前SHA> --passed-sc <已通过SC>`；重复 --passed-sc 可列多项。
+- `--phase waiting-ci --step ci --repo xindong/mivo-canvas-plugin --pr-number <PR> --head <已pushSHA>`。脚本核当前 head 的必需 CI；pending 不唤模型，failed/green 才继续本机后续。发现 PR 已非 Draft 则要求交付凭据，不派本机修 Mini 反馈。
+- `--phase waiting-window --step <原因> --resume-after-epoch <明确开放时间秒>`。未到点零派发；不能把“审查没来”当本机保持写入权的理由。
+- `--phase decision --step <阻塞动作> --decision-id <稳定ID> --decision-evidence <证据绝对路径>`。同一事件只聚合一次，lead busy 时等，不能轮询追问。
+- `--phase delivered --step delivered --delivery-receipt <confirm v2回执> --release-receipt <release回执>`。脚本核原字节、release/confirm hash、branch、assignment 和 ledger 的交付 A；checkpoint 自称 delivered 不算完成。
+- 明确授权归档时另加 `--phase archived --archive-receipt <回执> --archive-tool-result <真实工具结果>`。配置 approved-legacy-archive 复用旧 supplemental receipt 验证，不改原失败历史。
+
+每 owner 的 stall 只看 phase/step/head/passed_scs，忽略 checked_at、ledger.version 等观测；无变化 30 分钟才有一次有界续推，最多三次，再发单次决策。等待 CI、busy、窗口不消耗恢复次数。
+
+派发先持久化 intent。真实 broker 回执只接受相同 target_session_id 与 resumed/queued/steered wake_kind。明确 HOST_NOT_READY 或指定“伙伴能力刷新” PRECONDITION_FAILED 才可五分钟间隔最多三次；之后 recovery_grants 必须逐个绑定 request_id、target_session_id、grant_id、authorization_ref，单 grant 只允许一次实际重试，busy 不消耗 grant。unknown 缺 lookup 能力时保持 blocked，不清 intent、不重复发。
+
+旧 state pending 的迁移保留 legacy 原对象。只有明确拒绝且 legacy_recovery.previous_state_digest 等于原对象 canonical JSON SHA256、含唯一 grant_id/authorization_ref，才解开旧 lead latch；未知响应即使配置 grant 也不得恢复重派。此迁移不是对真实宿主已恢复的证明。
+
+验收命令：`python3 -B -m unittest discover -s tests -p 'test_*continuation.py'`，以及现有 `node --test tests/release-mivo-pr.test.mjs tests/render-pr-handoff.test.mjs tests/skill-doc.test.mjs`。正式部署仍必须验证真实 owner/lead 回执，不能用 fixture PASS 替代。

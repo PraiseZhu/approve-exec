@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 2,
+  "preview_only": true,
+  "package_id": "approved-package-id",
+  "lead_session_id": "bound-lead-session-id",
+  "authorization_path": "/absolute/task/authorization.md",
+  "authorization_sha256": "REPLACE_WITH_EXACT_APPROVED_FILE_SHA256",
+  "session_metadata_db": "/absolute/confirmed-cindy-metadata.db",
+  "expected_group_ids": ["PR01"],
+  "schedule_timeout_sec": 105,
+  "stalled_after_sec": 1800,
+  "retry_after_sec": 300,
+  "owners": [
+    {
+      "group_id": "PR01",
+      "session_id": "bound-existing-owner-session-id",
+      "assignment_seq": 0,
+      "ledger_path": "/absolute/task/PR01/ledger.json",
+      "manifest_core_hash": "REPLACE_WITH_BOUND_MANIFEST_HASH",
+      "checkpoint_path": "/absolute/task/PR01/owner-checkpoint.json",
+      "completion": "delivered"
+    }
+  ],
+  "recovery_grants": []
+}
