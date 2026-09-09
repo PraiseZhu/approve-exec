@@ -10,7 +10,7 @@ trigger: 批准执行
 
 **合并红线（最高优先级）**：任何 lead、owner、reviewer、tester、Mini session、watcher、worker 或本 skill 都不得合并、自动合并、启用 auto-merge、点击合并或调用 gh pr merge。只有用户本人对指定 PR 的明确、当次授权才允许合并；PR Ready、cloud_ready、required checks 通过、管理员权限或开工包中的提交/推送授权，均不构成合并授权。后续由用户手动合并插件承接该动作；插件上线前只能报告“可合并”，不得代替用户合并。
 
-Lead 只做判断：拆 PR、写开工包、派独立 session、裁决例外、验收、派 native cleanup sub、归档该 PR 的 owner。功能代码、SC、e2e、开远端 PR 与必需 CI 确认由本机 owner 执行；云端反馈修复由 Mini Cindy 常驻程序执行。本 skill 不再 register Mini；每 PR 仍只允许一个 Mini 修复 session，title 为 `{项目名}-{任务名}丨修复丨YYYY-MM-DD`。
+Lead 只做判断：拆 PR、写开工包、派独立 session、裁决例外、验收、派 native cleanup sub、归档该 PR 的 owner。功能代码、SC、e2e、开远端 PR 与必需 CI 确认由本机 owner 执行；云端反馈修复由 Mini Cindy 常驻程序执行。本 skill 不再 register Mini；每 PR 仍只允许一个 Mini 修复 session，沿用统一标题 `{项目名}-{中文任务名}丨 {MMDD}`。
 
 真实派窗与 owner 入账的命令、恢复边界见 references/owner-protocol.md（派发前必读，完整内容随 handoff 发送）。保证等级是 T1 skill 纪律与脚本校验，不是宿主强制隔离。
 
@@ -168,7 +168,7 @@ create **没有 `provider_id` 字段**。create 后 `provider_id` 为 null 是�
 
 Art = Super Grok（`provider_id=art`，模型 id `grok-4.6`），不是 cindy-art 画图插件。
 
-标题格式：`{项目名}-{中文任务名}丨 {MMDD}`。分隔符是 `丨`，日期两位月日、前面一个空格。任务段必须含至少一个汉字。例：`MivoPlugin-存图补图修复丨 0902`。Mini 常驻修复窗使用 `{项目名}-{任务名}丨修复丨YYYY-MM-DD`，本 skill 不代创建，也不复用 owner 的标题来猜会话身份。
+标题格式：`{项目名}-{中文任务名}丨 {MMDD}`。分隔符是 `丨`，日期两位月日、前面一个空格。任务段必须含至少一个汉字。例：`MivoPlugin-存图补图修复丨 0902`。Mini 常驻修复窗沿用同一格式：短中文任务名，日期固定为 Asia/Shanghai 首次创建日；PR 号、nodeid、分支和修复角色留在 metadata，不把完整 PR 技术标题拼入侧栏。复用或恢复时保留 session_id 与首次创建日；纠正旧标题走宿主 rename 的预览和并发校验，不重建 session。本 skill 不代创建 Mini session，也不从标题猜会话身份。
 
 | 仓 | 标题前缀 |
 |---|---|
@@ -246,7 +246,7 @@ Mini Cindy 常驻程序是云端反馈修复者；本机 owner 仅推进到本�
 
 ready-check 先每 PR、再 run：对每个 group 用该组 worktree 跑门；单 PR 通过后独立写 LOCAL_PR_VALIDATED，不等其它组；兼容旧整批入口才写 run 级 `READY_FOR_LATER_SUBMIT_PR_SKILL`。这行是验收门过了的机器信号，意思是 owner 可以继续开远端 PR 并在 PR Ready 后归档；不是「交给以后的提交 PR skill」，也不是 lead 可以 git merge。旧 `accepted` / run `ready` 不得原地改名冒充 PR Ready。七门按 PR 各算一遍。L2 相对该 PR 的 `identity.base`。run 级 ready 额外一条：总表里的波次顺序已记录；真正合入不由本 skill 执行。
 
-`watch_registered` 旧回执仍可读，但新 Mivo 路径不再把它当清场前置。Mini Cindy 以 PR nodeid 建唯一修复 session，title 为 `{项目名}-{任务名}丨修复丨YYYY-MM-DD`；本 skill 不代创建该 session。
+`watch_registered` 旧回执仍可读，但新 Mivo 路径不再把它当清场前置。Mini Cindy 以 PR nodeid 建唯一修复 session，title 沿用第⑥段统一格式；本 skill 不代创建该 session。
 
 Lock+tmp+rename+CAS 与 `LedgerError` 码沿用。`budget_note` 事件可留，但 lead 不跨 session 加总账单。
 

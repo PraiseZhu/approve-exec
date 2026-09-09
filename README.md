@@ -7,7 +7,7 @@
 - lead 不代执行产品任务；只读验收 `pr_ready` 后派 cleanup sub，再消费真实归档回执
 - owner 派发通过 prepare → Cindy `send_to_session` → bind 记录一次性 claim；未知工具回执保留现场，不重复 create
 - 旧台账 `accepted` / run `ready` 保持 legacy 语义，不得原地改名冒充 PR Ready
-- owner 标题：`{项目名}-{中文任务名}丨 {MMDD}`；Mini 修复窗：`{项目名}-{任务名}丨修复丨YYYY-MM-DD`
+- owner 与 Mini 修复窗统一标题：`{项目名}-{中文任务名}丨 {MMDD}`；Mini 使用短中文任务名与 Asia/Shanghai 首次创建日，PR 号和修复角色留在 metadata，复用时保留原 session_id
 - 本 skill 不合入、不跑三机同步；merge 由人点
 
 状态：owner 自主验收、首次 CI 失败回修、`pr_ready`、本地清理和归档回执已由脚本校验。`scripts/lead-continuation.py` 为已显式配置的开工包提供 script-only 续跑；普通 owner 的阶段变化不逐轮唤醒 lead。它不自动注册未来任务，不替代宿主 Goal，也不保证 Cindy 离线时继续运行。Mini 独立发现目标仓本人 PR，不依赖本 skill 手动交接。保证等级仍是 T1 流程校验，不能阻止同一 OS 用户主动改账。Fable 决策是状态机外 sidecar（`config/fable-decision.json` + `scripts/decision-broker.mjs`）。
