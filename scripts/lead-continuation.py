@@ -3,8 +3,9 @@
 
 Reads explicitly configured approve-exec ledgers (and an optional status.json),
 then wakes the existing lead session only when a business fingerprint changes or
-the configured stall window expires.  It never reads session transcripts/DBs and
-never discovers additional tasks.
+the configured stall window expires in v1. Explicit v2 routes bound owners and
+reads only configured session identity/status/busy metadata from SQLite read-only.
+Neither version reads session transcripts or discovers additional tasks.
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 PR_WATCH = HERE / "pr-watch"
 sys.path.insert(0, str(PR_WATCH))
+sys.path.insert(0, str(HERE))
 from protocol import DuplexClient, RpcError  # type: ignore  # noqa: E402
 
 VOLATILE_KEYS = {"updated_at", "created_at", "last_seen_at", "observed_at", "at", "timestamp", "mtime", "mtime_ms"}
@@ -196,6 +198,9 @@ def _config(path: str | Path) -> tuple[Path, dict[str, Any]]:
     config_path = Path(path).expanduser().resolve()
     cfg = _read_json(config_path, "continuation config")
     if not isinstance(cfg, dict): _die("continuation config must be an object")
+    if cfg.get("schemaVersion") == 2:
+        from owner_continuation import validate_config
+        return config_path, validate_config(cfg)
     lead = cfg.get("lead_session_id")
     if not isinstance(lead, str) or not lead.strip(): _die("lead_session_id is required")
     paths = cfg.get("ledger_paths")
@@ -326,6 +331,17 @@ def _message(cfg: dict[str, Any], signals: list[dict[str, Any]], fp: str, reason
 def run_once(config_path: str | Path, *, client: Any | None = None, now: float | None = None) -> dict[str, Any]:
     config_file, cfg = _config(config_path)
     now = time.time() if now is None else now
+    if cfg.get("schemaVersion") == 2:
+        from owner_continuation import run
+        state_path, lock_path = _state_paths(config_file)
+        with _lock(lock_path) as acquired:
+            if not acquired: return {"status": "locked", "dispatched": False}
+            previous = _read_json(state_path, "continuation state") if state_path.exists() else {}
+            def legacy_archive(owner):
+                status = _read_json(Path(owner['legacy_status_path']), 'legacy status')
+                items = [item for item in _status_values(status) if item.get('pr_id') == owner['group_id'] and item.get('session_id') == owner['session_id']]
+                return len(items) == 1 and _status_item_archived(items[0], [Path(owner['ledger_path'])])
+            return run(cfg, previous, rpc=client or DuplexClient(), now=now, write=lambda value: _write_atomic(state_path, value), legacy_archive_fn=legacy_archive)
     ledgers = [_read_json(path, f"ledger {path}") for path in cfg["ledger_paths"]]
     if cfg.get("status_path"):
         if not cfg["status_path"].exists(): _die("status_path is configured but missing")
@@ -438,6 +454,7 @@ def main() -> None:
         _, cfg = _config(args.config)
         result = run_once(args.config, client=client)
         summary = {"status": result.get("status"), "fingerprint": result.get("fingerprint"), "dispatched": result.get("dispatched", False)}
+        if cfg.get("schemaVersion") == 2: summary["outcomes"] = result.get("outcomes", {})
         client.emit_complete(json.dumps(summary, ensure_ascii=False, separators=(",", ":")), cfg["lead_session_id"])
     except Exception as exc:
         print(f"lead-continuation: {exc}", file=sys.stderr)

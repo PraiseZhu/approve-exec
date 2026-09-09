@@ -204,6 +204,10 @@ Lead 验收时现读 live routing.json：交卷 `e2e.model` 既不是当前 e2e 
 
 ## ⑧ 子 session 闭环与 lead 指挥
 
+**continuation v2 的当前执行合约**：当已批准配置启用 `schemaVersion=2` 时，本节旧协议中逐 PR 唤醒 lead、每 PR 必须归档的默认描述由以下约定替代：零 token 脚本直接续推已绑定 idle owner；busy 不催，CI pending 与明确窗口只检查等待；lead 只处理新增真实决策与整包最终事件。每 owner 用 `owner-checkpoint.py` 写入 ledger 同目录的 `owner-checkpoint.json`，handoff 已提供命令，不能只口头报进度。达成配置中的授权 `completion=delivered` 即本机终态；明确要求归档的才用 `archived`，原批准例外用 `approved-legacy-archive` 验旧凭据，保留原 fail/incomplete。不得因源码存在就宣称实际调度已切换。
+
+部署前用 `preview-owner-continuation.py` 只读生成配置预览，显式保留所有已批准 group；缺 ledger/session/checkpoint 必须阻塞，不能删掉未完成项凑成 complete。完整接口、实际宿主能力限制与恢复流程见 `references/owner-protocol.md`。宿主当前只有派发 RPC，没有 lookup；unknown response 保持 blocked 并核原回执，不宣称 exactly-once。明确派发前拒绝才可凭精确授权恢复单次，禁止反复清 pending/归零。
+
 PR Ready 表示本机验收、当前提交 required CI 全绿、审查workflow静态入口前提可用，以及 OPEN 非 draft PR head 一致；开 PR ≠ Mini 修复开始，lead 验收后立即清本地归档，不能把它误作审查机最终通过。审查机独立打/撤 `review:merge-ready`。
 
 owner session 只许在这五种情况下停。其中 2–5 进入 DECISION_REQUIRED（保留 owner 身份和现场，不算完成）；第 1 种是正常完成，pr_ready 后由 lead 清场归档：
