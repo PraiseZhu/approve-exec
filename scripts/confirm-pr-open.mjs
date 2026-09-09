@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { LedgerError, parseTimestamp } from './run-ledger.mjs';
+import { confirmMivoRelease, deliveryGh } from './release-mivo-pr.mjs';
 
 const GITHUB_PR_URL_RE = /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+/;
 const SHA_RE = /^[0-9a-f]{40}$/;
@@ -76,7 +77,7 @@ function requireStamp(value, name) {
   return n;
 }
 
-export function confirmPrOpen({ repo, branch, head, ghBin, now, ledgerVersion, assignmentSeq, runner = spawnSync } = {}) {
+export function confirmPrOpen({ repo, branch, head, ghBin, now, ledgerVersion, assignmentSeq, runner = spawnSync, releaseReceipt, git, worktree } = {}) {
   if (typeof repo !== 'string' || !repo.includes('/')) {
     throw new LedgerError('ARGS', `repo 必须是 owner/name（当前: ${repo}）`);
   }
@@ -84,6 +85,11 @@ export function confirmPrOpen({ repo, branch, head, ghBin, now, ledgerVersion, a
     throw new LedgerError('ARGS', 'branch 必须是非空字符串');
   }
   parseTimestamp(now, 'confirm-pr-open --now');
+  if (releaseReceipt !== undefined) {
+    if (repo !== MIVO_REPO) throw new LedgerError('ARGS', '--release-receipt is Mivo-only');
+    return confirmMivoRelease({ releaseReceipt, branch, head, now, ledgerVersion, assignmentSeq, git, worktree,
+      gh: args => deliveryGh(args, (binary, argv, options) => runner(ghBin ?? binary, argv, options)) });
+  }
   let raw = runGh(repo, branch, ghBin, runner);
   if (repo === MIVO_REPO) {
     assertReadyPr({ ...raw, expectedHead: head });
@@ -120,6 +126,8 @@ function runCli(argv) {
       now: flags.now,
       ledgerVersion: flags['ledger-version'],
       assignmentSeq: flags['assignment-seq'],
+      releaseReceipt: flags['release-receipt'],
+      worktree: flags.worktree,
     });
     process.stdout.write(`${JSON.stringify(out)}\n`);
     return 0;

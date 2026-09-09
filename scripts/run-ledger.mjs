@@ -32,6 +32,7 @@ import {
 import { resolve, dirname, join, isAbsolute } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadMiniWatchConfig, miniWatchConfigSha256 } from './lib/mini-watch-config.mjs';
+import { validateMivoV2 } from './release-mivo-pr.mjs';
 import { assertTakeover } from './pr-watch/takeover.mjs';
 import { hashObject } from './lib/common.mjs';
 import { compilePrPlan, executionPlanHash } from './lib/pr-plan.mjs';
@@ -1097,6 +1098,12 @@ function assertReceiptAfterEvent(receipt, ledger, group, eventType, what) {
 }
 
 export function readPrOpenReceipt(receiptPath) {
+  let candidate;
+  try { candidate = JSON.parse(readFileSync(receiptPath, 'utf8')); }
+  catch (error) { throw new LedgerError('WRAPUP_RECEIPT', `→pr-open receipt 读取/解析失败: ${error.message}`); }
+  if (candidate.schemaVersion === 2) {
+    try { return validateMivoV2(candidate); } catch (error) { throw new LedgerError('WRAPUP_RECEIPT', error.message); }
+  }
   const parsed = readExactReceipt(receiptPath, PR_OPEN_RECEIPT_KEYS, '→pr-open receipt');
   if (typeof parsed.url !== 'string' || !GITHUB_PR_URL_RE.test(parsed.url)) {
     throw new LedgerError('WRAPUP_RECEIPT', `→pr-open receipt.url 非法（当前: ${parsed.url ?? '缺失'}）`);
@@ -1419,10 +1426,11 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
     assertReceiptAfterEvent(receipt, ledger, parsed.group_id, 'pr_opened', 'pr_ready');
     const receiptMs = parseTimestamp(receipt.checked_at, 'pr_ready.checked_at');
     const nowMs = parseTimestamp(now, 'pr_ready.now');
-    if (receipt.headRefOid !== sha || receipt.url !== g.pr_url || receipt.branch !== g.branch
+    if ((receipt.deliveryHeadSha ?? receipt.headRefOid) !== sha || receipt.url !== g.pr_url || receipt.branch !== g.branch
       || receiptMs > nowMs || nowMs - receiptMs > 5 * 60_000) {
       throw new LedgerError('PRECONDITION', 'pr_ready 必须重新确认当前非 draft PR（URL/branch/head 对齐，回执五分钟内且不在未来）');
     }
+    if (receipt.schemaVersion === 2) Object.assign(ev.detail, { deliveryHeadSha: receipt.deliveryHeadSha, observedHeadSha: receipt.observedHeadSha, releaseEpoch: receipt.releaseEpoch });
     ev.detail.remote_confirmed_at = receipt.checked_at;
     ev.detail.assignment_seq = g.assignment_seq ?? 0;
   }
@@ -1863,7 +1871,7 @@ export function setState({
       if (prOpenReceipt.branch !== g.branch) {
         return `缺失前置：pr-open receipt.branch=${prOpenReceipt.branch} 对不上组分支 ${g.branch ?? '缺失'}`;
       }
-      if (prOpenReceipt.headRefOid !== g.tip_sha) {
+      if ((prOpenReceipt.deliveryHeadSha ?? prOpenReceipt.headRefOid) !== g.tip_sha) {
         return `缺失前置：pr-open receipt.headRefOid=${prOpenReceipt.headRefOid} 对不上组 tip_sha=${g.tip_sha ?? '缺失'}`;
       }
       try {
@@ -2027,7 +2035,8 @@ export function setState({
           group_id: group,
           pr_url: g.pr_url,
           pr_number: prOpenReceipt.number,
-          headRefOid: prOpenReceipt.headRefOid,
+          headRefOid: prOpenReceipt.deliveryHeadSha ?? prOpenReceipt.headRefOid,
+          ...(prOpenReceipt.schemaVersion === 2 ? { observedHeadSha: prOpenReceipt.observedHeadSha, releaseEpoch: prOpenReceipt.releaseEpoch } : {}),
           session_id: g.session_id,
           tip_sha: g.tip_sha,
           assignment_seq: g.assignment_seq ?? 0,
