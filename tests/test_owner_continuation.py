@@ -85,6 +85,25 @@ class OwnerContinuationTests(unittest.TestCase):
         ownercalls=[p for _,p in self.client.calls if p['target_session_id']!='lead']
         self.assertEqual(len(ownercalls),8)
         self.assertEqual(len([p for _,p in self.client.calls if p['target_session_id']=='lead']),1)
+    def test_each_real_stalled_dispatch_starts_a_full_cooldown(self):
+        for t in [100, 131, 132]: self.run_tick(t)
+        ownercalls = [p for _, p in self.client.calls if p['target_session_id'] != 'lead']
+        self.assertEqual(len(ownercalls), 4)
+        self.assertEqual(self.state['owners']['PR1:0']['last_dispatch_at'], 131)
+        self.assertEqual(self.state['outcomes']['PR1:0'], 'monitoring')
+
+    def test_reconciled_delivery_recovers_same_request_time(self):
+        self.run_tick(100)
+        row = self.state['owners']['PR1:0']
+        row.pop('last_dispatched_progress')
+        row['last_dispatch_at'] = 1
+        self.run_tick(110)
+        self.assertEqual(self.state['outcomes']['PR1:0'], 'already-delivered')
+        self.assertEqual(row['last_dispatch_at'], 100)
+        self.run_tick(120)
+        self.assertEqual(len(self.client.calls), 2)
+        self.assertEqual(self.state['outcomes']['PR1:0'], 'monitoring')
+
     def test_delivery_claim_alone_cannot_complete(self):
         self.point(0,phase='delivered')
         self.run_tick(evidence_fn=lambda _: {'verified':False})
