@@ -305,7 +305,8 @@ def run(cfg, state, *, rpc, now, write, metadata_fn=metadata, evidence_fn=eviden
             if outcome in ['dispatched', 'already-delivered']:
                 if row.get('last_dispatched_progress') == progress:
                     row['stalled_attempts'] = attempt
-                row.update(last_dispatched_progress=progress, last_dispatch_at=row.get('last_dispatch_at', now))
+                dispatched_at = now if outcome == 'dispatched' else state['intents'][request]['attempted_at']
+                row.update(last_dispatched_progress=progress, last_dispatch_at=dispatched_at)
         except (ValueError, OSError, sqlite3.Error, KeyError, subprocess.SubprocessError) as error:
             outcomes[key] = 'blocked-evidence'
             decisions.append({'owner': key, 'event': {'id': 'evidence:' + digest(str(error)), 'evidence_path': owner.get('checkpoint_path'), 'reason': str(error)[:200]}})
