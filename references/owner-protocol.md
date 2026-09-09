@@ -96,7 +96,7 @@ Mini 收到反馈后按投递包先准备 PR worktree，提炼反馈 SC，把绑
 
 这是 T1 skill 脚本检查：防意外错派、重复恢复、过期证据、误清现场；不能阻止拥有同一文件权限的 agent 故意手改台账，也不能证明 LLM 阅读过程。只读 sub 不替代正式 tester。bypassPermissions 仅是 worker 工具权限模式，不扩大任务允许的文件、动作或用户授权。
 
-Mivo 的 review-trust 由已部署审查控制面提供，必须包含 repo/workflowId/workflowPath/codeSha/workflowSha256/sourceManifest/dispatchCompatible。prepare/release 对实际 BASE 的审查控制面全文件集与 SHA256 清单逐项核对，读取 BASE 的 agent-use/docs/pr-rules.json 和 docs/sync/required-checks.json；缺配置或漂移均拒绝释放。不得从 PR head 自造受信任清单。
+Mivo 的 review-trust 由已部署审查控制面提供，必须包含 repo/workflowId/workflowPath/codeSha/workflowSha256/sourceManifest。旧协议另需 dispatchCompatible；current-review-v1 改核 PRtarget ready_for_review、新 export/history helpers、独立 hosted native_attestation，以及真实 REVIEW_PR_CONTROL_SHA 和 NATIVE_EVIDENCE_TRUST_JSON 变量与 trust 的 pin/全清单一致，不要求旧 workflow_dispatch。prepare/release 对实际 BASE 的审查控制面全文件集与 SHA256 清单逐项核对，读取 BASE 的 agent-use/docs/pr-rules.json 和 docs/sync/required-checks.json；缺配置或漂移均拒绝释放。不得从 PR head 自造受信任清单。
 
 
 ## continuation v2：owner 直接续推

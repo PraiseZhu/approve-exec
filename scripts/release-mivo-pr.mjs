@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { collectPrOwnershipSync } from './mivo-pr-snapshot.mjs';
-import { verifyControlSourceSync } from './mivo-control-source.mjs';
+import { verifyControlSourceSync, controlManifestDigest } from './mivo-control-source.mjs';
 import { collectMivoCiSync } from './mivo-ci.mjs';
 
 export const MIVO_REPO = 'xindong/mivo-canvas-plugin';
@@ -52,8 +52,13 @@ function sameCandidate(pr, candidate) {
     && pr.headRefOid === candidate.deliveryHeadSha && pr.baseRefOid === candidate.baseSha, 'candidate head/base/identity drift');
 }
 function prerequisites(pr, gh, trust) {
-  check(trust?.repo === pr.repo && sha(trust.codeSha) && trust.workflowPath === '.github/workflows/code-review.yml' && trust.dispatchCompatible === true, 'review trust configuration required');
-  for (const name of ['build_control_manifest.mjs', 'review_dispatch_context.py', 'review_public_evidence.py']) check(trust.sourceManifest?.[`.github/scripts/${name}`], 'trusted helper missing');
+  const native = trust?.protocol === 'current-review-v1';
+  check(trust?.repo === pr.repo && sha(trust.codeSha) && trust.workflowPath === '.github/workflows/code-review.yml'
+    && (native || trust.protocol == null && trust.dispatchCompatible === true), 'review trust configuration required');
+  if (native) check(sha(trust.native?.sourceSha), 'native Review-PR source pin required');
+  const helpers = native ? ['build_control_manifest.mjs', 'review_native_export.mjs', 'review_native_history.mjs']
+    : ['build_control_manifest.mjs', 'review_dispatch_context.py', 'review_public_evidence.py'];
+  for (const name of helpers) check(trust.sourceManifest?.[`.github/scripts/${name}`], 'trusted helper missing');
   const control = verifyControlSourceSync({ repo: pr.repo, sha: pr.baseRefOid, gh, manifest: trust.sourceManifest });
   const rules = parse(gh(['api', `repos/${pr.repo}/contents/agent-use/docs/pr-rules.json?ref=${pr.baseRefOid}`]));
   check(rules.type === 'file' && rules.encoding === 'base64', 'BASE review rules unavailable');
@@ -64,8 +69,20 @@ function prerequisites(pr, gh, trust) {
   const source = parse(gh(['api', `repos/${pr.repo}/contents/.github/workflows/code-review.yml?ref=${pr.baseRefOid}`]));
   check(source.type === 'file' && source.encoding === 'base64' && typeof source.content === 'string', 'review workflow source unavailable');
   const bytes = Buffer.from(source.content, 'base64');
-  check(bytes.length > 0 && bytes.length < 1024 * 1024 && /workflow_dispatch\s*:/.test(bytes.toString())
-    && /ready_for_review/.test(bytes.toString()), 'base lacks compatible review entry points');
+  const text = bytes.toString();
+  check(bytes.length > 0 && bytes.length < 1024 * 1024 && /ready_for_review/.test(text)
+    && (native ? /pull_request_target\s*:/.test(text) : /workflow_dispatch\s*:/.test(text)), 'base lacks compatible review entry points');
+  if (native) {
+    const attestation = text.match(/^  native_attestation:\n([\s\S]*?)(?=^  [A-Za-z_][\w-]*:|$(?![\s\S]))/m)?.[1];
+    check(attestation && /^    runs-on: ubuntu-latest\s*$/m.test(attestation)
+      && /actions\/attest-build-provenance@/.test(attestation)
+      && /vars\.REVIEW_PR_CONTROL_SHA/.test(text) && /vars\.NATIVE_EVIDENCE_TRUST_JSON/.test(text), 'native entry/attestation configuration missing');
+    const pin = parse(gh(['api', `repos/${pr.repo}/actions/variables/REVIEW_PR_CONTROL_SHA`]));
+    check(pin.name === 'REVIEW_PR_CONTROL_SHA' && pin.value === trust.native.sourceSha, 'native source variable pin mismatch');
+    const history = parse(gh(['api', `repos/${pr.repo}/actions/variables/NATIVE_EVIDENCE_TRUST_JSON`]));
+    check(history.name === 'NATIVE_EVIDENCE_TRUST_JSON' && typeof history.value === 'string', 'native history trust variable missing');
+    check(controlManifestDigest(parse(history.value).sourceManifest) === controlManifestDigest(trust.sourceManifest), 'native history source manifest mismatch');
+  }
   check(hash(bytes) === trust.workflowSha256 && trust.sourceManifest[wf.path] === trust.workflowSha256, 'workflow does not match trusted manifest');
   return { workflowId: wf.id, workflowPath: wf.path, baseSha: pr.baseRefOid, workflowSha256: hash(bytes), control, rulesSha256: hash(ruleBytes), trust };
 }

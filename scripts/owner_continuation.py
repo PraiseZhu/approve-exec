@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+import shlex
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -275,6 +276,9 @@ def run(cfg, state, *, rpc, now, write, metadata_fn=metadata, evidence_fn=eviden
                 message = 'Reconcile your actual bound ledger and current PR first; this initialization claims no SC or phase completion. Continue only remaining authorized local work after checking ownership, then write a truthful checkpoint. Read ' + owner['ledger_path']
             if point['phase'] == 'delivered':
                 message = 'Delivery is already verified. Only complete the explicitly authorized cleanup/archive contract; never modify product, remote branch, or Mini review work. Read ' + owner['checkpoint_path']
+            writer_command = shlex.join(['python3', str(HERE / 'owner-checkpoint.py'), '--ledger', owner['ledger_path'], '--group', owner['group_id'], '--checkpoint', owner['checkpoint_path'], '--phase', 'reconciling', '--step', 'inspect-actual-assignment'])
+            message += ('\nBound checkpoint: ' + owner['checkpoint_path'] + '\nCheckpoint writer: ' + writer_command
+                        + '\nAfter actual progress or phase changes, update this exact checkpoint using the writer with truthful --phase/--step, --head and --passed-sc as applicable. CI waiting requires --repo/--pr-number/--head; delivery requires original --delivery-receipt/--release-receipt. Do not leave initialization as your final progress.')
             outcome = dispatch(cfg, state, request, owner['session_id'], message, rpc, now, write, metadata_fn)
             outcomes[key] = outcome
             if outcome.startswith('blocked-'):
