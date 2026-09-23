@@ -63,6 +63,7 @@ import { spawnSync } from 'node:child_process';
 // 不在 ready-check 另写一套存在性检查——receipts 在 core hash 黑名单之外，删它 hash 不变，
 // 出口门不能只靠 hash 兜底）。
 import { tmpPath, readManifest, readExecutionManifest, assertManifestBound, assertBaselineReady, findGroup, findPacket, latestPrHandoffDelivery } from './run-ledger.mjs';
+import { loadCollateralPolicy, evaluateCollateral } from './lib/collateral.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -312,12 +313,60 @@ function isVerifyGroup(packet) {
 //   L2 全树封闭性——HEAD 相对台账 baseline_tip 的 diff 必须全部落在「全组 allowed_paths
 //      并集 ∪ P 席打包白名单（graph.json phases.P.packaging_paths）」内；baseline_tip=null
 //      （兼容模式）→ stderr WARN 点名跳过（与 run-ledger init 兼容模式既有处理风格一致）。
+// 连带文件改动量（base → HEAD）：numstat 行数（二进制记 Infinity）+ 新增行文本（查 skip/only 绕过）。
+function collateralDiff(repoRoot, base, headSha, paths) {
+  const changed = new Map();
+  const added = new Map();
+  const num = runGit(repoRoot, ['diff', '--numstat', base, headSha, '--', ...paths]);
+  if (num.status !== 0) return { error: num.stderr || `git diff --numstat 失败（exit ${num.status}）` };
+  for (const line of num.stdout.split('\n').filter(Boolean)) {
+    const [a, d, ...rest] = line.split('\t');
+    const lines = a === '-' || d === '-' ? Infinity : Number(a) + Number(d);
+    changed.set(rest.join('\t'), lines);
+  }
+  for (const p of changed.keys()) {
+    const patch = runGit(repoRoot, ['diff', '-U0', base, headSha, '--', p]);
+    if (patch.status !== 0) return { error: patch.stderr || `git diff -U0 ${p} 失败` };
+    added.set(p, patch.stdout.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).map((l) => l.slice(1)));
+  }
+  return { changed, added };
+}
+
+// 连带文件校验（config/collateral.json）：返回通过校验的路径集，违规逐条进 gaps（gate=collateral）。
+// 策略只在确有申报时才读：没申报的旧交卷完全不碰这份配置（也不在 stderr 多出任何行）。
+function checkCollateral(g, packet, packets, delivery, repoRoot, headSha, baseline, gaps) {
+  const used = Array.isArray(delivery?.detail?.collateral_used) ? delivery.detail.collateral_used : [];
+  if (used.length === 0) return [];
+  let policy;
+  try {
+    policy = loadCollateralPolicy();
+  } catch (err) {
+    gaps.push({ gate: 'collateral', detail: `${g.group_id} 申报了连带文件，但连带策略不可用（${err.message}）` });
+    return [];
+  }
+  const base = g.base ?? baseline;
+  if (!base) { gaps.push({ gate: 'collateral', detail: `${g.group_id} 申报了连带文件，但无基线可比（组 base 与台账 baseline_tip 都缺）` }); return []; }
+  const diff = collateralDiff(repoRoot, base, headSha, used.map((u) => u?.path).filter((p) => typeof p === 'string'));
+  if (diff.error) { gaps.push({ gate: 'collateral', detail: `${g.group_id} 连带文件改动量无法计算（${diff.error}）` }); return []; }
+  const result = evaluateCollateral({
+    policy,
+    packet,
+    otherPackets: packets.filter((p) => p.group_id !== g.group_id),
+    used,
+    changedLines: diff.changed,
+    addedLines: diff.added,
+  });
+  for (const v of result.violations) gaps.push({ gate: 'collateral', detail: `${g.group_id} ${v}` });
+  return result.paths;
+}
+
 function checkReviewClean(ledger, manifest, repoRoot, headSha, packagingPaths, gaps) {
   // F-O: 台账不可解析时本 gate 自身点名不可用，不拖垮不依赖台账的后项
   if (!ledger) { gaps.push({ gate: 'review-clean', detail: '台账不可用（文件不存在或不可解析）' }); return; }
   const groups = (ledger.waves || []).flatMap((w) => w.groups || []);
   const events = ledger.events || [];
   const packets = manifest?.dispatch?.packets || [];
+  const collateralPaths = [];
   for (const g of groups) {
     const deliveries = events.filter((e) => e.type === 'delivery' && e.detail?.group_id === g.group_id);
     const packet = packets.find((p) => p.group_id === g.group_id);
@@ -334,7 +383,11 @@ function checkReviewClean(ledger, manifest, repoRoot, headSha, packagingPaths, g
       // 当前 HEAD 在组 allowed_paths 内必须零 diff。集成 squash/rebase/P 席打包都会产生新
       // HEAD——SHA 精确等值因此不再适用；改证「审过的字节没变」。git 无法解析已审 tip
       // （过期/伪造 SHA）→ fail-closed 点名，不猜测不降级。
-      const allowedPaths = Array.isArray(packet?.allowed_paths) ? packet.allowed_paths : [];
+      const groupCollateral = bindingKind === 'pr-handoff'
+        ? checkCollateral(g, packet, packets, lastBinding, repoRoot, headSha, ledger.baseline_tip ?? null, gaps)
+        : [];
+      collateralPaths.push(...groupCollateral);
+      const allowedPaths = [...(Array.isArray(packet?.allowed_paths) ? packet.allowed_paths : []), ...groupCollateral];
       const reviewedTip = lastBinding.detail.candidate_sha;
       const domainDiff = runGit(repoRoot, ['diff', '--name-only', reviewedTip, headSha, '--', ...allowedPaths]);
       if (domainDiff.status !== 0) {
@@ -355,6 +408,7 @@ function checkReviewClean(ledger, manifest, repoRoot, headSha, packagingPaths, g
     const treeWhitelist = [
       ...packets.flatMap((p) => (Array.isArray(p.allowed_paths) ? p.allowed_paths : [])),
       ...(Array.isArray(packagingPaths) ? packagingPaths : []),
+      ...collateralPaths, // 只含通过 collateral 闸的连带路径；不合格的仍按越域点名
     ];
     const treeDiff = runGit(repoRoot, ['diff', '--name-only', baseline, headSha]);
     if (treeDiff.status !== 0) {

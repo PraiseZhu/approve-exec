@@ -31,6 +31,8 @@ prepare 使用台账路径旁固定的 .owners 目录。持久 claim 的作用�
 - 先核自己的 runtime 与 ledger.session_id、worktree、branch、base；确认 Art、完整包身份无误。绑定或 dispatched 登记尚未到达时，读台账等待，保留该 owner；不要写代码或重复派窗。
 - 真实读取自己的 goal skill；新版先执行文末 owner-gate.mjs baseline，通过后再执行随包给出的 owner-gate.mjs goal 命令，旧版不补造 baseline。脚本重算文件 hash、检查干净基线、CAS 入账 gate_goal 并推进 executing。不得补造已有改动之前的开工证据，不用 jump 等逐步放行。
 - 自主完成本 PR 的 SC。可以开只读 sub 获取信息，也可提前派 tester 验证。提前验证不能替代最终当前提交的全量 SC/e2e。本地禁止派 reviewer。
+- 判断按开工包第 8 段的决策三层走（SKILL.md 第⑲段）：事实用命令查；不越界的选择先问 Jev（Pi 走 `cindy_mcp_call_tool` 网关，`typesafe-jev` / `evaluate`），每次调用追加到台账目录 `jev/` 下本组留痕；只有越界才发 DECISION_REQUIRED，并附 Jev 选项排序。Jev 不可用时可撤回的选择按默认规则自决，连带文件改动必须有 Jev 结论。
+- `allowed_paths` 外的文件只能按第 5 段连带策略（`config/collateral.json`）改，交卷 `collateral_used` 逐条申报；别组写域的文件永远不是连带文件。
 - 首次及每次重新派 worker 前，现读共享 routing.json，执行 start_team({worker_permission_mode:"bypassPermissions"}) 并确认实际返回。用 owner-gate.mjs routing --owner-model <当前模型ID> --team-result <真实工具结果JSON> 连同台账/组/时间入账。脚本输出当前 e2e 档；agent、model、effort、provider_id 原样传给 Orca。只派 tester（e2e 档），禁止派 reviewer。配置缺项或 auto 不得冒充通过。
 - candidate 是检查点，正常 owner 继续完成全部 SC/e2e/本地门禁、push 与 Draft PR 收尾；Mivo 必须等当前提交 required CI 全绿且审查workflow静态入口前提可用后转为 OPEN 非 draft，再写 pr_ready。交卷后由 lead 验收并立即清本地、归档该 owner；本机不等待 Mini 接管，不继续同写分支。
 - 每次等待保留原任务 ID、状态、已尝试动作和下次唤醒条件；宿主 `lead-continuation.py` 按显式配置绑定 lead session、ledger 与状态源，每 5 分钟以 script-only（零模型）消费结构化进度和工具回执。正常阶段变化只更新进度；`pr_ready`、决策、清理归档或后继可派信号变化才唤醒 lead。没有进展满 30 分钟后续跑一次，同一指纹最多 3 次且每次间隔 30 分钟，之后记 `blocked`。未读到真实工具回执不得手写 state；Cindy 离线或宿主脚本不可用时如实报告，不能声称有后台自动唤醒。连续三轮无新证据，或授权/SC/接口/跨 PR 依赖改变，只发一个 DECISION_REQUIRED。停止的是受阻动作，不是宣布任务完成；仅所有 PR 真实归档后才可标记整包 complete。

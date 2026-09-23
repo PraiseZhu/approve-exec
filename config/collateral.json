@@ -1,0 +1,37 @@
+{
+  "_comments": {
+    "schema_version": "连带文件策略版本；render-pr-handoff 写进开工包第 5 段，ready-check 按同一份校验 collateral_used",
+    "max_files": "每个 PR 连带文件数上限。2026-09-23 用户批准的起步值，不是测量值；跑一批后按真实上报再调",
+    "max_lines": "每个 PR 连带文件新增+删除行数合计上限（git diff --numstat 相对台账 baseline_tip）",
+    "classes.generated": "登记类：只能用仓内生成器产出，路径必须在 files 清单里；regen 写入、check 复核",
+    "classes.legacy_test": "旧行为测试：断言被 SC 明确改掉的旧行为时才可改。2026-09-23 批准分两步上：先登记类，跑一批后再把 enabled 改 true",
+    "jev": "D1 域内判断调用 typesafe-jev evaluate；confidence 达到 act_confidence 才直接执行"
+  },
+  "schema_version": 1,
+  "max_files": 5,
+  "max_lines": 200,
+  "classes": {
+    "generated": {
+      "enabled": true,
+      "files": [
+        {
+          "path": "cindyplugin/design-inventory.md",
+          "regen": "node scripts/ci/design-inventory.mjs --write",
+          "check": "node scripts/ci/design-inventory.mjs --check"
+        }
+      ]
+    },
+    "legacy_test": {
+      "enabled": false,
+      "patterns": ["\\.(test|spec)\\.[cm]?[jt]sx?$", "(^|/)__tests__/"],
+      "min_jev_confidence": 0.8,
+      "jev_choice": "update_legacy_assertion",
+      "forbidden_added_re": "\\.(skip|only|todo)\\s*\\(|\\bx(it|describe|test)\\s*\\("
+    }
+  },
+  "jev": {
+    "ghost_id": "typesafe-jev",
+    "tool": "evaluate",
+    "act_confidence": 0.75
+  }
+}

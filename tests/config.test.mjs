@@ -52,7 +52,8 @@ test('runLedgerDir 以 ~ 开头（HOME 由消费脚本展开，不写死用户�
 test('skillTriggerScanPath 以 ~ 开头（HOME 由消费脚本展开，不写死用户主目录）', () => {
   assert.ok(defaults.skillTriggerScanPath.startsWith('~/'), 'skillTriggerScanPath 必须以 ~/ 开头，禁止硬编码绝对主目录');
   assert.ok(!defaults.skillTriggerScanPath.includes('/Users/'), 'skillTriggerScanPath 不得内嵌 /Users/<name> 具体路径');
-  assert.ok(defaults.skillTriggerScanPath.endsWith('skill-trigger-scan.md'),
+  // 2026-09-23 触发表拆分：完整「批准执行」行在 rules-lib/skill-trigger-detail.md，入口表只留短行
+  assert.ok(defaults.skillTriggerScanPath.endsWith('skill-trigger-scan.md') || defaults.skillTriggerScanPath.endsWith('skill-trigger-detail.md'),
     `skillTriggerScanPath 应指向触发词规则文件，当前: ${defaults.skillTriggerScanPath}`);
 });
 

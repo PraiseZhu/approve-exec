@@ -14,6 +14,7 @@ import { assertHandoffComplete, handoffHash } from './vnext-owner-contract.mjs';
 import { wouldCreate } from './session-dispatch.mjs';
 import { checkSite } from './site-check.mjs';
 import { renderScText } from './render-pr-handoff.mjs';
+import { loadCollateralPolicy, renderCollateralPolicyText } from './lib/collateral.mjs';
 import { extractArchiveResult } from './confirm-session-archived.mjs';
 
 function context(ledgerPath, groupId) {
@@ -88,9 +89,15 @@ export function prepareOwner({ ledgerPath, groupId, handoffPath, sitePath, now }
     assertHandoffComplete(text, { title: ctx.identity.title, worktree: ctx.identity.worktree,
       verify_cmds: ctx.packet.verify_cmds });
     const section = (heading, next) => text.split('## ' + heading + '\n')[1]?.split('\n## ' + next)[0]?.trim();
+    // 第 5 段 = 写域清单逐字，或「写域清单 + 空行 + 当前 config/collateral.json 渲染的连带策略原文」；
+    // 连带策略被改写同样拒（防用第 5 段偷扩授权），旧开工包（无连带策略）仍按原样放行。
+    const allowedBlock = ctx.packet.allowed_paths.map((p) => '- ' + p).join('\n');
+    const section5 = section('5. allowed_paths', '6. SC 全文');
+    const section5Ok = section5 === allowedBlock
+      || section5 === [allowedBlock, '', renderCollateralPolicyText(loadCollateralPolicy())].join('\n');
     if (section('6. SC 全文', '7. 验证命令') !== renderScText(ctx.packet)
       || section('7. 验证命令', '8. 做完之后') !== ctx.packet.verify_cmds.join('\n').trim()
-      || section('5. allowed_paths', '6. SC 全文') !== ctx.packet.allowed_paths.map((p) => '- ' + p).join('\n')) {
+      || !section5Ok) {
       throw new LedgerError('PACKET_INCOMPLETE', '开工包 SC 全文/优先级/命令/授权路径与 final 不一致');
     }
     const witnesses = [...text.matchAll(/^source_sha256\((.+)\)=([0-9a-f]{64})$/gm)];

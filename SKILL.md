@@ -1,12 +1,12 @@
 ---
 name: approve-exec
-description: 批准执行——只吃 task-priority final manifest；lead 拆 PR、写开工包、派独立 PI owner session、裁决例外；E 由 owner session 走 goal 场景 C 并自主推到 PR Ready；T 由 owner 现读 routing.json 派 e2e worker；本地不再派 GPT/Claude 单审；lead 不改产品代码、不代执行。触发词：批准执行。
+description: 批准执行——吃 task-priority final manifest，或把对话里已批准的方案经 context-intake 转成同形 manifest；lead 拆 PR、写开工包、派独立 PI owner session、裁决例外；E 由 owner session 走 goal 场景 C 并自主推到 PR Ready（域内判断先问 Jev，连带文件按策略自改，只有越界才回 lead）；T 由 owner 现读 routing.json 派 e2e worker；本地不再派 GPT/Claude 单审；lead 不改产品代码、不代执行。触发词：批准执行。
 trigger: 批准执行
 ---
 
 # approve-exec — lead 编排守则
 
-**lead 按本文编排**：把 task-priority final manifest 拆成每 PR 一个独立 owner session。本机 owner 完成实现、全部 priority/SC、本地 e2e 和普通 push；Mivo PR 先保持 Draft，只有当前提交 required CI 全绿且审查workflow静态入口前提可用后才转为 Ready for review，再写 pr_ready。lead 验收后立即派 sub 清本地并归档该 owner。云端审查反馈、冲突与复审由 Mini 常驻 Cindy 按 PR 唯一 session 接管，本机不再注册盯梢。candidate 是检查点；不得自行 merge。本地不再派 GPT/Claude 单审。
+**lead 按本文编排**：把输入 manifest（task-priority final，或上下文入口 context-intake 的同形产物，见第②段）拆成每 PR 一个独立 owner session。本机 owner 完成实现、全部 priority/SC、本地 e2e 和普通 push；Mivo PR 先保持 Draft，只有当前提交 required CI 全绿且审查workflow静态入口前提可用后才转为 Ready for review，再写 pr_ready。lead 验收后立即派 sub 清本地并归档该 owner。云端审查反馈、冲突与复审由 Mini 常驻 Cindy 按 PR 唯一 session 接管，本机不再注册盯梢。candidate 是检查点；不得自行 merge。本地不再派 GPT/Claude 单审。
 
 **合并红线（最高优先级）**：任何 lead、owner、reviewer、tester、Mini session、watcher、worker 或本 skill 都不得合并、自动合并、启用 auto-merge、点击合并或调用 gh pr merge。只有用户本人对指定 PR 的明确、当次授权才允许合并；PR Ready、cloud_ready、required checks 通过、管理员权限或开工包中的提交/推送授权，均不构成合并授权。后续由用户手动合并插件承接该动作；插件上线前只能报告“可合并”，不得代替用户合并。
 
@@ -14,7 +14,7 @@ Lead 只做判断：拆 PR、写开工包、派独立 session、裁决例外、�
 
 真实派窗与 owner 入账的命令、恢复边界见 references/owner-protocol.md（派发前必读，完整内容随 handoff 发送）。保证等级是 T1 skill 纪律与脚本校验，不是宿主强制隔离。
 
-生态链：task-priority（出 manifest）→ **本 skill（拆 PR + 写完整 handoff + 派唯一 owner）** → owner 用 goal 场景 C 完成实现与 SC 验证，再由同一 owner 完成本地 e2e 和已授权的 PR Ready 收尾。三审仍不在本 skill。本地不再派 GPT/Claude 单审。
+生态链：task-priority（出 manifest）或上下文入口 context-intake（对话里已批准的方案 → 同形 manifest）→ **本 skill（拆 PR + 写完整 handoff + 派唯一 owner）** → owner 用 goal 场景 C 完成实现与 SC 验证，再由同一 owner 完成本地 e2e 和已授权的 PR Ready 收尾。三审仍不在本 skill。本地不再派 GPT/Claude 单审。
 
 **阶段与授权交接**：SC PASS 是 goal 子阶段完成，不是 owner 整体任务完成。仅当所有 SC 都有 PASS 证据且没有 hard_stop、预算暂停或 blocked 时，才正常返回同一 owner 继续收尾；不得通过切换阶段绕过停止条件。开工包应注明已有授权的来源、目标仓、分支和动作；本次任务已明确授权的提交、推送、创建/更新目标 PR 直接执行，不重复请示。只有对应动作确实未获授权时才停下请求决定，PR Ready 终点本身不产生新增授权。goal 内 push／回帖仍遵守 goal 的精确声明及当前 PR 窄范围，不能为省去请示自行补造声明，也不借此授权创建 PR 或 merge。
 
@@ -58,10 +58,14 @@ Lead 只做判断：拆 PR、写开工包、派独立 session、裁决例外、�
 未读 goal skill、或未读 routing.json、或本地 hash 自检失败：不得开工。不得写代码、不得开 PR、不得派 worker。停，提交 decision_required，写明卡在第几步。禁止问 lead「要开始吗」。
 ```
 
-## ② 输入门：只消费 task-priority final manifest
+## ② 输入门：两个来源，同一份 manifest 契约
 
-- 唯一输入：task-priority **final 阶段释放**的 manifest——顶层含 `waves` / `dispatch` / `receipts` 三要素，packets 每包含 `scs_inline` / `allowed_paths` / `verify_cmds` / `forbidden` / `submit_format` 五要素。
-- **fail-closed**：manifest 缺 `waves`/`dispatch`/`receipts` 任一、或文件不存在、或 packet 缺五要素任一 → 视为 draft/缺 manifest，**不开跑**，停下指路「汇总任务优先级」。不得拿中间产物开跑。
+- 来源 A：task-priority **final 阶段释放**的 manifest——顶层含 `waves` / `dispatch` / `receipts` 三要素，packets 每包含 `scs_inline` / `allowed_paths` / `verify_cmds` / `forbidden` / `submit_format` 五要素。
+- 来源 B（2026-09-23 用户批准）：对话里已谈定、用户说「批准执行」的方案。lead 把方案写成 brief（schema `approve-exec-brief-v1`，字段见 `scripts/context-intake.mjs` 与 `tests/context-intake.test.mjs`），跑 `node scripts/context-intake.mjs --brief <brief.json> --out-dir ~/.claude/.goal/<slug>/ --now <ISO> --repo-dir <目标仓 worktree>`，产出同形 manifest（`receipts: []`，另带 `provenance.kind=context-brief`）与 `intake-receipt.json`，再走与来源 A 相同的 init / SiteScout / site-check / 出包 / ready-check。它不替代 task-priority：没有七面覆盖与对抗质询；派工总表、开工包第 1 段与 PR 描述必须标注「上下文方案」来源。
+- 取来源的顺序钉死，不按修改时间猜：用户给的 manifest 路径 → 本会话 task-priority 刚释放的 final → 本会话刚谈定并被批准的方案（走 context-intake）→ 都没有则 fail-closed。
+- brief 缺项（验证命令、真实摘录、写域文件、base、`needs_three_review`）只问缺的那一项，其余照走；context-intake 拒绝时按 stderr 修 brief，不手改产物。新入口前几次先 `批准执行 --dry-run`。
+- 只有 1 个 PR、改动面清楚的小活，优先在本会话走 goal 场景 A，省掉独立 session、开工闸与 e2e worker 的开销。
+- **fail-closed**：manifest 缺 `waves`/`dispatch`/`receipts` 任一、或文件不存在、或 packet 缺五要素任一 → 视为 draft/缺 manifest，**不开跑**，停下指路「汇总任务优先级」或补上下文 brief。不得拿中间产物开跑。
 - `allowed_paths` 只列文件，禁止目录。缺文件路径或含目录 → 渲染开工包失败，不得 create session。
 
 ## ③ 总流程与席位
@@ -127,16 +131,17 @@ task-priority final manifest
 包文顺序钉死：
 
 **0. 开工闸** — 第①段代码块全文，逐字。
-**1. 身份**：仓、对照树（只读）、开发基线 SHA、新分支名、lead session id、本 PR 在总表里的序号。
+**1. 身份**：仓、对照树（只读）、开发基线 SHA、新分支名、lead session id、本 PR 在总表里的序号、任务来源（task-priority final 或上下文方案）。
 **2. 为什么改**：人话，一条用户能看见的失败。
 **3. 不要重读也能开工的现场（假设收据）**：每个洞一段已证实摘录（文件 + 行号 + 行为/接口签名）。owner 开工即承诺这些假设。发现不符但仍在原 SC、接口和写入范围内，允许定点重读并自主选择等价实现；只有边界变化才 DECISION_REQUIRED。没有摘录 = 渲染失败，不得 create。禁止占位句「本包未附摘录」。
 **4. 具体改法**：函数/类型/控制流；兼容旧调用的硬约束。不得复制第 2 段禁令当改法。
-**5. allowed_paths**：只列文件，禁止目录。点名不可改的文件。
+**5. allowed_paths**：只列文件，禁止目录。点名不可改的文件。后附连带文件策略（渲染自 `config/collateral.json`，见第⑲段）。
 **6. SC 全文**：每条 `id` + `change` + `holds` + `expect` + `anchor_paths`。禁止「去 ~/.claude/.goal 自己找」。
 **7. 验证命令**：可复制的真实命令。禁止 `console.log` 占位，禁止「先读 AGENTS.md 再决定跑什么」，禁止只用 `gh pr diff`。
 **8. 做完之后（自动，不要问 lead）：mem-probe → 现读 routing.json 派 e2e（禁止本地单审） → candidate 检查点 → 本机 owner 完成全部 SC/e2e/本地门禁并 push、确认 OPEN 非 draft PR；Mivo 等当前提交 required CI 全绿后写 pr_ready → lead 验收全部 priority/SC 后立即派 native cleanup sub 清本地并归档该 owner。Mini Cindy 常驻程序按 PR 唯一 session 独立修复云端反馈；本机不 register、不等待接管，也不继续同写分支。
-**9. 禁做**：硬停六条 + 本 PR 产品禁令 + 「未读 goal / 未读 routing.json 不得开工」+ 不得改总表 / `allowed_paths` / `base` + 假设破裂必须 blocked 上报，禁止就地改方案。含「可自决 / 必须停」两张表。
-**10. 回报格式**：第⑩节 exact JSON（candidate 检查点 + pr_ready + decision_required）。
+第 8 段同时内联决策三层（D0 事实题 / D1 域内判断先问 Jev / D2 必须停）、Jev 调用约定与留痕路径、Jev 不可用时的处理、CI 等待不收工（第⑲段）。
+**9. 禁做**：硬停六条 + 本 PR 产品禁令 + 「未读 goal / 未读 routing.json 不得开工」+ 不得改总表 / `allowed_paths` / `base` + 假设破裂必须 blocked 上报，禁止就地改方案。含「可自决 / 必须停」两张表。符合连带策略的连带文件不算改 `allowed_paths`，但必须逐条申报。
+**10. 回报格式**：第⑩节 exact JSON（candidate 检查点 + pr_ready + decision_required）；用了连带文件再带 `collateral_used`，decision_required 附 Jev 选项排序。
 
 总表（一份，每个子 session 也带上自己那一行）：并行/串行、合并顺序、全局禁做、lead id。
 
@@ -204,6 +209,8 @@ Lead 验收时现读 live routing.json：交卷 `e2e.model` 既不是当前 e2e 
 
 ## ⑧ 子 session 闭环与 lead 指挥
 
+**continuation v2 默认启用（2026-09-23 用户批准）**：新 run 首次派窗后，lead 按 owner-protocol「整包续跑登记」与「continuation v2」写配置并登记 script 调度，不再逐次请批。脚本一律从 live 路径（本仓根的 `scripts/`）运行，禁止再钉 `.worktrees/` 下的部署树——2026-09-19 前后部署树被清掉，live 软链与 Library 包续跑一起断了 4 天（调度每 5 分钟报 `ModuleNotFoundError: owner_continuation`）。宿主 scheduler 不可用时仍按下文记 `continuation_unavailable`，不得声称已自动续跑。
+
 **continuation v2 的当前执行合约**：当已批准配置启用 `schemaVersion=2` 时，本节旧协议中逐 PR 唤醒 lead、每 PR 必须归档的默认描述由以下约定替代：零 token 脚本直接续推已绑定 idle owner；busy 不催，CI pending 与明确窗口只检查等待；lead 只处理新增真实决策与整包最终事件。每 owner 用 `owner-checkpoint.py` 写入 ledger 同目录的 `owner-checkpoint.json`，handoff 已提供命令，不能只口头报进度。达成配置中的授权 `completion=delivered` 即本机终态；明确要求归档的才用 `archived`，原批准例外用 `approved-legacy-archive` 验旧凭据，保留原 fail/incomplete。不得因源码存在就宣称实际调度已切换。
 
 部署前用 `preview-owner-continuation.py` 只读生成配置预览，显式保留所有已批准 group；缺 ledger/session/checkpoint 必须阻塞，不能删掉未完成项凑成 complete。完整接口、实际宿主能力限制与恢复流程见 `references/owner-protocol.md`。宿主当前只有派发 RPC，没有 lookup；unknown response 保持 blocked 并核原回执，不宣称 exactly-once。明确派发前拒绝才可凭精确授权恢复单次，禁止反复清 pending/归零。
@@ -216,7 +223,7 @@ owner session 只许在这五种情况下停。其中 2–5 进入 DECISION_REQU
 2. 硬停六条。
 3. **本 session 自报**累计打到 `budgetPauseUsd`（可 `--no-budget-pause`）。不是 lead 跨 session 加总。
 4. **未读 goal skill 或未读 routing.json**：不得开工。停，提交 decision_required，写明卡在开工闸第 1 步还是第 2 步。禁止 jump 等 lead 放行。
-5. **假设破裂**：只有 SC、对外接口兼容、授权、跨 PR 依赖、`allowed_paths` 或 `base` 需要改变时才 blocked + decision_required。现场与 handoff 摘录不一致但仍在原 SC、接口和写入范围内时，owner 必须定点重读并自主选择等价实现，不得把正常调试退回 lead。
+5. **假设破裂**：只有 SC、对外接口兼容、授权、跨 PR 依赖、`allowed_paths` 或 `base` 需要改变时才 blocked + decision_required。现场与 handoff 摘录不一致但仍在原 SC、接口和写入范围内时，owner 必须定点重读并自主选择等价实现，不得把正常调试退回 lead。`allowed_paths` 不够但符合连带策略（第⑲段）的，不算假设破裂，按连带文件改并申报。
 
 连续 3 轮零增量：不得空转，也不得收工。必须发一条 decision_required 摊开卡点。Lead 只给一个决定，同一 owner 继续。
 
@@ -277,6 +284,7 @@ goal_skill_path 必须是 /Users/praise/.agents/skills/goal/SKILL.md
 e2e             {status, candidate_sha, model, route_source}
 size_gate       {result: 非空字符串, candidate_sha: 40hex}
 fallbacks_tried [{route, model, provider_id, error}] 无降级写 []；禁止 tried_fallbacks
+collateral_used 可选；[{path, class, sc_id, reason, jev_ref}]，jev_ref 为 {journal, line} 或 null
 ```
 
 `goal_skill_path` 缺或不是上表三路径之一 → 视为未调用 PI 自己的 goal skill，拒。台账里没有本组成立的 `gate_goal` + `gate_routing` → 视为未执行开工闸，拒，不得 `accepted`。含 `pr_url` → 拒。`route_source` 必须是 live routing.json 绝对路径、其 `~/.agents/skills/orca-fanout/routing.json` 软链、或字面量 `model-route show`。其它路径拒。缺键 / 多键 / sha 不是 40 hex / `scs` 对不齐 → 拒。
@@ -341,6 +349,28 @@ Lead 按四类选，不自由发挥：
 下游冻结：任一组因假设破裂 `blocked` → 依赖它的同波 / 后波组不得 `gate_goal` 放行。前波 tip 变化 → 后波未开工组必须换 base 重出包。已合入才发现偏航：不回滚 main，开修正 PR，`replan_note` 记因果。
 
 **自进化**：每轮 run 收尾、摘要之前，把拆错 / 假设破裂 / 补救不对记进 `evolution/ledger.json`（唯一写通道 `scripts/evolution-note.mjs`）。三档 `by-design` / `proposal` / `auto`；扩权与拿不准永不自动落地。默认不 git push。登记进 Cindy「每周自进化 Skills」（`ledger-triage.mjs` `SOURCES`）。
+
+## ⑲ owner 自主推进：Jev 决策三层与连带文件（2026-09-23）
+
+**为什么有这段**：2026-09-08 起 21 个 Pi owner 会话调 Jev 0 次（网关可用），回问 lead 的主因是写域不够——域外旧测试仍断言被 SC 改掉的旧行为、新组件要登记进生成清单、域外偶发超时；有 owner 为迁就旧测试考虑扭曲产品实现。本段把"自己判"写成开工包里的固定动作，只有越界才回 lead。
+
+**决策三层**（由 `render-pr-handoff.mjs` 渲染进第 8 段；owner 多为 Pi、不读 `~/.claude/rules`，必须内联）：
+
+- D0 事实题：用命令查清（哪个 job 红、文件在不在写域或连带清单、size-gate、base 上是否同样红），不问 Jev 也不问 lead。
+- D1 域内判断（可自决）：不改 SC、接口兼容、授权、跨 PR 依赖、base 的选择先问 Jev 再执行。固定时点：CI 红且不像基础设施故障、域外测试红（旧行为断言还是真回归）、等价实现二选一、连续 2 轮零增量换策略、record-delivery 前核 SC 证据。Pi 走 `cindy_mcp_call_tool` 网关，Claude/Codex 走 `mcp__cindy__ghost_call`；`ghost_id=typesafe-jev`、`tool=evaluate`。confidence 达到 `config/collateral.json` 的 `jev.act_confidence`（起步 0.75）才直接执行，否则补一条事实重问，仍低取改动最小、可撤回的一项。选项只列域内动作，不给 Jev「上报 lead」选项。
+- D2 必须停：第⑧段五类停 + `allowed_paths` 不够且不符合连带策略 + base 本身红。只发一条 decision_required，附 Jev 选项排序与留痕行号。
+- 留痕：每次调用追加一行 JSON 到台账目录下 `jev/<sha256(组)>.jsonl`（不进 worktree）。ready-check 只在 `legacy_test` 连带时读它，其余留痕供 lead 验收参考。
+- Jev 不可用：记 `JEV_UNAVAILABLE`；可撤回的 D1 按「改动最小 > 可撤回 > 跟随仓内既有写法 > 不扩写域」自决，不回问 lead；连带文件改动没有 Jev 结论就按 D2 停。owner 自己派的只读 sub 没有网关，其 `JEV_DECISION_REQUEST` 回给 owner 代调，不上交 lead。这是 2026-09-23 用户批准的例外，已同步写进 `~/.pi/agent/AGENTS.md` 与 `~/.claude/CLAUDE.md` 的 JEV 段。
+- CI 等待不收工：启用 continuation v2 时写 `waiting-ci` checkpoint 后结束本轮，由零 token 脚本唤醒；未启用时本轮内 `gh pr checks --watch` 轮询。CI 红先按确定性规则判基础设施故障并重跑一次，不命中再按 D1 问 Jev。
+
+**连带文件**（`config/collateral.json`，`scripts/lib/collateral.mjs` 单一实现，开工包第 5 段与 ready-check 同源）：
+
+- `generated`（已启用）：只限清单路径（当前 `cindyplugin/design-inventory.md`），只提交仓内生成器输出，交卷前跑清单里的 check。
+- `legacy_test`（默认未启用，分两步上：先跑一批登记类，再把 `enabled` 改 true）：只限测试文件；失败断言针对 SC.change 明确改掉的旧行为，Jev 判定 `update_legacy_assertion` 且 confidence≥0.8；不删用例、不加 skip/only/todo。
+- 上限：每 PR ≤ `max_files` 个文件（起步 5）、≤ `max_lines` 行（起步 200，相对基线新增+删除）。起步值是 2026-09-23 用户批准的经验值，不是测量值，跑一批后按真实上报调。
+- 别组写域里的文件永远不是连带文件。交卷 `collateral_used` 逐条申报；record-delivery 核形状，ready-check 核语义（类别启用、清单、测试路径、Jev 留痕、skip/only、跨 PR 冲突、上限、确有改动）。通过的路径并入该组 L1 写域与 L2 白名单；任一条不合格，该组连带路径全部不放行（gate=`collateral`，原越域照常点名）。
+
+**保证等级**：T1 纪律级。Jev 是判断参考不是事实证明；留痕与申报防疏忽，不防同一 OS 用户蓄意伪造。
 
 ## 历史 Mini 运维前置（仅兼容旧任务，新任务不执行）
 

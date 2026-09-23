@@ -523,6 +523,54 @@ test('SC-gate3-layer2: .pr-intent.md 在 P 席打包白名单（packaging_paths�
   assert.match(res.stdout, new RegExp(`^READY_FOR_LATER_SUBMIT_PR_SKILL feat/fixture-branch ${headSha}$`));
 });
 
+// 连带文件（config/collateral.json）：申报挂在 g1 的 pr-handoff 交卷上；候选提交本身就含连带改动，
+// 所以该交卷 candidate_sha 重绑到新 HEAD（owner 交卷时连带文件已在候选树里）。
+const COLLATERAL_GEN_FILE = 'cindyplugin/design-inventory.md';
+function declareCollateral(env, headSha, items) {
+  const ev = env.parsed.ledger.events.find((e) => e.type === 'delivery' && e.detail?.group_id === 'g1' && e.detail?.e2e);
+  assert.ok(ev, '夹具应有 g1 的 pr-handoff 交卷');
+  ev.detail.candidate_sha = headSha;
+  if (items) ev.detail.collateral_used = items;
+  writeFileSync(env.ledgerPath, `${JSON.stringify(env.parsed.ledger, null, 2)}\n`);
+}
+function collateralCommit(t, repo, file) {
+  mkdirSync(join(repo.dir, dirname(file)), { recursive: true });
+  return appendCommit(t, repo, { files: [{ file, content: '<!-- GENERATED -->\n- NewPanel.tsx\n' }], message: 'owner 候选：登记新组件' });
+}
+
+test('collateral: 清单内登记类文件已申报 → 并入写域，READY', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, null);
+  const headSha = collateralCommit(t, repo, COLLATERAL_GEN_FILE);
+  rebindToHead(env, headSha);
+  declareCollateral(env, headSha, [{ path: COLLATERAL_GEN_FILE, class: 'generated', sc_id: 'sc-p0a', reason: '新组件需登记', jev_ref: null }]);
+  const res = runReady(repo, env);
+  assert.equal(res.status, 0, `期望 exit 0（合法连带文件并入写域）\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+  assert.match(res.stdout, new RegExp(`^READY_FOR_LATER_SUBMIT_PR_SKILL feat/fixture-branch ${headSha}$`));
+});
+
+test('collateral: 改了登记文件却没申报 → 仍按越域 exit 2 gap review-clean', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, null);
+  const headSha = collateralCommit(t, repo, COLLATERAL_GEN_FILE);
+  rebindToHead(env, headSha);
+  declareCollateral(env, headSha, null);
+  const res = runReady(repo, env);
+  expectGaps(res, ['review-clean'], '未申报的连带文件不得放行');
+  assert.match(res.stderr, /cindyplugin\/design-inventory\.md/);
+});
+
+test('collateral: 申报路径不在登记清单 → exit 2 gap collateral + review-clean', (t) => {
+  const repo = makeRepo(t);
+  const env = buildEnv(t, repo, null);
+  const headSha = collateralCommit(t, repo, 'docs/extra.md');
+  rebindToHead(env, headSha);
+  declareCollateral(env, headSha, [{ path: 'docs/extra.md', class: 'generated', sc_id: 'sc-p0a', reason: '想顺手改', jev_ref: null }]);
+  const res = runReady(repo, env);
+  expectGaps(res, ['collateral', 'review-clean'], '清单外路径不是合法连带文件');
+  assert.match(res.stderr, /不在 generated\.files 清单/);
+});
+
 test('SC-gate3-tamper: 已审 tip 之后偷改某组 allowed_paths 内一行（src.ts）→ exit 2 gap review-clean 且点名该组与路径', (t) => {
   const repo = makeRepo(t);
   const env = buildEnv(t, repo, null);
@@ -944,7 +992,10 @@ const MUTATION_PREDICTIONS = [
   { id: '变异⑪', label: '③ 审查交卷绑定按该类组结论交卷（review 旧 SHA 不被 verify 顶替）', from: 'const lastBinding = binding[binding.length - 1];',
     to: 'const lastBinding = deliveries[deliveries.length - 1];',
     red: ['gap3: e2e/pr-handoff 交卷 candidate_sha 过期 → exit 2 gap review-clean',
-          'gap3: 组无 pr-handoff 类交卷（仅 exec+verify delivery）→ exit 2 gap review-clean 且点名类别序列'] },
+          'gap3: 组无 pr-handoff 类交卷（仅 exec+verify delivery）→ exit 2 gap review-clean 且点名类别序列',
+          // 连带文件申报挂在 pr-handoff 交卷上：绑错成 verify 交卷就读不到申报，合法连带被当越域、非法申报漏检
+          'collateral: 清单内登记类文件已申报 → 并入写域，READY',
+          'collateral: 申报路径不在登记清单 → exit 2 gap collateral + review-clean'] },
 ];
 
 // 复制 scripts/tests/config 到临时目录并对脚本副本应用变异；返回 { file, dir }——
@@ -978,6 +1029,8 @@ function copyTreeForMutation(t, mutateScript) {
   // gate ③ 第 2 层读 graph.json（P 席 packaging_paths 唯一真相源）：变异副本树必须带上，
   // 否则子套件全部测试因「缺 packaging_paths」fail-closed 红，失败集契约被整体污染
   writeFileSync(join(dir, 'graph.json'), readFileSync(join(root, 'graph.json'), 'utf8'));
+  // 连带文件用例读 config/collateral.json（lib/collateral.mjs 按仓根定位）：副本树缺它会让连带用例在每个变异下都红
+  writeFileSync(join(dir, 'config/collateral.json'), readFileSync(join(root, 'config/collateral.json'), 'utf8'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return { file: join(dir, 'tests/ready-check.test.mjs'), dir };
 }

@@ -9,7 +9,7 @@ const exact = (value, keys) => {
 const unique = values => [...new Set(values)];
 const sameIds = (left, right) => hashObject([...left].sort()) === hashObject([...right].sort());
 
-function layers(ids, dependencies) {
+export function layers(ids, dependencies) {
   const remaining = new Set(ids);
   const completed = new Set();
   const result = [];

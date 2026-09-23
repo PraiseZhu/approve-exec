@@ -58,6 +58,21 @@ function fixture(t, staged = false, probeExit = 0) {
   return { dir, repo, sha, manifest, report, ledgerPath, handoffPath, sitePath, groupId: 'g4', now: NOW };
 }
 
+test('派窗核第 5 段：连带策略原文被改写即拒；旧开工包（无连带策略）仍放行', t => {
+  const tampered = fixture(t);
+  const text = readFileSync(tampered.handoffPath, 'utf8');
+  assert.ok(text.includes('上限 5 个文件、200 行'), '夹具开工包应带连带策略');
+  writeFileSync(tampered.handoffPath, text.replace('上限 5 个文件、200 行', '上限 50 个文件、200 行'));
+  assert.throws(() => prepareOwner(tampered), /授权路径与 final 不一致/);
+  const legacy = fixture(t);
+  const legacyText = readFileSync(legacy.handoffPath, 'utf8');
+  const start = legacyText.indexOf('\n\n连带文件（包内预授权');
+  const end = legacyText.indexOf('\n\n## 6. SC 全文');
+  assert.ok(start > 0 && end > start, '应能定位第 5 段连带策略块');
+  writeFileSync(legacy.handoffPath, legacyText.slice(0, start) + legacyText.slice(end));
+  assert.equal(prepareOwner(legacy).action, 'create_once');
+});
+
 test('新版 PR 全链：真实格式计划、唯一 owner、核查先行、完整条件验收', t => {
   const input = fixture(t, true);
   const request = prepareOwner(input);
