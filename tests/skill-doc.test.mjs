@@ -16,7 +16,7 @@ const gateBlock0 = readFileSync(join(root, '_tmp/handoff-gate-block-0.md'), 'utf
 
 const MARKERS = [
   '## ① 身份与触发',
-  '## ② 输入门：只消费 task-priority final manifest',
+  '## ② 输入门：两个来源，同一份 manifest 契约',
   '## ③ 总流程与席位',
   '## ④ 拆 PR、并行与合并顺序',
   '## ⑤ 开工包',
@@ -101,6 +101,23 @@ test('第②段：输入门三要素 + fail-closed 指路 task-priority，缺则
   assert.ok(s2.includes('fail-closed'), '输入门段应声明 fail-closed');
   assert.ok(s2.includes('task-priority'), '输入门段应指路 task-priority');
   assert.ok(s2.includes('不开跑'), '输入门段应声明缺要素时不开跑');
+  // 2026-09-23：上下文方案入口与来源 A 同一契约，且顺序钉死、不按修改时间猜、如实标注来源
+  assert.ok(s2.includes('context-intake.mjs') && s2.includes('approve-exec-brief-v1'), '输入门段应给出上下文入口脚本与 brief schema');
+  assert.ok(s2.includes('provenance.kind=context-brief'), '输入门段应声明上下文产物带 provenance');
+  assert.ok(s2.includes('不按修改时间猜'), '输入门段应钉死取来源顺序');
+  assert.ok(s2.includes('不替代 task-priority') && s2.includes('标注'), '输入门段应声明上下文入口不替代 task-priority 并标注来源');
+});
+
+test('第⑲段：owner 自主推进——Jev 决策三层与连带文件', () => {
+  const start = skillDoc.indexOf('## ⑲ owner 自主推进');
+  assert.ok(start > skillDoc.indexOf('## ⑱ 偏航补救与自进化'), '⑲段应在⑱段之后');
+  const s19 = skillDoc.slice(start, skillDoc.indexOf('## 历史 Mini 运维前置', start));
+  for (const needle of ['D0 事实题', 'D1 域内判断', 'D2 必须停', 'typesafe-jev', 'cindy_mcp_call_tool', 'mcp__cindy__ghost_call',
+    'JEV_UNAVAILABLE', 'config/collateral.json', 'generated', 'legacy_test', 'max_files', 'max_lines', 'waiting-ci', 'T1 纪律级']) {
+    assert.ok(s19.includes(needle), `⑲段缺: ${needle}`);
+  }
+  assert.ok(s19.includes('不给 Jev「上报 lead」选项'), '⑲段应禁止把上报 lead 交给 Jev 选');
+  assert.ok(s19.includes('不是测量值'), '⑲段应如实声明上限是起步值');
 });
 
 test('第③段：DISPATCH_MODES 含 session；E=session；LEAD_SELF=R/V/P；WORKER=T', () => {

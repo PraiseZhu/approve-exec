@@ -36,6 +36,7 @@ import { validateMivoV2 } from './release-mivo-pr.mjs';
 import { assertTakeover } from './pr-watch/takeover.mjs';
 import { hashObject } from './lib/common.mjs';
 import { compilePrPlan, executionPlanHash } from './lib/pr-plan.mjs';
+import { assertCollateralUsedShape } from './lib/collateral.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -761,7 +762,7 @@ function assertPacketComplete(packet, what) {
  *   waves 的非空数组检查在 initLedger 内既有逻辑。
  *   每个 dispatch.packets[] 过 assertPacketComplete（与 render-packet 同一份判据）。
  */
-function assertManifestComplete(manifest) {
+export function assertManifestComplete(manifest) {
   if (!('dispatch' in manifest)) {
     throw new LedgerError('MANIFEST', 'manifest 缺 dispatch 键（顶层要素 exact 在场契约，fail-closed 不开跑）');
   }
@@ -1018,6 +1019,8 @@ const ROUTING_PATH_LINK = '/Users/praise/.agents/skills/orca-fanout/routing.json
 const PR_HANDOFF_DELIVERY_KEYS = Object.freeze([
   'branch', 'tip_sha', 'scs', 'goal_skill_path', 'e2e', 'size_gate', 'fallbacks_tried',
 ]);
+// 可选键：连带文件申报（config/collateral.json）。旧开工包不带也合法；带了就 exact 校验形状，语义归 ready-check。
+const PR_HANDOFF_OPTIONAL_KEYS = Object.freeze(['collateral_used']);
 const FALLBACKS_TRIED_ITEM_KEYS = Object.freeze(['route', 'model', 'provider_id', 'error']);
 const PR_HANDOFF_E2E_KEYS = Object.freeze(['status', 'candidate_sha', 'model', 'route_source']);
 const PR_HANDOFF_SIZE_KEYS = Object.freeze(['result', 'candidate_sha']);
@@ -2318,7 +2321,8 @@ function classifyDelivery(data) {
   const hasReview = REVIEW_DELIVERY_KEYS.every((k) => keys.includes(k)) && keys.length === REVIEW_DELIVERY_KEYS.length;
   const hasVerify = VERIFY_DELIVERY_KEYS.every((k) => keys.includes(k)) && keys.length === VERIFY_DELIVERY_KEYS.length;
   const hasPrewalk = PREWALK_DELIVERY_KEYS.every((k) => keys.includes(k)) && keys.length === PREWALK_DELIVERY_KEYS.length;
-  const hasPrHandoff = PR_HANDOFF_DELIVERY_KEYS.every((k) => keys.includes(k)) && keys.length === PR_HANDOFF_DELIVERY_KEYS.length;
+  const prHandoffKeys = keys.filter((k) => !PR_HANDOFF_OPTIONAL_KEYS.includes(k));
+  const hasPrHandoff = PR_HANDOFF_DELIVERY_KEYS.every((k) => keys.includes(k)) && prHandoffKeys.length === PR_HANDOFF_DELIVERY_KEYS.length;
   const hits = [hasExec, hasReview, hasVerify, hasPrewalk, hasPrHandoff].filter(Boolean).length;
   if (hits !== 1) {
     throw new LedgerError(
@@ -2404,6 +2408,13 @@ function validatePrHandoffDelivery(data, packet) {
       if (typeof item[k] !== 'string' || item[k].trim().length === 0) {
         throw new LedgerError('DELIVERY_SCHEMA', `终态交卷 fallbacks_tried.${k} 必须是非空字符串`);
       }
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(data, 'collateral_used')) {
+    try {
+      assertCollateralUsedShape(data.collateral_used, '终态交卷 collateral_used');
+    } catch (err) {
+      throw new LedgerError('DELIVERY_SCHEMA', err.message);
     }
   }
 }
@@ -2764,6 +2775,7 @@ export function recordDelivery({ ledgerPath, group, payload, now }) {
           e2e: data.e2e,
           size_gate: data.size_gate,
           fallbacks_tried: data.fallbacks_tried,
+          collateral_used: data.collateral_used ?? [],
           session_id: g.session_id,
           candidate_sha: data.tip_sha,
           e2e_status: data.e2e.status,

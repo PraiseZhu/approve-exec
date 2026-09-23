@@ -1051,6 +1051,36 @@ test('sc-p1d: 组 review.unresolved>0 不挡 accepted（本地不再核单审）
   assert.equal(r.status, 0, `组 review.unresolved>0 不得再挡 accepted: ${r.stderr}`);
 });
 
+test('collateral_used: candidate 交卷可选带连带申报；形状不合拒且台账不变，合法则原样入账', () => {
+  const dir = newTmpDir();
+  const { ledgerPath } = initLedgerFor(dir);
+  assignIdentity(ledgerPath, 'g4', 'feat/run-ledger');
+  renderGroup(ledgerPath, 'g4');
+  const g = 'g4';
+  for (const [to, extra] of [
+    ['dispatched', ['--worker-label', 'w1', '--mem-snapshot', memSnapshotJson()]],
+    ['executing', ['--detail', gateGoalDetail()]],
+    ['e2e', ['--detail', gateRoutingDetail()]],
+    ['review', []],
+  ]) {
+    const r = cli('set-state', ledgerPath, '--group', g, '--to', to, ...extra, '--now', T);
+    assert.equal(r.status, 0, r.stderr);
+  }
+  const item = { path: 'cindyplugin/design-inventory.md', class: 'generated', sc_id: 'x', reason: '新组件需登记', jev_ref: null };
+  const before = readFileSync(ledgerPath, 'utf8');
+  const bad = { ...prHandoffPayload(g, { ledgerPath }), collateral_used: [{ ...item, class: 'anything' }] };
+  let r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify(bad), '--now', T);
+  assert.equal(r.status, 2, '非法连带类别必须拒');
+  assert.match(r.stderr, /DELIVERY_SCHEMA/);
+  assert.match(r.stderr, /class 必须是/);
+  assert.equal(readFileSync(ledgerPath, 'utf8'), before, '坏交卷不得改台账');
+  const good = { ...prHandoffPayload(g, { ledgerPath }), collateral_used: [item] };
+  r = cli('record-delivery', ledgerPath, '--group', g, '--payload', JSON.stringify(good), '--now', T);
+  assert.equal(r.status, 0, `合法连带申报应入账: ${r.stderr}`);
+  const events = JSON.parse(readFileSync(ledgerPath, 'utf8')).events.filter((e) => e.type === 'delivery' && e.detail?.group_id === g);
+  assert.deepEqual(events[events.length - 1].detail.collateral_used, [item]);
+});
+
 test('sc-p1d: accepted 拒绝非绿 candidate（SC/e2e/size/branch/SHA 未闭环）', () => {
   const cases = [
     {
@@ -3591,6 +3621,8 @@ const RL_MUTATION_PREDICTIONS = [
       'sc-p1d: dispatched→executing 缺 gate_goal 拒',
       'sc-p1d: executing→e2e 缺 gate_routing 拒',
       'sc-p1d: 组 review.unresolved>0 不挡 accepted（本地不再核单审）',
+      // 连带申报用例同样先走 set-state dispatched（F1 字符串化 dispatch detail → schema 拒）
+      'collateral_used: candidate 交卷可选带连带申报；形状不合拒且台账不变，合法则原样入账',
       'sc-p1d: accepted 拒绝非绿 candidate（SC/e2e/size/branch/SHA 未闭环）',
       'sc-p1d: 非法跳转矩阵全部 exit 2 且落 illegal_transition 事件',
       'sc-p1d: failed→pending 后 rounds==0 且 tip_sha/worker_label/身份三键清空（重派不继承旧计数/旧身份）',

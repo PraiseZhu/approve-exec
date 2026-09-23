@@ -79,6 +79,31 @@ test('render-pr-handoff: SC 阶段结束后的收尾说明保留授权与硬停�
   assert.match(afterSc, /子 session 不合入/);
 });
 
+test('render-pr-handoff: 决策三层 + Jev 约定 + 连带策略 + 来源标注写进包里（Pi owner 不读 ~/.claude/rules）', () => {
+  const journal = '/abs/run/jev/g4.jsonl';
+  const out = renderPrHandoff(baseArgs({ jevJournal: journal }));
+  const section = (name, next) => out.split(`## ${name}\n`)[1].split(`\n## ${next}`)[0];
+  const s1 = section('1. 身份', '2. 为什么改');
+  const s5 = section('5. allowed_paths', '6. SC 全文');
+  const s8 = section('8. 做完之后（自动，不要问 lead）', '9. 禁做');
+  const s10 = out.split('## 10. 回报格式\n')[1];
+  assert.match(s1, /任务来源=task-priority final manifest/);
+  assert.match(s5, /连带文件（包内预授权，逐条申报；上限 5 个文件、200 行/);
+  assert.match(s5, /cindyplugin\/design-inventory\.md/);
+  for (const needle of ['D0 事实题', 'D1 域内判断（可自决）', 'D2 必须停', 'typesafe-jev', 'tool=evaluate', 'cindy_mcp_call_tool', 'mcp__cindy__ghost_call', 'confidence ≥ 0.75', 'JEV_UNAVAILABLE', 'JEV_DECISION_REQUEST', 'waiting-ci', 'gh pr checks', 'gh run rerun']) {
+    assert.ok(s8.includes(needle), `第 8 段缺: ${needle}`);
+  }
+  assert.ok(s8.includes(journal), '第 8 段必须给 Jev 留痕绝对路径');
+  assert.match(s8, /不给 Jev「上报 lead」选项/);
+  assert.match(s8, /连带文件改动必须有 Jev 结论，没有就按 D2 必须停/);
+  assert.match(s8, /不得以「在等 CI」收工或报完成/);
+  assert.match(s10, /collateral_used\[\{path, class, sc_id, reason, jev_ref\}\]/);
+  assert.match(s10, /Jev 选项排序与留痕行号/);
+  const ctx = renderPrHandoff(baseArgs({ provenance: { kind: 'context-brief', brief_sha256: 'f'.repeat(64) } }));
+  assert.match(ctx, /任务来源=上下文方案（brief sha256=f{64}；未经 task-priority 七面覆盖与对抗质询/);
+  assert.throws(() => renderPrHandoff(baseArgs({ jevJournal: 'rel/jev.jsonl' })), LedgerError);
+});
+
 test('render-pr-handoff: 缺摘录或第 4 段复制第 2 段拒', () => {
   assert.throws(() => renderPrHandoff(baseArgs({ excerpts: [] })), LedgerError);
   assert.throws(() => renderPrHandoff(baseArgs({ excerpts: ['（本包未附摘录：子 session 仍须按 allowed_paths 开工，禁止 Grep 整模块。）'] })), LedgerError);
