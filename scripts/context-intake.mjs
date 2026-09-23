@@ -7,7 +7,7 @@
 //   --out-dir 建议 ~/.claude/.goal/<slug>/（不进 worktree，防宿主自动 commit 卷走）
 //   --repo-dir 给出时额外核：摘录文件与行号真实存在；验证命令里的 npm script 与仓内路径真实存在
 // 输出：stdout 一行 JSON 摘要；exit 0 成功 / 2 拒绝（stderr 点名原因）。
-import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { hashObject, isMain, normalizeRepoPath } from './lib/common.mjs';
 import { layers } from './lib/pr-plan.mjs';
@@ -122,11 +122,15 @@ function checkAgainstRepo(prs, repoDir) {
   }
   for (const pr of prs) {
     try { assertExcerpts(pr.excerpts, { worktree: repoDir }); } catch (err) { reject(`${pr.pr_id}: ${err.message}`); }
+    // 写域只收文件：下游 ready-check 把 allowed_paths 当前缀白名单，给目录等于放开整棵子树
+    for (const p of pr.allowed_paths) {
+      if (existsSync(join(repoDir, p)) && statSync(join(repoDir, p)).isDirectory()) reject(`${pr.pr_id} allowed_paths 只能写文件，不能写目录: ${p}`);
+    }
     const willCreate = new Set(pr.allowed_paths);
     for (const cmd of pr.verify_cmds) {
       const npmRun = cmd.match(/\bnpm\s+run\s+([^\s;&|]+)/g) ?? [];
       for (const m of npmRun) {
-        const name = m.split(/\s+/).pop();
+        const name = m.split(/\s+/).pop().replace(/^(['"])(.*)\1$/, '$2');
         if (!scripts || !Object.hasOwn(scripts, name)) reject(`${pr.pr_id} 验证命令引用了仓里不存在的 npm script: ${name}（${cmd}）`);
       }
       for (const token of cmd.split(/\s+/)) {
@@ -147,7 +151,9 @@ function planWaves(prs) {
   const byId = new Map(prs.map((pr) => [pr.pr_id, pr]));
   order.forEach((ids) => {
     for (let a = 0; a < ids.length; a += 1) for (let b = a + 1; b < ids.length; b += 1) {
-      const shared = byId.get(ids[a]).allowed_paths.filter((p) => byId.get(ids[b]).allowed_paths.includes(p));
+      // 相等或一方是另一方的目录前缀都算撞写域（brief 没带 --repo-dir 时也能拦住 scripts vs scripts/x.mjs）
+      const overlaps = (x, y) => x === y || y.startsWith(x + '/') || x.startsWith(y + '/');
+      const shared = byId.get(ids[a]).allowed_paths.filter((p) => byId.get(ids[b]).allowed_paths.some((q) => overlaps(p, q)));
       if (shared.length) reject(`${ids[a]} 与 ${ids[b]} 同波并行却写同一文件（${shared.join(', ')}）；用 depends_on 串行或拆开写域`);
     }
   });

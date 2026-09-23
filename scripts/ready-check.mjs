@@ -360,7 +360,9 @@ function checkCollateral(g, packet, packets, delivery, repoRoot, headSha, baseli
   return result.paths;
 }
 
-function checkReviewClean(ledger, manifest, repoRoot, headSha, packagingPaths, gaps) {
+// conflictPackets：连带文件跨 PR 冲突域。--group 投影后 manifest 只剩本组 packet，
+// 冲突域必须取投影前的完整计划，否则别组写域里的文件会被当成本组连带放行。
+function checkReviewClean(ledger, manifest, repoRoot, headSha, packagingPaths, gaps, conflictPackets = null) {
   // F-O: 台账不可解析时本 gate 自身点名不可用，不拖垮不依赖台账的后项
   if (!ledger) { gaps.push({ gate: 'review-clean', detail: '台账不可用（文件不存在或不可解析）' }); return; }
   const groups = (ledger.waves || []).flatMap((w) => w.groups || []);
@@ -384,7 +386,7 @@ function checkReviewClean(ledger, manifest, repoRoot, headSha, packagingPaths, g
       // HEAD——SHA 精确等值因此不再适用；改证「审过的字节没变」。git 无法解析已审 tip
       // （过期/伪造 SHA）→ fail-closed 点名，不猜测不降级。
       const groupCollateral = bindingKind === 'pr-handoff'
-        ? checkCollateral(g, packet, packets, lastBinding, repoRoot, headSha, ledger.baseline_tip ?? null, gaps)
+        ? checkCollateral(g, packet, conflictPackets ?? packets, lastBinding, repoRoot, headSha, ledger.baseline_tip ?? null, gaps)
         : [];
       collateralPaths.push(...groupCollateral);
       const allowedPaths = [...(Array.isArray(packet?.allowed_paths) ? packet.allowed_paths : []), ...groupCollateral];
@@ -504,6 +506,7 @@ function main() {
     process.exit(2);
   }
 
+  let collateralConflictPackets = null; // --group 投影前的完整 packets（连带跨 PR 冲突域）
   let ledger = readJsonOrNull(args.ledger);
   // manifest 经 readManifest 统一收口（receipts 在场/形状契约与 run-ledger 全部消费入口同判据）：
   // 不合约/不可解析 → 转 gap 占位（F-O：不提前 exit，后项照常运行），错误原文随 manifestError
@@ -538,9 +541,12 @@ function main() {
         || candidate.e2e?.candidate_sha !== group.tip_sha) throw new Error('单 PR 缺当前 candidate e2e 证据');
       const projectedE2e = { type: 'delivery', detail: { group_id: args.group,
         candidate_sha: candidate.e2e.candidate_sha, e2e: candidate.e2e, size_gate: candidate.size_gate,
-        branch: candidate.branch, tip_sha: candidate.tip_sha } };
+        branch: candidate.branch, tip_sha: candidate.tip_sha,
+        // 连带申报随投影交卷带过去，否则单 PR 验收时合法连带文件会被当越域
+        ...(candidate.collateral_used ? { collateral_used: candidate.collateral_used } : {}) } };
       ledger = { ...ledger, baseline_tip: group.base, waves: [{ wave: 1, groups: [group] }],
         events: [...events, projectedE2e] };
+      collateralConflictPackets = manifest.dispatch.packets;
       manifest = { ...manifest, scs: manifest.scs.filter((sc) => group.sc_ids.includes(sc.id)),
         dispatch: { ...manifest.dispatch, packets: [packet] } };
     } catch (error) {
@@ -590,7 +596,7 @@ function main() {
   const gaps = [];
   checkLedgerPartition(ledger, manifest, manifestError, gaps, Boolean(args.group));
   checkVerdictAnchors(verdict, manifest, manifestError, ledger, args.repo, headSha, gaps);
-  checkReviewClean(ledger, manifest, args.repo, headSha, packagingPaths, gaps);
+  checkReviewClean(ledger, manifest, args.repo, headSha, packagingPaths, gaps, collateralConflictPackets);
   checkE2eReport(e2eReport, headSha, gaps);
   checkPresubmitGates(args.presubmitDir, headSha, gaps);
   checkGitClean(args.repo, gaps);

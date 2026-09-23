@@ -86,6 +86,7 @@ test('context-intake: depends_on 分前后波；同波写同一文件拒；依�
   const parallel = buildManifest(brief({ prs: [pr('PR1'), pr('PR2')] }));
   assert.deepEqual(parallel.waves.map((w) => w.groups.map((g) => g.group_id)), [['PR1', 'PR2']]);
   assert.throws(() => buildManifest(brief({ prs: [pr('PR1'), pr('PR2', { allowed_paths: ['src/PR1.ts'] })] })), /同波并行却写同一文件/);
+  assert.throws(() => buildManifest(brief({ prs: [pr('PR1', { allowed_paths: ['src'] }), pr('PR2', { allowed_paths: ['src/PR2.ts'] })] })), /同波并行却写同一文件/);
   assert.throws(() => buildManifest(brief({ prs: [pr('PR1', { depends_on: ['PR2'] }), pr('PR2', { depends_on: ['PR1'] })] })), /无法分层/);
 });
 
@@ -110,6 +111,8 @@ test('context-intake: --repo-dir 核摘录行号、npm script 与仓内路径', 
     writeFileSync(join(repo, 'package.json'), JSON.stringify({ scripts: { 'test:unit': 'vitest' } }));
     assert.doesNotThrow(() => validateBrief(brief({ prs: [pr('PR1', { verify_cmds: ['npm run test:unit', 'npx vitest run src/PR1.test.ts'] })] }), { repoDir: repo }));
     assert.throws(() => validateBrief(brief({ prs: [pr('PR1', { verify_cmds: ['npm run test:e2e'] })] }), { repoDir: repo }), /不存在的 npm script: test:e2e/);
+    assert.doesNotThrow(() => validateBrief(brief({ prs: [pr('PR1', { verify_cmds: ['npm run "test:unit"'] })] }), { repoDir: repo }));
+    assert.throws(() => validateBrief(brief({ prs: [pr('PR1', { allowed_paths: ['src'] })] }), { repoDir: repo }), /只能写文件，不能写目录: src/);
     assert.throws(() => validateBrief(brief({ prs: [pr('PR1', { verify_cmds: ['node scripts/ci/missing.mjs'] })] }), { repoDir: repo }), /不存在、也不在本 PR 写域/);
     assert.throws(() => validateBrief(brief({ prs: [pr('PR1', { excerpts: [{ file: 'src/a.ts', line: 99, behavior: 'x' }] })] }), { repoDir: repo }), /行号超出/);
   } finally {

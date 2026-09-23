@@ -571,6 +571,42 @@ test('collateral: 申报路径不在登记清单 → exit 2 gap collateral + rev
   assert.match(res.stderr, /不在 generated\.files 清单/);
 });
 
+test('collateral: 单 PR 验收（--group）带着连带申报放行；文件在别组写域里 → 投影后仍判跨 PR 冲突', (t) => {
+  const setup = (owned) => (data) => {
+    const group = data.ledger.waves[0].groups[0];
+    group.worktree = repo.dir;
+    group.base = repo.sha;
+    group.branch = 'feat/fixture-branch';
+    data.ledger.waves[1].groups[0].state = 'executing';
+    for (const event of data.ledger.events) event.detail.assignment_seq = 0;
+    if (owned) data.manifest.dispatch.packets[1].allowed_paths.push(COLLATERAL_GEN_FILE);
+  };
+  const repo = makeRepo(t);
+  const base = repo.sha;
+  const headSha = collateralCommit(t, repo, COLLATERAL_GEN_FILE);
+  for (const owned of [false, true]) {
+    const env = buildEnv(t, { ...repo, sha: base }, setup(owned));
+    rebindToHead(env, headSha);
+    env.parsed.ledger.waves[0].groups[0].tip_sha = headSha;
+    env.parsed.ledger.events.push({ type: 'delivery', detail: {
+      group_id: 'g1', assignment_seq: 0, branch: 'feat/fixture-branch', tip_sha: headSha,
+      e2e: { status: 'pass', candidate_sha: headSha }, size_gate: { result: 'PASS', candidate_sha: headSha },
+      collateral_used: [{ path: COLLATERAL_GEN_FILE, class: 'generated', sc_id: 'sc-p0a', reason: '新组件需登记', jev_ref: null }],
+    } });
+    env.parsed.ledger.manifest_core_hash = manifestCoreHash(env.parsed.manifest);
+    writeFileSync(env.ledgerPath, `${JSON.stringify(env.parsed.ledger, null, 2)}\n`);
+    writeFileSync(env.manifestPath, `${JSON.stringify(env.parsed.manifest, null, 2)}\n`);
+    const res = runReady(repo, env, { group: 'g1' });
+    if (!owned) {
+      assert.equal(res.status, 0, `合法连带在单 PR 验收下应放行\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+      assert.match(res.stdout, /LOCAL_PR_VALIDATED/);
+    } else {
+      assert.equal(res.status, 2, `别组写域里的文件不得当本组连带\nstdout: ${res.stdout}`);
+      assert.match(res.stderr, /在组 g2 的 allowed_paths 里，跨 PR 写冲突/);
+    }
+  }
+});
+
 test('SC-gate3-tamper: 已审 tip 之后偷改某组 allowed_paths 内一行（src.ts）→ exit 2 gap review-clean 且点名该组与路径', (t) => {
   const repo = makeRepo(t);
   const env = buildEnv(t, repo, null);
