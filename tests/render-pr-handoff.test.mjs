@@ -88,7 +88,7 @@ test('render-pr-handoff: 决策三层 + Jev 约定 + 连带策略 + 来源标注
   const s8 = section('8. 做完之后（自动，不要问 lead）', '9. 禁做');
   const s10 = out.split('## 10. 回报格式\n')[1];
   assert.match(s1, /任务来源=task-priority final manifest/);
-  assert.match(s5, /连带文件（包内预授权，逐条申报；上限 5 个文件、200 行/);
+  assert.match(s5, /连带文件（包内预授权，逐条申报；上限 10 个文件、200 行/);
   assert.match(s5, /cindyplugin\/design-inventory\.md/);
   for (const needle of ['D0 事实题', 'D1 域内判断（可自决）', 'D2 必须停', 'typesafe-jev', 'tool=evaluate', 'cindy_mcp_call_tool', 'mcp__cindy__ghost_call', 'confidence ≥ 0.75', 'JEV_UNAVAILABLE', 'JEV_DECISION_REQUEST', 'waiting-ci', 'gh pr checks', 'gh run rerun']) {
     assert.ok(s8.includes(needle), `第 8 段缺: ${needle}`);
@@ -148,4 +148,26 @@ test('render-pr-handoff CLI: --packet + --identity 出包', () => {
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /用 goal skill 执行。/);
   assert.match(r.stdout, /## 0\. 开工闸/);
+});
+
+test('render-pr-handoff: 回归 mivo PR3——lead 补充在五类停外加停点即拒', () => {
+  const cases = [
+    { how: '【lead 补充，优先于第 8 段】先改 A', rule: /override-section-8/ },
+    { how: '本 PR 必须由你派 GPT 单审 reviewer + e2e tester', rule: /local-review/ },
+    { how: '写 decision checkpoint accept-PR3 并停下等 lead「开 PR」', rule: /wait-for-lead/ },
+    { forbiddenExtra: ['lead 验收通过并下达「开 PR」指令之前 git push 或 gh pr create'], rule: /wait-for-lead|forbid-authorized-push/ },
+    { forbiddenExtra: ['验收前不得 push'], rule: /forbid-authorized-push/ },
+  ];
+  for (const { rule, ...overrides } of cases) {
+    assert.throws(() => renderPrHandoff(baseArgs(overrides)), (err) => err instanceof LedgerError
+      && err.code === 'PACKET_EXTRA_STOP' && rule.test(err.message), JSON.stringify(overrides));
+  }
+});
+
+test('render-pr-handoff: 合法禁令与否定式不误拦', () => {
+  const out = renderPrHandoff(baseArgs({
+    how: '本地禁止派 reviewer，不要 GPT 单审；按第 5 段连带策略改测试。',
+    forbiddenExtra: ['合并 PR、启用 auto-merge、gh pr merge、force push', '直接 push main', 'git push --force'],
+  }));
+  assert.ok(out.includes('## 9. 禁做'));
 });

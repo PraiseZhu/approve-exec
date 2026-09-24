@@ -84,6 +84,9 @@ export const EVENT_TYPES = Object.freeze([
   'watch_registered',
   'site_report',
   'replan_note',
+  'decision_required',
+  'goal_report',
+  'final_acceptance',
 ]);
 // set-state --to failed 的 --event 白名单（窄事件集）：只允许「失败原因类」事件。
 // dispatch/delivery/review_round/integrate 是成功流事件——ready-check ①③ 消费它们做分区
@@ -116,14 +119,14 @@ const GROUP_SCOPED_EVENT_TYPES = new Set([
   'overreach_rejected', 'overlap_replan', 'budget_note',
   'session_created', 'session_steer', 'gate_goal', 'gate_routing', 'pr_opened', 'accepted',
   'pr_ready', 'local_validated', 'owner_rework', 'local_cleaned', 'session_archived', 'watch_registered',
-  'replan_note',
+  'replan_note', 'decision_required', 'goal_report', 'final_acceptance',
 ]);
 const GATE_EVENT_TYPES = Object.freeze(['gate_goal', 'gate_routing']);
 const SESSION_EVENT_TYPES = Object.freeze([
   'session_created', 'session_steer', 'pr_opened', 'accepted', 'pr_ready', 'local_validated',
   'local_cleaned', 'session_archived', 'watch_registered',
 ]);
-const NOTE_EVENT_TYPES = Object.freeze(['site_report', 'replan_note', 'local_validated', 'pr_ready', 'watch_registered']);
+const NOTE_EVENT_TYPES = Object.freeze(['site_report', 'replan_note', 'local_validated', 'pr_ready', 'watch_registered', 'decision_required', 'goal_report', 'final_acceptance']);
 const OLD_WATCH_SCHEDULE_IDS = Object.freeze([
   ...loadMiniWatchConfig().old_schedule_ids_blocklist,
 ]);
@@ -1258,7 +1261,7 @@ export function latestGroupEvent(ledger, groupId, type) {
   for (let i = ledger.events.length - 1; i >= 0; i -= 1) {
     const ev = ledger.events[i];
     if (ev.type === 'owner_rework' && ev.detail?.group_id === groupId
-      && ['accepted', 'pr_opened', 'pr_ready', 'local_validated', 'delivery'].includes(type)) return null;
+      && ['accepted', 'pr_opened', 'pr_ready', 'local_validated', 'delivery', 'goal_report', 'final_acceptance'].includes(type)) return null;
     if (ev.type !== type || ev.detail?.group_id !== groupId) continue;
     if (seq !== undefined && ev.detail?.assignment_seq !== seq) continue;
     return ev;
@@ -1369,6 +1372,22 @@ const DELIVERY_LIFECYCLE = Object.freeze({
   'pr-handoff': ['review'],
 });
 
+const GOAL_VERDICTS = Object.freeze(['achieved', 'partial', 'not_achieved']);
+
+function requireString(value, what) {
+  if (typeof value !== 'string' || value.trim().length === 0) throw new LedgerError('ARGS', `${what} 必须是非空字符串`);
+  return value;
+}
+
+function assertFreshOpenReceipt(receipt, g, sha, now, what) {
+  const receiptMs = parseTimestamp(receipt.checked_at, `${what}.checked_at`);
+  const nowMs = parseTimestamp(now, `${what}.now`);
+  if ((receipt.deliveryHeadSha ?? receipt.headRefOid) !== sha || receipt.url !== g.pr_url || receipt.branch !== g.branch
+    || receiptMs > nowMs || nowMs - receiptMs > 5 * 60_000) {
+    throw new LedgerError('PRECONDITION', `${what} 必须重新确认当前非 draft PR 与必需 CI（URL/branch/head 对齐，回执五分钟内且不在未来）`);
+  }
+}
+
 export function noteEvent({ ledgerPath, now, event, detail }) {
   requireNow(now, 'note-event');
   if (!NOTE_EVENT_TYPES.includes(event)) {
@@ -1384,7 +1403,7 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
     throw new LedgerError('ARGS', '--detail 必须是 JSON 对象');
   }
   const ledger = readLedger(ledgerPath);
-  if (ledger.phase === 'ready' && event !== 'watch_registered' && event !== 'pr_ready') {
+  if (ledger.phase === 'ready' && !['watch_registered', 'pr_ready', 'goal_report', 'final_acceptance'].includes(event)) {
     throw new LedgerError('FROZEN', `台账已 ready（phase=${ledger.phase}），冻结只读，拒绝写操作`);
   }
   if (ledger.pr_plan) readExecutionManifest(ledger);
@@ -1436,6 +1455,68 @@ export function noteEvent({ ledgerPath, now, event, detail }) {
     if (receipt.schemaVersion === 2) Object.assign(ev.detail, { deliveryHeadSha: receipt.deliveryHeadSha, observedHeadSha: receipt.observedHeadSha, releaseEpoch: receipt.releaseEpoch });
     ev.detail.remote_confirmed_at = receipt.checked_at;
     ev.detail.assignment_seq = g.assignment_seq ?? 0;
+  }
+  if (event === 'goal_report') {
+    // owner 在 pr_ready 之后重新确认 PR 仍 OPEN/非 draft/必需 CI 绿，逐条回报设计与功能目标是否达成
+    const g = findGroup(ledger, requireString(parsed.group_id, 'goal_report.group_id'));
+    const sha = parsed.head_sha;
+    if (g.state !== 'pr-open') throw new LedgerError('PRECONDITION', `goal_report 只允许在 pr-open 入账（组 ${g.group_id} 当前 ${g.state}）`);
+    const ready = latestGroupEvent(ledger, g.group_id, 'pr_ready');
+    if (!ready || ready.detail?.current_pr_head_sha !== sha || sha !== g.tip_sha) {
+      throw new LedgerError('PRECONDITION', 'goal_report 必须绑定本组已成立 pr_ready 的同一 head（提交变化须重新交付）');
+    }
+    const scIds = Array.isArray(g.sc_ids) ? g.sc_ids : [];
+    const goals = parsed.goals;
+    if (!Array.isArray(goals) || goals.length === 0) throw new LedgerError('ARGS', 'goal_report.goals 必须是非空数组');
+    for (const [i, goal] of goals.entries()) {
+      if (typeof goal?.id !== 'string' || !goal.id || !GOAL_VERDICTS.includes(goal.verdict)
+        || typeof goal.evidence !== 'string' || !goal.evidence.trim()) {
+        throw new LedgerError('ARGS', `goal_report.goals[${i}] 需含 id、verdict(${GOAL_VERDICTS.join('|')})、非空 evidence`);
+      }
+    }
+    const missing = scIds.filter((id) => !goals.some((goal) => goal.id === id));
+    if (missing.length) throw new LedgerError('PRECONDITION', `goal_report 必须逐条覆盖本组 SC（缺: ${missing.join(', ')}）`);
+    requireString(parsed.summary, 'goal_report.summary');
+    const receipt = readPrOpenReceipt(requireString(parsed.receipt, 'goal_report.receipt'));
+    assertReceiptBoundToLedger(receipt, ledger, g.group_id, 'goal_report');
+    assertReceiptAfterEvent(receipt, ledger, g.group_id, 'pr_ready', 'goal_report');
+    assertFreshOpenReceipt(receipt, g, sha, now, 'goal_report');
+    ev.detail = { group_id: g.group_id, head_sha: sha, goals, summary: parsed.summary,
+      all_achieved: goals.every((goal) => goal.verdict === 'achieved'),
+      remote_confirmed_at: receipt.checked_at, assignment_seq: g.assignment_seq ?? 0 };
+  }
+  if (event === 'final_acceptance') {
+    // lead 的最终验收：只有 accepted 才能清场归档；rejected 由同一 owner 返工
+    const g = findGroup(ledger, requireString(parsed.group_id, 'final_acceptance.group_id'));
+    const report = latestGroupEvent(ledger, g.group_id, 'goal_report');
+    const ready = latestGroupEvent(ledger, g.group_id, 'pr_ready');
+    if (!report || !ready || parseTimestamp(report.at, 'goal_report.at') < parseTimestamp(ready.at, 'pr_ready.at')
+      || report.detail.head_sha !== parsed.head_sha || parsed.head_sha !== g.tip_sha
+      || report.detail.assignment_seq !== (g.assignment_seq ?? 0)) {
+      throw new LedgerError('PRECONDITION', 'final_acceptance 必须针对本组当前 head、晚于 pr_ready 的最新 goal_report');
+    }
+    if (!['accepted', 'rejected'].includes(parsed.verdict)) throw new LedgerError('ARGS', 'final_acceptance.verdict 必须是 accepted 或 rejected');
+    requireString(parsed.reason, 'final_acceptance.reason');
+    if (parseTimestamp(now, 'final_acceptance.now') <= parseTimestamp(report.at, 'goal_report.at')) {
+      throw new LedgerError('PRECONDITION', 'final_acceptance 不得早于或等于 goal_report');
+    }
+    ev.detail = { group_id: g.group_id, head_sha: parsed.head_sha, verdict: parsed.verdict, reason: parsed.reason,
+      goal_report_at: report.at, all_achieved: report.detail.all_achieved, assignment_seq: g.assignment_seq ?? 0 };
+  }
+  if (event === 'decision_required') {
+    // owner 停下的唯一入账口：lead-continuation 只看台账信号，checkpoint 本身叫不醒 lead
+    for (const key of ['group_id', 'decision_id', 'evidence_path']) {
+      if (typeof parsed[key] !== 'string' || parsed[key].length === 0) {
+        throw new LedgerError('ARGS', `decision_required 的 --detail.${key} 必须是非空字符串`);
+      }
+    }
+    if (!isAbsolute(parsed.evidence_path)) throw new LedgerError('ARGS', 'decision_required.evidence_path 必须是绝对路径');
+    const g = findGroup(ledger, parsed.group_id);
+    ev.detail = { group_id: parsed.group_id, decision_id: parsed.decision_id, evidence_path: parsed.evidence_path,
+      assignment_seq: g.assignment_seq ?? 0, ...(typeof parsed.phase === 'string' ? { phase: parsed.phase } : {}) };
+    const same = ledger.events.find((e) => e.type === 'decision_required' && e.detail?.group_id === parsed.group_id
+      && e.detail?.decision_id === parsed.decision_id && e.detail?.assignment_seq === ev.detail.assignment_seq);
+    if (same) return ledger;  // 同一决策重复写 checkpoint 不重复叫醒
   }
   if (event === 'local_validated') {
     const group = findGroup(ledger, parsed.group_id);
@@ -1892,6 +1973,13 @@ export function setState({
       if (!latestGroupEvent(ledger, group, 'pr_ready')) {
         return '缺失前置：→local-cleaned 要求本组成立的 pr_ready（本机绿色交付后即可清场，不再等 Mini 名册）';
       }
+      const verdict = latestGroupEvent(ledger, group, 'final_acceptance');
+      const report = latestGroupEvent(ledger, group, 'goal_report');
+      if (!verdict || verdict.detail?.verdict !== 'accepted' || verdict.detail.head_sha !== g.tip_sha
+        || !report || verdict.detail.goal_report_at !== report.at
+        || verdict.detail.assignment_seq !== (g.assignment_seq ?? 0)) {
+        return '缺失前置：→local-cleaned 要求 owner 的 goal_report 与 lead 对同一 head 的 final_acceptance=accepted（最终验收前不得完结）';
+      }
       if (cleanupReceipt === undefined) {
         return '缺失前置：→local-cleaned 要求 wrapup-cleanup 成功回执（--cleanup-receipt <path>）';
       }
@@ -1906,7 +1994,7 @@ export function setState({
       }
       try {
         assertReceiptBoundToLedger(cleanupReceipt, ledger, group, 'cleanup receipt');
-        assertReceiptAfterEvent(cleanupReceipt, ledger, group, 'pr_ready', 'cleanup receipt');
+        assertReceiptAfterEvent(cleanupReceipt, ledger, group, 'final_acceptance', 'cleanup receipt');
       } catch (err) {
         if (err instanceof LedgerError) return `缺失前置：${err.message}`;
         throw err;
@@ -2855,7 +2943,7 @@ function usage() {
     '  set-state <ledger> --wave <n> --integrate <hex40> --now <ts>',
     '  render-packet <ledger> --group <gid> [--manifest <path>]',
     '  record-delivery <ledger> --group <gid> --payload <json|@file> --now <ts>',
-    '  note-event <ledger> --event site_report|replan_note|watch_registered --detail <json> --now <ts>',
+    '  note-event <ledger> --event site_report|replan_note|watch_registered|decision_required|goal_report|final_acceptance --detail <json> --now <ts>',
     '  staleness <ledger> [--now <iso>]',
     '退出码：0 成功 / 1 用法错误 / 2 fail-closed（schema/CAS/前置/hash 不匹配等，点名原因）',
   ].join('\n');

@@ -177,6 +177,8 @@ test('standard delivered-local-only cleanup succeeds against a real clean Git wo
   ledger.events.push({ type: 'delivery', detail: { group_id: 'PR01', assignment_seq: 0, branch: f.branch, tip_sha: f.accepted,
     e2e: { status: 'pass', candidate_sha: f.accepted }, size_gate: { result: 'PASS', candidate_sha: f.accepted } } });
   ledger.events.push({ type: 'pr_ready', detail: { group_id: 'PR01', assignment_seq: 0, receipt: prReceiptPath } });
+  ledger.events.push({ type: 'goal_report', at: '2026-09-25T00:00:01Z', detail: { group_id: 'PR01', assignment_seq: 0, head_sha: f.accepted, all_achieved: true } });
+  ledger.events.push({ type: 'final_acceptance', at: '2026-09-25T00:00:02Z', detail: { group_id: 'PR01', assignment_seq: 0, head_sha: f.accepted, verdict: 'accepted', goal_report_at: '2026-09-25T00:00:01Z' } });
   write(f.ledgerPath, ledger);
   const ghBin = join(f.root, 'gh-fixture');
   writeFileSync(ghBin, `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(JSON.stringify(pr))});\n`);

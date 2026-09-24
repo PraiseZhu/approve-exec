@@ -26,7 +26,7 @@ sys.path.insert(0, str(HERE))
 from protocol import DuplexClient, RpcError  # type: ignore  # noqa: E402
 
 VOLATILE_KEYS = {"updated_at", "created_at", "last_seen_at", "observed_at", "at", "timestamp", "mtime", "mtime_ms"}
-SIGNAL_TYPES = {"pr_ready", "decision_required", "blocked", "local_cleaned", "session_archived", "owner_done", "next_wave", "successor_dispatch_ready"}
+SIGNAL_TYPES = {"pr_ready", "goal_report", "final_acceptance", "decision_required", "blocked", "local_cleaned", "session_archived", "owner_done", "next_wave", "successor_dispatch_ready"}
 ARCHIVED_STATES = {"archived", "owner_archived"}
 FAILED_STATES = {"failed", "error"}
 SUPPLEMENTAL_CLEANUP_SCHEMA = "approve-exec-supplemental-cleanup-receipt-v1"
@@ -49,6 +49,12 @@ def _retryable_rejection(exc: BaseException) -> bool:
     if code == "HOST_NOT_READY":
         return True
     return code == "PRECONDITION_FAILED" and "伙伴能力正在刷新，请稍后再发送" in message
+
+
+def _lead_missing(exc: BaseException) -> bool:
+    code = getattr(exc, "code", "")
+    message = getattr(exc, "message", str(exc))
+    return code == "NOT_FOUND" and "session" in message.lower()
 
 
 def _die(message: str) -> None:
@@ -365,6 +371,9 @@ def run_once(config_path: str | Path, *, client: Any | None = None, now: float |
             result = {"version": 1, "status": "complete", "fingerprint": fp, "last_progress_at": now, "dispatched": False}
             _write_atomic(state_path, result)
             return result
+        if previous.get("lead_missing") and (previous.get("pending") or {}).get("target_session_id") != cfg["lead_session_id"]:
+            # 配置已改绑到新 lead：丢弃发往旧 lead 的待送，按业务变化重发一次
+            previous = {k: v for k, v in previous.items() if k not in {"pending", "lead_missing", "fingerprint", "status"}}
         changed = previous.get("fingerprint") != fp
         pending = previous.get("pending")
         # Older consumers stored this explicit pre-dispatch refusal as unknown.
@@ -425,6 +434,11 @@ def run_once(config_path: str | Path, *, client: Any | None = None, now: float |
                 result = {**before, "status": "retryable-rejected", "retryable_attempts": retryable_attempts + 1, "last_dispatch_at": now, "dispatch_error_code": exc.code, "dispatch_error": str(exc), "dispatched": False}
                 _write_atomic(state_path, result)
                 return result
+            if _lead_missing(exc):
+                # 目标 session 不存在是确定的派前拒绝，不是回执未知；静默挂 pending-receipt 会让 owner 的决策永远没人看
+                result = {**before, "status": "blocked", "reason": "lead session not found", "lead_missing": True, "dispatch_error_code": getattr(exc, "code", ""), "dispatch_error": str(exc), "dispatched": False}
+                _write_atomic(state_path, result)
+                return result
             result = {**before, "status": "pending-receipt", "dispatch_error": str(exc), "dispatched": False}
             _write_atomic(state_path, result)
             return result
@@ -456,6 +470,9 @@ def main() -> None:
         summary = {"status": result.get("status"), "fingerprint": result.get("fingerprint"), "dispatched": result.get("dispatched", False)}
         if cfg.get("schemaVersion") == 2: summary["outcomes"] = result.get("outcomes", {})
         client.emit_complete(json.dumps(summary, ensure_ascii=False, separators=(",", ":")), cfg["lead_session_id"])
+        if result.get("lead_missing"):
+            # 让调度这一轮显式失败，别人才看得见绑定的 lead 已不存在
+            raise RuntimeError(f"绑定的 lead session {cfg['lead_session_id']} 不存在；owner 的决策/Ready 信号无法送达，改配置里的 lead_session_id 后下一轮自动重发")
     except Exception as exc:
         print(f"lead-continuation: {exc}", file=sys.stderr)
         raise SystemExit(2)

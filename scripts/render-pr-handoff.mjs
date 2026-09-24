@@ -8,6 +8,7 @@ import { LedgerError, readLedger, readExecutionManifest, assertManifestBound, fi
 import {
   assertHandoffComplete, assertExcerpts, assertVerifyCmds, assertOwnerTitle,
 } from './vnext-owner-contract.mjs';
+import { findExtraStopPoints, formatStopPoints } from './lib/stop-points.mjs';
 import { loadCollateralPolicy, renderCollateralPolicyText } from './lib/collateral.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -60,6 +61,19 @@ export function renderDecisionLadder({ jevJournal, actConfidence }) {
     'D2 必须停（DECISION_REQUIRED，保留原 owner 绑定）：硬停六条；hash/身份自检失败；SC、接口兼容、授权或跨 PR 依赖发生变化；allowed_paths 不够且不符合第 5 段连带策略；base 本身红；授权不足；已授权恢复策略和预算耗尽；连续 3 轮零增量。只发一条 decision_required，附已尝试动作、fallbacks_tried 和 Jev 给的选项排序（留痕行号），等 lead 一个决定后同一 owner 继续。等待期间保留任务状态、阻塞原因和唤醒条件，不报完成。',
     'CI 等待不收工：push 后启用了 continuation v2 就写 --phase waiting-ci 的 checkpoint 再结束本轮，由零 token 脚本在 CI 出结果时唤醒；未启用时本轮内用 gh pr checks <PR> --watch --interval 60 轮询（单条命令超时就重进），不得以「在等 CI」收工或报完成。CI 红先走确定性规则：失败日志命中网络超时 / ETIMEDOUT / ECONNRESET / 429 / runner 失联这类基础设施故障，且同一 head 未重跑过，就 gh run rerun <run-id> --failed 一次；不命中或重跑后仍红，再按 D1 问 Jev 定修法。',
   ];
+}
+
+/** lead 可写部分不得加第⑧节五类停以外的停点（见 lib/stop-points.mjs）。 */
+export function assertNoExtraStopPoints({ why, how, tableLine, forbidden = [] }) {
+  const checks = [
+    ['第 2 段', findExtraStopPoints(why)],
+    ['第 4 段', findExtraStopPoints(how)],
+    ['总表', findExtraStopPoints(tableLine)],
+    ...forbidden.map((item) => ['第 9 段禁做「' + item + '」', findExtraStopPoints(item, { forbiddenItem: true })]),
+  ];
+  for (const [where, hits] of checks) {
+    if (hits.length) throw new LedgerError('PACKET_EXTRA_STOP', formatStopPoints(where, hits));
+  }
 }
 
 export function renderPrHandoff({
@@ -137,6 +151,8 @@ export function renderPrHandoff({
     throw new LedgerError('PACKET_INCOMPLETE', `开工包第 5 段需要连带策略: ${err.message}`);
   }
   if (jevJournal !== undefined) requireAbs(jevJournal, 'Jev 留痕路径');
+  assertNoExtraStopPoints({ why: resolvedWhy, how: resolvedHow, tableLine,
+    forbidden: [...(packet.forbidden ?? []), ...(forbiddenExtra ?? [])] });
   const forbidden = [
     ...(packet.forbidden ?? []),
     ...(forbiddenExtra ?? []),
@@ -191,7 +207,7 @@ export function renderPrHandoff({
       '可自决：不改变 SC、接口兼容、授权和跨 PR 依赖的域内实现选型；派 read-only sub / e2e worker；本机测试红在 allowed_paths 内修到绿；已授权的 feature branch push 与目标 PR create/update。禁止派 review worker。',
       '429 / Too Many Requests 按 Retry-After 和现有预算在原路由等待重试，记录下一次唤醒；worker 崩溃先查原 worker 状态再恢复。创建失败结果不明时先查绑定，不盲目重复创建。只有 NO_PROVIDER_FOR_AGENT / PROVIDER_ROUTE_UNAVAILABLE / BUDGET_MODEL_REQUIRES_API_MODE 才按现读该档 fallbacks 换 provider、不换代次。每次实际降级写入 fallbacks_tried；未走降级保留空数组并说明原因，禁止空数组就问 lead。',
       ...renderDecisionLadder({ jevJournal, actConfidence: collateralPolicy.jev.act_confidence }),
-      '按第⑩节提交 candidate 后继续已授权的本机验证、提交、普通 push 与 Draft PR 收尾；Mivo 必须等当前提交必需 CI 全绿且审查workflow静态入口前提可用后转为 OPEN 非 draft，再写 pr_ready，交 lead 验收全部 priority/SC。lead 验收后立即清本地并归档该 owner；Mini Cindy 常驻程序按 PR 唯一修复 session 处理云端审查反馈。本机不追反馈；必要门禁和远端 head 均已确认。子 session 不合入；任何角色不得自动合并、启用 auto-merge 或调用 gh pr merge，只有用户对指定 PR 的当次明确授权才允许合并。',
+      '按第⑩节提交 candidate 后继续已授权的本机验证、提交、普通 push 与 Draft PR 收尾；Mivo 必须等当前提交必需 CI 全绿且审查workflow静态入口前提可用后转为 OPEN 非 draft，再写 pr_ready。pr_ready 之后同一 owner 重新执行 confirm-pr-open 确认 PR 仍 OPEN 非 draft、必需 CI 全绿，写 note-event goal_report：逐条 SC（含设计/功能目标）标 achieved|partial|not_achieved 并附证据，如实报告未达成项；CI 转红或 PR 被关就先修到绿再报，释放后不得再改产品则发 decision_required。goal_report 之后由 lead 写 final_acceptance：accepted 才算正式完结，rejected 由同一 owner 返工。lead 验收后立即清本地并归档该 owner；Mini Cindy 常驻程序按 PR 唯一修复 session 处理云端审查反馈。本机不追反馈；必要门禁和远端 head 均已确认。子 session 不合入；任何角色不得自动合并、启用 auto-merge 或调用 gh pr merge，只有用户对指定 PR 的当次明确授权才允许合并。',
     ].join('\n')],
     ['9. 禁做', forbidden.map((f) => `- ${f}`).join('\n')],
     ['10. 回报格式', [
@@ -199,6 +215,7 @@ export function renderPrHandoff({
       `goal_skill_path 必须是 ${GOAL_SKILL}`,
       'pr_ready note-event detail: group_id, pr_url, current_pr_head_sha, receipt（重新执行 confirm-pr-open 的真实回执路径；必须晚于 pr_opened，五分钟内）',
       'Mivo v2：Draft下 release-mivo-pr.mjs prepare --repo --pr --head --validation-report --review-trust --out；CI/SC/E2E与静态审查前提通过后 release --worktree --candidate-receipt --out。confirm-pr-open 增加 --worktree 与 --release-receipt，交付A与Mini后继B分列；current_pr_head_sha填已验收A。释放后不写产品、不等待实际审查入场；unknown Ready只查原journal，不重复mutation。详细报告schema见owner-protocol。',
+      'goal_report note-event detail: group_id, head_sha（= pr_ready 的 current_pr_head_sha）, receipt（pr_ready 之后重新执行 confirm-pr-open 的真实回执，五分钟内）, goals[{id, verdict: achieved|partial|not_achieved, evidence}]（覆盖本组全部 SC）, summary',
       'decision_required 人读报告：本组/当前 head、阻塞事实、已尝试动作、fallbacks_tried、唯一待决问题、选项和建议（附 Jev 选项排序与留痕行号；Jev 不可用写 JEV_UNAVAILABLE）；不是另造 ledger schema',
       '直接调用随包 owner-protocol 的 skill 脚本入账；不需要宿主 gateway。创建回执未知时保留原 claim，不重复 create。',
     ].join('\n')],

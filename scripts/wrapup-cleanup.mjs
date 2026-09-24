@@ -141,6 +141,11 @@ function assertDeliveredEvidence({ delivery, branch, localSha, ledgerPath, group
   if (!record || !['pr-open', 'local-cleaned'].includes(record.state) || !SHA_RE.test(acceptedSha) || e2e?.status !== 'pass' || e2e.candidate_sha !== acceptedSha || deliveryEvidence?.tip_sha !== acceptedSha || !prReceipt || prReceipt.branch !== branch || (prReceipt.deliveryHeadSha ?? prReceipt.headRefOid) !== acceptedSha || prReceipt.isDraft !== false || prReceipt.state !== 'OPEN') {
     throw new LedgerError('PRECONDITION', 'ledger 未证明本组同一提交已通过 e2e 且已建立 PR 回执');
   }
+  const verdict = latestGroupEvent(ledger, group, 'final_acceptance');
+  if (verdict?.detail?.verdict !== 'accepted' || verdict.detail.head_sha !== acceptedSha
+    || verdict.detail.goal_report_at !== latestGroupEvent(ledger, group, 'goal_report')?.at) {
+    throw new LedgerError('PRECONDITION', 'lead 尚未对同一 head 的 goal_report 给出 final_acceptance=accepted，不得清场');
+  }
   if (prReceipt.schemaVersion === 2) {
     if (localSha !== acceptedSha) throw new LedgerError('PRECONDITION', 'v2 cleanup requires local HEAD equal to delivery A');
     const pr = verifyDeliveryEpoch(prReceipt, args => deliveryGh(args, (binary, argv, options) => ghRunner(ghBin ?? binary, argv, options)));

@@ -90,6 +90,8 @@ test('Draft A release then Mini B permits v2 confirm and local-only cleanup desp
     waves: [{ groups: [{ group_id: 'g1', state: 'pr-open', tip_sha: f.head, assignment_seq: 0, pr_url: receipt.url }] }], events: [
       { type: 'delivery', detail: { group_id: 'g1', assignment_seq: 0, branch: f.branch, tip_sha: f.head, scs: [{ id: 'SC-1', status: 'pass' }], e2e: { status: 'pass', candidate_sha: f.head }, size_gate: { result: 'PASS', candidate_sha: f.head } } },
       { type: 'pr_ready', detail: { group_id: 'g1', assignment_seq: 0, receipt: receiptPath } },
+      { type: 'goal_report', at: '2026-09-09T10:02:10Z', detail: { group_id: 'g1', assignment_seq: 0, head_sha: f.head, all_achieved: true } },
+      { type: 'final_acceptance', at: '2026-09-09T10:02:20Z', detail: { group_id: 'g1', assignment_seq: 0, head_sha: f.head, verdict: 'accepted', goal_report_at: '2026-09-09T10:02:10Z' } },
     ] }));
   const cleaned = wrapupCleanup({ worktree: f.wt, branch: f.branch, now: '2026-09-09T10:03:00Z', ledgerVersion: 1, assignmentSeq: 0,
     mode: 'delivered-local-only', ledgerPath, group: 'g1', repo: MIVO_REPO, ghRunner: (_binary, args) => ({ status: 0, stdout: JSON.stringify(f.gh(args)) }) });
