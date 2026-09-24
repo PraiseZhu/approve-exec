@@ -85,7 +85,7 @@ task-priority final manifest
         → 本地不派 reviewer；GPT/Claude 单审取消
         → candidate 只是检查点；owner 自己完成本机验证、push 与 Draft PR 收尾，满足第 6 步双门后转 Ready，lead 不在中途放行
   → 5. Lead 只读每 PR 的自动入账证据与 DECISION_REQUIRED（失败则给一个决定，同一 owner 继续，直到 PR_READY）
-  → 6. owner 先开或保持 Draft PR；当前提交 required CI 全绿且审查workflow静态入口前提可用后，owner 将 PR 转为 Ready for review（非 draft），再由 `confirm-pr-open.mjs` 消费 OPEN/head 回执。该脚本由 owner 执行，不是 lead 代跑。开 PR ≠ Mini 修复开始。
+  → 6. owner 先开或保持 Draft PR；当前提交 required CI 全绿且审查workflow静态入口前提可用后，owner 将 PR 转为 Ready for review（非 draft），再由 `confirm-pr-open.mjs` 消费 OPEN/head/必需 CI 回执（所有 GitHub 仓都查 `gh pr checks --required`，空清单或非 pass fail-closed）。该脚本由 owner 执行，不是 lead 代跑。开 PR ≠ Mini 修复开始。
   → 6.5 owner 在已验收提交上确认 OPEN/非 draft/head/必需 CI 后写 note-event pr_ready，再重新确认 OPEN/CI 绿后写 goal_report 逐条回报目标达成情况；lead 对照 priority/SC 与设计目标写 final_acceptance（accepted 才完结），不等待审查机结论。
   → 7. lead 不再 register Mini；`watch_registered` 仅兼容旧台账读取。Mivo 交付后 Mini 常驻 Cindy 按 PR nodeid 唯一 session 采集反馈。
   → 8. lead 派 native sub 跑 `wrapup-cleanup.mjs --mode delivered-local-only` 清本地 worktree/分支（不删远端）→ 回报
