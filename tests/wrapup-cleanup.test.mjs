@@ -165,6 +165,24 @@ test('confirm-pr-open: gh pr view 用分支名，不用 --head', () => {
   assert.equal(args.includes('--head'), false);
 });
 
+
+// owner 回报目标 + lead 最终验收（清场前置）；ts 为 [goal 回执, goal_report, final_acceptance] 三个递增时间
+function recordFinalAcceptance({ cli, ledgerPath, dir, g, sha, prUrl, branch, stamp, ts, verdict = 'accepted', goalVerdict = 'achieved' }) {
+  const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  const group = ledger.waves.flatMap((w) => w.groups).find((item) => item.group_id === g);
+  const receipt = join(dir, `goal-receipt-${ts[1]}.json`);
+  writeFileSync(receipt, `${JSON.stringify({ url: prUrl, number: Number(prUrl.split('/').pop()), headRefOid: sha, isDraft: false, state: 'OPEN', branch, checked_at: ts[0], ...stamp() })}\n`);
+  let r = cli('note-event', ledgerPath, '--event', 'goal_report', '--detail', JSON.stringify({
+    group_id: g, head_sha: sha, receipt, summary: '设计与功能目标逐条核对',
+    goals: group.sc_ids.map((id) => ({ id, verdict: goalVerdict, evidence: 'e2e 报告与 CI 全绿' })),
+  }), '--now', ts[1]);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli('note-event', ledgerPath, '--event', 'final_acceptance', '--detail', JSON.stringify({
+    group_id: g, head_sha: sha, verdict, reason: 'lead 对照目标验收',
+  }), '--now', ts[2]);
+  assert.equal(r.status, 0, r.stderr);
+}
+
 test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
   const dir = mkdtempSync(join(tmpdir(), 'ready-wrapup-'));
@@ -325,13 +343,41 @@ test('ready 冻结后仍可 pr-open / watch_registered / local-cleaned', () => {
     receipt: watchReceipt,
   }), '--now', AFTER);
   assert.equal(r.status, 0, r.stderr);
+  const earlyCleanup = join(dir, 'cleanup-before-acceptance.json');
+  writeFileSync(earlyCleanup, `${JSON.stringify({
+    ok: true, skipped: false, branch: 'feat/run-ledger', worktree: '/wt/g4', sha: SHA1,
+    remoteDeleted: false, checked_at: '2026-08-09T00:00:03Z', ...stamp(),
+  })}\n`);
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'local-cleaned', '--now', T, '--cleanup-receipt', earlyCleanup);
+  assert.equal(r.status, 2, '没有 goal_report + final_acceptance 不得清场');
+  assert.match(r.stderr, /final_acceptance/);
+  const accept = { cli, ledgerPath, dir, g, sha: SHA1, prUrl: 'https://github.com/xindong/mivo-canvas-plugin/pull/1', branch: 'feat/run-ledger', stamp };
+  r = cli('note-event', ledgerPath, '--event', 'final_acceptance', '--detail', JSON.stringify({ group_id: g, head_sha: SHA1, verdict: 'accepted', reason: 'x' }), '--now', AFTER);
+  assert.equal(r.status, 2, '没有 goal_report 不得最终验收');
+  const goalReceipt = join(dir, 'goal-receipt-bad.json');
+  writeFileSync(goalReceipt, `${JSON.stringify({ url: accept.prUrl, number: 1, headRefOid: SHA1, isDraft: false, state: 'OPEN', branch: 'feat/run-ledger', checked_at: '2026-08-09T00:00:01.500Z', ...stamp() })}\n`);
+  const badGoal = (detail, now = '2026-08-09T00:00:01.600Z') => cli('note-event', ledgerPath, '--event', 'goal_report', '--detail', JSON.stringify({
+    group_id: g, head_sha: SHA1, receipt: goalReceipt, summary: 's', goals: [{ id: 'nope', verdict: 'achieved', evidence: 'e' }], ...detail }), '--now', now);
+  r = badGoal({});
+  assert.equal(r.status, 2); assert.match(r.stderr, /逐条覆盖本组 SC/);
+  r = badGoal({ head_sha: 'f'.repeat(40) });
+  assert.equal(r.status, 2); assert.match(r.stderr, /同一 head/);
+  const sc = JSON.parse(readFileSync(ledgerPath, 'utf8')).waves.flatMap((w) => w.groups).find((x) => x.group_id === g).sc_ids;
+  r = badGoal({ goals: sc.map((id) => ({ id, verdict: 'achieved', evidence: 'e' })) }, '2026-08-09T00:10:00Z');
+  assert.equal(r.status, 2, 'goal_report 必须用五分钟内重新确认的 OPEN/CI 回执'); assert.match(r.stderr, /五分钟/);
+  r = badGoal({ goals: sc.map((id) => ({ id, verdict: 'done', evidence: 'e' })) });
+  assert.equal(r.status, 2); assert.match(r.stderr, /verdict/);
+  recordFinalAcceptance({ ...accept, ts: ['2026-08-09T00:00:02.100Z', '2026-08-09T00:00:02.200Z', '2026-08-09T00:00:02.300Z'], verdict: 'rejected', goalVerdict: 'partial' });
+  r = cli('set-state', ledgerPath, '--group', g, '--to', 'local-cleaned', '--now', T, '--cleanup-receipt', earlyCleanup);
+  assert.equal(r.status, 2, 'lead 判 rejected 不得清场');
+  recordFinalAcceptance({ ...accept, ts: ['2026-08-09T00:00:02.400Z', '2026-08-09T00:00:02.500Z', '2026-08-09T00:00:02.600Z'] });
   const cleanupTooSoon = join(dir, 'cleanup-too-soon.json');
   writeFileSync(cleanupTooSoon, `${JSON.stringify({
     ok: true, skipped: false, branch: 'feat/run-ledger', worktree: '/wt/g4', sha: SHA1,
     remoteDeleted: false, checked_at: LATER, ...stamp(),
   })}\n`);
   r = cli('set-state', ledgerPath, '--group', g, '--to', 'local-cleaned', '--now', T, '--cleanup-receipt', cleanupTooSoon);
-  assert.equal(r.status, 2, 'cleanup 回执不得早于或等于 pr_ready');
+  assert.equal(r.status, 2, 'cleanup 回执不得早于或等于最终验收');
   const cleanupReceipt = join(dir, 'cleanup-receipt.json');
   writeFileSync(cleanupReceipt, `${JSON.stringify({
     ok: true,
@@ -464,6 +510,8 @@ test('cleanup 回执在其它写入先推高 version 后仍可消费（不绑全
     current_pr_head_sha: SHA1, receipt: prOpenReceipt,
   }), '--now', LATER);
   assert.equal(r.status, 0, r.stderr);
+  recordFinalAcceptance({ cli, ledgerPath, dir, g, sha: SHA1, prUrl: 'https://github.com/xindong/mivo-canvas-plugin/pull/1', branch: 'feat/run-ledger', stamp,
+    ts: ['2026-08-09T00:00:02.100Z', '2026-08-09T00:00:02.200Z', '2026-08-09T00:00:02.300Z'] });
   const cleanupReceipt = join(dir, 'cleanup-stale-version.json');
   writeFileSync(cleanupReceipt, `${JSON.stringify({
     ok: true, skipped: false, branch: 'feat/run-ledger', worktree: '/wt/g4', sha: SHA1,
@@ -775,6 +823,8 @@ test('wrapup-cleanup: 显式保留 ignored 目录且远端后代可清理（真�
     writeFileSync(ledgerPath, JSON.stringify({ version: 1, waves: [{ groups: [{ group_id: 'PR01', state: 'pr-open', tip_sha: local, pr_url: prUrl, assignment_seq: 0 }] }], events: [
       { type: 'delivery', detail: { group_id: 'PR01', assignment_seq: 0, branch, tip_sha: local, scs: [{ id: 'SC-A1', status: 'pass' }], e2e: { status: 'pass', candidate_sha: local }, size_gate: { result: 'PASS', candidate_sha: local } } },
       { type: 'pr_ready', detail: { group_id: 'PR01', assignment_seq: 0, receipt: prReceiptPath } },
+      { type: 'goal_report', at: '2026-08-09T00:00:03Z', detail: { group_id: 'PR01', assignment_seq: 0, head_sha: local, all_achieved: true } },
+      { type: 'final_acceptance', at: '2026-08-09T00:00:04Z', detail: { group_id: 'PR01', assignment_seq: 0, head_sha: local, verdict: 'accepted', goal_report_at: '2026-08-09T00:00:03Z' } },
     ] }));
     const ghBin = join(root, 'gh-fixture');
     writeFileSync(ghBin, `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(JSON.stringify({ state: 'OPEN', isDraft: false, headRefOid: remote, headRepositoryOwner: { login: 'xindong' }, headRepository: { name: 'mivo-canvas-plugin' } }))});\n`);
@@ -824,6 +874,8 @@ test('wrapup-cleanup: worktree 已删但 CAS 失败时保留物标记 partial cl
   writeFileSync(ledgerPath, JSON.stringify({ version: 1, waves: [{ groups: [{ group_id: 'PR01', state: 'pr-open', tip_sha: f.SHA }] }], events: [
     { type: 'delivery', detail: { group_id: 'PR01', assignment_seq: 0, branch: f.branch, tip_sha: f.SHA, scs: [{ id: 'SC-A1', status: 'pass' }], e2e: { status: 'pass', candidate_sha: f.SHA }, size_gate: { result: 'PASS', candidate_sha: f.SHA } } },
     { type: 'pr_ready', detail: { group_id: 'PR01', receipt: receiptPath } },
+    { type: 'goal_report', at: '2026-08-09T00:00:03Z', detail: { group_id: 'PR01', head_sha: f.SHA, all_achieved: true } },
+    { type: 'final_acceptance', at: '2026-08-09T00:00:04Z', detail: { group_id: 'PR01', head_sha: f.SHA, verdict: 'accepted', goal_report_at: '2026-08-09T00:00:03Z' } },
   ] }));
   const ghBin = join(f.root, 'gh-fixture');
   writeFileSync(ghBin, `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(JSON.stringify({ state: 'OPEN', isDraft: false, headRefOid: f.remote, headRepositoryOwner: { login: 'xindong' }, headRepository: { name: 'mivo-canvas-plugin' } }))});\n`);

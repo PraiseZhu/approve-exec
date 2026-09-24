@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, realpathSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -17,6 +17,12 @@ import { miniWatchConfigSha256 } from '../scripts/lib/mini-watch-config.mjs';
 import { issueLeadSignal } from '../scripts/pr-watch/lead-signal.mjs';
 
 const NOW = '2026-09-05T00:00:00Z';
+function writeContinuation(dir, ledgerPath, schedule = {}) {
+  const configPath = join(dir, 'lead-continuation.json');
+  writeFileSync(configPath, JSON.stringify({ lead_session_id: 'lead-test', ledger_paths: [realpathSync(ledgerPath)], stalled_after_sec: 1800 }));
+  writeFileSync(join(dir, 'lead-continuation-schedule.json'), JSON.stringify({ ok: true, id: 'sched-1', executionMode: 'script', status: 'active',
+    command: 'python3 /skill/scripts/lead-continuation.py --config ' + realpathSync(configPath), ...schedule }));
+}
 function fixture(t, staged = false, probeExit = 0) {
   const dir = mkdtempSync(join(tmpdir(), 'owner-chain-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -55,14 +61,15 @@ function fixture(t, staged = false, probeExit = 0) {
     per_sc: manifest.dispatch.packets.flatMap((p) => p.scs_inline.map((sc) => ({ sc_id: sc.id,
       group_id: p.group_id, read_only: sc.kind === 'probe' || p.allowed_paths.length === 0, real_write_paths: sc.kind === 'probe' ? [] : p.allowed_paths }))) };
   const sitePath = join(dir, 'site.json'); writeFileSync(sitePath, JSON.stringify(report));
+  writeContinuation(dir, ledgerPath);
   return { dir, repo, sha, manifest, report, ledgerPath, handoffPath, sitePath, groupId: 'g4', now: NOW };
 }
 
 test('派窗核第 5 段：连带策略原文被改写即拒；旧开工包（无连带策略）仍放行', t => {
   const tampered = fixture(t);
   const text = readFileSync(tampered.handoffPath, 'utf8');
-  assert.ok(text.includes('上限 5 个文件、200 行'), '夹具开工包应带连带策略');
-  writeFileSync(tampered.handoffPath, text.replace('上限 5 个文件、200 行', '上限 50 个文件、200 行'));
+  assert.ok(text.includes('上限 10 个文件、200 行'), '夹具开工包应带连带策略');
+  writeFileSync(tampered.handoffPath, text.replace('上限 10 个文件、200 行', '上限 50 个文件、200 行'));
   assert.throws(() => prepareOwner(tampered), /授权路径与 final 不一致/);
   const legacy = fixture(t);
   const legacyText = readFileSync(legacy.handoffPath, 'utf8');
@@ -358,4 +365,57 @@ test('Mini 接管不是写名册：必须有 Ready 之后的新鲜心跳', () =>
   assert.throws(() => assertTakeover(takeover, { now: NOW }), /心跳/);
   assert.throws(() => assertTakeover(takeover, { now: '2026-09-05T01:00:00Z' }), /心跳/);
   assert.throws(() => assertTakeover(takeover, { now: '2026-09-05T00:00:03Z', readyAt: '2026-09-05T00:00:02Z' }), /心跳/);
+});
+
+test('派窗拒手改开工包夹带五类停外的停点（回归 mivo PR3 的 lead 补充）', t => {
+  const f = fixture(t);
+  const text = readFileSync(f.handoffPath, 'utf8');
+  writeFileSync(f.handoffPath, text + '\n【lead 补充，优先于第 8 段】派 GPT 单审 reviewer，写 accept-PR3 后停下等 lead「开 PR」\n');
+  assert.throws(() => prepareOwner(f), /PACKET_EXTRA_STOP|五类停以外/);
+  writeFileSync(f.handoffPath, text.replace('## 9. 禁做\n', '## 9. 禁做\n- lead 验收前 git push\n'));
+  assert.throws(() => prepareOwner(f), /forbid-authorized-push/);
+});
+
+test('派窗前必须已登记指向本台账的 active 续跑调度', t => {
+  const missing = fixture(t);
+  unlinkSync(join(missing.dir, 'lead-continuation-schedule.json'));
+  assert.throws(() => prepareOwner(missing), /派窗前必须先登记整包续跑/);
+  const paused = fixture(t);
+  writeContinuation(paused.dir, paused.ledgerPath, { status: 'paused' });
+  assert.throws(() => prepareOwner(paused), /active script 调度/);
+  const otherLedger = fixture(t);
+  writeFileSync(join(otherLedger.dir, 'lead-continuation.json'), JSON.stringify({ lead_session_id: 'lead-test', ledger_paths: ['/elsewhere/ledger.json'] }));
+  assert.throws(() => prepareOwner(otherLedger), /ledger_paths 未包含本台账/);
+});
+
+test('decision_required：owner 停下入账一次、重复不再叫醒、字段不全即拒', t => {
+  const f = fixture(t);
+  const evidence = join(f.dir, 'decision.json');
+  const detail = { group_id: f.groupId, decision_id: 'expand-write-set', evidence_path: evidence };
+  const before = readLedger(f.ledgerPath).version;
+  noteEvent({ ledgerPath: f.ledgerPath, now: NOW, event: 'decision_required', detail });
+  noteEvent({ ledgerPath: f.ledgerPath, now: NOW, event: 'decision_required', detail });
+  const ledger = readLedger(f.ledgerPath);
+  assert.equal(ledger.version, before + 1);
+  assert.equal(ledger.events.filter(e => e.type === 'decision_required').length, 1);
+  assert.throws(() => noteEvent({ ledgerPath: f.ledgerPath, now: NOW, event: 'decision_required', detail: { ...detail, evidence_path: 'rel.json' } }), /绝对路径/);
+  assert.throws(() => noteEvent({ ledgerPath: f.ledgerPath, now: NOW, event: 'decision_required', detail: { group_id: f.groupId } }), /decision_id/);
+});
+
+test('owner-checkpoint 写 decision 时同步入账 decision_required，lead 续跑能看见', t => {
+  const f = fixture(t);
+  const request = prepareOwner(f);
+  bindOwner({ ...f, claimId: request.claim_id, result: { target_session_id: 'bound-owner' } });
+  const checkpoint = join(f.dir, 'owner-checkpoints', 'g4.json');
+  const evidence = join(f.dir, 'decision.json');
+  const script = fileURLToPath(new URL('../scripts/owner-checkpoint.py', import.meta.url));
+  const run = () => spawnSync('python3', ['-B', script, '--ledger', f.ledgerPath, '--group', f.groupId, '--checkpoint', checkpoint,
+    '--phase', 'decision', '--step', 'await-expansion', '--decision-id', 'expand-write-set', '--decision-evidence', evidence], { encoding: 'utf8' });
+  const first = run();
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(run().status, 0);
+  const events = readLedger(f.ledgerPath).events.filter(e => e.type === 'decision_required');
+  assert.equal(events.length, 1);
+  assert.equal(events[0].detail.decision_id, 'expand-write-set');
+  assert.equal(JSON.parse(readFileSync(checkpoint, 'utf8')).phase, 'decision');
 });

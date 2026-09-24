@@ -86,13 +86,13 @@ task-priority final manifest
         → candidate 只是检查点；owner 自己完成本机验证、push 与 Draft PR 收尾，满足第 6 步双门后转 Ready，lead 不在中途放行
   → 5. Lead 只读每 PR 的自动入账证据与 DECISION_REQUIRED（失败则给一个决定，同一 owner 继续，直到 PR_READY）
   → 6. owner 先开或保持 Draft PR；当前提交 required CI 全绿且审查workflow静态入口前提可用后，owner 将 PR 转为 Ready for review（非 draft），再由 `confirm-pr-open.mjs` 消费 OPEN/head 回执。该脚本由 owner 执行，不是 lead 代跑。开 PR ≠ Mini 修复开始。
-  → 6.5 owner 在已验收提交上确认 OPEN/非 draft/head/必需 CI 后写 note-event pr_ready，表示本机交付完成；lead 验收全部 priority/SC，不等待审查机结论。
+  → 6.5 owner 在已验收提交上确认 OPEN/非 draft/head/必需 CI 后写 note-event pr_ready，再重新确认 OPEN/CI 绿后写 goal_report 逐条回报目标达成情况；lead 对照 priority/SC 与设计目标写 final_acceptance（accepted 才完结），不等待审查机结论。
   → 7. lead 不再 register Mini；`watch_registered` 仅兼容旧台账读取。Mivo 交付后 Mini 常驻 Cindy 按 PR nodeid 唯一 session 采集反馈。
   → 8. lead 派 native sub 跑 `wrapup-cleanup.mjs --mode delivered-local-only` 清本地 worktree/分支（不删远端）→ 回报
   → 9. lead `archive_sessions` 归档该 PR 的 PI session 后，用 `confirm-session-archived.mjs --result <工具 JSON>` 出回执再入账；不等其他 PR
 ```
 
-正常路径是 lead 验收本机 pr_ready 后立即清本地并归档该 owner；Mini Cindy 常驻程序独立扫本人 open PR，本 skill 不再发送盯梢授权。
+正常路径是 lead 读 goal_report、写 final_acceptance=accepted 后立即清本地并归档该 owner；Mini Cindy 常驻程序独立扫本人 open PR，本 skill 不再发送盯梢授权。
 
 席位真相源是 `graph.json`（五席，精确键集 E/R/V/T/P；Fable 不是第六席）：
 
@@ -209,6 +209,8 @@ Lead 验收时现读 live routing.json：交卷 `e2e.model` 既不是当前 e2e 
 
 ## ⑧ 子 session 闭环与 lead 指挥
 
+**续跑先于派窗（2026-09-25）**：首个 owner 派窗前，lead 必须已在台账同目录写好 `lead-continuation.json`（真实 `lead_session_id` + 含本台账的 `ledger_paths`）并保存 active script 调度回执 `lead-continuation-schedule.json`；`owner-dispatch.mjs prepare` 核不到就拒派（`CONTINUATION_MISSING`）。调度发给 lead 遇到 `NOT_FOUND`（lead session 不存在）记 `blocked` + `lead_missing` 并让本轮失败，改绑 `lead_session_id` 后下一轮自动重发。
+
 **continuation v2 默认启用（2026-09-23 用户批准）**：新 run 首次派窗后，lead 按 owner-protocol「整包续跑登记」与「continuation v2」写配置并登记 script 调度，不再逐次请批。脚本一律从 live 路径（本仓根的 `scripts/`）运行，禁止再钉 `.worktrees/` 下的部署树——2026-09-19 前后部署树被清掉，live 软链与 Library 包续跑一起断了 4 天（调度每 5 分钟报 `ModuleNotFoundError: owner_continuation`）。宿主 scheduler 不可用时仍按下文记 `continuation_unavailable`，不得声称已自动续跑。
 
 **continuation v2 的当前执行合约**：当已批准配置启用 `schemaVersion=2` 时，本节旧协议中逐 PR 唤醒 lead、每 PR 必须归档的默认描述由以下约定替代：零 token 脚本直接续推已绑定 idle owner；busy 不催，CI pending 与明确窗口只检查等待；lead 只处理新增真实决策与整包最终事件。每 owner 用 `owner-checkpoint.py` 写入 ledger 同目录的 `owner-checkpoint.json`，handoff 已提供命令，不能只口头报进度。达成配置中的授权 `completion=delivered` 即本机终态；明确要求归档的才用 `archived`，原批准例外用 `approved-legacy-archive` 验旧凭据，保留原 fail/incomplete。不得因源码存在就宣称实际调度已切换。
@@ -219,7 +221,7 @@ PR Ready 表示本机验收、当前提交 required CI 全绿、审查workflow�
 
 owner session 只许在这五种情况下停。其中 2–5 进入 DECISION_REQUIRED（保留 owner 身份和现场，不算完成）；第 1 种是正常完成，pr_ready 后由 lead 清场归档：
 
-1. owner 已在同一提交完成全部 priority/SC、e2e 与规模门，且审查workflow静态入口前提可用、远端 OPEN 非 draft PR head 一致、必需 CI 全绿：记本机 pr_ready，交 lead 验收。本机释放写入权后不再跟进云端 CI/review。
+1. owner 已在同一提交完成全部 priority/SC、e2e 与规模门，且审查workflow静态入口前提可用、远端 OPEN 非 draft PR head 一致、必需 CI 全绿：记本机 pr_ready；随后重新 confirm-pr-open 确认仍 OPEN、非 draft、CI 全绿，写 `goal_report` 逐条回报设计/功能目标是否达成（如实写 partial/not_achieved），由 lead 写 `final_acceptance`。只有 accepted 才正式完结，`→local-cleaned` 与 newmode wrapup-cleanup 都核这一条；rejected 由同一 owner 返工（`owner_rework` 作废旧回报与验收）。本机释放写入权后不再跟进云端 CI/review。
 2. 硬停六条。
 3. **本 session 自报**累计打到 `budgetPauseUsd`（可 `--no-budget-pause`）。不是 lead 跨 session 加总。
 4. **未读 goal skill 或未读 routing.json**：不得开工。停，提交 decision_required，写明卡在开工闸第 1 步还是第 2 步。禁止 jump 等 lead 放行。
@@ -303,7 +305,7 @@ collateral_used 可选；[{path, class, sc_id, reason, jev_ref}]，jev_ref 为 {
 
 ## ⑬ 不停机条款（仅五类停）
 
-仅第⑧节五类停。硬停六条（autonomous-execution）仍是人独占，禁止进 Fable、禁止豁免第④节任一道规模硬闸或输入门。size-gate `STOP` 只能再拆 PR，不能进 sidecar；`WARN` 必须保留证据并评估拆分，不得误写成 STOP。假设破裂走第 5 类停 + 第⑱节 replan，不进 sidecar。
+仅第⑧节五类停。**lead 不得在开工包里另加停点**：第 2/4/9 段、总表、`forbiddenExtra` 或手改补充里出现「优先于第 8 段」「停下等 lead／等 lead 开 PR」「派 GPT/Claude 单审」、禁做条目里禁普通 push／开 PR，`render-pr-handoff` 与 `owner-dispatch prepare` 都判 `PACKET_EXTRA_STOP` 拒出包／拒派（`scripts/lib/stop-points.mjs`；强推、直推默认分支等既有禁令不拦）。确需收窄授权改 `OWNER_STANDING_AUTH` 或走 replan。2026-09-25 mivo PR3 就是 lead 补充要求单审并停下等「开 PR」，owner 停在 push 前。owner 停在 decision／blocked 时用 `owner-checkpoint.py` 写，脚本同步入账台账 `decision_required` 事件，续跑调度看见才会叫醒 lead；只写 checkpoint 不入账 = lead 收不到。硬停六条（autonomous-execution）仍是人独占，禁止进 Fable、禁止豁免第④节任一道规模硬闸或输入门。size-gate `STOP` 只能再拆 PR，不能进 sidecar；`WARN` 必须保留证据并评估拆分，不得误写成 STOP。假设破裂走第 5 类停 + 第⑱节 replan，不进 sidecar。
 
 ## ⑭ 与提交 PR 的边界
 
@@ -366,8 +368,8 @@ Lead 按四类选，不自由发挥：
 **连带文件**（`config/collateral.json`，`scripts/lib/collateral.mjs` 单一实现，开工包第 5 段与 ready-check 同源）：
 
 - `generated`（已启用）：只限清单路径（当前 `cindyplugin/design-inventory.md`），只提交仓内生成器输出，交卷前跑清单里的 check。
-- `legacy_test`（默认未启用，分两步上：先跑一批登记类，再把 `enabled` 改 true）：只限测试文件；失败断言针对 SC.change 明确改掉的旧行为，Jev 判定 `update_legacy_assertion` 且 confidence≥0.8；不删用例、不加 skip/only/todo。
-- 上限：每 PR ≤ `max_files` 个文件（起步 5）、≤ `max_lines` 行（起步 200，相对基线新增+删除）。起步值是 2026-09-23 用户批准的经验值，不是测量值，跑一批后按真实上报调。
+- `legacy_test`（2026-09-25 用户批准启用；此前 PR3 因未启用停在 D2）：只限测试文件；失败断言针对 SC.change 明确改掉的旧行为，Jev 判定 `update_legacy_assertion` 且 confidence≥0.8；不删用例、不加 skip/only/todo。
+- 上限：每 PR ≤ `max_files` 个文件（2026-09-25 由 5 调到 10：新增一个 agent 工具会牵动 7 个写死工具数的测试）、≤ `max_lines` 行（200，相对基线新增+删除）。都是经验值，不是测量值，跑一批后按真实上报调。
 - 别组写域里的文件永远不是连带文件。交卷 `collateral_used` 逐条申报；record-delivery 核形状，ready-check 核语义（类别启用、清单、测试路径、Jev 留痕、skip/only、跨 PR 冲突、上限、确有改动）。通过的路径并入该组 L1 写域与 L2 白名单；任一条不合格，该组连带路径全部不放行（gate=`collateral`，原越域照常点名）。
 
 **保证等级**：T1 纪律级。Jev 是判断参考不是事实证明；留痕与申报防疏忽，不防同一 OS 用户蓄意伪造。

@@ -18,7 +18,7 @@ prepare 使用台账路径旁固定的 .owners 目录。持久 claim 的作用�
 
 ## 整包续跑登记
 
-每个新 run 首次派窗后，lead 在该 run 的任务目录写 `lead-continuation.json`，而不是依赖另一个项目已有的 schedule。配置显式绑定真实 `lead_session_id`、本包全部已建立的 `ledger_paths`（非空绝对路径数组）及 `stalled_after_sec:1800`；分批建账时另给覆盖本包全部 PR 的 `status_path`。新增 ledger 后更新原配置的路径集合，不另开消费者。配置、脚本状态和回执须放在已有任务目录，禁止放 Codex 隐藏运行根或复制 raw session。
+每个新 run 首个 owner 派窗前，lead 在台账同目录写 `lead-continuation.json` 并登记调度（`owner-dispatch.mjs prepare` 会核配置含本台账、调度回执 active，否则拒派）；v2 的 owner 映射在派窗后补。配置文件即 `lead-continuation.json`，而不是依赖另一个项目已有的 schedule。配置显式绑定真实 `lead_session_id`、本包全部已建立的 `ledger_paths`（非空绝对路径数组）及 `stalled_after_sec:1800`；分批建账时另给覆盖本包全部 PR 的 `status_path`。新增 ledger 后更新原配置的路径集合，不另开消费者。配置、脚本状态和回执须放在已有任务目录，禁止放 Codex 隐藏运行根或复制 raw session。
 
 用宿主实际可用的 scheduler 工具创建一条 `executionMode=script`、`cronExpr="*/5 * * * *"` 的 recurring 调度，`workingDir` 为配置所在目录，`scriptConfig.command` 为 Python 调用本 skill 的 `scripts/lead-continuation.py --config <绝对配置路径>`，capabilities 只需 `sessions.dispatch`。此调度只读本包结构化状态，无事不启动模型。保存真实 schedule 工具回执为 `lead-continuation-schedule.json`；恢复 run 先读取并核对原 schedule ID、配置路径和 lead ID，不重复创建。首次执行须检查真实 run 的 success 和派发回执；创建成功不代表续跑验收完成。
 
@@ -32,6 +32,8 @@ prepare 使用台账路径旁固定的 .owners 目录。持久 claim 的作用�
 - 真实读取自己的 goal skill；新版先执行文末 owner-gate.mjs baseline，通过后再执行随包给出的 owner-gate.mjs goal 命令，旧版不补造 baseline。脚本重算文件 hash、检查干净基线、CAS 入账 gate_goal 并推进 executing。不得补造已有改动之前的开工证据，不用 jump 等逐步放行。
 - 自主完成本 PR 的 SC。可以开只读 sub 获取信息，也可提前派 tester 验证。提前验证不能替代最终当前提交的全量 SC/e2e。本地禁止派 reviewer。
 - 判断按开工包第 8 段的决策三层走（SKILL.md 第⑲段）：事实用命令查；不越界的选择先问 Jev（Pi 走 `cindy_mcp_call_tool` 网关，`typesafe-jev` / `evaluate`），每次调用追加到台账目录 `jev/` 下本组留痕；只有越界才发 DECISION_REQUIRED，并附 Jev 选项排序。Jev 不可用时可撤回的选择按默认规则自决，连带文件改动必须有 Jev 结论。
+- pr_ready 不是终点：随后重新执行 confirm-pr-open（PR 仍 OPEN、非 draft、必需 CI 全绿，五分钟内），用 `run-ledger.mjs note-event <台账> --event goal_report --detail '{group_id, head_sha, receipt, goals:[{id, verdict, evidence}], summary}'` 逐条回报设计/功能目标，未达成如实写 partial／not_achieved。lead 读报告写 `final_acceptance`（accepted／rejected + reason），accepted 前清场与归档一律被拒。
+- 停在 decision／blocked 必须用 `owner-checkpoint.py --phase decision|blocked --decision-id --decision-evidence <绝对路径>` 写；它同步入账台账 `decision_required`（同一决策重复写不重复入账），续跑调度据此叫醒 lead。入账失败脚本会报错，不得只留 checkpoint 就结束本轮。
 - `allowed_paths` 外的文件只能按第 5 段连带策略（`config/collateral.json`）改，交卷 `collateral_used` 逐条申报；别组写域的文件永远不是连带文件。
 - 首次及每次重新派 worker 前，现读共享 routing.json，执行 start_team({worker_permission_mode:"bypassPermissions"}) 并确认实际返回。用 owner-gate.mjs routing --owner-model <当前模型ID> --team-result <真实工具结果JSON> 连同台账/组/时间入账。脚本输出当前 e2e 档；agent、model、effort、provider_id 原样传给 Orca。只派 tester（e2e 档），禁止派 reviewer。配置缺项或 auto 不得冒充通过。
 - candidate 是检查点，正常 owner 继续完成全部 SC/e2e/本地门禁、push 与 Draft PR 收尾；Mivo 必须等当前提交 required CI 全绿且审查workflow静态入口前提可用后转为 OPEN 非 draft，再写 pr_ready。交卷后由 lead 验收并立即清本地、归档该 owner；本机不等待 Mini 接管，不继续同写分支。

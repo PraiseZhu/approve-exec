@@ -2,7 +2,7 @@
 // Skill-owned at-most-once create. No host changes, no promise of exactly-once.
 // The caller executes the returned tool request ONCE and persists the real result.
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { resolve, join, relative, isAbsolute, sep } from 'node:path';
+import { resolve, join, relative, isAbsolute, sep, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +15,7 @@ import { wouldCreate } from './session-dispatch.mjs';
 import { checkSite } from './site-check.mjs';
 import { renderScText } from './render-pr-handoff.mjs';
 import { loadCollateralPolicy, renderCollateralPolicyText } from './lib/collateral.mjs';
+import { findExtraStopPoints, formatStopPoints } from './lib/stop-points.mjs';
 import { extractArchiveResult } from './confirm-session-archived.mjs';
 
 function context(ledgerPath, groupId) {
@@ -33,6 +34,33 @@ function context(ledgerPath, groupId) {
 function claimFile(ledgerPath, groupId) {
   // Do not accept a caller-selected claim directory: changing it would evade dedup.
   return join(realpathSync(ledgerPath) + '.owners', hashObject({ groupId }) + '.json');
+}
+
+// 派窗前续跑必须已登记：owner 的 decision/blocked 只有被调度读到才会叫醒 lead。
+// 2026-09-25 mivo-unlimited-import：配置绑了不存在的 lead、调度卡在 pending-receipt，owner 停下无人知道。
+export function assertContinuationRegistered(ledgerPath) {
+  const dir = dirname(realpathSync(ledgerPath));
+  const configPath = join(dir, 'lead-continuation.json');
+  const schedulePath = join(dir, 'lead-continuation-schedule.json');
+  const read = (path, what) => {
+    try { return JSON.parse(readFileSync(path, 'utf8')); } catch (err) {
+      throw new LedgerError('CONTINUATION_MISSING', `派窗前必须先登记整包续跑（${what}: ${path} 读取失败: ${err.message}）`);
+    }
+  };
+  const config = read(configPath, 'lead-continuation.json');
+  if (typeof config.lead_session_id !== 'string' || !config.lead_session_id.trim()) {
+    throw new LedgerError('CONTINUATION_MISSING', 'lead-continuation.json 缺 lead_session_id');
+  }
+  if (config.schemaVersion !== 2 && !(config.ledger_paths ?? []).includes(realpathSync(ledgerPath))) {
+    throw new LedgerError('CONTINUATION_MISSING', 'lead-continuation.json 的 ledger_paths 未包含本台账');
+  }
+  const schedule = read(schedulePath, 'lead-continuation-schedule.json');
+  if (schedule.ok !== true || schedule.status !== 'active' || schedule.executionMode !== 'script'
+    || typeof schedule.command !== 'string' || !schedule.command.includes('lead-continuation.py')
+    || !schedule.command.includes(configPath)) {
+    throw new LedgerError('CONTINUATION_MISSING', `续跑调度回执不是指向 ${configPath} 的 active script 调度`);
+  }
+  return { config_path: configPath, schedule_id: schedule.id };
 }
 
 export function prepareOwner({ ledgerPath, groupId, handoffPath, sitePath, now }) {
@@ -88,6 +116,14 @@ export function prepareOwner({ ledgerPath, groupId, handoffPath, sitePath, now }
     }
     assertHandoffComplete(text, { title: ctx.identity.title, worktree: ctx.identity.worktree,
       verify_cmds: ctx.packet.verify_cmds });
+    // 手改过的开工包同样不得夹带五类停以外的停点（渲染器之外的补充也要拦）
+    const extraStops = findExtraStopPoints(text);
+    const forbiddenStops = (text.split('## 9. 禁做\n')[1]?.split('\n## 10.')[0] ?? '')
+      .split('\n').flatMap((line) => findExtraStopPoints(line, { forbiddenItem: true }));
+    if (extraStops.length || forbiddenStops.length) {
+      throw new LedgerError('PACKET_EXTRA_STOP', formatStopPoints('开工包', [...extraStops, ...forbiddenStops]));
+    }
+    assertContinuationRegistered(ledgerPath);
     const section = (heading, next) => text.split('## ' + heading + '\n')[1]?.split('\n## ' + next)[0]?.trim();
     // 第 5 段 = 写域清单逐字，或「写域清单 + 空行 + 当前 config/collateral.json 渲染的连带策略原文」；
     // 连带策略被改写同样拒（防用第 5 段偷扩授权），旧开工包（无连带策略）仍按原样放行。

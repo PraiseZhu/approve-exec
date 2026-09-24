@@ -283,5 +283,44 @@ class ContinuationTests(unittest.TestCase):
         self.assertIn("未授予 sessions.dispatch", completed.stderr)
 
 
+class MissingLeadTests(unittest.TestCase):
+    """回归 2026-09-25 mivo-unlimited-import：lead session 不存在时状态静默卡在 pending-receipt。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.ledger = root / "ledger.json"
+        self.config = root / "continuation.json"
+        self.ledger.write_text(json.dumps({"version": 1, "events": [{"type": "decision_required", "at": "t1", "detail": {"group_id": "PR3", "decision_id": "expand"}}], "waves": [{"groups": [{"group_id": "PR3", "state": "executing"}]}]}))
+        self.config.write_text(json.dumps({"lead_session_id": "gone-lead", "ledger_paths": [str(self.ledger)], "stalled_after_sec": 10}))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_decision_event_wakes_lead(self):
+        client = FakeClient({"target_session_id": "gone-lead", "status": "woken"})
+        result = module.run_once(self.config, client=client, now=100)
+        self.assertTrue(result["dispatched"])
+        self.assertIn("decision_required", client.calls[0][1]["message"])
+
+    def test_missing_lead_blocks_loudly_and_rebind_redispatches(self):
+        class Missing(FakeClient):
+            def call(self, method, params):
+                self.calls.append((method, params))
+                raise module.RpcError("NOT_FOUND", "session gone-lead not found")
+        missing = Missing(None)
+        first = module.run_once(self.config, client=missing, now=100)
+        self.assertEqual(first["status"], "blocked")
+        self.assertTrue(first["lead_missing"])
+        again = module.run_once(self.config, client=missing, now=400)
+        self.assertTrue(again["lead_missing"])
+        self.assertEqual(len(missing.calls), 1)
+        self.config.write_text(json.dumps({"lead_session_id": "new-lead", "ledger_paths": [str(self.ledger)], "stalled_after_sec": 10}))
+        client = FakeClient({"target_session_id": "new-lead", "status": "woken"})
+        rebound = module.run_once(self.config, client=client, now=500)
+        self.assertTrue(rebound["dispatched"])
+        self.assertEqual(client.calls[0][1]["target_session_id"], "new-lead")
+
+
 if __name__ == "__main__":
     unittest.main()

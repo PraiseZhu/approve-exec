@@ -31,12 +31,12 @@ function run(used, { changed = {}, added = {}, pol = policy(), readText } = {}) 
   });
 }
 
-test('collateral: 真实策略可加载，登记类启用、旧测试类默认未启用', () => {
+test('collateral: 真实策略可加载，登记类与旧测试类都已启用', () => {
   const p = loadCollateralPolicy();
-  assert.equal(p.max_files, 5);
+  assert.equal(p.max_files, 10);
   assert.equal(p.max_lines, 200);
   assert.equal(p.classes.generated.enabled, true);
-  assert.equal(p.classes.legacy_test.enabled, false);
+  assert.equal(p.classes.legacy_test.enabled, true);
   assert.ok(p.classes.generated.files.some((f) => f.path === GEN));
 });
 
@@ -78,7 +78,7 @@ test('collateral: 文件数与行数上限', () => {
   assert.match(run([item()], { changed: { [GEN]: Infinity } }).violations.join(), /含二进制/);
 });
 
-test('collateral: 旧测试类默认未启用 → 拒', () => {
+test('collateral: 旧测试类关闭时 → 拒', () => {
   const t = 'src/old.test.ts';
   assert.match(run([item({ path: t, class: 'legacy_test', jev_ref: null })], { changed: { [t]: 3 } }).violations.join(), /未启用/);
 });
@@ -104,9 +104,22 @@ test('collateral: 旧测试类启用后，需测试文件 + Jev 达标 + 不加 
 
 test('collateral: 开工包说明文字含上限、清单与必须停', () => {
   const text = renderCollateralPolicyText(loadCollateralPolicy());
-  assert.match(text, /上限 5 个文件、200 行/);
+  assert.match(text, /上限 10 个文件、200 行/);
   assert.match(text, /cindyplugin\/design-inventory\.md/);
   assert.match(text, /必须停/);
-  assert.match(text, /legacy_test：未启用/);
+  assert.match(text, /legacy_test（已启用）/);
+  assert.match(renderCollateralPolicyText(policy({ legacyEnabled: false })), /legacy_test：未启用/);
   assert.match(text, /collateral_used/);
+});
+
+test('collateral: 回归 mivo PR3——新增工具牵动 7 个写死工具数的测试，按真实策略放行', () => {
+  const journal = '/abs/jev/pr3.jsonl';
+  const files = ['toolResultSweep', 'toolBudget', 'exportManifest', 'notifyManifest', 'sessionManifest', 'depositBrain', 'updateNodeTool']
+    .map((n) => `cindyplugin/src/__tests__/${n}.test.ts`);
+  const verdict = JSON.stringify({ choice: 'update_legacy_assertion', confidence: 0.99, paths: files });
+  const used = files.map((path) => item({ path, class: 'legacy_test', reason: '工具数 12→13', jev_ref: { journal, line: 1 } }));
+  const changed = Object.fromEntries(files.map((f) => [f, 4]));
+  const r = run(used, { changed, pol: loadCollateralPolicy(), readText: () => `${verdict}\n` });
+  assert.deepEqual(r.violations, []);
+  assert.deepEqual(r.paths, files);
 });

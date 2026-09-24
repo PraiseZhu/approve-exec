@@ -1,9 +1,24 @@
 #!/usr/bin/env python3
-"""Write one bound owner checkpoint; no dispatch, PR mutation, or ledger edits."""
+"""Write one bound owner checkpoint; no dispatch or PR mutation.
+
+decision/blocked also records a ledger decision_required event: lead-continuation only
+wakes lead on ledger signals, so a checkpoint alone left PR3 (2026-09-25) stopped unseen.
+"""
 import argparse
 import json
 import os
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
+
+HERE=Path(__file__).resolve().parent
+
+
+def note_decision(ledger_path,group_id,phase,decision_id,evidence_path):
+    detail=json.dumps({'group_id':group_id,'decision_id':decision_id,'evidence_path':evidence_path,'phase':phase},ensure_ascii=False)
+    now=datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00','Z')
+    result=subprocess.run(['node',str(HERE/'run-ledger.mjs'),'note-event',str(ledger_path),'--event','decision_required','--detail',detail,'--now',now],text=True,capture_output=True,timeout=60)
+    if result.returncode:raise ValueError('decision_required ledger event failed; lead will not be woken: '+(result.stderr or result.stdout)[:300])
 
 
 def main():
@@ -34,6 +49,7 @@ def main():
         point['resume_after_epoch']=args.resume_after_epoch
     if args.phase in ['decision','blocked']:
         if not args.decision_id or not args.decision_evidence:raise ValueError('decision id/evidence required')
+        if not Path(args.decision_evidence).is_absolute():raise ValueError('decision evidence path must be absolute')
         point['decision']={'id':args.decision_id,'evidence_path':args.decision_evidence}
     for field in ['delivery_receipt','release_receipt','archive_receipt','archive_tool_result']:
         value=getattr(args,field)
@@ -47,6 +63,7 @@ def main():
         for key in ['repo','pr_number']:
             if key not in point and key in prior:point[key]=prior[key]
         if any(prior.get(k)!=point[k] for k in ['group_id','session_id','assignment_seq']):raise ValueError('refusing to replace another owner checkpoint')
+    if args.phase in ['decision','blocked']:note_decision(ledger_path,args.group,args.phase,args.decision_id,args.decision_evidence)
     target.parent.mkdir(parents=True,exist_ok=True)
     temporary=target.with_name(target.name+'.'+str(os.getpid())+'.tmp')
     with temporary.open('x') as out:json.dump(point,out,ensure_ascii=False,indent=2);out.write('\n')
