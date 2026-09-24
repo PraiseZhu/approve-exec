@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// confirm-pr-open.mjs — 验收后确认远端 ready PR 已存在（零 LLM）。
+// confirm-pr-open.mjs — 验收后确认远端 ready PR 已存在且必需 CI 全绿（零 LLM）。
 import { spawnSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -53,19 +53,19 @@ function runGh(repo, branch, ghBin = process.env.GH_BIN ?? 'gh', runner = spawnS
   return JSON.parse(r.stdout);
 }
 
-function assertMivoGreen({ repo, pr, head, ghBin = process.env.GH_BIN ?? 'gh', runner }) {
-  if (!SHA_RE.test(head ?? '')) throw new LedgerError('ARGS', 'Mivo 交付必须提供有效的已验收 head SHA');
+function assertRequiredCiGreen({ repo, pr, head, ghBin = process.env.GH_BIN ?? 'gh', runner }) {
+  if (!SHA_RE.test(head ?? '')) throw new LedgerError('ARGS', 'confirm-pr-open 必须提供有效的已验收 head SHA');
   if (pr.headRefOid !== head || pr.url !== `https://github.com/${repo}/pull/${pr.number}`) {
-    throw new LedgerError('PRECONDITION', 'Mivo PR 身份或提交与交付对象不一致');
+    throw new LedgerError('PRECONDITION', 'PR 身份或提交与交付对象不一致');
   }
   const result = runner(ghBin, ['pr', 'checks', String(pr.number), '--repo', repo,
     '--required', '--json', 'name,state,bucket'], { encoding: 'utf8' });
-  if (result.status !== 0) throw new LedgerError('PRECONDITION', 'Mivo 必需 CI 未通过或查询失败，不能交付 Mini');
+  if (result.status !== 0) throw new LedgerError('PRECONDITION', '必需 CI 未通过或查询失败，不能确认 PR OPEN');
   const checks = JSON.parse(result.stdout);
   if (!Array.isArray(checks) || checks.length === 0 || checks.some(check =>
     typeof check.name !== 'string' || !check.name.trim() || check.bucket !== 'pass' ||
     !['SUCCESS', 'success'].includes(check.state))) {
-    throw new LedgerError('PRECONDITION', 'Mivo 必需 CI 缺失、未成功或尚在等待，不能交付 Mini');
+    throw new LedgerError('PRECONDITION', '必需 CI 缺失、未成功或尚在等待，不能确认 PR OPEN');
   }
 }
 
@@ -91,16 +91,14 @@ export function confirmPrOpen({ repo, branch, head, ghBin, now, ledgerVersion, a
       gh: args => deliveryGh(args, (binary, argv, options) => runner(ghBin ?? binary, argv, options)) });
   }
   let raw = runGh(repo, branch, ghBin, runner);
-  if (repo === MIVO_REPO) {
-    assertReadyPr({ ...raw, expectedHead: head });
-    assertMivoGreen({ repo, pr: raw, head, ghBin, runner });
-    // Required checks belong to a commit; re-read after the potentially slow query.
-    const after = runGh(repo, String(raw.number), ghBin, runner);
-    if (after.url !== raw.url || after.number !== raw.number || after.headRefOid !== raw.headRefOid) {
-      throw new LedgerError('PRECONDITION', 'Mivo PR 在 CI 验证期间变化，必须重新验证');
-    }
-    raw = after;
+  assertReadyPr({ ...raw, expectedHead: head });
+  assertRequiredCiGreen({ repo, pr: raw, head, ghBin, runner });
+  // Required checks belong to a commit; re-read after the potentially slow query.
+  const after = runGh(repo, String(raw.number), ghBin, runner);
+  if (after.url !== raw.url || after.number !== raw.number || after.headRefOid !== raw.headRefOid) {
+    throw new LedgerError('PRECONDITION', 'PR 在 CI 验证期间变化，必须重新验证');
   }
+  raw = after;
   return {
     ...assertReadyPr({
       url: raw.url,

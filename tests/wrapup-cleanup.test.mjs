@@ -154,7 +154,14 @@ test('confirm-pr-open: gh pr view 用分支名，不用 --head', () => {
   const binDir = mkdtempSync(join(tmpdir(), 'gh-bin-'));
   const gh = join(binDir, 'gh');
   const log = join(binDir, 'args.txt');
-  writeFileSync(gh, `#!/bin/sh\nprintf '%s\\n' "$@" > "${log}"\nprintf '{"url":"https://github.com/acme/app/pull/9","state":"OPEN","isDraft":false,"headRefOid":"${SHA}","number":9}\\n'\n`);
+  writeFileSync(gh, `#!/bin/sh
+printf '%s\\n' "$@" >> "${log}"
+if [ "$2" = "checks" ]; then
+  printf '[{"name":"unit","bucket":"pass","state":"SUCCESS"}]\\n'
+  exit 0
+fi
+printf '{"url":"https://github.com/acme/app/pull/9","state":"OPEN","isDraft":false,"headRefOid":"${SHA}","number":9}\\n'
+`);
   chmodSync(gh, 0o755);
   const out = confirmPrOpen({ repo: 'acme/app', branch: 'feat/x', head: SHA, ghBin: gh, now: NOW, ...STAMP });
   assert.equal(out.number, 9);
@@ -163,6 +170,10 @@ test('confirm-pr-open: gh pr view 用分支名，不用 --head', () => {
   const args = readFileSync(log, 'utf8').trim().split('\n');
   assert.deepEqual(args.slice(0, 5), ['pr', 'view', 'feat/x', '--repo', 'acme/app']);
   assert.equal(args.includes('--head'), false);
+  const checksAt = args.indexOf('checks');
+  assert.equal(args[checksAt - 1], 'pr');
+  assert.equal(args[checksAt + 1], '9');
+  assert.ok(args.includes('--required'));
 });
 
 
@@ -530,7 +541,13 @@ test('confirm-pr-open / wrapup-cleanup stdout 必须能被台账回执闸直接�
   const dir = mkdtempSync(join(tmpdir(), 'wrapup-stdout-'));
   const binDir = mkdtempSync(join(tmpdir(), 'gh-bin-'));
   const gh = join(binDir, 'gh');
-  writeFileSync(gh, `#!/bin/sh\nprintf '{"url":"https://github.com/acme/app/pull/9","state":"OPEN","isDraft":false,"headRefOid":"${SHA}","number":9}\\n'\n`);
+  writeFileSync(gh, `#!/bin/sh
+if [ "$2" = "checks" ]; then
+  printf '[{"name":"unit","bucket":"pass","state":"SUCCESS"}]\\n'
+  exit 0
+fi
+printf '{"url":"https://github.com/acme/app/pull/9","state":"OPEN","isDraft":false,"headRefOid":"${SHA}","number":9}\\n'
+`);
   chmodSync(gh, 0o755);
   const pr = confirmPrOpen({ repo: 'acme/app', branch: 'feat/x', head: SHA, ghBin: gh, now: NOW, ...STAMP });
   assert.deepEqual(Object.keys(pr).sort(), [...PR_OPEN_RECEIPT_KEYS].sort());
