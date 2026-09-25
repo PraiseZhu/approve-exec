@@ -1720,8 +1720,8 @@ test('sc-p1e: 五项逐项挖空各得 exit 2 点名（fail-closed 缺一不出�
 
 test('sc-p1e: pr-submit-gate 门禁结论透传——needs_three_review true/false 各渲染对应说明区', () => {
   for (const [flag, expected] of [
-    [true, 'needs_three_review=true：本包对应功能改动（功能 PR），交付后须走 submit-pr 三审收口。'],
-    [false, 'needs_three_review=false：本包对应非功能性改动，免 submit-pr 三审，常规验证照常。'],
+    [true, 'needs_three_review=true：本包对应功能改动（功能 PR），按目标仓 PR 门禁验证，Ready 后由云端审查收口。'],
+    [false, 'needs_three_review=false：本包对应非功能性改动，常规验证照常。'],
   ]) {
     const dir = newTmpDir();
     // 完整夹具先 init，再改 needs_three_review + 同步台账 hash（init 后改会撞 F-D 门禁
