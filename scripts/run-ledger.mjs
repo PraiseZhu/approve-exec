@@ -726,7 +726,7 @@ const PACKET_REQUIRED_FIELDS = Object.freeze([
  *      空数组视为空缺；
  *   ② scs_inline id 契约（非空字符串 + 无重复，F-J）；
  *   ③ needs_three_review 布尔 exact 契约（pr-submit-gate 门禁透传：缺失/非布尔一律拒，
- *      缺省即拒，禁止默认成 false——默认 false 会让功能 PR 悄悄绕过 submit-pr 三审门禁）。
+ *      缺省即拒，禁止默认成 false——默认 false 会让功能 PR 悄悄绕过目标仓 PR 门禁与云端审查）。
  * 任一条不过 → PACKET_INCOMPLETE（exit 2 点名）。
  */
 function assertPacketComplete(packet, what) {
@@ -753,7 +753,7 @@ function assertPacketComplete(packet, what) {
     const shown = packet.needs_three_review === undefined ? '缺失' : JSON.stringify(packet.needs_three_review);
     throw new LedgerError(
       'PACKET_INCOMPLETE',
-      `${what}：packet.needs_three_review 必须是布尔（true=功能 PR 交付后须走 submit-pr 三审 / false=非功能性免三审）；当前: ${shown}（fail-closed，禁止默认成 false）`
+      `${what}：packet.needs_three_review 必须是布尔（true=功能 PR，按目标仓 PR 门禁验证并在 Ready 后接受云端审查 / false=非功能性小 PR）；当前: ${shown}（fail-closed，禁止默认成 false）`
     );
   }
 }
@@ -2316,8 +2316,8 @@ function renderPacketWithCredential({ ledgerPath, group, ledger, out, now }) {
 /** pr-submit-gate 门禁说明（needs_three_review 判定结论；renderPacket 已校验为布尔，双模板共用）。 */
 function renderGateNote(packet) {
   return packet.needs_three_review
-    ? 'needs_three_review=true：本包对应功能改动（功能 PR），交付后须走 submit-pr 三审收口。'
-    : 'needs_three_review=false：本包对应非功能性改动，免 submit-pr 三审，常规验证照常。';
+    ? 'needs_three_review=true：本包对应功能改动（功能 PR），按目标仓 PR 门禁验证，Ready 后由云端审查收口。'
+    : 'needs_three_review=false：本包对应非功能性改动，常规验证照常。';
 }
 
 function renderExecPacket({ packet, group, wave, identity, prewalk }) {
