@@ -62,9 +62,10 @@ function assertProject(project) {
 
 export function repairSessionTitle({ project = 'MivoPlugin', task, prNumber, createdAt, repo } = {}) {
   assertProject(project);
+  if (!Number.isInteger(prNumber) || prNumber < 1) throw new Error('session title requires a PR number');
   const date = sessionDate(createdAt);
   const taskName = shortTaskName({ task, prNumber, repo });
-  return `${project}-${taskName}丨 ${date.slice(5).replace('-', '')}`;
+  return `${project}-#${prNumber}-${taskName}丨 ${date.slice(5).replace('-', '')}`;
 }
 
 export function planSessionTitle({ pr, existing = {}, createdAt, project = 'MivoPlugin', repo } = {}) {
@@ -75,7 +76,7 @@ export function planSessionTitle({ pr, existing = {}, createdAt, project = 'Mivo
   // Legacy UTC title suffixes cannot establish the session's local creation date.
   const titleDate = sessionDate(existing.titleDate ?? existing.sessionCreatedAt ?? createdAt);
   const mmdd = titleDate.slice(5).replace('-', '');
-  const prefix = `${project}-`;
+  const prefix = `${project}-#${pr.number}-`;
   const suffix = `丨 ${mmdd}`;
   if (typeof existing.title === 'string' && existing.title.startsWith(prefix) && existing.title.endsWith(suffix)) {
     const taskName = existing.title.slice(prefix.length, -suffix.length);
