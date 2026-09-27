@@ -157,7 +157,7 @@ function boundSession(paths, task) {
     ? [entry.activeTask.dispatchId]
     : [entry.lastDispatch?.dispatchId, entry.pendingDispatch?.dispatchId].filter(Boolean);
   if (dispatches.length && !dispatches.includes(task.dispatchId)) fail('task dispatchId is not the active watcher dispatch');
-  return { state, sessionId: entry.sessionId };
+  return { sessionId: entry.sessionId };
 }
 
 function ghPr(task, ghFn, requireHead = true) {

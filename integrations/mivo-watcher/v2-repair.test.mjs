@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  bindSchedule, cleanupWatch, cloneWorktree, DEFAULT_PLUGIN_REPO, pushIfNeeded,
+  bindSchedule, cleanupWatch, cloneWorktree, DEFAULT_PLUGIN_REPO, prepare, pushIfNeeded,
   repairPaths, scheduleParams, watchBranchName, watchWorktreePath,
 } from './bin/mivo-repair.mjs';
 import { writePr } from './bin/mivo-state.mjs';
@@ -134,4 +134,69 @@ test('cleanup removes only a clean worktree', (t) => {
   });
   assert.ok(calls.some((args) => args.includes('worktree') && args.includes('remove')));
   assert.ok(calls.some((args) => args.includes('branch') && args.includes('-d') && args.includes('watch/pr-790')));
+});
+
+function writeTask(home, extra = {}) {
+  const paths = repairPaths(home);
+  fs.mkdirSync(paths.tasks, { recursive: true });
+  const task = {
+    dispatchId: 'live-790', nodeId: 'PR_790', number: 790, repo: 'xindong/mivo-canvas-plugin',
+    sessionId: 'sess-a', headRefOid: HEAD, headRefName: 'fix/x', ...extra,
+  };
+  const taskPath = path.join(paths.tasks, 'live-790.json');
+  fs.writeFileSync(taskPath, JSON.stringify(task));
+  return { paths, taskPath, task };
+}
+
+function prepareFns(plugin, worktree) {
+  const ghFn = () => JSON.stringify({
+    state: 'OPEN', isDraft: false, headRefOid: HEAD, headRefName: 'fix/x', baseRefOid: REMOTE,
+  });
+  const gitFn = (_bin, args) => {
+    if (args.includes('worktree') && args.includes('add')) fs.mkdirSync(worktree, { recursive: true });
+    if (args.includes('--show-toplevel')) return worktree;
+    if (args.includes('get-url')) return 'https://github.com/xindong/mivo-canvas-plugin.git';
+    if (args.includes('symbolic-ref')) return 'watch/pr-790';
+    if (args.includes('@{u}')) return 'origin/fix/x';
+    if (args.includes('--porcelain')) return '';
+    if (args.includes('rev-parse') && args.includes('HEAD')) return HEAD;
+    return '';
+  };
+  return { ghFn, gitFn, env: { MIVO_PLUGIN_REPO: plugin } };
+}
+
+test('prepare reads v2 per-PR state without ReferenceError', (t) => {
+  const home = homeOf(t);
+  const plugin = fs.mkdtempSync(path.join(os.tmpdir(), 'plugin-'));
+  t.after(() => fs.rmSync(plugin, { recursive: true, force: true }));
+  const { taskPath } = writeTask(home);
+  writePr(home, 'PR_790', { number: 790, nodeId: 'PR_790', sessionId: 'sess-a', activeTask: { dispatchId: 'live-790' } });
+  const worktree = watchWorktreePath(plugin, 790);
+  const { ghFn, gitFn, env } = prepareFns(plugin, worktree);
+  const original = process.env.MIVO_PLUGIN_REPO;
+  process.env.MIVO_PLUGIN_REPO = plugin;
+  t.after(() => { if (original === undefined) delete process.env.MIVO_PLUGIN_REPO; else process.env.MIVO_PLUGIN_REPO = original; });
+  const result = prepare({ home, taskPath, ghFn, gitFn });
+  assert.equal(result.sessionId, 'sess-a');
+  assert.equal(result.status, 'prepared');
+  assert.equal(result.worktree, worktree);
+});
+
+test('prepare reads legacy state.json without ReferenceError', (t) => {
+  const home = homeOf(t);
+  const plugin = fs.mkdtempSync(path.join(os.tmpdir(), 'plugin-'));
+  t.after(() => fs.rmSync(plugin, { recursive: true, force: true }));
+  const { paths, taskPath } = writeTask(home);
+  fs.mkdirSync(path.dirname(paths.state), { recursive: true });
+  fs.writeFileSync(paths.state, JSON.stringify({
+    prs: { PR_790: { number: 790, nodeId: 'PR_790', sessionId: 'sess-a', activeTask: { dispatchId: 'live-790' } } },
+  }));
+  const worktree = watchWorktreePath(plugin, 790);
+  const { ghFn, gitFn } = prepareFns(plugin, worktree);
+  const original = process.env.MIVO_PLUGIN_REPO;
+  process.env.MIVO_PLUGIN_REPO = plugin;
+  t.after(() => { if (original === undefined) delete process.env.MIVO_PLUGIN_REPO; else process.env.MIVO_PLUGIN_REPO = original; });
+  const result = prepare({ home, taskPath, ghFn, gitFn });
+  assert.equal(result.sessionId, 'sess-a');
+  assert.equal(result.status, 'prepared');
 });
