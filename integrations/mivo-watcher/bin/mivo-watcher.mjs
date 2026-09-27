@@ -92,13 +92,15 @@ const PUBLISHER_BOT_ID = 41898282;
 
 function publisherShape(comment = {}) {
   const author = comment.user ?? comment.author ?? {};
-  const bot = author.__typename === 'Bot' || author.type === 'Bot';
-  const login = bot && author.login === 'github-actions' ? 'github-actions[bot]' : author.login;
+  const loginRaw = author.login;
+  const bot = author.__typename === 'Bot' || author.type === 'Bot'
+    || loginRaw === 'github-actions' || loginRaw === 'github-actions[bot]';
+  const login = bot && loginRaw === 'github-actions' ? 'github-actions[bot]' : loginRaw;
   const id = author.id === PUBLISHER_BOT_ID || author.databaseId === PUBLISHER_BOT_ID
     || (bot && login === 'github-actions[bot]') ? PUBLISHER_BOT_ID : author.id ?? author.databaseId;
   return {
     ...comment,
-    user: { ...author, id, login, type: bot ? 'Bot' : (author.type ?? 'User') },
+    user: { ...author, id, login, type: bot ? 'Bot' : (author.type ?? author.__typename ?? 'User') },
     created_at: comment.created_at ?? comment.createdAt,
     updated_at: comment.updated_at ?? comment.updatedAt,
   };

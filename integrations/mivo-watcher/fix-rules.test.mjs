@@ -83,6 +83,18 @@ test('forged human infra heading is other and dispatches', (t) => {
   assert.equal(result.prs[0].dispatch.attempted, true);
 });
 
+test('GraphQL github-actions login-only thread infra is ignore-infra', () => {
+  const items = feedbackItems({
+    pr,
+    threads: [{
+      id: 'TH_bot', isResolved: false, isOutdated: false, path: 'c.ts',
+      comments: [{ id: 'c-ga', body: verdict('INCOMPLETE'), author: { login: 'github-actions' }, createdAt: '2026-09-10T00:00:00Z' }],
+    }],
+  });
+  assert.equal(items[0].category, 'ignore-infra');
+  assert.equal(newFeedback({}, items).fresh.length, 0);
+});
+
 test('bot infra title plus human P1 reply stays actionable', () => {
   const items = feedbackItems({
     pr,
