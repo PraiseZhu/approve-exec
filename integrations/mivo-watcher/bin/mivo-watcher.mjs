@@ -600,6 +600,250 @@ function rememberDispatchFailure(state, key, error, now, paths) {
   return state.prs[key];
 }
 
+export function* processPr({
+  pr, previous: previousArg, state, paths, now, events, report, viewer, dryRun,
+  dispatchFn, collect, ghFn, recheckFn, ownershipSnapshot, maintenanceSessionId,
+  remaining, deadline, clock, resumeCursor, resetPrDeadline,
+} = {}) {
+  const key = String(pr.id);
+  let previous = migrateEntry(clearDryPending(previousArg ?? (state.prs[key] || {})));
+  previous = { ...previous, number: pr.number, nodeId: pr.id };
+  let resultError;
+  try { previous = consumeResult(previous, resultFor(previous, paths), now); }
+  catch (error) { resultError = error.message; }
+  if (resultError) {
+    previous = { ...previous, eligibility: 'blocked', activeTask: {
+      ...previous.activeTask, dispatchId: previous.activeTask?.dispatchId ?? previous.lastDispatch?.dispatchId,
+      status: 'blocked', blockedKind: 'invalid-result', reason: resultError,
+    } };
+  }
+  const mapping = planSession({ pr, existing: previous, date: now });
+  const base = {
+    ...previous, headRefOid: pr.headRefOid, headRefName: pr.headRefName, url: pr.url,
+    title: mapping.title, titleDate: mapping.titleDate, taskName: mapping.taskName, lastSeenAt: now,
+    ...(previous.activeTask ? {activeTask:{...previous.activeTask,resultHeadCurrent:previous.activeTask.head===pr.headRefOid}} : {}),
+  };
+  if (previous.sessionId && previous.sessionId === maintenanceSessionId) {
+    state.prs[key] = base;
+    persistState(state,paths);
+    report.push({ number: pr.number, nodeId: pr.id, session: mapping,
+      dispatch: { attempted: false, bound: false, reason: 'session-title-maintenance' } });
+    return;
+  }
+  if (pr.isDraft === true) {
+    state.prs[key] = markException({ ...base, wasDraft: true, admissionVerified: false, admissionEpoch: null }, now, events);
+    persistState(state,paths);
+    report.push({ number: pr.number, nodeId: pr.id, fresh: 0, admissionVerified: false,
+      admissionReason: 'draft', mergeReady: false, repairStatus: base.activeTask?.status ?? 'observing',
+      session: mapping, dispatch: { attempted: false, bound: false, reason: 'draft' } });
+    return;
+  }
+  let collected;
+  try {
+  try { collected = yield () => collect(pr, { ghFn }); }
+  catch (error) {
+    state.prs[key] = {...base,lastCollectionError:{at:now,reason:String(error.message).slice(0,400)},mergeReady:false,reviewEvidence:null};
+    // A PR cut short only because earlier PRs used this run's time gets a
+    // full budget first next round. Its own per-PR cap still advances past it.
+    if (deadline-clock()<1000) state.scan={...state.scan,cursor:resumeCursor,deferredNumber:pr.number};
+    report.push({ number: pr.number, nodeId: pr.id, dispatch: { attempted: false, reason: 'collection-failed' }, error: String(error.message).slice(0, 400) });
+    return;
+  }
+  if (collected.pr && (collected.pr.state !== 'OPEN' || collected.pr.isDraft || !collected.pr.sameRepository || collected.pr.author?.login !== viewer)) {
+    state.prs[key] = { ...base, admissionVerified: false, admissionEpoch: null };
+    report.push({ number: pr.number, dispatch: {attempted:false,reason:'ownership-no-longer-released'} });
+    return;
+  }
+  const sameEpoch = !collected.pr || (previous.admissionEpoch === collected.pr.releaseEpoch && previous.wasDraft !== true);
+  if (!sameEpoch) previous = {...previous, admissionVerified:false};
+  const cursorBase = previous.wasDraft === true ? {} : (previous.feedbackCursor || {});
+  const { fresh, cursor } = newFeedback(cursorBase, feedbackItems({ pr, ...collected, receiptActor: viewer }));
+  const admitted = previous.admissionVerified === true || collected.admissionVerified === true;
+  const admissionBlocked = collected.admissionVerified === false && previous.admissionVerified !== true;
+  previous = {
+    ...base, labels: collected.labels ?? [], mergeReady: collected.mergeReady === true,
+    reviewReason: collected.reviewReason ?? null, reviewEvidence: collected.reviewEvidence ?? null,
+    admissionVerified: admitted, admissionReason: collected.admissionReason ?? previous.admissionReason ?? null,
+    admissionEpoch: admitted ? collected.pr?.releaseEpoch ?? previous.admissionEpoch : null,
+    eligibilityInitialized: true, wasDraft: false,
+  };
+  const active = previous.activeTask;
+  const waiting = active?.status === 'waiting-ci'
+    || (active?.status === 'blocked' && ['required-ci', 'optional-ci', 'ci-transport'].includes(active.blockedKind));
+  if (waiting && active.evidenceVersion === 2 && !dryRun && !resultError) {
+    try {
+      if (remaining()<1000) throw Error('scan-budget-exhausted');
+      yield () => recheckFn({ paths, previous, pr, timeoutMs:Math.max(1,Math.min(30000,remaining())) });
+      previous = consumeResult(previous, resultFor(previous, paths), now);
+    } catch (error) {
+      // A transport failure is not a new agent task or proof of completion.
+      previous = { ...previous, lastRecheckError: { at: now, message: String(error.message).slice(0, 400) } };
+      if (deadline-clock()<1000) state.scan={...state.scan,cursor:resumeCursor,deferredNumber:pr.number};
+    }
+  }
+  if (!resultError && !['blocked', 'complete', 'legacy-complete', 'waiting-ci'].includes(previous.activeTask?.status)
+    && Number(previous.lastDispatch?.recoveryCount ?? 0) >= MAX_RECOVERIES
+    && Date.parse(now) - Date.parse(previous.lastDispatch?.lastRecoveryAt ?? previous.lastDispatch?.at) >= RECOVERY_MIN_MS) {
+    previous = { ...previous, eligibility: 'blocked', activeTask: {
+      ...previous.activeTask, dispatchId: previous.lastDispatch.dispatchId,
+      sessionId: previous.sessionId, status: 'blocked', blockedKind: 'missing-result-limit',
+      reason: 'No result after three bounded recovery deliveries; inspect the existing session before resuming.',
+    } };
+  }
+  const terminal = ['blocked', 'complete', 'legacy-complete'].includes(previous.activeTask?.status);
+  const inFlight = Boolean(previous.lastDispatch?.dispatchId) && !terminal;
+  const recovery = admitted && !collected.mergeReady && !resultError
+    && previous.activeTask?.status !== 'waiting-ci' && !terminal
+    ? readTaskForRecovery(previous, paths, now) : null;
+  const repairRounds = Number(previous.repairRounds ?? 0);
+  const hitRoundLimit = repairRounds >= REPAIR_ROUND_LIMIT;
+  const canResume = !resultError && (canRepair(previous) || (
+    fresh.length > 0 && previous.activeTask?.status === 'blocked'
+    && !['invalid-result', 'missing-result-limit', 'round-limit'].includes(previous.activeTask?.blockedKind)
+  ));
+  const shouldDispatch = fresh.length > 0 && !collected.mergeReady && canResume && !admissionBlocked && !inFlight && !hitRoundLimit;
+  let dispatch = { attempted: false, bound: false, reason: 'no-new-feedback' };
+  // Advance only non-actionable observations until a delivery is acknowledged.
+  const retainedCursor = { ...cursor };
+  for (const item of fresh) {
+    if (Object.hasOwn(cursorBase, item.key)) retainedCursor[item.key] = cursorBase[item.key];
+    else delete retainedCursor[item.key];
+  }
+  previous = {
+    ...previous, feedbackCursor: retainedCursor, pendingFeedback: fresh.length,
+    sessionId: mapping.sessionId ?? previous.sessionId ?? null,
+  };
+  if (hitRoundLimit && fresh.length > 0 && !collected.mergeReady && !admissionBlocked && !resultError && !inFlight) {
+    previous = {
+      ...previous,
+      eligibility: 'blocked',
+      activeTask: {
+        ...previous.activeTask,
+        dispatchId: previous.activeTask?.dispatchId ?? previous.lastDispatch?.dispatchId,
+        sessionId: previous.sessionId,
+        status: 'blocked',
+        blockedKind: 'round-limit',
+        reason: 'Same PR reached the 6-round repair limit.',
+      },
+    };
+  }
+  const wantsDelivery=shouldDispatch || recovery || previous.pendingDispatch?.status==='retryable';
+  if (!dryRun && wantsDelivery && deadline-clock()<65000) {
+    state.prs[key]=previous;
+    report.push({number:pr.number,dispatch:{attempted:false,reason:'dispatch-budget-deferred'}});
+    return;
+  }
+  if (!dryRun && collected.pr && (shouldDispatch || recovery || previous.pendingDispatch?.status === 'retryable')) {
+    let live;
+    try { live = yield* ownershipSnapshot({pr:{number:pr.number,repo:REPO},ghFn}); }
+    catch { live = null; }
+    if (!live || live.pr.state !== 'OPEN' || live.pr.isDraft || !live.pr.sameRepository
+      || live.pr.author.login !== viewer || live.pr.headRefOid !== collected.pr.headRefOid
+      || live.pr.baseRefOid !== collected.pr.baseRefOid || live.pr.releaseEpoch !== collected.pr.releaseEpoch) {
+      state.prs[key] = {...previous, lastDispatchGuard:{at:now,reason:'ownership-changed-before-dispatch'}};
+      report.push({number:pr.number,dispatch:{attempted:false,reason:'ownership-changed-before-dispatch'}});
+      return;
+    }
+  }
+  if (!dryRun && wantsDelivery && deadline-clock()<61000) {
+    state.prs[key]=previous;
+    report.push({number:pr.number,dispatch:{attempted:false,reason:'dispatch-budget-deferred'}});
+    return;
+  }
+  if (!dryRun && previous.pendingDispatch?.status === 'retryable'
+    && Number(previous.pendingDispatch.attempts ?? 1) < 3
+    && Date.parse(previous.pendingDispatch.retryAt) <= Date.parse(now)) {
+    const pending = { ...previous.pendingDispatch, attempts: Number(previous.pendingDispatch.attempts ?? 1) + 1,
+      params: { ...previous.pendingDispatch.params, title: mapping.title } };
+    state.prs[key] = { ...previous, pendingDispatch: pending };
+    persistState(state, paths);
+    try {
+      const receipt = yield () => dispatchFn(pending.params,{timeoutMs:Math.max(1,remaining())});
+      const bound = applyDispatchReceipt({ state, pr, mapping,
+        receipt: { ...receipt, dispatch_id: receipt?.dispatch_id ?? pending.dispatchId },
+        now, cursor: pending.cursor ?? retainedCursor, collected, fresh: [], paths, recovery: pending.recovery === true });
+      previous = state.prs[key];
+      dispatch = { attempted: true, ...bound, reason: 'confirmed-nondelivery-retry' };
+    } catch (error) {
+      previous = rememberDispatchFailure(state, key, error, now, paths);
+      dispatch = { attempted: true, bound: false, reason: 'dispatch-unconfirmed', error: String(error.message).slice(0, 400) };
+    }
+  } else if (previous.pendingDispatch && !String(previous.pendingDispatch.dispatchId ?? '').startsWith('dry-')) {
+    dispatch.reason = 'pending-dispatch-unknown';
+  } else if (resultError) {
+    dispatch.reason = 'invalid-result';
+  } else if (admissionBlocked) {
+    dispatch.reason = 'admission-not-verified';
+  } else if (collected.mergeReady) {
+    dispatch.reason = 'merge-ready';
+  } else if (recovery && !dryRun && previous.sessionId) {
+    const taskPath = path.join(paths.stateDir, 'tasks', `${recovery.dispatchId}.json`);
+    const pending = {
+      dispatchId: recovery.dispatchId,
+      params: dispatchParams({ pr: { ...pr, headRefOid: recovery.task?.headRefOid ?? pr.headRefOid },
+        mapping, fresh: recovery.task?.feedback ?? [], now, taskPath, home: paths.home }),
+      at: now, taskPath, recovery: true, cursor: retainedCursor,
+    };
+    state.prs[key] = { ...previous, pendingDispatch: pending };
+    persistState(state, paths);
+    try {
+      const receipt = yield () => dispatchFn(pending.params,{timeoutMs:Math.max(1,remaining())});
+      const bound = applyDispatchReceipt({ state, pr, mapping,
+        receipt: { ...receipt, dispatch_id: receipt?.dispatch_id ?? pending.dispatchId },
+        now, cursor: retainedCursor, collected, fresh: [], paths, recovery: true });
+      previous = state.prs[key];
+      dispatch = { attempted: true, ...bound, reason: 'missing-result-recovery' };
+    } catch (error) {
+      previous = rememberDispatchFailure(state, key, error, now, paths);
+      dispatch = { attempted: true, bound: false, reason: 'dispatch-unconfirmed', error: String(error.message).slice(0, 400) };
+    }
+  } else if (shouldDispatch) {
+    const pending = { ...dispatchIntent({ pr, mapping, fresh, now, paths, dryRun }), cursor };
+    previous = { ...previous, pendingDispatch: pending };
+    if (dryRun) {
+      dispatch = { attempted: false, bound: false, reason: 'dry-run', pending };
+    } else {
+      state.prs[key] = previous;
+      persistState(state, paths);
+      try {
+        const receipt = yield () => dispatchFn(pending.params,{timeoutMs:Math.max(1,remaining())});
+        const bound = applyDispatchReceipt({ state, pr, mapping,
+          receipt: { ...receipt, dispatch_id: receipt?.dispatch_id ?? pending.dispatchId },
+          now, cursor, collected, fresh, paths });
+        previous = state.prs[key];
+        dispatch = { attempted: true, ...bound };
+      } catch (error) {
+        previous = rememberDispatchFailure(state, key, error, now, paths);
+        dispatch = { attempted: true, bound: false, reason: 'dispatch-unconfirmed', error: String(error.message).slice(0, 400) };
+      }
+    }
+  } else if (hitRoundLimit && fresh.length > 0) {
+    dispatch.reason = 'round-limit';
+  } else if (inFlight) {
+    dispatch.reason = previous.activeTask?.status === 'waiting-ci' ? 'waiting-ci' : 'task-in-flight';
+  } else if (!canResume) {
+    dispatch.reason = 'eligibility-blocked';
+  }
+  if (dispatch.reason === 'no-new-feedback' && collected.policy && collected.policy.status !== 'verified') {
+    dispatch.reason = 'policy-unknown';
+  }
+  previous = markException({ ...previous, lastPolicyStatus: collected.policy?.status ?? previous.lastPolicyStatus ?? null }, now, events);
+  state.prs[key] = previous;
+  report.push({
+    number: pr.number, nodeId: pr.id, fresh: fresh.length, admissionVerified: admitted,
+    admissionReason: collected.admissionReason ?? null, mergeReady: collected.mergeReady,
+    repairStatus: previous.activeTask?.status ?? 'observing',
+    evidenceVersion: previous.activeTask?.evidenceVersion ?? null,
+    session: mapping, dispatch,
+    ...(previous.lastRecheckError ? { recheckError: previous.lastRecheckError } : {}),
+  });
+  } finally {
+    state.updatedAt=now;
+    persistState(state,paths);
+    resetPrDeadline?.();
+  }
+}
+
 // Sync tests and the asynchronous Cindy transport share one state machine.
 // Yielded effects keep external calls outside the transition logic.
 function* scanWorkflow({
@@ -668,243 +912,12 @@ function* scanWorkflow({
     // Advance before effects: a killed/slow PR cannot starve later PRs forever.
     state.scan={...state.scan,version:2,cursor:pr.number,deferredNumber:null,startedAt:now,partial:true,visited:[...visited],listed:listed.length};
     persistState(state,paths);
-    const key = String(pr.id);
-    let previous = migrateEntry(clearDryPending(state.prs[key] || {}));
-    previous = { ...previous, number: pr.number, nodeId: pr.id };
-    let resultError;
-    try { previous = consumeResult(previous, resultFor(previous, paths), now); }
-    catch (error) { resultError = error.message; }
-    if (resultError) {
-      previous = { ...previous, eligibility: 'blocked', activeTask: {
-        ...previous.activeTask, dispatchId: previous.activeTask?.dispatchId ?? previous.lastDispatch?.dispatchId,
-        status: 'blocked', blockedKind: 'invalid-result', reason: resultError,
-      } };
-    }
-    const mapping = planSession({ pr, existing: previous, date: now });
-    const base = {
-      ...previous, headRefOid: pr.headRefOid, headRefName: pr.headRefName, url: pr.url,
-      title: mapping.title, titleDate: mapping.titleDate, taskName: mapping.taskName, lastSeenAt: now,
-      ...(previous.activeTask ? {activeTask:{...previous.activeTask,resultHeadCurrent:previous.activeTask.head===pr.headRefOid}} : {}),
-    };
-    if (previous.sessionId && previous.sessionId === maintenanceSessionId) {
-      state.prs[key] = base;
-      persistState(state,paths);
-      report.push({ number: pr.number, nodeId: pr.id, session: mapping,
-        dispatch: { attempted: false, bound: false, reason: 'session-title-maintenance' } });
-      continue;
-    }
-    if (pr.isDraft === true) {
-      state.prs[key] = markException({ ...base, wasDraft: true, admissionVerified: false, admissionEpoch: null }, now, events);
-      persistState(state,paths);
-      report.push({ number: pr.number, nodeId: pr.id, fresh: 0, admissionVerified: false,
-        admissionReason: 'draft', mergeReady: false, repairStatus: base.activeTask?.status ?? 'observing',
-        session: mapping, dispatch: { attempted: false, bound: false, reason: 'draft' } });
-      continue;
-    }
-    let collected;
-    try {
-    try { collected = yield () => collect(pr, { ghFn }); }
-    catch (error) {
-      state.prs[key] = {...base,lastCollectionError:{at:now,reason:String(error.message).slice(0,400)},mergeReady:false,reviewEvidence:null};
-      // A PR cut short only because earlier PRs used this run's time gets a
-      // full budget first next round. Its own per-PR cap still advances past it.
-      if (deadline-clock()<1000) state.scan={...state.scan,cursor:resumeCursor,deferredNumber:pr.number};
-      report.push({ number: pr.number, nodeId: pr.id, dispatch: { attempted: false, reason: 'collection-failed' }, error: String(error.message).slice(0, 400) });
-      continue;
-    }
-    if (collected.pr && (collected.pr.state !== 'OPEN' || collected.pr.isDraft || !collected.pr.sameRepository || collected.pr.author?.login !== viewer)) {
-      state.prs[key] = { ...base, admissionVerified: false, admissionEpoch: null };
-      report.push({ number: pr.number, dispatch: {attempted:false,reason:'ownership-no-longer-released'} });
-      continue;
-    }
-    const sameEpoch = !collected.pr || (previous.admissionEpoch === collected.pr.releaseEpoch && previous.wasDraft !== true);
-    if (!sameEpoch) previous = {...previous, admissionVerified:false};
-    const cursorBase = previous.wasDraft === true ? {} : (previous.feedbackCursor || {});
-    const { fresh, cursor } = newFeedback(cursorBase, feedbackItems({ pr, ...collected, receiptActor: viewer }));
-    const admitted = previous.admissionVerified === true || collected.admissionVerified === true;
-    const admissionBlocked = collected.admissionVerified === false && previous.admissionVerified !== true;
-    previous = {
-      ...base, labels: collected.labels ?? [], mergeReady: collected.mergeReady === true,
-      reviewReason: collected.reviewReason ?? null, reviewEvidence: collected.reviewEvidence ?? null,
-      admissionVerified: admitted, admissionReason: collected.admissionReason ?? previous.admissionReason ?? null,
-      admissionEpoch: admitted ? collected.pr?.releaseEpoch ?? previous.admissionEpoch : null,
-      eligibilityInitialized: true, wasDraft: false,
-    };
-    const active = previous.activeTask;
-    const waiting = active?.status === 'waiting-ci'
-      || (active?.status === 'blocked' && ['required-ci', 'optional-ci', 'ci-transport'].includes(active.blockedKind));
-    if (waiting && active.evidenceVersion === 2 && !dryRun && !resultError) {
-      try {
-        if (remaining()<1000) throw Error('scan-budget-exhausted');
-        yield () => recheckFn({ paths, previous, pr, timeoutMs:Math.max(1,Math.min(30000,remaining())) });
-        previous = consumeResult(previous, resultFor(previous, paths), now);
-      } catch (error) {
-        // A transport failure is not a new agent task or proof of completion.
-        previous = { ...previous, lastRecheckError: { at: now, message: String(error.message).slice(0, 400) } };
-        if (deadline-clock()<1000) state.scan={...state.scan,cursor:resumeCursor,deferredNumber:pr.number};
-      }
-    }
-    if (!resultError && !['blocked', 'complete', 'legacy-complete', 'waiting-ci'].includes(previous.activeTask?.status)
-      && Number(previous.lastDispatch?.recoveryCount ?? 0) >= MAX_RECOVERIES
-      && Date.parse(now) - Date.parse(previous.lastDispatch?.lastRecoveryAt ?? previous.lastDispatch?.at) >= RECOVERY_MIN_MS) {
-      previous = { ...previous, eligibility: 'blocked', activeTask: {
-        ...previous.activeTask, dispatchId: previous.lastDispatch.dispatchId,
-        sessionId: previous.sessionId, status: 'blocked', blockedKind: 'missing-result-limit',
-        reason: 'No result after three bounded recovery deliveries; inspect the existing session before resuming.',
-      } };
-    }
-    const terminal = ['blocked', 'complete', 'legacy-complete'].includes(previous.activeTask?.status);
-    const inFlight = Boolean(previous.lastDispatch?.dispatchId) && !terminal;
-    const recovery = admitted && !collected.mergeReady && !resultError
-      && previous.activeTask?.status !== 'waiting-ci' && !terminal
-      ? readTaskForRecovery(previous, paths, now) : null;
-    const repairRounds = Number(previous.repairRounds ?? 0);
-    const hitRoundLimit = repairRounds >= REPAIR_ROUND_LIMIT;
-    const canResume = !resultError && (canRepair(previous) || (
-      fresh.length > 0 && previous.activeTask?.status === 'blocked'
-      && !['invalid-result', 'missing-result-limit', 'round-limit'].includes(previous.activeTask?.blockedKind)
-    ));
-    const shouldDispatch = fresh.length > 0 && !collected.mergeReady && canResume && !admissionBlocked && !inFlight && !hitRoundLimit;
-    let dispatch = { attempted: false, bound: false, reason: 'no-new-feedback' };
-    // Advance only non-actionable observations until a delivery is acknowledged.
-    const retainedCursor = { ...cursor };
-    for (const item of fresh) {
-      if (Object.hasOwn(cursorBase, item.key)) retainedCursor[item.key] = cursorBase[item.key];
-      else delete retainedCursor[item.key];
-    }
-    previous = {
-      ...previous, feedbackCursor: retainedCursor, pendingFeedback: fresh.length,
-      sessionId: mapping.sessionId ?? previous.sessionId ?? null,
-    };
-    if (hitRoundLimit && fresh.length > 0 && !collected.mergeReady && !admissionBlocked && !resultError && !inFlight) {
-      previous = {
-        ...previous,
-        eligibility: 'blocked',
-        activeTask: {
-          ...previous.activeTask,
-          dispatchId: previous.activeTask?.dispatchId ?? previous.lastDispatch?.dispatchId,
-          sessionId: previous.sessionId,
-          status: 'blocked',
-          blockedKind: 'round-limit',
-          reason: 'Same PR reached the 6-round repair limit.',
-        },
-      };
-    }
-    const wantsDelivery=shouldDispatch || recovery || previous.pendingDispatch?.status==='retryable';
-    if (!dryRun && wantsDelivery && deadline-clock()<65000) {
-      state.prs[key]=previous;
-      report.push({number:pr.number,dispatch:{attempted:false,reason:'dispatch-budget-deferred'}});
-      continue;
-    }
-    if (!dryRun && collected.pr && (shouldDispatch || recovery || previous.pendingDispatch?.status === 'retryable')) {
-      let live;
-      try { live = yield* ownershipSnapshot({pr:{number:pr.number,repo:REPO},ghFn}); }
-      catch { live = null; }
-      if (!live || live.pr.state !== 'OPEN' || live.pr.isDraft || !live.pr.sameRepository
-        || live.pr.author.login !== viewer || live.pr.headRefOid !== collected.pr.headRefOid
-        || live.pr.baseRefOid !== collected.pr.baseRefOid || live.pr.releaseEpoch !== collected.pr.releaseEpoch) {
-        state.prs[key] = {...previous, lastDispatchGuard:{at:now,reason:'ownership-changed-before-dispatch'}};
-        report.push({number:pr.number,dispatch:{attempted:false,reason:'ownership-changed-before-dispatch'}});
-        continue;
-      }
-    }
-    if (!dryRun && wantsDelivery && deadline-clock()<61000) {
-      state.prs[key]=previous;
-      report.push({number:pr.number,dispatch:{attempted:false,reason:'dispatch-budget-deferred'}});
-      continue;
-    }
-    if (!dryRun && previous.pendingDispatch?.status === 'retryable'
-      && Number(previous.pendingDispatch.attempts ?? 1) < 3
-      && Date.parse(previous.pendingDispatch.retryAt) <= Date.parse(now)) {
-      const pending = { ...previous.pendingDispatch, attempts: Number(previous.pendingDispatch.attempts ?? 1) + 1,
-        params: { ...previous.pendingDispatch.params, title: mapping.title } };
-      state.prs[key] = { ...previous, pendingDispatch: pending };
-      persistState(state, paths);
-      try {
-        const receipt = yield () => dispatchFn(pending.params,{timeoutMs:Math.max(1,remaining())});
-        const bound = applyDispatchReceipt({ state, pr, mapping,
-          receipt: { ...receipt, dispatch_id: receipt?.dispatch_id ?? pending.dispatchId },
-          now, cursor: pending.cursor ?? retainedCursor, collected, fresh: [], paths, recovery: pending.recovery === true });
-        previous = state.prs[key];
-        dispatch = { attempted: true, ...bound, reason: 'confirmed-nondelivery-retry' };
-      } catch (error) {
-        previous = rememberDispatchFailure(state, key, error, now, paths);
-        dispatch = { attempted: true, bound: false, reason: 'dispatch-unconfirmed', error: String(error.message).slice(0, 400) };
-      }
-    } else if (previous.pendingDispatch && !String(previous.pendingDispatch.dispatchId ?? '').startsWith('dry-')) {
-      dispatch.reason = 'pending-dispatch-unknown';
-    } else if (resultError) {
-      dispatch.reason = 'invalid-result';
-    } else if (admissionBlocked) {
-      dispatch.reason = 'admission-not-verified';
-    } else if (collected.mergeReady) {
-      dispatch.reason = 'merge-ready';
-    } else if (recovery && !dryRun && previous.sessionId) {
-      const taskPath = path.join(paths.stateDir, 'tasks', `${recovery.dispatchId}.json`);
-      const pending = {
-        dispatchId: recovery.dispatchId,
-        params: dispatchParams({ pr: { ...pr, headRefOid: recovery.task?.headRefOid ?? pr.headRefOid },
-          mapping, fresh: recovery.task?.feedback ?? [], now, taskPath, home: paths.home }),
-        at: now, taskPath, recovery: true, cursor: retainedCursor,
-      };
-      state.prs[key] = { ...previous, pendingDispatch: pending };
-      persistState(state, paths);
-      try {
-        const receipt = yield () => dispatchFn(pending.params,{timeoutMs:Math.max(1,remaining())});
-        const bound = applyDispatchReceipt({ state, pr, mapping,
-          receipt: { ...receipt, dispatch_id: receipt?.dispatch_id ?? pending.dispatchId },
-          now, cursor: retainedCursor, collected, fresh: [], paths, recovery: true });
-        previous = state.prs[key];
-        dispatch = { attempted: true, ...bound, reason: 'missing-result-recovery' };
-      } catch (error) {
-        previous = rememberDispatchFailure(state, key, error, now, paths);
-        dispatch = { attempted: true, bound: false, reason: 'dispatch-unconfirmed', error: String(error.message).slice(0, 400) };
-      }
-    } else if (shouldDispatch) {
-      const pending = { ...dispatchIntent({ pr, mapping, fresh, now, paths, dryRun }), cursor };
-      previous = { ...previous, pendingDispatch: pending };
-      if (dryRun) {
-        dispatch = { attempted: false, bound: false, reason: 'dry-run', pending };
-      } else {
-        state.prs[key] = previous;
-        persistState(state, paths);
-        try {
-          const receipt = yield () => dispatchFn(pending.params,{timeoutMs:Math.max(1,remaining())});
-          const bound = applyDispatchReceipt({ state, pr, mapping,
-            receipt: { ...receipt, dispatch_id: receipt?.dispatch_id ?? pending.dispatchId },
-            now, cursor, collected, fresh, paths });
-          previous = state.prs[key];
-          dispatch = { attempted: true, ...bound };
-        } catch (error) {
-          previous = rememberDispatchFailure(state, key, error, now, paths);
-          dispatch = { attempted: true, bound: false, reason: 'dispatch-unconfirmed', error: String(error.message).slice(0, 400) };
-        }
-      }
-    } else if (hitRoundLimit && fresh.length > 0) {
-      dispatch.reason = 'round-limit';
-    } else if (inFlight) {
-      dispatch.reason = previous.activeTask?.status === 'waiting-ci' ? 'waiting-ci' : 'task-in-flight';
-    } else if (!canResume) {
-      dispatch.reason = 'eligibility-blocked';
-    }
-    if (dispatch.reason === 'no-new-feedback' && collected.policy && collected.policy.status !== 'verified') {
-      dispatch.reason = 'policy-unknown';
-    }
-    previous = markException({ ...previous, lastPolicyStatus: collected.policy?.status ?? previous.lastPolicyStatus ?? null }, now, events);
-    state.prs[key] = previous;
-    report.push({
-      number: pr.number, nodeId: pr.id, fresh: fresh.length, admissionVerified: admitted,
-      admissionReason: collected.admissionReason ?? null, mergeReady: collected.mergeReady,
-      repairStatus: previous.activeTask?.status ?? 'observing',
-      evidenceVersion: previous.activeTask?.evidenceVersion ?? null,
-      session: mapping, dispatch,
-      ...(previous.lastRecheckError ? { recheckError: previous.lastRecheckError } : {}),
+    yield* processPr({
+      pr, state, paths, now, events, report, viewer, dryRun, dispatchFn,
+      collect, ghFn, recheckFn, ownershipSnapshot, maintenanceSessionId,
+      remaining, deadline, clock, resumeCursor,
+      resetPrDeadline: () => { prDeadline = deadline; },
     });
-    } finally {
-      state.updatedAt=now;
-      persistState(state,paths);
-      prDeadline=deadline;
-    }
   }
   state.scan={...state.scan,partial,visited,listed:listed.length,finishedAt:now,elapsedMs:clock()-started};
   state.updatedAt = now;
