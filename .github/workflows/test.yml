@@ -1,5 +1,7 @@
 # approve-exec 云端测试证据（非 required：私有仓分支保护 403）。
 # 本机 node v26；云端用 actions 支持的 Node 24 LTS。测试未使用 26-only API。
+# Jev D1（ubuntu_split_jobs, confidence 0.97）：ubuntu 必绿 job + continue-on-error known job。
+# 不删用例、不改断言、不修 main 上已有的基线失败。
 name: test
 
 on:
@@ -12,6 +14,7 @@ permissions:
 
 jobs:
   test:
+    name: test
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -34,3 +37,29 @@ jobs:
       - name: node scripts/run-tests.mjs
         timeout-minutes: 30
         run: node scripts/run-tests.mjs
+
+  test-known:
+    name: test-known
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # 未进必绿 job 的文件（实跑、允许红）：
+      # graph / decision-broker / selfcheck：本机 /Users/praise live 路径；selfcheck --live 在 main 上已有基线失败
+      # mem-probe / e2e-dryrun / run-ledger：Darwin sysctl/vm_stat，ubuntu 不可用；run-ledger mutation-kill 会重跑前两者
+      - name: known host-bound / Darwin-only tests
+        timeout-minutes: 30
+        run: |
+          node --test --test-force-exit \
+            tests/graph.test.mjs \
+            tests/decision-broker.test.mjs \
+            tests/selfcheck.test.mjs \
+            tests/mem-probe.test.mjs \
+            tests/e2e-dryrun.test.mjs \
+            tests/run-ledger.test.mjs
