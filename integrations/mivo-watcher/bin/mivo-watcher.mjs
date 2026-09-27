@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { planSessionTitle, repairSessionTitle } from './session-title.mjs';
 import { collectPublicReview, verdictComment } from './public-review.mjs';
 import { collectPrSnapshot, collectPrOwnership } from './mivo-pr-snapshot.mjs';
-import { listPrs, readPr, statePaths as v2StatePaths, withLock as withPrLock, writePr } from './mivo-state.mjs';
+import { listPrs, migrateLegacy, readPr, statePaths as v2StatePaths, withLock as withPrLock, writePr } from './mivo-state.mjs';
 export const REPO = 'xindong/mivo-canvas-plugin';
 const GH = process.env.GH_BIN ?? 'gh';
 
@@ -434,11 +434,12 @@ function readTaskForRecovery(previous, paths, now = new Date().toISOString()) {
   return { dispatchId, params: task.params, task, recoveryCount: count + 1 };
 }
 
-export function dispatchParams({ pr, mapping, fresh, now, taskPath, home }) {
+export function dispatchParams({ pr, mapping, fresh, now, taskPath, home, messagePrefix = '' }) {
   const title = mapping.title || repairSessionTitle({ task: pr.title, prNumber: pr.number, createdAt: now });
   const params = {
     title,
     message: [
+      ...(messagePrefix ? [messagePrefix] : []),
       `Mivo PR repair for ${REPO}#${pr.number}.`,
       `nodeid=${pr.id}`,
       `head=${pr.headRefOid}`,
@@ -501,10 +502,10 @@ function hasWatchOff(labels) {
   return (labels ?? []).map((item) => typeof item === 'string' ? item : item?.name).includes('mivo-watch:off');
 }
 
-function dispatchIntent({ pr, mapping, fresh, now, paths, dryRun }) {
+function dispatchIntent({ pr, mapping, fresh, now, paths, dryRun, messagePrefix = '' }) {
   const dispatchId = `${dryRun ? 'dry' : 'live'}-${pr.number}-${now}`;
   const taskPath = path.join(paths.stateDir, 'tasks', `${dispatchId}.json`);
-  const pending = { dispatchId, params: dispatchParams({ pr, mapping, fresh, now, taskPath, home: paths.home }), at: now, taskPath };
+  const pending = { dispatchId, params: dispatchParams({ pr, mapping, fresh, now, taskPath, home: paths.home, messagePrefix }), at: now, taskPath };
   if (!dryRun) {
     fs.mkdirSync(path.dirname(taskPath), { recursive: true });
     atomic(taskPath, JSON.stringify({ dispatchId, nodeId: pr.id, number: pr.number, repo: REPO, headRefOid: pr.headRefOid, headRefName: pr.headRefName, feedback: fresh, params: pending.params, createdAt: now }));
@@ -655,7 +656,7 @@ function rememberDispatchFailure(state, key, error, now, paths) {
 export function* processPr({
   pr, previous: previousArg, state, paths, now, events, report, viewer, dryRun,
   dispatchFn, collect, ghFn, recheckFn, ownershipSnapshot, maintenanceSessionId,
-  remaining, deadline, clock, resumeCursor, resetPrDeadline, allowCreate = true,
+  remaining, deadline, clock, resumeCursor, resetPrDeadline, allowCreate = true, messagePrefix = '',
 } = {}) {
   const key = String(pr.id);
   let previous = migrateEntry(clearDryPending(previousArg ?? (state.prs[key] || {})));
@@ -853,7 +854,7 @@ export function* processPr({
     previous = { ...previous, needsOwner: true };
     dispatch = { attempted: false, bound: false, reason: 'needs-owner' };
   } else if (shouldDispatch) {
-    const pending = { ...dispatchIntent({ pr, mapping, fresh, now, paths, dryRun }), cursor };
+    const pending = { ...dispatchIntent({ pr, mapping, fresh, now, paths, dryRun, messagePrefix }), cursor };
     previous = { ...previous, pendingDispatch: pending };
     if (dryRun) {
       dispatch = { attempted: false, bound: false, reason: 'dry-run', pending };
@@ -1071,8 +1072,123 @@ export function* pollWorkflow({
   return { mode: 'poll', dispatch: !dryRun, prs: report, events };
 }
 
+const HEARTBEAT_STALE_MS = 15 * 60 * 1000;
+const LOST_REMIND_MS = 30 * 60 * 1000;
+const CLAIM_MS = 60 * 60 * 1000;
+
+export function* discoverWorkflow({
+  now = new Date().toISOString(),
+  enabled = process.env.MIVO_WATCHER_ENABLED === '1',
+  allowDispatch = process.env.MIVO_WATCHER_DISPATCH === '1',
+  ghFn = gh, collect = collectPr, dispatchFn = null, paths = watcherPaths(),
+  recheckFn = recheckResult, ownershipSnapshot = collectPrOwnership,
+  clock = Date.now, budgetMs = 120000, maxPrs = 1000,
+} = {}) {
+  const started = clock();
+  const deadline = started + Math.min(120000, Math.max(1, budgetMs));
+  const remaining = () => Math.max(0, deadline - clock());
+  const dryRun = !(enabled && allowDispatch && typeof dispatchFn === 'function');
+  const v2 = v2StatePaths(paths.home);
+  fs.mkdirSync(v2.prsDir, { recursive: true, mode: 0o700 });
+  if (!fs.existsSync(v2.indexPath)) {
+    fs.writeFileSync(v2.indexPath, `${JSON.stringify({ version: 2, migratedAt: now }, null, 2)}\n`, { mode: 0o600 });
+  }
+  const viewer = String(yield () => ghFn(['api', 'user', '-q', '.login'])).trim();
+  const listed = JSON.parse(yield () => ghFn([
+    'pr', 'list', '--repo', REPO, '--author', viewer, '--state', 'open', '--limit', '1000',
+    '--json', 'number,id,headRefOid,headRefName,isDraft,labels,url,updatedAt,title',
+  ]));
+  if (!Array.isArray(listed)) throw new Error('Open PR listing is not an array');
+  migrateLegacy(paths.home, listed.map((pr) => pr.id));
+  const report = [];
+  const events = [];
+  const nowMs = Date.parse(now);
+  for (const pr of listed) {
+    if (deadline - clock() < 1000 || report.length >= maxPrs) break;
+    const key = String(pr.id);
+    const labels = (pr.labels ?? []).map((item) => typeof item === 'string' ? item : item?.name);
+    if (hasWatchOff(labels)) {
+      report.push({ number: pr.number, nodeId: pr.id, dispatch: { attempted: false, reason: 'opt-out' } });
+      continue;
+    }
+    let previous = readPr(paths.home, key) || { nodeId: key, number: pr.number };
+    const guide = watchGuideMessage({ home: paths.home, prNumber: pr.number, nodeId: key });
+    if (previous.sessionId) {
+      const beat = Date.parse(previous.heartbeatAt ?? '');
+      const stale = !Number.isFinite(beat) || nowMs - beat >= HEARTBEAT_STALE_MS;
+      const reminded = Date.parse(previous.lastLostReminderAt ?? '');
+      const canRemind = !Number.isFinite(reminded) || nowMs - reminded >= LOST_REMIND_MS;
+      if (!stale || !canRemind || dryRun) {
+        report.push({ number: pr.number, nodeId: key, dispatch: { attempted: false, reason: stale ? 'lost-reminder-throttled' : 'bound-heartbeat-ok' } });
+        continue;
+      }
+      try {
+        yield () => dispatchFn({
+          title: previous.title || `MivoPlugin-#${pr.number}`,
+          message: watchPollLostMessage({ prNumber: pr.number, heartbeatAt: previous.heartbeatAt, scheduleId: previous.scheduleId }),
+          target_session_id: previous.sessionId,
+        }, { timeoutMs: Math.max(1, remaining()) });
+        previous = { ...previous, lastLostReminderAt: now };
+        writePr(paths.home, key, previous);
+        report.push({ number: pr.number, nodeId: key, dispatch: { attempted: true, reason: 'poll-lost' } });
+      } catch (error) {
+        const text = String(error.message);
+        if (/ARCHIVED|NOT_FOUND|DELETED/.test(text)) {
+          const predecessorId = previous.sessionId;
+          previous = {
+            ...previous, sessionId: null, predecessors: [...(previous.predecessors ?? []), predecessorId],
+            lastLostReminderAt: now,
+          };
+          writePr(paths.home, key, previous);
+          const state = { version: 2, repo: REPO, prs: { [key]: previous } };
+          const inner = [];
+          yield* processPr({
+            pr, previous, state, paths, now, events, report: inner, viewer, dryRun, dispatchFn, collect, ghFn,
+            recheckFn, ownershipSnapshot, remaining, deadline, clock, resetPrDeadline: () => {},
+            messagePrefix: `${watchSuccessorMessage({ prNumber: pr.number, predecessorId, reason: text.slice(0, 120) })}\n${guide}`,
+          });
+          report.push(inner[0] ?? { number: pr.number, nodeId: key, dispatch: { attempted: true, reason: 'successor' }, predecessors: previous.predecessors });
+        } else {
+          report.push({ number: pr.number, nodeId: key, dispatch: { attempted: true, reason: 'poll-lost-unconfirmed', error: text.slice(0, 400) } });
+        }
+      }
+      continue;
+    }
+    if (previous.pendingDispatch?.status === 'awaiting-claim') {
+      const until = Date.parse(previous.pendingDispatch.claimDeadline ?? '');
+      if (Number.isFinite(until) && nowMs < until) {
+        report.push({ number: pr.number, nodeId: key, dispatch: { attempted: false, reason: 'awaiting-claim' } });
+        continue;
+      }
+      previous = {
+        ...previous,
+        abandonedDispatches: [...(previous.abandonedDispatches ?? []), previous.pendingDispatch.dispatchId].filter(Boolean),
+        pendingDispatch: null, dispatchError: null,
+      };
+    }
+    const state = { version: 2, repo: REPO, prs: { [key]: previous } };
+    const inner = [];
+    yield* processPr({
+      pr, previous, state, paths, now, events, report: inner, viewer, dryRun, dispatchFn, collect, ghFn,
+      recheckFn, ownershipSnapshot, remaining, deadline, clock, resetPrDeadline: () => {}, messagePrefix: guide,
+    });
+    let entry = state.prs[key] || previous;
+    if (!entry.sessionId && entry.pendingDispatch && entry.pendingDispatch.status !== 'retryable'
+      && !String(entry.pendingDispatch.dispatchId ?? '').startsWith('dry-')) {
+      entry = {
+        ...entry, dispatchError: null,
+        pendingDispatch: { ...entry.pendingDispatch, status: 'awaiting-claim', claimDeadline: new Date(nowMs + CLAIM_MS).toISOString() },
+      };
+    }
+    writePr(paths.home, key, entry);
+    report.push(inner[0] ?? { number: pr.number, nodeId: key, dispatch: { attempted: false } });
+  }
+  return { mode: 'discover', dispatch: !dryRun, viewer, repo: REPO, prs: report, events };
+}
+
 export function scanOnce(options = {}) {
-  const iterator = options.mode === 'poll' ? pollWorkflow(options) : scanWorkflow(options);
+  const iterator = options.mode === 'poll' ? pollWorkflow(options)
+    : options.mode === 'discover' ? discoverWorkflow(options) : scanWorkflow(options);
   let step = iterator.next();
   while (!step.done) {
     let value;
@@ -1086,7 +1202,7 @@ export function scanOnce(options = {}) {
 
 export async function scanOnceAsync(options = {}) {
   const mode = options.mode ?? watcherMode();
-  const workflow = mode === 'poll' ? pollWorkflow : scanWorkflow;
+  const workflow = mode === 'poll' ? pollWorkflow : mode === 'discover' ? discoverWorkflow : scanWorkflow;
   const iterator = workflow({ collect: collectPrAsync, ...options });
   let step = iterator.next();
   while (!step.done) {
