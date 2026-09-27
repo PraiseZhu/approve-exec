@@ -475,8 +475,9 @@ export function dispatchParams({ pr, mapping, fresh, now, taskPath, home, messag
 }
 
 export function watchGuideMessage({ home, prNumber, nodeId }) {
-  const helper = `${home}/bin/mivo-repair.mjs`;
-  return `第 0 步（只做一次）：运行 \`node ${helper} --home ${home} schedule-params --pr ${prNumber} --node-id ${nodeId}\`，把输出 JSON 原样作为 cindy_scheduler 的 schedule_create 参数调用；把工具返回原样存成文件后运行 \`${helper} --home ${home} bind-schedule --pr ${prNumber} --node-id ${nodeId} --result <文件>\`。bind 被拒说明本 PR 已有 owner，立刻停止并回复一句说明。之后本 PR 的所有反馈只会投递到你这里（每 5 分钟由你的轮询脚本检查）。`;
+  const helper = JSON.stringify(path.join(home, 'bin', 'mivo-repair.mjs'));
+  const quotedHome = JSON.stringify(home);
+  return `第 0 步（只做一次）：运行 \`node ${helper} --home ${quotedHome} schedule-params --pr ${prNumber} --node-id ${nodeId}\`，把输出 JSON 原样作为 cindy_scheduler 的 schedule_create 参数调用；把工具返回原样存成文件后运行 \`${helper} --home ${quotedHome} bind-schedule --pr ${prNumber} --node-id ${nodeId} --result <文件>\`。bind 被拒说明本 PR 已有 owner，立刻停止并回复一句说明。之后本 PR 的所有反馈只会投递到你这里（每 5 分钟由你的轮询脚本检查）。`;
 }
 export function watchSuccessorMessage({ prNumber, predecessorId, reason, summary }) {
   return `你是 PR #${prNumber} 的接班修复 session，前任 ${predecessorId} 已不可用（${reason}）；先读本 PR 状态摘要 ${summary ?? '…'}，再执行第 0 步。`;
@@ -486,7 +487,8 @@ export function watchPollLostMessage({ prNumber, heartbeatAt, scheduleId }) {
 }
 export function watchClosedownMessage({ prNumber, state, scheduleId, home }) {
   const verb = state === 'MERGED' ? '合并' : '关闭';
-  return `PR #${prNumber} 已${verb}：调用 schedule_delete ${scheduleId ?? ''} 删除本 PR 轮询调度，再运行 \`${home}/bin/mivo-repair.mjs --home ${home} cleanup --pr ${prNumber}\`；不做其它改动。`;
+  const helper = JSON.stringify(path.join(home, 'bin', 'mivo-repair.mjs'));
+  return `PR #${prNumber} 已${verb}：调用 schedule_delete ${scheduleId ?? ''} 删除本 PR 轮询调度，再运行 \`node ${helper} --home ${JSON.stringify(home)} cleanup --pr ${prNumber}\`；不做其它改动。`;
 }
 function runAttemptFromUrl(url) {
   const text = String(url ?? '');
