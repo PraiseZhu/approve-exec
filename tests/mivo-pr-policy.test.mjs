@@ -2,9 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { collectMivoPolicy, collectMivoPolicySync, evaluateMivoCi } from '../scripts/mivo-pr-policy.mjs';
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
-function fixture({ protectedBranch = false, drift = false, fail = false } = {}) {
+function fixture({ protectedBranch = false, drift = false, fail = false, advancedTip = false } = {}) {
   const calls = [];
   let views = 0;
+  const tip = 'd'.repeat(40);
   const gh = (args) => {
     calls.push(args);
     if (fail) throw new Error('API unavailable');
@@ -12,9 +13,9 @@ function fixture({ protectedBranch = false, drift = false, fail = false } = {}) 
     if (args[1].includes('/rules/')) return [[{ type: 'required_status_checks', ruleset_id: 4, parameters: { required_status_checks: [{ context: 'verify', integration_id: 7 }] } }]];
     if (args[1].endsWith('/protection')) return { required_status_checks: { contexts: ['classic'], checks: [{ context: 'classic', app_id: 7 }] } };
     if (args[1].includes('/contents/')) return { type: 'file', encoding: 'base64', content: Buffer.from(JSON.stringify({ on_main: ['verify'], pr_only: ['size'] })).toString('base64') };
-    return { protected: protectedBranch, commit: { sha: base } };
+    return { protected: protectedBranch, commit: { sha: advancedTip ? tip : base } };
   };
-  return { gh, calls };
+  return { gh, calls, tip };
 }
 const policy = { status: 'verified', headSha: head, baseSha: base, policyHash: 'hash', required: [{ context: 'verify', appId: 7 }] };
 const check = (extra = {}) => ({ id: 1, name: 'verify', head_sha: head, app: { id: 7, slug: 'github-actions' }, workflowHeadSha: head, status: 'completed', conclusion: 'SUCCESS', started_at: '2026-09-09T00:00:00Z', ...extra });
@@ -25,6 +26,16 @@ test('collect actual stack base policy and explicit file union', async () => {
   assert.deepEqual([...new Set(result.required.map((item) => item.context))].sort(), ['classic', 'size', 'verify']);
   assert.ok(calls.some((args) => args[1]?.includes('branches/stack%2Ftopic')));
   assert.ok(calls.some((args) => args[1]?.endsWith(`?ref=${base}`)));
+});
+test('advanced main tip still verifies policy from current branch rules and PR-base file', async () => {
+  const { gh, calls, tip } = fixture({ protectedBranch: true, advancedTip: true });
+  const result = await collectMivoPolicy({ repo: 'owner/repo', number: 1, gh });
+  assert.equal(result.status, 'verified');
+  assert.equal(result.baseSha, base);
+  assert.notEqual(result.baseSha, tip);
+  assert.deepEqual([...new Set(result.required.map((item) => item.context))].sort(), ['classic', 'size', 'verify']);
+  assert.ok(calls.some((args) => args[1]?.endsWith(`?ref=${base}`)));
+  assert.equal(calls.some((args) => args[1]?.endsWith(`?ref=${tip}`)), false);
 });
 test('unknown API and identity drift fail closed', async () => {
   assert.equal((await collectMivoPolicy({ repo: 'owner/repo', number: 1, ...fixture({ fail: true }) })).status, 'unknown');

@@ -14,7 +14,7 @@ export function* collectMivoPolicySteps({ repo, number, gh }) {
     assert(before.id && before.number === Number(number) && sha(before.headRefOid) && sha(before.baseRefOid) && before.baseRefName, 'incomplete PR identity');
     const branchPath = `repos/${repo}/branches/${encodeURIComponent(before.baseRefName)}`;
     const branch = parse(yield () => gh(['api', branchPath]));
-    assert(typeof branch.protected === 'boolean' && branch.commit?.sha === before.baseRefOid, 'base branch drift or unknown protection');
+    assert(typeof branch.protected === 'boolean', 'unknown protection');
     const rulesPages = parse(yield () => gh(['api', `repos/${repo}/rules/branches/${encodeURIComponent(before.baseRefName)}?per_page=100`, '--paginate', '--slurp']));
     assert(Array.isArray(rulesPages) && rulesPages.every(Array.isArray), 'incomplete effective rules');
     const required = new Map();
