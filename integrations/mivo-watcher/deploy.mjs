@@ -32,11 +32,14 @@ function identities(home){
  const stateFile=path.join(home,'state/state.json');
  return identitiesFromState(JSON.parse(fs.readFileSync(stateFile)));
 }
-function stateFingerprint(home){
+export function stateFingerprint(home){
  const index=path.join(home,'state/index.json'),prsDir=path.join(home,'state/prs');
  if(fs.existsSync(index)||fs.existsSync(prsDir)){
   const files=fs.existsSync(prsDir)?fs.readdirSync(prsDir).filter(n=>n.endsWith('.json')).sort():[];
-  return createHash('sha256').update(JSON.stringify({index:sha(index),files})).digest('hex');
+  return createHash('sha256').update(JSON.stringify({
+   index:sha(index),
+   files:files.map(name=>({name,sha:sha(path.join(prsDir,name))})),
+  })).digest('hex');
  }
  return sha(path.join(home,'state/state.json'));
 }
