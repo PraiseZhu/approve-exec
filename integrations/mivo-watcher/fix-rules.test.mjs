@@ -147,15 +147,59 @@ test('optional CI failure advances cursor but is not fresh', () => {
   assert.ok(first.cursor['ci:Greptile Review']);
 });
 
-test('missing required list is fail-closed and stays fresh', () => {
+test('unknown policy optional CI is not dispatched and cursor is retained', (t) => {
   const items = feedbackItems({
     pr,
-    checks: [{ name: 'unit', state: 'FAILURE', bucket: 'fail' }],
+    checks: [{ name: 'Greptile Review', state: 'FAILURE', bucket: 'fail' }],
+    policy: { status: 'unknown', required: [] },
   });
-  assert.equal(items[0].actionable, true);
+  assert.equal(items[0].deferred, true);
   const first = newFeedback({}, items);
-  assert.equal(first.fresh.length, 1);
-  assert.equal(first.fresh[0].nativeId, 'unit');
+  assert.equal(first.fresh.length, 0);
+  assert.equal(first.cursor['ci:Greptile Review'], undefined);
+  const { paths, listed } = scanHome(t);
+  let sent = 0;
+  runScan(paths, listed, () => ({
+    checks: [{ name: 'Greptile Review', state: 'FAILURE', bucket: 'fail' }],
+    policy: { status: 'unknown', required: [] },
+    mergeReady: false,
+  }), () => { sent += 1; return { target_session_id: 's1' }; });
+  assert.equal(sent, 0);
+  const cursor = JSON.parse(fs.readFileSync(paths.statePath, 'utf8')).prs.PR_1.feedbackCursor;
+  assert.equal(cursor['ci:Greptile Review'], undefined);
+});
+
+test('unknown policy still dispatches human review comments', (t) => {
+  const { paths, listed } = scanHome(t);
+  let sent = 0;
+  const result = runScan(paths, listed, () => ({
+    checks: [{ name: 'Greptile Review', state: 'FAILURE', bucket: 'fail' }],
+    policy: { status: 'unknown' },
+    comments: [{ id: 41, body: 'please look', user: { login: 'alice' }, updatedAt: 't1' }],
+    mergeReady: false,
+  }), () => { sent += 1; return { target_session_id: 's1' }; });
+  assert.equal(sent, 1);
+  assert.equal(result.prs[0].dispatch.attempted, true);
+  assert.equal(JSON.parse(fs.readFileSync(paths.statePath, 'utf8')).prs.PR_1.feedbackCursor['ci:Greptile Review'], undefined);
+});
+
+test('policy recovery then required CI red dispatches', (t) => {
+  const { paths, listed } = scanHome(t);
+  let sent = 0;
+  runScan(paths, listed, () => ({
+    checks: [{ name: 'lint', state: 'FAILURE', bucket: 'fail' }],
+    policy: { status: 'unknown' },
+    mergeReady: false,
+  }), () => { sent += 1; return { target_session_id: 's1' }; });
+  assert.equal(sent, 0);
+  assert.equal(JSON.parse(fs.readFileSync(paths.statePath, 'utf8')).prs.PR_1.feedbackCursor['ci:lint'], undefined);
+  const result = runScan(paths, listed, () => ({
+    checks: [{ name: 'lint', state: 'FAILURE', bucket: 'fail' }],
+    policy: { status: 'verified', required: [{ context: 'lint' }] },
+    mergeReady: false,
+  }), () => { sent += 1; return { target_session_id: 's1' }; });
+  assert.equal(sent, 1);
+  assert.equal(result.prs[0].dispatch.attempted, true);
 });
 
 test('BASE-required failure with empty gh-required still dispatches', (t) => {

@@ -191,7 +191,9 @@ export function feedbackItems({ pr, checks = [], requiredChecks = [], policy, ci
     const failing = check.bucket === 'fail' || ['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED'].includes(check.state);
     items.push(withCategory({
       source: 'ci',
-      actionable: Boolean(failing && (required ? required.has(native) : true)),
+      ...(required
+        ? { actionable: Boolean(failing && required.has(native)) }
+        : { deferred: true, actionable: false }),
       nativeId: native,
       revision: `${check.bucket ?? check.state ?? ''}:${check.sha ?? pr.headRefOid ?? ''}`,
       sha: check.sha ?? pr.headRefOid ?? null,
@@ -248,6 +250,7 @@ export function newFeedback(previousCursor = {}, items = []) {
   for (const item of items) {
     const key = `${item.source}:${item.nativeId}`;
     const stamp = `${item.revision}:${item.contentHash}:${['ci', 'conflict'].includes(item.source) ? item.sha ?? '' : ''}`;
+    if (item.deferred === true) continue;
     if (next[key] === stamp) continue;
     next[key] = stamp;
     if (item.actionable !== false) fresh.push({ ...item, key });
