@@ -478,8 +478,8 @@ export function watchGuideMessage({ home, prNumber, nodeId }) {
   const helper = `${home}/bin/mivo-repair.mjs`;
   return `第 0 步（只做一次）：运行 \`node ${helper} --home ${home} schedule-params --pr ${prNumber} --node-id ${nodeId}\`，把输出 JSON 原样作为 cindy_scheduler 的 schedule_create 参数调用；把工具返回原样存成文件后运行 \`${helper} --home ${home} bind-schedule --pr ${prNumber} --node-id ${nodeId} --result <文件>\`。bind 被拒说明本 PR 已有 owner，立刻停止并回复一句说明。之后本 PR 的所有反馈只会投递到你这里（每 5 分钟由你的轮询脚本检查）。`;
 }
-export function watchSuccessorMessage({ prNumber, predecessorId, reason }) {
-  return `你是 PR #${prNumber} 的接班修复 session，前任 ${predecessorId} 已不可用（${reason}）；先读本 PR 状态摘要 …，再执行第 0 步。`;
+export function watchSuccessorMessage({ prNumber, predecessorId, reason, summary }) {
+  return `你是 PR #${prNumber} 的接班修复 session，前任 ${predecessorId} 已不可用（${reason}）；先读本 PR 状态摘要 ${summary ?? '…'}，再执行第 0 步。`;
 }
 export function watchPollLostMessage({ prNumber, heartbeatAt, scheduleId }) {
   return `你的 PR #${prNumber} 轮询调度失联（最后心跳 ${heartbeatAt}）：先 schedule_get ${scheduleId ?? ''}；paused 则 schedule_resume；不存在则重新执行第 0 步。`;
@@ -717,7 +717,7 @@ function rememberDispatchFailure(state, key, error, now, paths) {
 export function* processPr({
   pr, previous: previousArg, state, paths, now, events, report, viewer, dryRun,
   dispatchFn, collect, ghFn, recheckFn, ownershipSnapshot, maintenanceSessionId,
-  remaining, deadline, clock, resumeCursor, resetPrDeadline, allowCreate = true, messagePrefix = '',
+  remaining, deadline, clock, resumeCursor, resetPrDeadline, allowCreate = true, messagePrefix = '', forceCreate = false,
 } = {}) {
   const key = String(pr.id);
   let previous = migrateEntry(clearDryPending(previousArg ?? (state.prs[key] || {})));
@@ -815,7 +815,7 @@ export function* processPr({
     fresh.length > 0 && previous.activeTask?.status === 'blocked'
     && !['invalid-result', 'missing-result-limit', 'round-limit'].includes(previous.activeTask?.blockedKind)
   ));
-  const shouldDispatch = fresh.length > 0 && !collected.mergeReady && canResume && !admissionBlocked && !inFlight && !hitRoundLimit;
+  const shouldDispatch = forceCreate || (fresh.length > 0 && !collected.mergeReady && canResume && !admissionBlocked && !inFlight && !hitRoundLimit);
   let dispatch = { attempted: false, bound: false, reason: 'no-new-feedback' };
   // Advance only non-actionable observations until a delivery is acknowledged.
   const retainedCursor = { ...cursor };
@@ -1193,17 +1193,32 @@ export function* discoverWorkflow({
         const text = String(error.message);
         if (/ARCHIVED|NOT_FOUND|DELETED/.test(text)) {
           const predecessorId = previous.sessionId;
+          const summary = JSON.stringify({
+            activeTask: previous.activeTask ?? null,
+            pendingDispatch: previous.pendingDispatch ?? null,
+            lastDispatch: previous.lastDispatch ?? null,
+          });
           previous = {
-            ...previous, sessionId: null, predecessors: [...(previous.predecessors ?? []), predecessorId],
+            ...previous,
+            sessionId: null,
             lastLostReminderAt: now,
+            activeTask: null,
+            pendingDispatch: null,
+            lastDispatch: null,
+            predecessors: [...(previous.predecessors ?? []), {
+              sessionId: predecessorId, at: now, reason: text.slice(0, 120),
+              activeTask: previous.activeTask ?? null,
+              pendingDispatch: previous.pendingDispatch ?? null,
+              lastDispatch: previous.lastDispatch ?? null,
+            }],
           };
           writePr(paths.home, key, previous);
           const state = { version: 2, repo: REPO, prs: { [key]: previous } };
           const inner = [];
           yield* processPr({
             pr, previous, state, paths, now, events, report: inner, viewer, dryRun, dispatchFn, collect, ghFn,
-            recheckFn, ownershipSnapshot, remaining, deadline, clock, resetPrDeadline: () => {},
-            messagePrefix: `${watchSuccessorMessage({ prNumber: pr.number, predecessorId, reason: text.slice(0, 120) })}\n${guide}`,
+            recheckFn, ownershipSnapshot, remaining, deadline, clock, resetPrDeadline: () => {}, forceCreate: true,
+            messagePrefix: `${watchSuccessorMessage({ prNumber: pr.number, predecessorId, reason: text.slice(0, 120), summary })}\n${guide}`,
           });
           report.push(inner[0] ?? { number: pr.number, nodeId: key, dispatch: { attempted: true, reason: 'successor' }, predecessors: previous.predecessors });
         } else {

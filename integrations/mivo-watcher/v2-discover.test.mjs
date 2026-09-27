@@ -124,7 +124,39 @@ test('ARCHIVED lost delivery starts successor and records predecessors', (t) => 
   assert.equal(calls[1].target_session_id, undefined);
   assert.match(calls[1].message, /接班修复 session/);
   assert.match(calls[1].message, /sess-old/);
-  assert.deepEqual(entry.predecessors, ['sess-old']);
+  assert.equal(entry.predecessors[0].sessionId, 'sess-old');
+  assert.equal(entry.sessionId, 'sess-next');
+});
+
+test('successor create ignores inFlight and empty fresh', (t) => {
+  const { paths } = homeOf(t);
+  writePr(paths.home, nodeId, {
+    number: 790, nodeId, sessionId: 'sess-old', heartbeatAt: '2026-09-28T00:00:00Z',
+    eligibilityInitialized: true, eligibility: 'active', admissionVerified: true, admissionEpoch: 'e',
+    lastDispatch: { dispatchId: 'old-dispatch' },
+    activeTask: { status: 'running', dispatchId: 'old-dispatch' },
+    feedbackCursor: { 'comment:1': 't1' },
+  });
+  const calls = [];
+  const { entry } = discover(paths, {
+    now: '2026-09-28T00:16:00Z',
+    collect: () => ({
+      pr: { id: nodeId, number: 790, state: 'OPEN', isDraft: false, sameRepository: true, author: { login: 'owner' }, headRefOid: HEAD, baseRefOid: BASE, releaseEpoch: 'e' },
+      admissionVerified: true, checks: [], comments: [], reviews: [], threads: [], labels: [], mergeReady: false,
+      ci: { status: 'green', required: [] }, policy: { status: 'verified', required: [] },
+    }),
+    dispatchFn: (p) => {
+      calls.push(p);
+      if (p.target_session_id) throw new Error('ARCHIVED');
+      return { target_session_id: 'sess-next' };
+    },
+  });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].target_session_id, undefined);
+  assert.match(calls[1].message, /old-dispatch/);
+  assert.equal(entry.predecessors[0].activeTask.status, 'running');
+  assert.equal(entry.feedbackCursor['comment:1'], 't1');
+  assert.equal(entry.sessionId, 'sess-next');
 });
 
 test('bound PR with fresh heartbeat skips collect', (t) => {
