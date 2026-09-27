@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { scanOnce, watcherPaths, watchGuideMessage } from './bin/mivo-watcher.mjs';
-import { readPr, writePr } from './bin/mivo-state.mjs';
+import { readPr, statePaths, writePr } from './bin/mivo-state.mjs';
 
 const HEAD = 'a'.repeat(40);
 const BASE = 'b'.repeat(40);
@@ -170,6 +170,19 @@ test('bound PR with fresh heartbeat skips collect', (t) => {
   });
   assert.equal(collected, 0);
   assert.equal(result.prs[0].dispatch.reason, 'bound-heartbeat-ok');
+});
+
+test('discover skips a PR whose pr lock is held', (t) => {
+  const { paths, home } = homeOf(t);
+  const { locksDir } = statePaths(home);
+  fs.mkdirSync(locksDir, { recursive: true });
+  fs.writeFileSync(path.join(locksDir, `pr-${nodeId}.lock`), `${process.pid} 2026-09-28T00:00:00.000Z\n`);
+  const { result, collected } = discover(paths, {
+    collect: collectFail,
+    dispatchFn: () => { throw new Error('should not dispatch'); },
+  });
+  assert.equal(collected, 0);
+  assert.equal(result.prs[0].dispatch.reason, 'pr-lock-held');
 });
 
 test('opt-out label skips discover work', (t) => {

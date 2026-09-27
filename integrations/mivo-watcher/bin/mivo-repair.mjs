@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { collectMivoCiSync } from './mivo-ci.mjs';
-import { readPr, writePr } from './mivo-state.mjs';
+import { acquireLock, readPr, writePr } from './mivo-state.mjs';
 
 export const REPO = 'xindong/mivo-canvas-plugin';
 export const DEFAULT_PLUGIN_REPO = '/Users/praise/AI-Agent/Claude/projects/Project Mivo Canvas-Plugin';
@@ -83,6 +83,13 @@ function assertIdentity(value, task, sessionId, label) {
 }
 
 function saveResult(paths, task, sessionId, payload) {
+  const lock = acquireLock(paths.home, `pr-${task.nodeId}`);
+  if (lock.held) fail('PR 状态锁占用，请稍后重试写结果');
+  try {
+  return saveResultLocked(paths, task, sessionId, payload);
+  } finally { lock.release(); }
+}
+function saveResultLocked(paths, task, sessionId, payload) {
   const latest = path.join(paths.results, `${task.dispatchId}.json`);
   const history = path.join(paths.results, 'history', task.dispatchId);
   if (fs.existsSync(latest)) {
@@ -552,22 +559,26 @@ export function bindSchedule({ home, pr, nodeId, resultPath, now = new Date().to
   if (result.status !== 'active') fail('schedule_create status must be active');
   if (typeof result.targetSessionId !== 'string' || !result.targetSessionId) fail('schedule_create targetSessionId is required');
   if (!String(command).includes(`--pr ${pr}`)) fail('schedule command does not target this PR');
-  const previous = readPr(root, nodeId) || {};
-  const incoming = result.targetSessionId;
-  if (previous.sessionId && previous.sessionId !== incoming) {
-    const claimed = Date.parse(previous.claimedAt ?? '');
-    const awaiting = previous.pendingDispatch?.status === 'awaiting-claim';
-    if (!awaiting || (Number.isFinite(claimed) && claimed >= Date.parse(now))) {
-      fail(`本 PR 已由 ${previous.sessionId} 持有，你应停止`);
+  const lock = acquireLock(root, `pr-${nodeId}`);
+  if (lock.held) fail('PR 状态锁占用，请稍后重试 bind-schedule');
+  try {
+    const previous = readPr(root, nodeId) || {};
+    const incoming = result.targetSessionId;
+    if (previous.sessionId && previous.sessionId !== incoming) {
+      const claimed = Date.parse(previous.claimedAt ?? '');
+      const awaiting = previous.pendingDispatch?.status === 'awaiting-claim';
+      const needsHuman = previous.needsHuman?.reason === 'owner-unknown';
+      if (!awaiting && !needsHuman) fail(`本 PR 已由 ${previous.sessionId} 持有，你应停止`);
+      if (Number.isFinite(claimed) && claimed >= Date.parse(now) && !needsHuman) fail(`本 PR 已由 ${previous.sessionId} 持有，你应停止`);
     }
-  }
-  const entry = {
-    ...previous, number: Number(pr), nodeId,
-    scheduleId: result.id ?? result.scheduleId,
-    sessionId: incoming, claimedAt: now, pendingDispatch: null, dispatchError: null,
-  };
-  writePr(root, nodeId, entry);
-  return entry;
+    const entry = {
+      ...previous, number: Number(pr), nodeId,
+      scheduleId: result.id ?? result.scheduleId,
+      sessionId: incoming, claimedAt: now, pendingDispatch: null, dispatchError: null, needsHuman: null,
+    };
+    writePr(root, nodeId, entry);
+    return entry;
+  } finally { lock.release(); }
 }
 
 export function cleanupWatch({ home, pr, ghFn = command, gitFn = command, env = process.env }) {

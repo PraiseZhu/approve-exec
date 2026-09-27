@@ -7,7 +7,7 @@ import {
   bindSchedule, cleanupWatch, cloneWorktree, DEFAULT_PLUGIN_REPO, prepare, pushIfNeeded,
   repairPaths, scheduleParams, watchBranchName, watchWorktreePath,
 } from './bin/mivo-repair.mjs';
-import { writePr } from './bin/mivo-state.mjs';
+import { statePaths, writePr } from './bin/mivo-state.mjs';
 
 const HEAD = 'a'.repeat(40);
 const REMOTE = 'b'.repeat(40);
@@ -58,6 +58,19 @@ test('bind-schedule accepts first owner and rejects a second live owner', (t) =>
     () => bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, now: '2026-09-28T00:01:00Z' }),
     /本 PR 已由 sess-a 持有/,
   );
+});
+
+test('bind-schedule fails closed when pr lock is held', (t) => {
+  const home = homeOf(t);
+  const { locksDir } = statePaths(home);
+  fs.mkdirSync(locksDir, { recursive: true });
+  fs.writeFileSync(path.join(locksDir, 'pr-PR_790.lock'), `${process.pid} 2026-09-28T00:00:00.000Z\n`);
+  const resultPath = path.join(home, 'sched.json');
+  fs.writeFileSync(resultPath, JSON.stringify({
+    ok: true, id: 'sched-1', executionMode: 'script', status: 'active',
+    targetSessionId: 'sess-a', scriptConfig: { command: 'python3 x.py --mode poll --pr 790 --node-id PR_790' },
+  }));
+  assert.throws(() => bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath }), /状态锁占用/);
 });
 
 test('cloneWorktree uses git worktree add -B watch/pr-N under plugin repo', (t) => {

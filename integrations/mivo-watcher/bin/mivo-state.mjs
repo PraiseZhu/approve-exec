@@ -48,36 +48,42 @@ function pidAlive(pid) {
   catch (error) { return error.code !== 'ESRCH'; }
 }
 
-export function withLock(home, name, fn) {
+export function acquireLock(home, name) {
   const { locksDir } = statePaths(home);
   fs.mkdirSync(locksDir, { recursive: true, mode: 0o700 });
   const lockPath = path.join(locksDir, `${name}.lock`);
   const payload = `${process.pid} ${new Date().toISOString()}\n`;
   const acquire = () => fs.writeFileSync(lockPath, payload, { mode: 0o600, flag: 'wx' });
-  try { acquire(); }
+  const release = () => { try { fs.unlinkSync(lockPath); } catch {} };
+  try { acquire(); return { held: false, release }; }
   catch (error) {
     if (error.code !== 'EEXIST') throw error;
     const previous = fs.existsSync(lockPath) ? fs.readFileSync(lockPath, 'utf8') : '';
     const pid = Number(previous.split(' ')[0]);
-    if (pidAlive(pid)) return { held: true };
-    if (!(fs.existsSync(lockPath) && fs.readFileSync(lockPath, 'utf8') === previous)) return { held: true };
-    try { fs.unlinkSync(lockPath); } catch { return { held: true }; }
-    try { acquire(); }
+    if (pidAlive(pid)) return { held: true, release: () => {} };
+    if (!(fs.existsSync(lockPath) && fs.readFileSync(lockPath, 'utf8') === previous)) return { held: true, release: () => {} };
+    try { fs.unlinkSync(lockPath); } catch { return { held: true, release: () => {} }; }
+    try { acquire(); return { held: false, release }; }
     catch (retry) {
-      if (retry.code === 'EEXIST') return { held: true };
+      if (retry.code === 'EEXIST') return { held: true, release: () => {} };
       throw retry;
     }
   }
+}
+
+export function withLock(home, name, fn) {
+  const lock = acquireLock(home, name);
+  if (lock.held) return { held: true };
   let result;
   try { result = fn(); }
   catch (error) {
-    try { fs.unlinkSync(lockPath); } catch {}
+    lock.release();
     throw error;
   }
   if (result && typeof result.then === 'function') {
-    return Promise.resolve(result).finally(() => { try { fs.unlinkSync(lockPath); } catch {} });
+    return Promise.resolve(result).finally(() => lock.release());
   }
-  try { fs.unlinkSync(lockPath); } catch {}
+  lock.release();
   return result;
 }
 

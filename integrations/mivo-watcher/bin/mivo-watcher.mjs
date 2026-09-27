@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { planSessionTitle, repairSessionTitle } from './session-title.mjs';
 import { collectPublicReview, verdictComment } from './public-review.mjs';
 import { collectPrSnapshot, collectPrOwnership } from './mivo-pr-snapshot.mjs';
-import { listPrs, migrateLegacy, readPr, statePaths as v2StatePaths, withLock as withPrLock, writePr } from './mivo-state.mjs';
+import { acquireLock, listPrs, migrateLegacy, readPr, statePaths as v2StatePaths, withLock as withPrLock, writePr } from './mivo-state.mjs';
 export const REPO = 'xindong/mivo-canvas-plugin';
 const GH = process.env.GH_BIN ?? 'gh';
 
@@ -1169,6 +1169,12 @@ export function* discoverWorkflow({
       report.push({ number: pr.number, nodeId: pr.id, dispatch: { attempted: false, reason: 'opt-out' } });
       continue;
     }
+    const prLock = acquireLock(paths.home, `pr-${key}`);
+    if (prLock.held) {
+      report.push({ number: pr.number, nodeId: key, dispatch: { attempted: false, reason: 'pr-lock-held' } });
+      continue;
+    }
+    try {
     let previous = readPr(paths.home, key) || { nodeId: key, number: pr.number };
     const guide = watchGuideMessage({ home: paths.home, prNumber: pr.number, nodeId: key });
     if (previous.sessionId) {
@@ -1255,6 +1261,7 @@ export function* discoverWorkflow({
     }
     writePr(paths.home, key, entry);
     report.push(inner[0] ?? { number: pr.number, nodeId: key, dispatch: { attempted: false } });
+    } finally { prLock.release(); }
   }
   return { mode: 'discover', dispatch: !dryRun, viewer, repo: REPO, prs: report, events };
 }
