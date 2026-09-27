@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { planSessionTitle, repairSessionTitle } from './session-title.mjs';
 import { collectPublicReview, verdictComment } from './public-review.mjs';
 import { collectPrSnapshot, collectPrOwnership } from './mivo-pr-snapshot.mjs';
+import { listPrs, readPr, statePaths as v2StatePaths, withLock as withPrLock, writePr } from './mivo-state.mjs';
 export const REPO = 'xindong/mivo-canvas-plugin';
 const GH = process.env.GH_BIN ?? 'gh';
 
@@ -351,14 +352,37 @@ export async function collectPrAsync(pr, { ghFn = gh } = {}) {
   return attachVerifiedCi(collected, collected.ci);
 }
 
+function isV2State(paths) {
+  const v2 = v2StatePaths(paths.home);
+  if (fs.existsSync(v2.indexPath)) return true;
+  return fs.existsSync(v2.prsDir) && fs.readdirSync(v2.prsDir).some((name) => name.endsWith('.json'));
+}
+
 function loadState(paths = watcherPaths()) {
+  if (isV2State(paths)) {
+    const prs = {};
+    for (const entry of listPrs(paths.home)) {
+      const key = String(entry?.nodeId ?? '');
+      if (key) prs[key] = entry;
+    }
+    return { version: 2, repo: REPO, prs };
+  }
   if (!fs.existsSync(paths.statePath)) return { version: 2, repo: REPO, prs: {} };
   return JSON.parse(fs.readFileSync(paths.statePath, 'utf8'));
 }
 
 function persistState(state, paths = watcherPaths()) {
+  const { _dirty, ...rest } = state;
+  if (isV2State(paths)) {
+    const keys = _dirty?.size ? [..._dirty] : Object.keys(rest.prs ?? {});
+    for (const key of keys) {
+      if (rest.prs?.[key]) writePr(paths.home, key, rest.prs[key]);
+    }
+    _dirty?.clear();
+    return;
+  }
   fs.mkdirSync(paths.stateDir, { recursive: true });
-  atomic(paths.statePath, `${JSON.stringify(state, null, 2)}\n`);
+  atomic(paths.statePath, `${JSON.stringify(rest, null, 2)}\n`);
 }
 
 function canRepair(previous) {
@@ -988,34 +1012,35 @@ export function createCindyStdinDispatch() {
   return dispatch;
 }
 
+function watcherMode() {
+  return process.env.MIVO_WATCHER_MODE === 'poll' ? 'poll' : 'discover';
+}
+
 if (fileURLToPath(import.meta.url) === process.argv[1]) {
   const paths = watcherPaths();
   fs.mkdirSync(paths.stateDir, { recursive: true });
-  if (fs.existsSync(paths.lockPath)) {
-    const previous = fs.readFileSync(paths.lockPath, 'utf8');
-    const pid = Number(previous.split(' ')[0]);
-    let alive = true;
-    if (Number.isSafeInteger(pid) && pid > 0) {
-      try { process.kill(pid, 0); } catch (error) { if (error.code === 'ESRCH') alive = false; }
+  const mode = watcherMode();
+  const nodeId = process.env.MIVO_WATCHER_NODE_ID;
+  if (mode === 'poll' && (!process.env.MIVO_WATCHER_PR || !nodeId)) {
+    process.stderr.write('poll mode requires MIVO_WATCHER_PR and MIVO_WATCHER_NODE_ID\n');
+    process.exitCode = 2;
+  } else {
+    const lockName = mode === 'poll' ? `pr-${nodeId}` : 'discover';
+    const ran = await withPrLock(paths.home, lockName, async () => {
+      let dispatchFn;
+      try {
+        dispatchFn = process.env.MIVO_CINDY_BRIDGE === '1' ? createCindyStdinDispatch() : null;
+        const result = await scanOnceAsync({ paths, dispatchFn, mode, nodeId, prNumber: process.env.MIVO_WATCHER_PR });
+        process.stdout.write(`${JSON.stringify(result)}\n`);
+      } catch (error) {
+        process.stderr.write(`${error.stderr?.toString() || error.message}\n`);
+        process.exitCode = 1;
+      } finally {
+        dispatchFn?.close();
+      }
+    });
+    if (ran?.held) {
+      process.stdout.write(`${JSON.stringify({ mode: 'lock-held', dispatch: false, prs: [] })}\n`);
     }
-    if (!alive && fs.readFileSync(paths.lockPath, 'utf8') === previous) fs.unlinkSync(paths.lockPath);
-  }
-  try { fs.writeFileSync(paths.lockPath, `${process.pid} ${new Date().toISOString()}\n`, { mode: 0o600, flag: 'wx' }); }
-  catch (error) {
-    if (error.code !== 'EEXIST') throw error;
-    process.stdout.write(`${JSON.stringify({ mode: 'lease-held', dispatch: false, prs: [], statePath: paths.statePath })}\n`);
-    process.exit(0);
-  }
-  let dispatchFn;
-  try {
-    dispatchFn = process.env.MIVO_CINDY_BRIDGE === '1' ? createCindyStdinDispatch() : null;
-    const result = await scanOnceAsync({ paths, dispatchFn });
-    process.stdout.write(`${JSON.stringify(result)}\n`);
-  } catch (error) {
-    process.stderr.write(`${error.stderr?.toString() || error.message}\n`);
-    process.exitCode = 1;
-  } finally {
-    dispatchFn?.close();
-    try { fs.unlinkSync(paths.lockPath); } catch {}
   }
 }

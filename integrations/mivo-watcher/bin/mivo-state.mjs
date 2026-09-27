@@ -68,8 +68,17 @@ export function withLock(home, name, fn) {
       throw retry;
     }
   }
-  try { return fn(); }
-  finally { try { fs.unlinkSync(lockPath); } catch {} }
+  let result;
+  try { result = fn(); }
+  catch (error) {
+    try { fs.unlinkSync(lockPath); } catch {}
+    throw error;
+  }
+  if (result && typeof result.then === 'function') {
+    return Promise.resolve(result).finally(() => { try { fs.unlinkSync(lockPath); } catch {} });
+  }
+  try { fs.unlinkSync(lockPath); } catch {}
+  return result;
 }
 
 function liftStuck(entry) {
