@@ -31,7 +31,7 @@ function collectFail() {
   };
 }
 
-function discover(paths, { now = '2026-09-28T00:00:00Z', prs = [listed], collect, dispatchFn } = {}) {
+function discover(paths, { now = '2026-09-28T00:00:00Z', prs = [listed], collect, dispatchFn, maxPrs } = {}) {
   let collected = 0;
   const result = scanOnce({
     mode: 'discover', enabled: true, allowDispatch: true, paths, now,
@@ -45,7 +45,7 @@ function discover(paths, { now = '2026-09-28T00:00:00Z', prs = [listed], collect
       if (typeof collect === 'function') return collect(...args);
       throw new Error('collect should not run');
     },
-    dispatchFn,
+    dispatchFn, maxPrs,
     ownershipSnapshot: function* () {
       return { pr: { state: 'OPEN', isDraft: false, sameRepository: true, author: { login: 'owner' }, headRefOid: HEAD, baseRefOid: BASE, releaseEpoch: 'e' } };
     },
@@ -195,6 +195,22 @@ test('discover skips a PR whose pr lock is held', (t) => {
   });
   assert.equal(collected, 0);
   assert.equal(result.prs[0].dispatch.reason, 'pr-lock-held');
+});
+
+test('discover fair cursor continues after last visited PR', (t) => {
+  const { paths } = homeOf(t);
+  const second = { number: 791, id: 'PR_791', headRefOid: HEAD, headRefName: 'fix/y', title: 'fix', isDraft: false, labels: [] };
+  const seen = [];
+  const run = () => discover(paths, {
+    prs: [listed, second], maxPrs: 1,
+    collect: (pr) => { seen.push(pr.number); return collectFail(); },
+    dispatchFn: () => ({ target_session_id: 'sess-new' }),
+  });
+  const first = run();
+  assert.deepEqual(seen, [790]);
+  assert.equal(first.result.scan.cursor, 790);
+  run();
+  assert.deepEqual(seen, [790, 791]);
 });
 
 test('opt-out label skips discover work', (t) => {

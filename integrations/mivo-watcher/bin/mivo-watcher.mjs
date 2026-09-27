@@ -1152,11 +1152,12 @@ export function* discoverWorkflow({
   allowDispatch = process.env.MIVO_WATCHER_DISPATCH === '1',
   ghFn = gh, collect = collectPr, dispatchFn = null, paths = watcherPaths(),
   recheckFn = recheckResult, ownershipSnapshot = collectPrOwnership,
-  clock = Date.now, budgetMs = 120000, maxPrs = 1000,
+  clock = Date.now, budgetMs = 120000, maxPrs = 1000, perPrBudgetMs = 75000,
 } = {}) {
   const started = clock();
   const deadline = started + Math.min(120000, Math.max(1, budgetMs));
-  const remaining = () => Math.max(0, deadline - clock());
+  let prDeadline = deadline;
+  const remaining = () => Math.max(0, Math.min(deadline, prDeadline) - clock());
   const dryRun = !(enabled && allowDispatch && typeof dispatchFn === 'function');
   const v2 = v2StatePaths(paths.home);
   fs.mkdirSync(v2.prsDir, { recursive: true, mode: 0o700 });
@@ -1173,8 +1174,15 @@ export function* discoverWorkflow({
   const report = [];
   const events = [];
   const nowMs = Date.parse(now);
-  for (const pr of listed) {
+  let index = JSON.parse(fs.readFileSync(v2.indexPath, 'utf8'));
+  const sorted = [...listed].sort((a, b) => a.number - b.number);
+  const previousCursor = Number(index.cursor ?? 0);
+  const ordered = [...sorted.filter((pr) => pr.number > previousCursor), ...sorted.filter((pr) => pr.number <= previousCursor)];
+  for (const pr of ordered) {
     if (deadline - clock() < 1000 || report.length >= maxPrs) break;
+    prDeadline = Math.min(deadline, clock() + perPrBudgetMs);
+    index = { ...index, version: 2, cursor: pr.number, startedAt: now };
+    fs.writeFileSync(v2.indexPath, `${JSON.stringify(index, null, 2)}\n`, { mode: 0o600 });
     const key = String(pr.id);
     const labels = (pr.labels ?? []).map((item) => typeof item === 'string' ? item : item?.name);
     if (hasWatchOff(labels)) {
@@ -1283,7 +1291,9 @@ export function* discoverWorkflow({
     report.push(inner[0] ?? { number: pr.number, nodeId: key, dispatch: { attempted: false } });
     } finally { prLock.release(); }
   }
-  return { mode: 'discover', dispatch: !dryRun, viewer, repo: REPO, prs: report, events };
+  index = { ...index, finishedAt: now, elapsedMs: clock() - started };
+  fs.writeFileSync(v2.indexPath, `${JSON.stringify(index, null, 2)}\n`, { mode: 0o600 });
+  return { mode: 'discover', dispatch: !dryRun, viewer, repo: REPO, prs: report, events, scan: { cursor: index.cursor ?? 0, listed: listed.length } };
 }
 
 export function scanOnce(options = {}) {
