@@ -12,6 +12,15 @@ function requiredKeySet(map) {
 function addRequired(required, context, appId, source) {
   assert(typeof context === 'string' && context.trim() === context && context.length > 0, 'invalid required context');
   assert(appId === null || Number.isSafeInteger(appId) && appId > 0, 'invalid required app');
+  if (appId === null) {
+    const scoped = [...required.values()].filter((item) => item.context === context && item.appId != null);
+    if (scoped.length) {
+      for (const item of scoped) {
+        if (!item.sources.includes(source)) item.sources.push(source);
+      }
+      return;
+    }
+  }
   const key = JSON.stringify([context, appId]);
   if (!required.has(key)) required.set(key, { context, appId, sources: [] });
   const item = required.get(key);

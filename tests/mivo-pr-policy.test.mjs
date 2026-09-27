@@ -27,6 +27,14 @@ test('collect actual stack base policy and explicit file union', async () => {
   assert.ok(calls.some((args) => args[1]?.includes('branches/stack%2Ftopic')));
   assert.ok(calls.some((args) => args[1]?.endsWith(`?ref=${base}`)));
 });
+test('base-file same name merges into app-scoped rule instead of any-app', async () => {
+  const result = await collectMivoPolicy({ repo: 'owner/repo', number: 1, ...fixture({ protectedBranch: true }) });
+  const verify = result.required.filter((item) => item.context === 'verify');
+  assert.equal(verify.length, 1);
+  assert.equal(verify[0].appId, 7);
+  assert.ok(verify[0].sources.includes('base-file'));
+  assert.equal(result.required.some((item) => item.context === 'verify' && item.appId == null), false);
+});
 test('advanced main tip still verifies policy from current branch rules and PR-base file', async () => {
   const { gh, calls, tip } = fixture({ protectedBranch: true, advancedTip: true });
   const result = await collectMivoPolicy({ repo: 'owner/repo', number: 1, gh });
