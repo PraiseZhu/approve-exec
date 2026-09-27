@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { scanOnce, watcherPaths, watchGuideMessage } from './bin/mivo-watcher.mjs';
 import { clearOwnerUnknown } from './bin/mivo-repair.mjs';
-import { readPr, statePaths, writePr } from './bin/mivo-state.mjs';
+import { acquireLock, readPr, statePaths, writePr } from './bin/mivo-state.mjs';
 
 const HEAD = 'a'.repeat(40);
 const BASE = 'b'.repeat(40);
@@ -67,7 +67,24 @@ test('unbound admitted PR creates with schedule-params and bind-schedule', (t) =
   assert.match(params.message, /bind-schedule/);
   const spaced = watchGuideMessage({ home: '/tmp/Project Mivo Canvas-Plugin/_ops/mivo-watcher', prNumber: 790, nodeId });
   assert.match(spaced, /第 0 步/);
+  assert.match(spaced, /busy/);
+  assert.match(spaced, /owner-conflict/);
   assert.match(spaced, /"\/tmp\/Project Mivo Canvas-Plugin\/_ops\/mivo-watcher"/);
+});
+
+test('discover releases pr lock during create dispatch', (t) => {
+  const { paths, home } = homeOf(t);
+  let heldDuringDispatch;
+  discover(paths, {
+    collect: collectFail,
+    dispatchFn: () => {
+      const lock = acquireLock(home, `pr-${nodeId}`);
+      heldDuringDispatch = lock.held;
+      if (!lock.held) lock.release();
+      return { target_session_id: 'sess-new' };
+    },
+  });
+  assert.equal(heldDuringDispatch, false);
 });
 
 test('create receipt timeout never auto-recreates; needsHuman until clear-owner-unknown', (t) => {

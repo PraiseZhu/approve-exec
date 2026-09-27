@@ -477,7 +477,7 @@ export function dispatchParams({ pr, mapping, fresh, now, taskPath, home, messag
 export function watchGuideMessage({ home, prNumber, nodeId }) {
   const helper = JSON.stringify(path.join(home, 'bin', 'mivo-repair.mjs'));
   const quotedHome = JSON.stringify(home);
-  return `第 0 步（只做一次）：运行 \`node ${helper} --home ${quotedHome} schedule-params --pr ${prNumber} --node-id ${nodeId}\`，把输出 JSON 原样作为 cindy_scheduler 的 schedule_create 参数调用；把工具返回原样存成文件后运行 \`${helper} --home ${quotedHome} bind-schedule --pr ${prNumber} --node-id ${nodeId} --result <文件>\`。bind 被拒说明本 PR 已有 owner，立刻停止并回复一句说明。之后本 PR 的所有反馈只会投递到你这里（每 5 分钟由你的轮询脚本检查）。`;
+  return `第 0 步（只做一次）：运行 \`node ${helper} --home ${quotedHome} schedule-params --pr ${prNumber} --node-id ${nodeId}\`，把输出 JSON 原样作为 cindy_scheduler 的 schedule_create 参数调用；把工具返回原样存成文件后运行 \`${helper} --home ${quotedHome} bind-schedule --pr ${prNumber} --node-id ${nodeId} --result <文件>\`。bind 若返回 busy（状态锁占用）：等 1 分钟后重跑同一 bind-schedule 命令。bind 若返回 owner-conflict（本 PR 已由他人持有）：立刻停止并回复一句说明。之后本 PR 的所有反馈只会投递到你这里（每 5 分钟由你的轮询脚本检查）。`;
 }
 export function watchSuccessorMessage({ prNumber, predecessorId, reason, summary }) {
   return `你是 PR #${prNumber} 的接班修复 session，前任 ${predecessorId} 已不可用（${reason}）；先读本 PR 状态摘要 ${summary ?? '…'}，再执行第 0 步。`;
@@ -720,8 +720,17 @@ export function* processPr({
   pr, previous: previousArg, state, paths, now, events, report, viewer, dryRun,
   dispatchFn, collect, ghFn, recheckFn, ownershipSnapshot, maintenanceSessionId,
   remaining, deadline, clock, resumeCursor, resetPrDeadline, allowCreate = true, messagePrefix = '', forceCreate = false,
+  unlockForDispatch = null, relockForDispatch = null,
 } = {}) {
   const key = String(pr.id);
+  function* yieldDispatch(effect) {
+    unlockForDispatch?.();
+    try { return yield effect; }
+    finally {
+      const relocked = relockForDispatch?.();
+      if (relocked?.held) throw new Error('PR 状态锁占用');
+    }
+  }
   let previous = migrateEntry(clearDryPending(previousArg ?? (state.prs[key] || {})));
   previous = { ...previous, number: pr.number, nodeId: pr.id };
   let resultError;
@@ -874,7 +883,7 @@ export function* processPr({
     state.prs[key] = { ...previous, pendingDispatch: pending };
     persistState(state, paths);
     try {
-      const receipt = yield () => dispatchFn(pending.params,{timeoutMs:Math.max(1,remaining())});
+      const receipt = yield* yieldDispatch(() => dispatchFn(pending.params,{timeoutMs:Math.max(1,remaining())}));
       const bound = applyDispatchReceipt({ state, pr, mapping,
         receipt: { ...receipt, dispatch_id: receipt?.dispatch_id ?? pending.dispatchId },
         now, cursor: pending.cursor ?? retainedCursor, collected, fresh: [], paths, recovery: pending.recovery === true });
@@ -903,7 +912,7 @@ export function* processPr({
     state.prs[key] = { ...previous, pendingDispatch: pending };
     persistState(state, paths);
     try {
-      const receipt = yield () => dispatchFn(pending.params,{timeoutMs:Math.max(1,remaining())});
+      const receipt = yield* yieldDispatch(() => dispatchFn(pending.params,{timeoutMs:Math.max(1,remaining())}));
       const bound = applyDispatchReceipt({ state, pr, mapping,
         receipt: { ...receipt, dispatch_id: receipt?.dispatch_id ?? pending.dispatchId },
         now, cursor: retainedCursor, collected, fresh: [], paths, recovery: true });
@@ -925,7 +934,7 @@ export function* processPr({
       state.prs[key] = previous;
       persistState(state, paths);
       try {
-        const receipt = yield () => dispatchFn(pending.params,{timeoutMs:Math.max(1,remaining())});
+        const receipt = yield* yieldDispatch(() => dispatchFn(pending.params,{timeoutMs:Math.max(1,remaining())}));
         const bound = applyDispatchReceipt({ state, pr, mapping,
           receipt: { ...receipt, dispatch_id: receipt?.dispatch_id ?? pending.dispatchId },
           now, cursor, collected, fresh, paths });
@@ -1192,11 +1201,13 @@ export function* discoverWorkflow({
       report.push({ number: pr.number, nodeId: pr.id, dispatch: { attempted: false, reason: 'opt-out' } });
       continue;
     }
-    const prLock = acquireLock(paths.home, `pr-${key}`);
+    let prLock = acquireLock(paths.home, `pr-${key}`);
     if (prLock.held) {
       report.push({ number: pr.number, nodeId: key, dispatch: { attempted: false, reason: 'pr-lock-held' } });
       continue;
     }
+    const unlockForDispatch = () => { prLock.release(); prLock = { release() {} }; };
+    const relockForDispatch = () => { prLock = acquireLock(paths.home, `pr-${key}`); return prLock; };
     try {
     let previous = readPr(paths.home, key) || { nodeId: key, number: pr.number };
     const guide = watchGuideMessage({ home: paths.home, prNumber: pr.number, nodeId: key });
@@ -1248,6 +1259,7 @@ export function* discoverWorkflow({
             pr, previous, state, paths, now, events, report: inner, viewer, dryRun, dispatchFn, collect, ghFn,
             recheckFn, ownershipSnapshot, remaining, deadline, clock, resetPrDeadline: () => {}, forceCreate: true,
             messagePrefix: `${watchSuccessorMessage({ prNumber: pr.number, predecessorId, reason: text.slice(0, 120), summary })}\n${guide}`,
+            unlockForDispatch, relockForDispatch,
           });
           report.push(inner[0] ?? { number: pr.number, nodeId: key, dispatch: { attempted: true, reason: 'successor' }, predecessors: previous.predecessors });
         } else {
@@ -1281,6 +1293,7 @@ export function* discoverWorkflow({
     yield* processPr({
       pr, previous, state, paths, now, events, report: inner, viewer, dryRun, dispatchFn, collect, ghFn,
       recheckFn, ownershipSnapshot, remaining, deadline, clock, resetPrDeadline: () => {}, messagePrefix: guide,
+      unlockForDispatch, relockForDispatch,
     });
     let entry = state.prs[key] || previous;
     if (!entry.sessionId && entry.pendingDispatch && entry.pendingDispatch.status !== 'retryable'

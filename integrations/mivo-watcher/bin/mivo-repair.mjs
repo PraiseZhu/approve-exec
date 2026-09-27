@@ -17,7 +17,11 @@ const GIT = process.env.GIT_BIN ?? 'git';
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const GIT_PUSH_TIMEOUT_MS = 60 * 60 * 1000;
 
-function fail(message) { throw new Error(message); }
+function fail(message, exitCode = 1) {
+  const error = new Error(message);
+  error.exitCode = exitCode;
+  throw error;
+}
 
 function requireAbs(value, label) {
   if (typeof value !== 'string' || !path.isAbsolute(value)) fail(`${label} must be an absolute path`);
@@ -550,7 +554,10 @@ export function scheduleParams({ home, pr, nodeId, env = process.env }) {
   };
 }
 
-export function bindSchedule({ home, pr, nodeId, resultPath, now = new Date().toISOString() }) {
+export function bindSchedule({
+  home, pr, nodeId, resultPath, now = new Date().toISOString(),
+  retryMs = 180000, retryDelayMs = 5000, sleepFn = null,
+} = {}) {
   const root = requireAbs(home, 'home');
   const result = readJson(requireAbs(resultPath, 'result'), 'schedule_create result');
   const command = result.scriptConfig?.command ?? result.command ?? '';
@@ -559,8 +566,14 @@ export function bindSchedule({ home, pr, nodeId, resultPath, now = new Date().to
   if (result.status !== 'active') fail('schedule_create status must be active');
   if (typeof result.targetSessionId !== 'string' || !result.targetSessionId) fail('schedule_create targetSessionId is required');
   if (!String(command).includes(`--pr ${pr}`)) fail('schedule command does not target this PR');
-  const lock = acquireLock(root, `pr-${nodeId}`);
-  if (lock.held) fail('PR 状态锁占用，请稍后重试 bind-schedule');
+  const sleep = sleepFn ?? ((ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); });
+  const deadline = Date.now() + retryMs;
+  let lock = acquireLock(root, `pr-${nodeId}`);
+  while (lock.held && Date.now() < deadline) {
+    sleep(retryDelayMs);
+    lock = acquireLock(root, `pr-${nodeId}`);
+  }
+  if (lock.held) fail('busy: PR 状态锁占用，请等 1 分钟后重试 bind-schedule', 2);
   try {
     const previous = readPr(root, nodeId) || {};
     const incoming = result.targetSessionId;
@@ -568,8 +581,8 @@ export function bindSchedule({ home, pr, nodeId, resultPath, now = new Date().to
       const claimed = Date.parse(previous.claimedAt ?? '');
       const awaiting = previous.pendingDispatch?.status === 'awaiting-claim';
       const needsHuman = previous.needsHuman?.reason === 'owner-unknown';
-      if (!awaiting && !needsHuman) fail(`本 PR 已由 ${previous.sessionId} 持有，你应停止`);
-      if (Number.isFinite(claimed) && claimed >= Date.parse(now) && !needsHuman) fail(`本 PR 已由 ${previous.sessionId} 持有，你应停止`);
+      if (!awaiting && !needsHuman) fail(`owner-conflict: 本 PR 已由 ${previous.sessionId} 持有，你应停止`, 3);
+      if (Number.isFinite(claimed) && claimed >= Date.parse(now) && !needsHuman) fail(`owner-conflict: 本 PR 已由 ${previous.sessionId} 持有，你应停止`, 3);
     }
     const entry = {
       ...previous, number: Number(pr), nodeId,
@@ -646,5 +659,5 @@ function cli(argv) {
 if (process.argv[1] && fs.existsSync(process.argv[1])
   && fs.realpathSync(fileURLToPath(import.meta.url)) === fs.realpathSync(process.argv[1])) {
   try { cli(process.argv.slice(2)); }
-  catch (error) { process.stderr.write(`mivo-repair: ${error.message}\n`); process.exitCode = 1; }
+  catch (error) { process.stderr.write(`mivo-repair: ${error.message}\n`); process.exitCode = Number(error.exitCode) || 1; }
 }

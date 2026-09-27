@@ -75,7 +75,7 @@ test('late bind-schedule can claim owner-unknown and clears needsHuman', (t) => 
   assert.equal(entry.needsHuman, null);
 });
 
-test('bind-schedule fails closed when pr lock is held', (t) => {
+test('bind-schedule busy vs owner-conflict', (t) => {
   const home = homeOf(t);
   const { locksDir } = statePaths(home);
   fs.mkdirSync(locksDir, { recursive: true });
@@ -85,7 +85,46 @@ test('bind-schedule fails closed when pr lock is held', (t) => {
     ok: true, id: 'sched-1', executionMode: 'script', status: 'active',
     targetSessionId: 'sess-a', scriptConfig: { command: 'python3 x.py --mode poll --pr 790 --node-id PR_790' },
   }));
-  assert.throws(() => bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath }), /状态锁占用/);
+  try {
+    bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, retryMs: 0, retryDelayMs: 0, sleepFn: () => {} });
+    assert.fail('expected busy');
+  } catch (error) {
+    assert.match(error.message, /^busy:/);
+    assert.equal(error.exitCode, 2);
+  }
+  fs.unlinkSync(path.join(locksDir, 'pr-PR_790.lock'));
+  bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, now: '2026-09-28T00:00:00Z', retryMs: 0 });
+  try {
+    fs.writeFileSync(resultPath, JSON.stringify({
+      ok: true, id: 'sched-2', executionMode: 'script', status: 'active',
+      targetSessionId: 'sess-b', scriptConfig: { command: 'python3 x.py --mode poll --pr 790 --node-id PR_790' },
+    }));
+    bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, now: '2026-09-28T00:01:00Z', retryMs: 0 });
+    assert.fail('expected owner-conflict');
+  } catch (error) {
+    assert.match(error.message, /^owner-conflict:/);
+    assert.equal(error.exitCode, 3);
+  }
+});
+
+test('bind-schedule retries until lock is released', (t) => {
+  const home = homeOf(t);
+  const { locksDir } = statePaths(home);
+  fs.mkdirSync(locksDir, { recursive: true });
+  const lockFile = path.join(locksDir, 'pr-PR_790.lock');
+  fs.writeFileSync(lockFile, `${process.pid} 2026-09-28T00:00:00.000Z\n`);
+  const resultPath = path.join(home, 'sched.json');
+  fs.writeFileSync(resultPath, JSON.stringify({
+    ok: true, id: 'sched-1', executionMode: 'script', status: 'active',
+    targetSessionId: 'sess-a', scriptConfig: { command: 'python3 x.py --mode poll --pr 790 --node-id PR_790' },
+  }));
+  let slept = 0;
+  const entry = bindSchedule({
+    home, pr: 790, nodeId: 'PR_790', resultPath, retryMs: 1000, retryDelayMs: 1,
+    sleepFn: () => { slept += 1; try { fs.unlinkSync(lockFile); } catch {} },
+  });
+  assert.equal(entry.sessionId, 'sess-a');
+  assert.ok(slept >= 1);
 });
 
 test('cloneWorktree uses git worktree add -B watch/pr-N under plugin repo', (t) => {
