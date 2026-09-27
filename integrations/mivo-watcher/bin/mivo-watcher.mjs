@@ -1233,6 +1233,10 @@ export function* discoverWorkflow({
       }
       continue;
     }
+    if (previous.needsHuman?.reason === 'owner-unknown') {
+      report.push({ number: pr.number, nodeId: key, needsHuman: previous.needsHuman, dispatch: { attempted: false, reason: 'needs-human' } });
+      continue;
+    }
     if (previous.pendingDispatch?.status === 'awaiting-claim') {
       const until = Date.parse(previous.pendingDispatch.claimDeadline ?? '');
       if (Number.isFinite(until) && nowMs < until) {
@@ -1243,7 +1247,11 @@ export function* discoverWorkflow({
         ...previous,
         abandonedDispatches: [...(previous.abandonedDispatches ?? []), previous.pendingDispatch.dispatchId].filter(Boolean),
         pendingDispatch: null, dispatchError: null,
+        needsHuman: { reason: 'owner-unknown', at: now, abandonedDispatchId: previous.pendingDispatch.dispatchId },
       };
+      writePr(paths.home, key, previous);
+      report.push({ number: pr.number, nodeId: key, needsHuman: previous.needsHuman, dispatch: { attempted: false, reason: 'needs-human' } });
+      continue;
     }
     const state = { version: 2, repo: REPO, prs: { [key]: previous } };
     const inner = [];

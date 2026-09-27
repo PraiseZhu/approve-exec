@@ -581,6 +581,22 @@ export function bindSchedule({ home, pr, nodeId, resultPath, now = new Date().to
   } finally { lock.release(); }
 }
 
+export function clearOwnerUnknown({ home, pr, nodeId, now = new Date().toISOString() }) {
+  const root = requireAbs(home, 'home');
+  const lock = acquireLock(root, `pr-${nodeId}`);
+  if (lock.held) fail('PR 状态锁占用，请稍后重试');
+  try {
+    const previous = readPr(root, nodeId) || {};
+    if (previous.needsHuman?.reason !== 'owner-unknown') fail('PR 没有 owner-unknown 标记');
+    const entry = {
+      ...previous, number: Number(pr), nodeId,
+      needsHuman: null, pendingDispatch: null, dispatchError: null, clearedOwnerUnknownAt: now,
+    };
+    writePr(root, nodeId, entry);
+    return entry;
+  } finally { lock.release(); }
+}
+
 export function cleanupWatch({ home, pr, ghFn = command, gitFn = command, env = process.env }) {
   const plugin = pluginRepoPath(env);
   const number = Number(pr);
@@ -598,7 +614,7 @@ export function cleanupWatch({ home, pr, ghFn = command, gitFn = command, env = 
 
 function cli(argv) {
   const args = [...argv];
-  const modes = new Set(['prepare', 'validate', 'finalize', 'recheck', 'blocked', 'schedule-params', 'bind-schedule', 'cleanup']);
+  const modes = new Set(['prepare', 'validate', 'finalize', 'recheck', 'blocked', 'schedule-params', 'bind-schedule', 'cleanup', 'clear-owner-unknown']);
   const modeIndex = args.findIndex((item) => modes.has(item));
   const mode = modeIndex >= 0 ? args.splice(modeIndex, 1)[0] : undefined;
   const value = (name, required = true) => {
@@ -613,6 +629,7 @@ function cli(argv) {
   if (mode === 'schedule-params') result = scheduleParams({ home, pr: value('--pr'), nodeId: value('--node-id') });
   else if (mode === 'bind-schedule') result = bindSchedule({ home, pr: value('--pr'), nodeId: value('--node-id'), resultPath: value('--result') });
   else if (mode === 'cleanup') result = cleanupWatch({ home, pr: value('--pr') });
+  else if (mode === 'clear-owner-unknown') result = clearOwnerUnknown({ home, pr: value('--pr'), nodeId: value('--node-id') });
   else {
     const task = value('--task');
     if (mode === 'prepare') result = prepare({ home, taskPath: task });
@@ -620,7 +637,7 @@ function cli(argv) {
     else if (mode === 'finalize') result = finalize({ home, taskPath: task, scReport: value('--sc-report'), validatedHead: value('--validated-head'), validationReceipt: value('--validation-receipt', false) });
     else if (mode === 'recheck') result = recheck({ home, taskPath: task, validatedHead: value('--validated-head', false) });
     else if (mode === 'blocked') result = blocked({ home, taskPath: task, reason: value('--reason') });
-    else fail('mode must be prepare, validate, finalize, recheck, blocked, schedule-params, bind-schedule, or cleanup');
+    else fail('mode must be prepare, validate, finalize, recheck, blocked, schedule-params, bind-schedule, cleanup, or clear-owner-unknown');
   }
   process.stdout.write(`${JSON.stringify(result)}\n`);
   if (mode === 'validate' && result.status === 'fail') process.exitCode = 1;

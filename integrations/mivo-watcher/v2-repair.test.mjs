@@ -60,6 +60,21 @@ test('bind-schedule accepts first owner and rejects a second live owner', (t) =>
   );
 });
 
+test('late bind-schedule can claim owner-unknown and clears needsHuman', (t) => {
+  const home = homeOf(t);
+  writePr(home, 'PR_790', {
+    number: 790, nodeId: 'PR_790', needsHuman: { reason: 'owner-unknown', at: '2026-09-28T01:01:00Z' },
+  });
+  const resultPath = path.join(home, 'sched.json');
+  fs.writeFileSync(resultPath, JSON.stringify({
+    ok: true, id: 'sched-late', executionMode: 'script', status: 'active',
+    targetSessionId: 'sess-late', scriptConfig: { command: 'python3 x.py --mode poll --pr 790 --node-id PR_790' },
+  }));
+  const entry = bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, now: '2026-09-28T03:00:00Z' });
+  assert.equal(entry.sessionId, 'sess-late');
+  assert.equal(entry.needsHuman, null);
+});
+
 test('bind-schedule fails closed when pr lock is held', (t) => {
   const home = homeOf(t);
   const { locksDir } = statePaths(home);

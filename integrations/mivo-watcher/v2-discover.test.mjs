@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { scanOnce, watcherPaths, watchGuideMessage } from './bin/mivo-watcher.mjs';
+import { clearOwnerUnknown } from './bin/mivo-repair.mjs';
 import { readPr, statePaths, writePr } from './bin/mivo-state.mjs';
 
 const HEAD = 'a'.repeat(40);
@@ -67,8 +68,8 @@ test('unbound admitted PR creates with schedule-params and bind-schedule', (t) =
   assert.match(watchGuideMessage({ home: paths.home, prNumber: 790, nodeId }), /第 0 步/);
 });
 
-test('create receipt timeout waits 60 minutes then allows one more create', (t) => {
-  const { paths } = homeOf(t);
+test('create receipt timeout never auto-recreates; needsHuman until clear-owner-unknown', (t) => {
+  const { paths, home } = homeOf(t);
   const boom = () => { throw new Error('Cindy dispatch receipt timed out; pending dispatch retained'); };
   const first = discover(paths, { now: '2026-09-28T00:00:00Z', collect: collectFail, dispatchFn: boom });
   assert.equal(first.entry.pendingDispatch.status, 'awaiting-claim');
@@ -76,8 +77,19 @@ test('create receipt timeout waits 60 minutes then allows one more create', (t) 
   assert.equal(mid.collected, 0);
   assert.equal(mid.result.prs[0].dispatch.reason, 'awaiting-claim');
   const later = discover(paths, { now: '2026-09-28T01:01:00Z', collect: collectFail, dispatchFn: boom });
-  assert.equal(later.collected, 1);
-  assert.ok(later.entry.abandonedDispatches.length >= 1);
+  assert.equal(later.collected, 0);
+  assert.equal(later.entry.needsHuman.reason, 'owner-unknown');
+  assert.equal(later.result.prs[0].dispatch.reason, 'needs-human');
+  const still = discover(paths, { now: '2026-09-28T03:00:00Z', collect: collectFail, dispatchFn: boom });
+  assert.equal(still.collected, 0);
+  clearOwnerUnknown({ home, pr: 790, nodeId });
+  const after = discover(paths, {
+    now: '2026-09-28T03:01:00Z', collect: collectFail,
+    dispatchFn: (p) => ({ target_session_id: 'sess-new' }),
+  });
+  assert.equal(after.collected, 1);
+  assert.equal(after.entry.sessionId, 'sess-new');
+  assert.equal(after.entry.needsHuman, null);
 });
 
 test('bound stale heartbeat reminds at most once per 30 minutes', (t) => {
