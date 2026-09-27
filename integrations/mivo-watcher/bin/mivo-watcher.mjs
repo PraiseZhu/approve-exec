@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { planSessionTitle, repairSessionTitle } from './session-title.mjs';
 import { collectPublicReview, verdictComment } from './public-review.mjs';
 import { collectPrSnapshot, collectPrOwnership } from './mivo-pr-snapshot.mjs';
-import { collectMivoPolicy, collectMivoPolicySync } from './mivo-pr-policy.mjs';
+import { collectMivoCi, collectMivoCiSync } from './mivo-ci.mjs';
 
 export const REPO = 'xindong/mivo-canvas-plugin';
 const GH = process.env.GH_BIN ?? 'gh';
@@ -173,6 +173,26 @@ function requiredVerdict(check, rules) {
   return matching.some((rule) => typeof rule === 'string' || rule.appId == null || rule.appId === appId) ? 'required' : 'optional';
 }
 
+function isFailingCheck(check) {
+  if (check.bucket === 'fail') return true;
+  if (['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED'].includes(check.state)) return true;
+  return ['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure', 'stale'].includes(String(check.conclusion ?? '').toLowerCase());
+}
+
+function ciSourceChecks({ checks = [], ci } = {}) {
+  if (Array.isArray(ci?.checks) && ci.checks.length) return ci.checks;
+  if (Array.isArray(ci?.required) && ci.required.length) {
+    return ci.required.map((rule) => ({
+      name: rule.context, context: rule.context, appId: rule.appId,
+      app: rule.appId != null ? { id: rule.appId } : undefined,
+      bucket: rule.status === 'failed' ? 'fail' : rule.status === 'green' ? 'pass' : rule.status === 'pending' ? 'pending' : 'unknown',
+      state: rule.status === 'failed' ? 'FAILURE' : rule.status === 'green' ? 'SUCCESS' : 'PENDING',
+      description: rule.reason, sha: rule.evidence?.sha, id: rule.evidence?.id,
+    }));
+  }
+  return checks;
+}
+
 function withCategory(item) {
   const category = classifyReviewFeedback(item);
   return { ...item, category, ...(category === 'ignore-infra' ? { actionable: false } : {}) };
@@ -193,11 +213,13 @@ function withPublisher(item, comment) {
 export function feedbackItems({ pr, checks = [], requiredChecks = [], policy, ci, reviews = [], comments = [], threads = [], mergeable, receiptActor }) {
   const items = [];
   const required = knownRequiredRules({ policy, ci, requiredChecks });
-  for (const check of checks) {
+  const sourceChecks = ciSourceChecks({ checks, ci });
+  const haveRuns = Array.isArray(ci?.checks) && ci.checks.length > 0 || Array.isArray(ci?.required) && ci.required.length > 0;
+  for (const check of sourceChecks) {
     const native = check.name ?? check.context ?? 'check';
-    const failing = check.bucket === 'fail' || ['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED'].includes(check.state);
+    const failing = isFailingCheck(check);
     const verdict = requiredVerdict(check, required);
-    const deferred = verdict === 'unknown-policy' || verdict === 'unknown-producer';
+    const deferred = !haveRuns && (verdict === 'unknown-policy' || verdict === 'unknown-producer');
     items.push(withCategory({
       source: 'ci',
       ...(deferred ? { deferred: true, actionable: false } : { actionable: Boolean(failing && verdict === 'required') }),
@@ -347,14 +369,17 @@ function bindPolicyRequired(collected, policy) {
   };
 }
 
+function attachVerifiedCi(collected, ci) {
+  return { ...bindPolicyRequired(collected, ci?.policy), ci };
+}
+
 export function collectPr(pr, { ghFn = gh } = {}) {
   const iterator = collectPublicReview(pr, ghFn);
   let step = iterator.next();
   while (!step.done) { let value; try { value = step.value(); } catch(error) { step = iterator.throw(error); continue; } step = iterator.next(value); }
   const collected = step.value;
-  return bindPolicyRequired(collected, collectMivoPolicySync({
-    repo: collected.pr?.repo ?? REPO, number: collected.pr?.number ?? pr.number, gh: ghFn,
-  }));
+  const prInfo = { ...(collected.pr ?? pr), repo: collected.pr?.repo ?? REPO };
+  return attachVerifiedCi(collected, collectMivoCiSync({ pr: prInfo, ghFn }));
 }
 
 export async function collectPrAsync(pr, { ghFn = gh } = {}) {
@@ -362,9 +387,8 @@ export async function collectPrAsync(pr, { ghFn = gh } = {}) {
   let step = iterator.next();
   while (!step.done) { let value; try { value = await step.value(); } catch(error) { step = iterator.throw(error); continue; } step = iterator.next(value); }
   const collected = step.value;
-  return bindPolicyRequired(collected, await collectMivoPolicy({
-    repo: collected.pr?.repo ?? REPO, number: collected.pr?.number ?? pr.number, gh: ghFn,
-  }));
+  const prInfo = { ...(collected.pr ?? pr), repo: collected.pr?.repo ?? REPO };
+  return attachVerifiedCi(collected, await collectMivoCi({ pr: prInfo, ghFn }));
 }
 
 function loadState(paths = watcherPaths()) {

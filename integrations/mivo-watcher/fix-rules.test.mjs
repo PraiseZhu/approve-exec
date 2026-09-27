@@ -251,6 +251,42 @@ test('missing producer on app-scoped required is deferred', () => {
   assert.equal(first.cursor['ci:verify'], undefined);
 });
 
+test('production gh pr checks without app plus check-runs dispatch required failure', (t) => {
+  const { paths, listed } = scanHome(t);
+  let sent = 0;
+  const result = runScan(paths, listed, () => ({
+    checks: [{ name: 'pr-format-gate', state: 'FAILURE', bucket: 'fail' }],
+    ci: {
+      status: 'failed',
+      checks: [{
+        id: 99, name: 'pr-format-gate', conclusion: 'failure', status: 'completed',
+        app: { id: 15368, slug: 'github-actions' }, head_sha: HEAD,
+      }],
+      required: [{ context: 'pr-format-gate', appId: 15368, status: 'failed' }],
+    },
+    policy: { status: 'verified', required: [{ context: 'pr-format-gate', appId: 15368 }] },
+    mergeReady: false,
+  }), () => { sent += 1; return { target_session_id: 's1' }; });
+  assert.equal(sent, 1);
+  assert.equal(result.prs[0].dispatch.attempted, true);
+  assert.equal(result.prs[0].fresh, 1);
+});
+
+test('base-file union keeps app scope so other app does not dispatch', (t) => {
+  const { paths, listed } = scanHome(t);
+  let sent = 0;
+  runScan(paths, listed, () => ({
+    checks: [{ name: 'verify', state: 'FAILURE', bucket: 'fail' }],
+    ci: {
+      checks: [{ name: 'verify', conclusion: 'failure', app: { id: 8, slug: 'other' } }],
+      required: [{ context: 'verify', appId: 7, status: 'green' }],
+    },
+    policy: { status: 'verified', required: [{ context: 'verify', appId: 7, sources: ['ruleset:4', 'base-file'] }] },
+    mergeReady: false,
+  }), () => { sent += 1; return { target_session_id: 's1' }; });
+  assert.equal(sent, 0);
+});
+
 test('BASE-required failure with empty gh-required still dispatches', (t) => {
   const items = feedbackItems({
     pr,
