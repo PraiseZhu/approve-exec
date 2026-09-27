@@ -37,6 +37,20 @@ test('advanced main tip still verifies policy from current branch rules and PR-b
   assert.ok(calls.some((args) => args[1]?.endsWith(`?ref=${base}`)));
   assert.equal(calls.some((args) => args[1]?.endsWith(`?ref=${tip}`)), false);
 });
+test('ruleset change mid-collection is stale', async () => {
+  const { gh } = fixture({ protectedBranch: true });
+  let rules = 0;
+  const result = await collectMivoPolicy({ repo: 'owner/repo', number: 1, gh: (args) => {
+    if (args[1]?.includes('/rules/')) {
+      rules += 1;
+      if (rules > 1) return [[{ type: 'required_status_checks', ruleset_id: 4, parameters: { required_status_checks: [{ context: 'verify', integration_id: 7 }, { context: 'extra', integration_id: 7 }] } }]];
+    }
+    return gh(args);
+  } });
+  assert.equal(result.status, 'stale');
+  assert.equal(result.reason, 'required-policy-changed');
+  assert.equal(rules, 2);
+});
 test('unknown API and identity drift fail closed', async () => {
   assert.equal((await collectMivoPolicy({ repo: 'owner/repo', number: 1, ...fixture({ fail: true }) })).status, 'unknown');
   assert.equal((await collectMivoPolicy({ repo: 'owner/repo', number: 1, ...fixture({ drift: true }) })).status, 'stale');

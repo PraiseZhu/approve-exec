@@ -5,6 +5,45 @@ const digest = (value) => createHash('sha256').update(JSON.stringify(value)).dig
 const assert = (condition, reason) => { if (!condition) throw new Error(reason); };
 const sha = (value) => typeof value === 'string' && /^[a-f0-9]{40}$/i.test(value);
 
+function requiredKeySet(map) {
+  return [...map.keys()].sort().join('\n');
+}
+
+function addRequired(required, context, appId, source) {
+  assert(typeof context === 'string' && context.trim() === context && context.length > 0, 'invalid required context');
+  assert(appId === null || Number.isSafeInteger(appId) && appId > 0, 'invalid required app');
+  const key = JSON.stringify([context, appId]);
+  if (!required.has(key)) required.set(key, { context, appId, sources: [] });
+  const item = required.get(key);
+  if (!item.sources.includes(source)) item.sources.push(source);
+}
+
+function* loadBranchRequired({ gh, repo, baseRefName, branchPath, isProtected, into }) {
+  const rulesPages = parse(yield () => gh(['api', `repos/${repo}/rules/branches/${encodeURIComponent(baseRefName)}?per_page=100`, '--paginate', '--slurp']));
+  assert(Array.isArray(rulesPages) && rulesPages.every(Array.isArray), 'incomplete effective rules');
+  for (const rule of rulesPages.flat()) {
+    assert(rule && typeof rule.type === 'string', 'invalid effective rule');
+    if (rule.type !== 'required_status_checks') continue;
+    assert(Array.isArray(rule.parameters?.required_status_checks), 'invalid ruleset required checks');
+    for (const check of rule.parameters.required_status_checks) addRequired(into, check.context, check.integration_id ?? null, `ruleset:${rule.ruleset_id ?? 'effective'}`);
+  }
+  if (!isProtected) return into;
+  let protection;
+  try { protection = parse(yield () => gh(['api', `${branchPath}/protection`])); }
+  catch (error) {
+    if (error.status === 404 && error.apiMessage === 'Branch not protected') protection = { required_status_checks: null };
+    else throw error;
+  }
+  assert(protection && typeof protection === 'object', 'unknown classic protection');
+  const classic = protection.required_status_checks;
+  if (classic !== null) {
+    assert(classic && Array.isArray(classic.contexts) && Array.isArray(classic.checks), 'unknown classic checks');
+    for (const check of classic.checks) addRequired(into, check.context, check.app_id === -1 ? null : check.app_id ?? null, 'classic');
+    for (const context of classic.contexts) if (!classic.checks.some((check) => check.context === context)) addRequired(into, context, null, 'classic');
+  }
+  return into;
+}
+
 export function* collectMivoPolicySteps({ repo, number, gh }) {
   const checkedAt = new Date().toISOString();
   try {
@@ -15,47 +54,20 @@ export function* collectMivoPolicySteps({ repo, number, gh }) {
     const branchPath = `repos/${repo}/branches/${encodeURIComponent(before.baseRefName)}`;
     const branch = parse(yield () => gh(['api', branchPath]));
     assert(typeof branch.protected === 'boolean', 'unknown protection');
-    const rulesPages = parse(yield () => gh(['api', `repos/${repo}/rules/branches/${encodeURIComponent(before.baseRefName)}?per_page=100`, '--paginate', '--slurp']));
-    assert(Array.isArray(rulesPages) && rulesPages.every(Array.isArray), 'incomplete effective rules');
     const required = new Map();
-    const add = (context, appId, source) => {
-      assert(typeof context === 'string' && context.trim() === context && context.length > 0, 'invalid required context');
-      assert(appId === null || Number.isSafeInteger(appId) && appId > 0, 'invalid required app');
-      const key = JSON.stringify([context, appId]);
-      if (!required.has(key)) required.set(key, { context, appId, sources: [] });
-      const item = required.get(key);
-      if (!item.sources.includes(source)) item.sources.push(source);
-    };
-    for (const rule of rulesPages.flat()) {
-      assert(rule && typeof rule.type === 'string', 'invalid effective rule');
-      if (rule.type !== 'required_status_checks') continue;
-      assert(Array.isArray(rule.parameters?.required_status_checks), 'invalid ruleset required checks');
-      for (const check of rule.parameters.required_status_checks) add(check.context, check.integration_id ?? null, `ruleset:${rule.ruleset_id ?? 'effective'}`);
-    }
-    if (branch.protected) {
-      let protection;
-      try { protection = parse(yield () => gh(['api', `${branchPath}/protection`])); }
-      catch (error) {
-        // Only an explicitly classified API response can distinguish absent classic protection.
-        if (error.status === 404 && error.apiMessage === 'Branch not protected') protection = { required_status_checks: null };
-        else throw error;
-      }
-      assert(protection && typeof protection === 'object', 'unknown classic protection');
-      const classic = protection.required_status_checks;
-      if (classic !== null) {
-        assert(classic && Array.isArray(classic.contexts) && Array.isArray(classic.checks), 'unknown classic checks');
-        for (const check of classic.checks) add(check.context, check.app_id === -1 ? null : check.app_id ?? null, 'classic');
-        for (const context of classic.contexts) if (!classic.checks.some((check) => check.context === context)) add(context, null, 'classic');
-      }
-    }
+    const branchArgs = { gh, repo, baseRefName: before.baseRefName, branchPath, isProtected: branch.protected, into: required };
+    yield* loadBranchRequired(branchArgs);
+    const firstKeys = requiredKeySet(required);
     const file = parse(yield () => gh(['api', `repos/${repo}/contents/docs/sync/required-checks.json?ref=${before.baseRefOid}`]));
     assert(file.encoding === 'base64' && typeof file.content === 'string' && file.type === 'file', 'missing BASE required-checks file');
     const config = JSON.parse(Buffer.from(file.content, 'base64').toString('utf8'));
     assert(Array.isArray(config.on_main) && Array.isArray(config.pr_only) && config.on_main.length + config.pr_only.length > 0, 'invalid BASE file policy');
-    for (const context of [...config.on_main, ...config.pr_only]) add(context, null, 'base-file');
+    for (const context of [...config.on_main, ...config.pr_only]) addRequired(required, context, null, 'base-file');
+    const second = yield* loadBranchRequired({ ...branchArgs, into: new Map() });
     const after = parse(yield () => gh(viewArgs));
     const identity = { repo, prNodeId: before.id, number: Number(number), headSha: before.headRefOid, baseSha: before.baseRefOid, baseRefName: before.baseRefName };
     if (['id', 'number', 'headRefOid', 'baseRefOid', 'baseRefName'].some((key) => before[key] !== after[key])) return { status: 'stale', reason: 'PR identity changed', ...identity, checkedAt };
+    if (requiredKeySet(second) !== firstKeys) return { status: 'stale', reason: 'required-policy-changed', ...identity, checkedAt };
     const entries = [...required.values()].map((entry) => ({ ...entry, sources: entry.sources.sort() })).sort((a, b) => a.context.localeCompare(b.context) || (a.appId ?? 0) - (b.appId ?? 0));
     return { status: 'verified', ...identity, required: entries, policyHash: digest({ baseSha: identity.baseSha, required: entries }), checkedAt };
   } catch (error) {
