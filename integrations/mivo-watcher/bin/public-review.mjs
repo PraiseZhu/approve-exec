@@ -1,4 +1,5 @@
-// Consume the production review publisher's public contract; never invoke or mutate it.
+// Consume-only: do not invoke or mutate the production review publisher contract.
+// Returning already-collected `ci` is pass-through of this collector's own CI snapshot.
 import { collectPrSnapshot } from './mivo-pr-snapshot.mjs';
 import { collectMivoCiSteps } from './mivo-ci.mjs';
 const REPO = 'xindong/mivo-canvas-plugin';
@@ -84,6 +85,7 @@ export function* collectPublicReview(pr, ghFn) {
   return {...snapshot, comments: snapshot.comments.filter(c => !handled.includes(c.id)),
     // Review infrastructure failures belong to its maintainer, never a business repair owner.
     checks: snapshot.checks.filter(c => !['gate','seat1','seat2','seat3','publish','native_attestation','control_attestation'].includes(c.name)),
+    ci,
     admissionVerified: snapshot.requiredChecksGreen && reviewIngress,
     admissionReason: snapshot.requiredChecksGreen ? (reviewIngress ? 'required-ci-and-review-ingress' : 'review-ingress-missing') : 'required-ci-not-green',
     mergeReady: verdict.ready, reviewReason: verdict.reason, reviewEvidence: verdict};

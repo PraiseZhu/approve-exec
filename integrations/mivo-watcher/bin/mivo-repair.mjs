@@ -12,6 +12,8 @@ import { collectMivoCiSync } from './mivo-ci.mjs';
 export const REPO = 'xindong/mivo-canvas-plugin';
 const GH = process.env.GH_BIN ?? 'gh';
 const GIT = process.env.GIT_BIN ?? 'git';
+const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
+const GIT_PUSH_TIMEOUT_MS = 60 * 60 * 1000;
 
 function fail(message) { throw new Error(message); }
 
@@ -90,9 +92,11 @@ function saveResult(paths, task, sessionId, payload) {
   return result;
 }
 
-function command(binary, args, options = {}) {
-  return execFileSync(binary, args, {
-    encoding: 'utf8', timeout: 120000, maxBuffer: 8 * 1024 * 1024,
+export function command(binary, args, options = {}, runner = execFileSync) {
+  const timeout = options.timeout ?? (binary === GIT && args.includes('push')
+    ? GIT_PUSH_TIMEOUT_MS : DEFAULT_COMMAND_TIMEOUT_MS);
+  return runner(binary, args, {
+    encoding: 'utf8', timeout, maxBuffer: 8 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'pipe'], ...options,
   }).trim();
 }
@@ -400,11 +404,10 @@ function checkStatus(task, head, ghFn) {
   return policyCiResult(collectMivoCiSync({pr:{...pr,repo:task.repo},ghFn:args=>ghFn(GH,args)}),head);
 }
 
-function ciResult(ci) {
+export function ciResult(ci) {
   const failures = ci.requiredChecks.filter((check) => check.bucket === 'fail');
   if (failures.length) return { status: 'blocked', blockedKind: 'required-ci', reason: `required CI failed: ${failures.map((check) => check.name).join(', ')}` };
   if (!ci.requiredGreen) return { status: 'waiting-ci', reason: `waiting for current HEAD required CI: ${[...ci.missing, ...ci.pending].join(', ')}` };
-  if (ci.optionalFailures.length) return { status: 'blocked', blockedKind: 'optional-ci', reason: `optional checks failed: ${ci.optionalFailures.map((check) => check.name).join(', ')}` };
   return { status: 'complete' };
 }
 
