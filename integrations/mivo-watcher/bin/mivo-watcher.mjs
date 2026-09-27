@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { planSessionTitle, repairSessionTitle } from './session-title.mjs';
-import { collectPublicReview } from './public-review.mjs';
+import { collectPublicReview, verdictComment } from './public-review.mjs';
 import { collectPrSnapshot, collectPrOwnership } from './mivo-pr-snapshot.mjs';
 import { collectMivoPolicy, collectMivoPolicySync } from './mivo-pr-policy.mjs';
 
@@ -88,28 +88,57 @@ const VERDICT_RE = /^## 🤖 自动 Review 结论[：:]\s*(\S+)\s*$/m;
 const P0P1_RE = /\*\*P[01]\*\*|🤖 自动 Review · P[01]/;
 const P2_RE = /\*\*P2\*\*|🤖 自动 Review · P2/;
 export const REPAIR_ROUND_LIMIT = 6;
+const PUBLISHER_BOT_ID = 41898282;
 
-function isRoundMarkerOnly(body) {
-  const original = String(body ?? '').trim();
-  if (!original) return false;
-  const stripped = original
-    .replace(/<!--[\s\S]*?-->/g, ' ')
+function publisherShape(comment = {}) {
+  const author = comment.user ?? comment.author ?? {};
+  const bot = author.__typename === 'Bot' || author.type === 'Bot';
+  const login = bot && author.login === 'github-actions' ? 'github-actions[bot]' : author.login;
+  const id = author.id === PUBLISHER_BOT_ID || author.databaseId === PUBLISHER_BOT_ID
+    || (bot && login === 'github-actions[bot]') ? PUBLISHER_BOT_ID : author.id ?? author.databaseId;
+  return {
+    ...comment,
+    user: { ...author, id, login, type: bot ? 'Bot' : (author.type ?? 'User') },
+    created_at: comment.created_at ?? comment.createdAt,
+    updated_at: comment.updated_at ?? comment.updatedAt,
+  };
+}
+
+function isPublisherBot(comment) {
+  const user = publisherShape(comment).user;
+  return user.id === PUBLISHER_BOT_ID && user.login === 'github-actions[bot]' && user.type === 'Bot';
+}
+
+function stripInfraScaffold(body) {
+  return String(body ?? '')
+    .replace(VERDICT_RE, ' ')
     .replace(/mivo-code-review depth=\S+ head_sha=[a-f0-9]{40}/g, ' ')
     .replace(/review-complete head_sha=[a-f0-9]{40} base_sha=[a-f0-9]{40}/g, ' ')
     .trim();
-  return stripped.length === 0;
+}
+
+function isRoundMarkerOnly(body) {
+  const original = String(body ?? '').trim();
+  if (!original || VERDICT_RE.test(original)) return false;
+  return stripInfraScaffold(original).length === 0;
+}
+
+function infraBodyOnly(body) {
+  const original = String(body ?? '').trim();
+  return original.length > 0 && stripInfraScaffold(original).length === 0;
 }
 
 export function classifyReviewFeedback(item = {}) {
   const body = String(item.body ?? '');
-  const verdict = body.match(VERDICT_RE)?.[1];
-  if (verdict && INFRA_VERDICTS.has(verdict)) return 'ignore-infra';
-  if (isRoundMarkerOnly(body)) return 'ignore-infra';
+  const parsed = verdictComment(publisherShape(item));
+  if (parsed && INFRA_VERDICTS.has(parsed.verdict) && infraBodyOnly(body)) return 'ignore-infra';
+  if (isPublisherBot(item) && isRoundMarkerOnly(body)) return 'ignore-infra';
   const greptile = item.source === 'greptile';
   const hasP0P1 = P0P1_RE.test(body) || (greptile && /\bP[01]\b/.test(body));
   const hasP2 = P2_RE.test(body) || (greptile && /\bP2\b/.test(body));
-  if (verdict === 'REQUEST_CHANGES' && hasP0P1) return 'actionable-fix';
-  if (verdict === 'COMMENT') return 'reply-resolve';
+  const heading = parsed?.verdict;
+  if (heading === 'REQUEST_CHANGES' && hasP0P1) return 'actionable-fix';
+  if (heading === 'COMMENT') return 'reply-resolve';
   if (hasP0P1) return 'actionable-fix';
   if (hasP2) return 'reply-resolve';
   return 'other';
@@ -135,6 +164,18 @@ function withCategory(item) {
   return { ...item, category, ...(category === 'ignore-infra' ? { actionable: false } : {}) };
 }
 
+function withPublisher(item, comment) {
+  const author = comment.author ?? comment.user;
+  return {
+    ...item,
+    author: author?.login,
+    user: comment.user ?? comment.author,
+    createdAt: comment.createdAt ?? comment.created_at ?? comment.submittedAt,
+    created_at: comment.created_at ?? comment.createdAt ?? comment.submittedAt,
+    updatedAt: comment.updatedAt ?? comment.updated_at,
+  };
+}
+
 export function feedbackItems({ pr, checks = [], requiredChecks = [], policy, ci, reviews = [], comments = [], threads = [], mergeable, receiptActor }) {
   const items = [];
   const required = knownRequiredNames({ policy, ci, requiredChecks });
@@ -154,40 +195,41 @@ export function feedbackItems({ pr, checks = [], requiredChecks = [], policy, ci
   for (const review of reviews) {
     if (ownReceipt(review, receiptActor)) continue;
     if (!review.body?.trim() && review.state !== 'CHANGES_REQUESTED') continue;
-    items.push(withCategory({
+    items.push(withCategory(withPublisher({
       source: review.author?.login === 'greptile-apps' ? 'greptile' : 'review',
       nativeId: String(review.id || review.node_id || `${review.author?.login}:${review.submittedAt}`),
       revision: review.submittedAt ?? review.commit?.oid ?? '',
       sha: review.commit?.oid ?? pr.headRefOid ?? null,
       body: review.body ?? '',
       contentHash: digest({ state: review.state, body: review.body ?? '' }),
-    }));
+    }, review)));
   }
   for (const comment of comments) {
     if (ownReceipt(comment, receiptActor)) continue;
-    items.push(withCategory({
+    items.push(withCategory(withPublisher({
       source: comment.user?.login === 'greptile-apps' || comment.author?.login === 'greptile-apps' ? 'greptile' : 'comment',
       nativeId: String(comment.id ?? comment.node_id ?? comment.url),
       revision: comment.updatedAt ?? comment.updated_at ?? comment.createdAt ?? '',
       sha: pr.headRefOid ?? null,
       body: comment.body ?? '',
       contentHash: digest({ body: comment.body ?? '', updated: comment.updatedAt ?? comment.updated_at }),
-    }));
+    }, comment)));
   }
   for (const thread of threads) {
     const threadComments = Array.isArray(thread.comments) ? thread.comments : (thread.comments?.nodes ?? []);
-    const external = threadComments.filter((comment) => !ownReceipt(comment, receiptActor))
-      .map((comment) => ({ id: comment.id, body: comment.body ?? '', author: comment.author?.login ?? comment.user?.login }));
-    if (!external.length) continue;
-    items.push(withCategory({
-      source: 'thread',
-      actionable: thread.isResolved !== true,
-      nativeId: String(thread.id),
-      revision: `${thread.isResolved === true}:${thread.isOutdated === true}:${external.length}`,
-      sha: pr.headRefOid ?? null,
-      body: external.map((comment) => comment.body).filter(Boolean).join('\n'),
-      contentHash: digest({ path: thread.path, resolved: thread.isResolved === true, comments: external }),
-    }));
+    const external = threadComments.filter((comment) => !ownReceipt(comment, receiptActor));
+    for (const comment of external) {
+      const author = comment.author?.login ?? comment.user?.login;
+      items.push(withCategory(withPublisher({
+        source: author === 'greptile-apps' ? 'greptile' : 'thread',
+        actionable: thread.isResolved !== true,
+        nativeId: `${thread.id}:${comment.id ?? author ?? 'comment'}`,
+        revision: `${thread.isResolved === true}:${thread.isOutdated === true}:${comment.updatedAt ?? comment.updated_at ?? comment.createdAt ?? ''}`,
+        sha: pr.headRefOid ?? null,
+        body: comment.body ?? '',
+        contentHash: digest({ path: thread.path, resolved: thread.isResolved === true, id: comment.id, author, body: comment.body ?? '' }),
+      }, comment)));
+    }
   }
   if (mergeable === 'CONFLICTING') items.push(withCategory({ source: 'conflict', nativeId: 'merge-conflict', revision: pr.headRefOid, sha: pr.headRefOid, body: 'PR has merge conflicts with its base branch.', contentHash: digest({ mergeable }) }));
   return items;

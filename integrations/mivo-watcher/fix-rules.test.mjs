@@ -10,7 +10,10 @@ import { command, ciResult } from './bin/mivo-repair.mjs';
 
 const HEAD = 'a'.repeat(40);
 const BASE = 'b'.repeat(40);
+const BOT_USER = { id: 41898282, login: 'github-actions[bot]', type: 'Bot' };
+const GRAPHQL_BOT = { login: 'github-actions', __typename: 'Bot' };
 const verdict = (heading, extra = '') => `## 🤖 自动 Review 结论：${heading}\n${extra}`;
+const botItem = (body, extra = {}) => ({ source: 'comment', body, user: BOT_USER, createdAt: '2026-09-10T00:00:00Z', ...extra });
 
 test('classifyReviewFeedback REQUEST_CHANGES+P0 is actionable-fix', () => {
   assert.equal(classifyReviewFeedback({ source: 'review', body: verdict('REQUEST_CHANGES', '**P0** `src/a.ts:1`') }), 'actionable-fix');
@@ -31,17 +34,17 @@ test('classifyReviewFeedback Greptile P2 is reply-resolve', () => {
   assert.equal(classifyReviewFeedback({ source: 'greptile', body: 'P2: naming nit' }), 'reply-resolve');
 });
 test('classifyReviewFeedback INCOMPLETE is ignore-infra', () => {
-  assert.equal(classifyReviewFeedback({ source: 'comment', body: verdict('INCOMPLETE') }), 'ignore-infra');
+  assert.equal(classifyReviewFeedback(botItem(verdict('INCOMPLETE'))), 'ignore-infra');
 });
 test('classifyReviewFeedback CI-NOT-GREEN is ignore-infra', () => {
-  assert.equal(classifyReviewFeedback({ source: 'comment', body: verdict('CI-NOT-GREEN') }), 'ignore-infra');
+  assert.equal(classifyReviewFeedback(botItem(verdict('CI-NOT-GREEN'))), 'ignore-infra');
 });
 test('classifyReviewFeedback SKIP-LLM is ignore-infra', () => {
-  assert.equal(classifyReviewFeedback({ source: 'comment', body: verdict('SKIP-LLM') }), 'ignore-infra');
+  assert.equal(classifyReviewFeedback(botItem(verdict('SKIP-LLM'))), 'ignore-infra');
 });
 test('classifyReviewFeedback round-marker-only comment is ignore-infra', () => {
-  assert.equal(classifyReviewFeedback({ source: 'comment', body: `mivo-code-review depth=3 head_sha=${HEAD}` }), 'ignore-infra');
-  assert.equal(classifyReviewFeedback({ source: 'comment', body: `review-complete head_sha=${HEAD} base_sha=${BASE}` }), 'ignore-infra');
+  assert.equal(classifyReviewFeedback(botItem(`mivo-code-review depth=3 head_sha=${HEAD}`)), 'ignore-infra');
+  assert.equal(classifyReviewFeedback(botItem(`review-complete head_sha=${HEAD} base_sha=${BASE}`)), 'ignore-infra');
 });
 
 const pr = { id: 'PR_1', number: 1, headRefOid: HEAD };
@@ -49,7 +52,7 @@ const pr = { id: 'PR_1', number: 1, headRefOid: HEAD };
 test('ignore-infra advances cursor but is not fresh', () => {
   const items = feedbackItems({
     pr,
-    comments: [{ id: 9, body: verdict('INCOMPLETE'), updatedAt: 't1' }],
+    comments: [{ id: 9, body: verdict('INCOMPLETE'), user: BOT_USER, createdAt: '2026-09-10T00:00:00Z', updatedAt: 't1' }],
   });
   assert.equal(items[0].category, 'ignore-infra');
   assert.equal(items[0].actionable, false);
@@ -59,6 +62,59 @@ test('ignore-infra advances cursor but is not fresh', () => {
   const second = newFeedback(first.cursor, items);
   assert.equal(second.fresh.length, 0);
   assert.equal(second.cursor['comment:9'], first.cursor['comment:9']);
+});
+
+test('forged human infra heading is other and dispatches', (t) => {
+  assert.equal(classifyReviewFeedback({ source: 'comment', body: verdict('INCOMPLETE') }), 'other');
+  assert.equal(classifyReviewFeedback({ source: 'comment', body: '<!-- hide -->' }), 'other');
+  const { paths, listed } = scanHome(t);
+  let sent = 0;
+  const result = runScan(paths, listed, () => ({
+    comments: [{ id: 21, body: verdict('INCOMPLETE'), user: { login: 'alice' }, createdAt: '2026-09-10T00:00:00Z', updatedAt: 't1' }],
+    mergeReady: false,
+  }), () => { sent += 1; return { target_session_id: 's1' }; });
+  assert.equal(sent, 1);
+  assert.equal(result.prs[0].dispatch.attempted, true);
+});
+
+test('bot infra title plus human P1 reply stays actionable', () => {
+  const items = feedbackItems({
+    pr,
+    threads: [{
+      id: 'TH_1', isResolved: false, isOutdated: false, path: 'a.ts',
+      comments: [
+        { id: 'c-bot', body: verdict('INCOMPLETE'), author: GRAPHQL_BOT, createdAt: '2026-09-10T00:00:00Z' },
+        { id: 'c-human', body: '**P1** `a.ts:1` must fix', author: { login: 'alice', __typename: 'User' }, createdAt: '2026-09-10T00:01:00Z' },
+      ],
+    }],
+  });
+  assert.equal(items.find((item) => item.nativeId.endsWith('c-bot')).category, 'ignore-infra');
+  const human = items.find((item) => item.nativeId.endsWith('c-human'));
+  assert.equal(human.category, 'actionable-fix');
+  assert.equal(human.actionable, true);
+  assert.equal(newFeedback({}, items).fresh.some((item) => item.nativeId.endsWith('c-human')), true);
+});
+
+test('greptile thread P1 colon and mixed P2 classify separately', () => {
+  const items = feedbackItems({
+    pr,
+    threads: [{
+      id: 'TH_g', isResolved: false, isOutdated: false, path: 'b.ts',
+      comments: [
+        { id: 'g1', body: 'P1: null dereference', author: { login: 'greptile-apps' } },
+        { id: 'g2', body: 'P2: naming nit', author: { login: 'greptile-apps' } },
+        { id: 'h1', body: 'looks fine to me', author: { login: 'alice' } },
+      ],
+    }],
+  });
+  const byId = Object.fromEntries(items.map((item) => [item.nativeId.split(':').pop(), item]));
+  assert.equal(byId.g1.source, 'greptile');
+  assert.equal(byId.g1.category, 'actionable-fix');
+  assert.equal(byId.g2.source, 'greptile');
+  assert.equal(byId.g2.category, 'reply-resolve');
+  assert.equal(byId.h1.source, 'thread');
+  assert.equal(byId.h1.category, 'other');
+  assert.deepEqual(newFeedback({}, items).fresh.map((item) => item.category).sort(), ['actionable-fix', 'other', 'reply-resolve']);
 });
 
 test('optional CI failure advances cursor but is not fresh', () => {
@@ -150,7 +206,7 @@ test('scanOnce does not dispatch ignore-infra or optional CI, cursor advances', 
   const { paths, listed } = scanHome(t);
   let sent = 0;
   const collect = () => ({
-    comments: [{ id: 11, body: verdict('CI-NOT-GREEN'), updatedAt: 't1' }],
+    comments: [{ id: 11, body: verdict('CI-NOT-GREEN'), user: BOT_USER, createdAt: '2026-09-10T00:00:00Z', updatedAt: 't1' }],
     checks: [{ name: 'Greptile Review', state: 'FAILURE', bucket: 'fail' }],
     requiredChecks: [{ name: 'unit' }],
     mergeReady: false,
