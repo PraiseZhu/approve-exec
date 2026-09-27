@@ -529,8 +529,8 @@ export function blocked({ home, taskPath, reason, ghFn = command } = {}) {
   return saveResult(paths, task, sessionId, { status: 'blocked', blockedKind: 'external', reason: reason.trim(), worktree: taskWorktree(task) });
 }
 
-function shellQuote(value) {
-  return /[\s'"\\]/.test(value) ? `'${String(value).replace(/'/g, `'\\''`)}'` : String(value);
+export function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
 
 export function scheduleParams({ home, pr, nodeId, env = process.env }) {

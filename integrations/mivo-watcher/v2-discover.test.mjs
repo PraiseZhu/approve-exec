@@ -70,7 +70,7 @@ test('unbound admitted PR creates with schedule-params and bind-schedule', (t) =
   assert.match(spaced, /第 0 步/);
   assert.match(spaced, /busy/);
   assert.match(spaced, /owner-conflict/);
-  assert.match(spaced, /"\/tmp\/Project Mivo Canvas-Plugin\/_ops\/mivo-watcher"/);
+  assert.match(spaced, /'\/tmp\/Project Mivo Canvas-Plugin\/_ops\/mivo-watcher'/);
 });
 
 test('discover releases pr lock during create dispatch', (t) => {
@@ -258,6 +258,19 @@ test('discover fair cursor continues after last visited PR', (t) => {
   assert.equal(first.result.scan.cursor, 790);
   run();
   assert.deepEqual(seen, [790, 791]);
+});
+
+test('discover summary lists closedownManual items', (t) => {
+  const { paths } = homeOf(t);
+  writePr(paths.home, 'PR_closed', {
+    number: 2, nodeId: 'PR_closed', closedownManual: { scheduleId: 'sched-old', reason: 'ARCHIVED', at: '2026-09-28T00:00:00Z' },
+  });
+  const { result } = discover(paths, {
+    collect: collectFail,
+    dispatchFn: () => ({ target_session_id: 'sess-new' }),
+  });
+  assert.equal(result.closedownManual[0].scheduleId, 'sched-old');
+  assert.equal(result.closedownManual[0].nodeId, 'PR_closed');
 });
 
 test('opt-out label skips discover work', (t) => {

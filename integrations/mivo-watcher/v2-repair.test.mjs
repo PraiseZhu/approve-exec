@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   bindSchedule, cleanupWatch, clearOwnerUnknown, cloneWorktree, DEFAULT_PLUGIN_REPO, prepare, pushIfNeeded,
-  repairPaths, scheduleParams, watchBranchName, watchWorktreePath,
+  repairPaths, scheduleParams, shellQuote, watchBranchName, watchWorktreePath,
 } from './bin/mivo-repair.mjs';
 import { readPr, statePaths, writePr } from './bin/mivo-state.mjs';
 
@@ -17,6 +17,11 @@ function homeOf(t) {
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   return home;
 }
+
+test('shellQuote uses POSIX single quotes and escapes apostrophes', () => {
+  assert.equal(shellQuote('hello'), "'hello'");
+  assert.equal(JSON.stringify(shellQuote("a'b")), JSON.stringify("'a'\\''b'"));
+});
 
 test('schedule-params matches v2 fields and omits silentWhenIdle', (t) => {
   const home = homeOf(t);
@@ -36,6 +41,7 @@ test('schedule-params matches v2 fields and omits silentWhenIdle', (t) => {
   assert.deepEqual(out.notify, { desktop: false, feishu: false });
   assert.equal(Object.hasOwn(out, 'silentWhenIdle'), false);
   assert.match(out.scriptConfig.command, /--mode poll --pr 790 --node-id PR_790/);
+  assert.match(out.scriptConfig.command, /MIVO_WATCHER_HOME='/);
   assert.match(out.scriptConfig.command, /mivo-watch-script\.py/);
 });
 

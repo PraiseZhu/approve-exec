@@ -456,7 +456,7 @@ export function dispatchParams({ pr, mapping, fresh, now, taskPath, home, messag
       '三审/Greptile：actionable-fix 修代码；reply-resolve 用「发生了什么 / 对本 PR 意味着什么 / 要不要改代码」三句回复后 resolve thread；ignore-infra 不处理。product-arch-gate 争议写 blocked 交用户。同一 PR 修复轮次上限 6 轮。冲突用 git merge origin/main（不 rebase，不 force push）。',
       ...(taskPath ? [
         `task=${taskPath}`,
-        `第一步：node ${JSON.stringify(path.join(home, 'bin', 'mivo-repair.mjs'))} --home ${JSON.stringify(home)} --task ${JSON.stringify(taskPath)} prepare。等待 watcher 的真实 session 绑定；只在返回的独立 worktree 改代码，禁止在 automation 根目录改产品。`,
+        `第一步：node ${shellQuote(path.join(home, 'bin', 'mivo-repair.mjs'))} --home ${shellQuote(home)} --task ${shellQuote(taskPath)} prepare。等待 watcher 的真实 session 绑定；只在返回的独立 worktree 改代码，禁止在 automation 根目录改产品。`,
         '允许路径：当前 PR 代码及解决反馈必需的直接调用/测试/文档；新增产品范围、CI配置、模型路由、密钥、生产数据不在授权内。外部服务失败写 blocked；禁止无依据反复 rerun。',
         '验证：该 worktree 仓库规定的 preflight 和受影响测试；每个 SC 记录真实命令/结果/HEAD，不伪造 PASS。',
         '验证收据：commit 后先运行同一 helper validate --validated-head <完整SHA>，由 helper 执行仓库 preflight；禁止 PREFLIGHT_SKIP 或自行写验证 PASS。无改动必须全部 SC=no-change 并保留未运行本地验证的事实。',
@@ -474,9 +474,12 @@ export function dispatchParams({ pr, mapping, fresh, now, taskPath, home, messag
   return params;
 }
 
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
 export function watchGuideMessage({ home, prNumber, nodeId, dispatchId } = {}) {
-  const helper = JSON.stringify(path.join(home, 'bin', 'mivo-repair.mjs'));
-  const quotedHome = JSON.stringify(home);
+  const helper = shellQuote(path.join(home, 'bin', 'mivo-repair.mjs'));
+  const quotedHome = shellQuote(home);
   const dispatchFlag = dispatchId ? ` --dispatch-id ${dispatchId}` : ' --dispatch-id <dispatchId>';
   return `第 0 步（只做一次）：运行 \`node ${helper} --home ${quotedHome} schedule-params --pr ${prNumber} --node-id ${nodeId}\`，把输出 JSON 原样作为 cindy_scheduler 的 schedule_create 参数调用；把工具返回原样存成文件后运行 \`${helper} --home ${quotedHome} bind-schedule --pr ${prNumber} --node-id ${nodeId}${dispatchFlag} --result <文件>\`。bind 若返回 busy（状态锁占用）：等 1 分钟后重跑同一 bind-schedule 命令。bind 若返回 owner-conflict（本 PR 已由他人持有）：立刻停止并回复一句说明。之后本 PR 的所有反馈只会投递到你这里（每 5 分钟由你的轮询脚本检查）。`;
 }
@@ -488,8 +491,8 @@ export function watchPollLostMessage({ prNumber, heartbeatAt, scheduleId }) {
 }
 export function watchClosedownMessage({ prNumber, state, scheduleId, home }) {
   const verb = state === 'MERGED' ? '合并' : '关闭';
-  const helper = JSON.stringify(path.join(home, 'bin', 'mivo-repair.mjs'));
-  return `PR #${prNumber} 已${verb}：调用 schedule_delete ${scheduleId ?? ''} 删除本 PR 轮询调度，再运行 \`node ${helper} --home ${JSON.stringify(home)} cleanup --pr ${prNumber}\`；不做其它改动。`;
+  const helper = shellQuote(path.join(home, 'bin', 'mivo-repair.mjs'));
+  return `PR #${prNumber} 已${verb}：调用 schedule_delete ${scheduleId ?? ''} 删除本 PR 轮询调度，再运行 \`node ${helper} --home ${shellQuote(home)} cleanup --pr ${prNumber}\`；不做其它改动。`;
 }
 function runAttemptFromUrl(url) {
   const text = String(url ?? '');
@@ -532,6 +535,11 @@ export function normalizePollSnapshot(payload) {
   }
   if (Array.isArray(node.checks)) checks.push(...node.checks);
   const threadTimes = threads.flatMap((thread) => (thread.comments?.nodes ?? []).map((item) => item.updatedAt)).filter(Boolean).sort();
+  const suiteNodes = node.commits?.nodes?.[0]?.commit?.checkSuites;
+  const overflow = Boolean(node.overflow
+    || node.reviewThreads?.pageInfo?.hasNextPage
+    || suiteNodes?.pageInfo?.hasNextPage
+    || (suiteNodes?.nodes ?? []).some((suite) => suite.checkRuns?.pageInfo?.hasNextPage));
   return {
     state: node.state, isDraft: node.isDraft, headRefOid: node.headRefOid, baseRefOid: node.baseRefOid,
     mergeable: node.mergeable, labels,
@@ -542,6 +550,7 @@ export function normalizePollSnapshot(payload) {
     commentUpdatedAt: comments?.nodes?.[0]?.updatedAt ?? comments?.at?.(-1)?.updatedAt ?? node.commentUpdatedAt ?? null,
     reviewUpdatedAt: reviews?.nodes?.[0]?.updatedAt ?? reviews?.at?.(-1)?.updatedAt ?? node.reviewUpdatedAt ?? null,
     threadUpdatedAt: threadTimes.at(-1) ?? node.threadUpdatedAt ?? null,
+    overflow,
   };
 }
 export function pollFingerprint(snapshot) {
@@ -555,10 +564,11 @@ export function pollFingerprint(snapshot) {
     commentUpdatedAt: normalized.commentUpdatedAt ?? null, reviewUpdatedAt: normalized.reviewUpdatedAt ?? null,
     threadUpdatedAt: normalized.threadUpdatedAt ?? null,
     unresolvedThreads: normalized.unresolvedThreads ?? 0,
+    overflow: normalized.overflow === true,
   });
 }
 function* fetchPollSnapshot({ nodeId, ghFn }) {
-  const query = 'query($id:ID!){node(id:$id){... on PullRequest{state isDraft headRefOid baseRefOid mergeable labels(first:50){nodes{name}} comments(last:1){totalCount nodes{updatedAt}} reviews(last:1){totalCount nodes{updatedAt}} reviewThreads(first:100){nodes{isResolved comments(last:1){nodes{updatedAt}}}} commits(last:1){nodes{commit{checkSuites(first:30){nodes{checkRuns(first:40){nodes{name status conclusion databaseId detailsUrl}}}}}}}}}}';
+  const query = 'query($id:ID!){node(id:$id){... on PullRequest{state isDraft headRefOid baseRefOid mergeable labels(first:50){nodes{name}} comments(last:1){totalCount nodes{updatedAt}} reviews(last:1){totalCount nodes{updatedAt}} reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved comments(last:1){nodes{updatedAt}}}} commits(last:1){nodes{commit{checkSuites(first:30){pageInfo{hasNextPage} nodes{checkRuns(first:40){pageInfo{hasNextPage} nodes{name status conclusion databaseId detailsUrl}}}}}}}}}}';
   const raw = yield () => ghFn(['api', 'graphql', '-f', `query=${query}`, '-F', `id=${nodeId}`]);
   return normalizePollSnapshot(JSON.parse(raw));
 }
@@ -857,7 +867,7 @@ export function* processPr({
     };
   }
   const wantsDelivery=shouldDispatch || recovery || previous.pendingDispatch?.status==='retryable';
-  if (!dryRun && wantsDelivery && deadline-clock()<65000) {
+  if (!dryRun && wantsDelivery && remaining()<65000) {
     state.prs[key]=previous;
     report.push({number:pr.number,dispatch:{attempted:false,reason:'dispatch-budget-deferred'}});
     return;
@@ -874,7 +884,7 @@ export function* processPr({
       return;
     }
   }
-  if (!dryRun && wantsDelivery && deadline-clock()<61000) {
+  if (!dryRun && wantsDelivery && remaining()<61000) {
     state.prs[key]=previous;
     report.push({number:pr.number,dispatch:{attempted:false,reason:'dispatch-budget-deferred'}});
     return;
@@ -1128,7 +1138,7 @@ export function* pollWorkflow({
   }
   const pendingRetry = previous.pendingDispatch?.status === 'retryable';
   const recoveryDue = Boolean(readTaskForRecovery(previous, paths, now));
-  if (previous.pollFingerprint === fingerprint && !pendingRetry && !recoveryDue && !previous.collectRetry) {
+  if (previous.pollFingerprint === fingerprint && !pendingRetry && !recoveryDue && !previous.collectRetry && !normalized.overflow) {
     save(previous);
     return { mode: 'poll', dispatch: false, prs: [{ number, nodeId, dispatch: { attempted: false, reason: 'fingerprint-unchanged' } }] };
   }
@@ -1313,7 +1323,10 @@ export function* discoverWorkflow({
   }
   index = { ...index, finishedAt: now, elapsedMs: clock() - started };
   fs.writeFileSync(v2.indexPath, `${JSON.stringify(index, null, 2)}\n`, { mode: 0o600 });
-  return { mode: 'discover', dispatch: !dryRun, viewer, repo: REPO, prs: report, events, scan: { cursor: index.cursor ?? 0, listed: listed.length } };
+  const closedownManual = listPrs(paths.home)
+    .filter((entry) => entry?.closedownManual)
+    .map((entry) => ({ number: entry.number, nodeId: entry.nodeId, ...entry.closedownManual }));
+  return { mode: 'discover', dispatch: !dryRun, viewer, repo: REPO, prs: report, events, closedownManual, scan: { cursor: index.cursor ?? 0, listed: listed.length } };
 }
 
 export function scanOnce(options = {}) {

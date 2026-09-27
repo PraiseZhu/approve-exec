@@ -86,6 +86,18 @@ test('new unresolved thread changes fingerprint', () => {
   assert.notEqual(none, added);
 });
 
+test('graphql overflow forces full collect', (t) => {
+  const { paths } = homeOf(t);
+  const fingerprint = pollFingerprint(snap({ overflow: true }));
+  seed(paths, { pollFingerprint: fingerprint });
+  const { collected } = poll(paths, {
+    snapshot: snap({ overflow: true }),
+    collect: () => { throw new Error('forced collect'); },
+    dispatchFn: () => ({ target_session_id: 'sess-790' }),
+  });
+  assert.equal(collected, 1);
+});
+
 test('unchanged fingerprint writes heartbeat and skips collect', (t) => {
   const { paths } = homeOf(t);
   const fingerprint = pollFingerprint(snap());
