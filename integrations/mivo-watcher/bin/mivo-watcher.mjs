@@ -1088,11 +1088,23 @@ export function* pollWorkflow({
         };
         yield () => dispatchFn(params, { timeoutMs: Math.max(1, remaining()) });
         dispatch = { attempted: true, bound: true, reason: 'closedown' };
+        save({ ...previous, closedHandled: true, pollFingerprint: fingerprint });
       } catch (error) {
-        dispatch = { attempted: true, bound: false, reason: 'closedown-unconfirmed', error: String(error.message).slice(0, 400) };
+        const text = String(error.message);
+        if (/ARCHIVED|NOT_FOUND|DELETED/.test(text)) {
+          dispatch = { attempted: true, bound: false, reason: 'closedown-session-gone' };
+          save({
+            ...previous, closedHandled: true, pollFingerprint: fingerprint,
+            closedownManual: { scheduleId: previous.scheduleId ?? null, reason: text.slice(0, 400), at: now },
+          });
+        } else {
+          dispatch = { attempted: true, bound: false, reason: 'closedown-unconfirmed', error: text.slice(0, 400) };
+          save({ ...previous, closedHandled: false, pollFingerprint: fingerprint });
+        }
       }
+    } else {
+      save({ ...previous, closedHandled: true, pollFingerprint: fingerprint });
     }
-    save({ ...previous, closedHandled: true, pollFingerprint: fingerprint });
     return { mode: 'poll', dispatch: dispatch.attempted, prs: [{ number, nodeId, dispatch }] };
   }
   if (hasWatchOff(normalized.labels) || hasWatchOff(labels)) {

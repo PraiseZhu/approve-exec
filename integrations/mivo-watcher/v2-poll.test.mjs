@@ -139,6 +139,35 @@ test('MERGED delivers closedown once', (t) => {
   assert.match(watchClosedownMessage({ prNumber: 790, state: 'MERGED', scheduleId: 'sched-1', home: paths.home }), /cleanup --pr 790/);
 });
 
+test('MERGED unknown receipt retries closedown', (t) => {
+  const { paths } = homeOf(t);
+  seed(paths, { scheduleId: 'sched-1' });
+  const first = poll(paths, {
+    snapshot: snap({ state: 'MERGED' }),
+    dispatchFn: () => { throw new Error('Cindy dispatch receipt timed out'); },
+  });
+  assert.equal(first.entry.closedHandled, false);
+  assert.equal(first.result.prs[0].dispatch.reason, 'closedown-unconfirmed');
+  const second = poll(paths, {
+    snapshot: snap({ state: 'MERGED' }),
+    dispatchFn: () => ({ target_session_id: 'sess-790' }),
+  });
+  assert.equal(second.entry.closedHandled, true);
+  assert.equal(second.result.prs[0].dispatch.reason, 'closedown');
+});
+
+test('MERGED ARCHIVED marks closedHandled for manual schedule cleanup', (t) => {
+  const { paths } = homeOf(t);
+  seed(paths, { scheduleId: 'sched-gone' });
+  const { entry, result } = poll(paths, {
+    snapshot: snap({ state: 'CLOSED' }),
+    dispatchFn: () => { throw new Error('target NOT_FOUND'); },
+  });
+  assert.equal(entry.closedHandled, true);
+  assert.equal(result.prs[0].dispatch.reason, 'closedown-session-gone');
+  assert.equal(entry.closedownManual.scheduleId, 'sched-gone');
+});
+
 test('mivo-watch:off does not dispatch', (t) => {
   const { paths } = homeOf(t);
   seed(paths);
