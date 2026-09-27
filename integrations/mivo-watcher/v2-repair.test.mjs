@@ -4,10 +4,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  bindSchedule, cleanupWatch, cloneWorktree, DEFAULT_PLUGIN_REPO, prepare, pushIfNeeded,
+  bindSchedule, cleanupWatch, clearOwnerUnknown, cloneWorktree, DEFAULT_PLUGIN_REPO, prepare, pushIfNeeded,
   repairPaths, scheduleParams, watchBranchName, watchWorktreePath,
 } from './bin/mivo-repair.mjs';
-import { statePaths, writePr } from './bin/mivo-state.mjs';
+import { readPr, statePaths, writePr } from './bin/mivo-state.mjs';
 
 const HEAD = 'a'.repeat(40);
 const REMOTE = 'b'.repeat(40);
@@ -39,14 +39,23 @@ test('schedule-params matches v2 fields and omits silentWhenIdle', (t) => {
   assert.match(out.scriptConfig.command, /mivo-watch-script\.py/);
 });
 
-test('bind-schedule accepts first owner and rejects a second live owner', (t) => {
-  const home = homeOf(t);
+function schedFile(home, extra = {}) {
   const resultPath = path.join(home, 'sched.json');
   fs.writeFileSync(resultPath, JSON.stringify({
     ok: true, id: 'sched-1', executionMode: 'script', status: 'active',
-    targetSessionId: 'sess-a', scriptConfig: { command: 'python3 x.py --mode poll --pr 790 --node-id PR_790' },
+    targetSessionId: 'sess-a', scriptConfig: { command: 'python3 x.py --mode poll --pr 790 --node-id PR_790' }, ...extra,
   }));
-  const first = bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, now: '2026-09-28T00:00:00Z' });
+  return resultPath;
+}
+function seedPending(home, dispatchId = 'disp-1', extra = {}) {
+  writePr(home, 'PR_790', { number: 790, nodeId: 'PR_790', pendingDispatch: { status: 'awaiting-claim', dispatchId }, ...extra });
+}
+
+test('bind-schedule accepts first owner and rejects a second live owner', (t) => {
+  const home = homeOf(t);
+  seedPending(home);
+  const resultPath = schedFile(home);
+  const first = bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, dispatchId: 'disp-1', now: '2026-09-28T00:00:00Z' });
   assert.equal(first.sessionId, 'sess-a');
   assert.equal(first.scheduleId, 'sched-1');
   assert.equal(first.pendingDispatch, null);
@@ -55,7 +64,7 @@ test('bind-schedule accepts first owner and rejects a second live owner', (t) =>
     targetSessionId: 'sess-b', scriptConfig: { command: 'python3 x.py --mode poll --pr 790 --node-id PR_790' },
   }));
   assert.throws(
-    () => bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, now: '2026-09-28T00:01:00Z' }),
+    () => bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, dispatchId: 'disp-1', now: '2026-09-28T00:01:00Z' }),
     /本 PR 已由 sess-a 持有/,
   );
 });
@@ -63,14 +72,11 @@ test('bind-schedule accepts first owner and rejects a second live owner', (t) =>
 test('late bind-schedule can claim owner-unknown and clears needsHuman', (t) => {
   const home = homeOf(t);
   writePr(home, 'PR_790', {
-    number: 790, nodeId: 'PR_790', needsHuman: { reason: 'owner-unknown', at: '2026-09-28T01:01:00Z' },
+    number: 790, nodeId: 'PR_790',
+    needsHuman: { reason: 'owner-unknown', at: '2026-09-28T01:01:00Z', abandonedDispatchId: 'old-disp' },
   });
-  const resultPath = path.join(home, 'sched.json');
-  fs.writeFileSync(resultPath, JSON.stringify({
-    ok: true, id: 'sched-late', executionMode: 'script', status: 'active',
-    targetSessionId: 'sess-late', scriptConfig: { command: 'python3 x.py --mode poll --pr 790 --node-id PR_790' },
-  }));
-  const entry = bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, now: '2026-09-28T03:00:00Z' });
+  const resultPath = schedFile(home, { id: 'sched-late', targetSessionId: 'sess-late' });
+  const entry = bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, dispatchId: 'old-disp', now: '2026-09-28T03:00:00Z' });
   assert.equal(entry.sessionId, 'sess-late');
   assert.equal(entry.needsHuman, null);
 });
@@ -93,13 +99,14 @@ test('bind-schedule busy vs owner-conflict', (t) => {
     assert.equal(error.exitCode, 2);
   }
   fs.unlinkSync(path.join(locksDir, 'pr-PR_790.lock'));
-  bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, now: '2026-09-28T00:00:00Z', retryMs: 0 });
+  seedPending(home);
+  bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, dispatchId: 'disp-1', now: '2026-09-28T00:00:00Z', retryMs: 0 });
   try {
     fs.writeFileSync(resultPath, JSON.stringify({
       ok: true, id: 'sched-2', executionMode: 'script', status: 'active',
       targetSessionId: 'sess-b', scriptConfig: { command: 'python3 x.py --mode poll --pr 790 --node-id PR_790' },
     }));
-    bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, now: '2026-09-28T00:01:00Z', retryMs: 0 });
+    bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, dispatchId: 'disp-1', now: '2026-09-28T00:01:00Z', retryMs: 0 });
     assert.fail('expected owner-conflict');
   } catch (error) {
     assert.match(error.message, /^owner-conflict:/);
@@ -119,12 +126,38 @@ test('bind-schedule retries until lock is released', (t) => {
     targetSessionId: 'sess-a', scriptConfig: { command: 'python3 x.py --mode poll --pr 790 --node-id PR_790' },
   }));
   let slept = 0;
+  seedPending(home);
   const entry = bindSchedule({
-    home, pr: 790, nodeId: 'PR_790', resultPath, retryMs: 1000, retryDelayMs: 1,
+    home, pr: 790, nodeId: 'PR_790', resultPath, dispatchId: 'disp-1', retryMs: 1000, retryDelayMs: 1,
     sleepFn: () => { slept += 1; try { fs.unlinkSync(lockFile); } catch {} },
   });
   assert.equal(entry.sessionId, 'sess-a');
   assert.ok(slept >= 1);
+});
+
+test('old bind after clear-owner-unknown is rejected; new bind succeeds', (t) => {
+  const home = homeOf(t);
+  writePr(home, 'PR_790', {
+    number: 790, nodeId: 'PR_790',
+    needsHuman: { reason: 'owner-unknown', at: '2026-09-28T01:01:00Z', abandonedDispatchId: 'old-disp' },
+  });
+  clearOwnerUnknown({ home, pr: 790, nodeId: 'PR_790' });
+  const afterClear = readPr(home, 'PR_790');
+  writePr(home, 'PR_790', {
+    ...afterClear,
+    pendingDispatch: { status: 'awaiting-claim', dispatchId: 'new-disp' },
+  });
+  const resultPath = schedFile(home, { targetSessionId: 'sess-old' });
+  assert.throws(
+    () => bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, dispatchId: 'old-disp', retryMs: 0 }),
+    /dispatch-id 已作废/,
+  );
+  fs.writeFileSync(resultPath, JSON.stringify({
+    ok: true, id: 'sched-new', executionMode: 'script', status: 'active',
+    targetSessionId: 'sess-new', scriptConfig: { command: 'python3 x.py --mode poll --pr 790 --node-id PR_790' },
+  }));
+  const ok = bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, dispatchId: 'new-disp', retryMs: 0 });
+  assert.equal(ok.sessionId, 'sess-new');
 });
 
 test('cloneWorktree uses git worktree add -B watch/pr-N under plugin repo', (t) => {

@@ -555,7 +555,7 @@ export function scheduleParams({ home, pr, nodeId, env = process.env }) {
 }
 
 export function bindSchedule({
-  home, pr, nodeId, resultPath, now = new Date().toISOString(),
+  home, pr, nodeId, resultPath, dispatchId, now = new Date().toISOString(),
   retryMs = 180000, retryDelayMs = 5000, sleepFn = null,
 } = {}) {
   const root = requireAbs(home, 'home');
@@ -577,12 +577,22 @@ export function bindSchedule({
   try {
     const previous = readPr(root, nodeId) || {};
     const incoming = result.targetSessionId;
+    if (!dispatchId) fail('owner-conflict: bind-schedule 需要 --dispatch-id', 3);
+    const abandoned = previous.abandonedDispatches ?? [];
+    if (abandoned.includes(dispatchId)) fail('owner-conflict: dispatch-id 已作废', 3);
+    const pendingId = previous.pendingDispatch?.dispatchId;
+    const lateUnknown = previous.needsHuman?.abandonedDispatchId;
+    if (pendingId && pendingId !== dispatchId) fail('owner-conflict: dispatch-id 与当前 pending 不一致', 3);
+    if (!pendingId && previous.needsHuman?.reason === 'owner-unknown' && dispatchId !== lateUnknown) {
+      fail('owner-conflict: dispatch-id 与 owner-unknown 记录不一致', 3);
+    }
+    if (!pendingId && !previous.sessionId && previous.needsHuman?.reason !== 'owner-unknown') {
+      fail('owner-conflict: 无 pending 的未知 dispatch-id', 3);
+    }
     if (previous.sessionId && previous.sessionId !== incoming) {
-      const claimed = Date.parse(previous.claimedAt ?? '');
       const awaiting = previous.pendingDispatch?.status === 'awaiting-claim';
       const needsHuman = previous.needsHuman?.reason === 'owner-unknown';
       if (!awaiting && !needsHuman) fail(`owner-conflict: 本 PR 已由 ${previous.sessionId} 持有，你应停止`, 3);
-      if (Number.isFinite(claimed) && claimed >= Date.parse(now) && !needsHuman) fail(`owner-conflict: 本 PR 已由 ${previous.sessionId} 持有，你应停止`, 3);
     }
     const entry = {
       ...previous, number: Number(pr), nodeId,
@@ -601,9 +611,12 @@ export function clearOwnerUnknown({ home, pr, nodeId, now = new Date().toISOStri
   try {
     const previous = readPr(root, nodeId) || {};
     if (previous.needsHuman?.reason !== 'owner-unknown') fail('PR 没有 owner-unknown 标记');
+    const abandonedId = previous.needsHuman.abandonedDispatchId ?? previous.pendingDispatch?.dispatchId;
+    const abandoned = [...(previous.abandonedDispatches ?? []), abandonedId].filter(Boolean);
     const entry = {
       ...previous, number: Number(pr), nodeId,
       needsHuman: null, pendingDispatch: null, dispatchError: null, clearedOwnerUnknownAt: now,
+      abandonedDispatches: [...new Set(abandoned)],
     };
     writePr(root, nodeId, entry);
     return entry;
@@ -640,7 +653,7 @@ function cli(argv) {
   const home = value('--home');
   let result;
   if (mode === 'schedule-params') result = scheduleParams({ home, pr: value('--pr'), nodeId: value('--node-id') });
-  else if (mode === 'bind-schedule') result = bindSchedule({ home, pr: value('--pr'), nodeId: value('--node-id'), resultPath: value('--result') });
+  else if (mode === 'bind-schedule') result = bindSchedule({ home, pr: value('--pr'), nodeId: value('--node-id'), resultPath: value('--result'), dispatchId: value('--dispatch-id') });
   else if (mode === 'cleanup') result = cleanupWatch({ home, pr: value('--pr') });
   else if (mode === 'clear-owner-unknown') result = clearOwnerUnknown({ home, pr: value('--pr'), nodeId: value('--node-id') });
   else {

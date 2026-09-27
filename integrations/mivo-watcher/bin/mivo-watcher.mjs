@@ -474,10 +474,11 @@ export function dispatchParams({ pr, mapping, fresh, now, taskPath, home, messag
   return params;
 }
 
-export function watchGuideMessage({ home, prNumber, nodeId }) {
+export function watchGuideMessage({ home, prNumber, nodeId, dispatchId } = {}) {
   const helper = JSON.stringify(path.join(home, 'bin', 'mivo-repair.mjs'));
   const quotedHome = JSON.stringify(home);
-  return `第 0 步（只做一次）：运行 \`node ${helper} --home ${quotedHome} schedule-params --pr ${prNumber} --node-id ${nodeId}\`，把输出 JSON 原样作为 cindy_scheduler 的 schedule_create 参数调用；把工具返回原样存成文件后运行 \`${helper} --home ${quotedHome} bind-schedule --pr ${prNumber} --node-id ${nodeId} --result <文件>\`。bind 若返回 busy（状态锁占用）：等 1 分钟后重跑同一 bind-schedule 命令。bind 若返回 owner-conflict（本 PR 已由他人持有）：立刻停止并回复一句说明。之后本 PR 的所有反馈只会投递到你这里（每 5 分钟由你的轮询脚本检查）。`;
+  const dispatchFlag = dispatchId ? ` --dispatch-id ${dispatchId}` : ' --dispatch-id <dispatchId>';
+  return `第 0 步（只做一次）：运行 \`node ${helper} --home ${quotedHome} schedule-params --pr ${prNumber} --node-id ${nodeId}\`，把输出 JSON 原样作为 cindy_scheduler 的 schedule_create 参数调用；把工具返回原样存成文件后运行 \`${helper} --home ${quotedHome} bind-schedule --pr ${prNumber} --node-id ${nodeId}${dispatchFlag} --result <文件>\`。bind 若返回 busy（状态锁占用）：等 1 分钟后重跑同一 bind-schedule 命令。bind 若返回 owner-conflict（本 PR 已由他人持有）：立刻停止并回复一句说明。之后本 PR 的所有反馈只会投递到你这里（每 5 分钟由你的轮询脚本检查）。`;
 }
 export function watchSuccessorMessage({ prNumber, predecessorId, reason, summary }) {
   return `你是 PR #${prNumber} 的接班修复 session，前任 ${predecessorId} 已不可用（${reason}）；先读本 PR 状态摘要 ${summary ?? '…'}。若状态为 merge-ready，等待人工合并，不要改代码。再执行第 0 步。`;
@@ -568,7 +569,10 @@ function hasWatchOff(labels) {
 function dispatchIntent({ pr, mapping, fresh, now, paths, dryRun, messagePrefix = '' }) {
   const dispatchId = `${dryRun ? 'dry' : 'live'}-${pr.number}-${now}`;
   const taskPath = path.join(paths.stateDir, 'tasks', `${dispatchId}.json`);
-  const pending = { dispatchId, params: dispatchParams({ pr, mapping, fresh, now, taskPath, home: paths.home, messagePrefix }), at: now, taskPath };
+  const prefix = messagePrefix?.includes('bind-schedule')
+    ? messagePrefix.replace(/--dispatch-id <dispatchId>/g, `--dispatch-id ${dispatchId}`)
+    : messagePrefix;
+  const pending = { dispatchId, params: dispatchParams({ pr, mapping, fresh, now, taskPath, home: paths.home, messagePrefix: prefix }), at: now, taskPath };
   if (!dryRun) {
     fs.mkdirSync(path.dirname(taskPath), { recursive: true });
     atomic(taskPath, JSON.stringify({ dispatchId, nodeId: pr.id, number: pr.number, repo: REPO, headRefOid: pr.headRefOid, headRefName: pr.headRefName, feedback: fresh, params: pending.params, createdAt: now }));

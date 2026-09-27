@@ -65,6 +65,7 @@ test('unbound admitted PR creates with schedule-params and bind-schedule', (t) =
   assert.equal(params.target_session_id, undefined);
   assert.match(params.message, /schedule-params/);
   assert.match(params.message, /bind-schedule/);
+  assert.match(params.message, /--dispatch-id live-790-/);
   const spaced = watchGuideMessage({ home: '/tmp/Project Mivo Canvas-Plugin/_ops/mivo-watcher', prNumber: 790, nodeId });
   assert.match(spaced, /第 0 步/);
   assert.match(spaced, /busy/);
