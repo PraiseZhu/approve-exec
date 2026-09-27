@@ -488,15 +488,76 @@ export function watchClosedownMessage({ prNumber, state, scheduleId, home }) {
   const verb = state === 'MERGED' ? '合并' : '关闭';
   return `PR #${prNumber} 已${verb}：调用 schedule_delete ${scheduleId ?? ''} 删除本 PR 轮询调度，再运行 \`${home}/bin/mivo-repair.mjs --home ${home} cleanup --pr ${prNumber}\`；不做其它改动。`;
 }
+function runAttemptFromUrl(url) {
+  const text = String(url ?? '');
+  const match = text.match(/\/attempts\/(\d+)/) || text.match(/[?&]attempt=(\d+)/i);
+  return match ? Number(match[1]) : null;
+}
+function normalizeChecks(list) {
+  return [...(list ?? [])].map((item) => ({
+    name: item.name ?? item.context ?? null,
+    status: item.status ?? item.state ?? null,
+    conclusion: item.conclusion ?? null,
+    id: item.id ?? item.databaseId ?? null,
+    runAttempt: item.runAttempt ?? runAttemptFromUrl(item.detailsUrl ?? item.details_url ?? item.link),
+  })).sort((a, b) => String(a.id ?? a.name).localeCompare(String(b.id ?? b.name)));
+}
+export function normalizePollSnapshot(payload) {
+  const node = payload?.data?.node ?? payload;
+  const labels = (node.labels?.nodes ?? node.labels ?? []).map((item) => typeof item === 'string' ? item : item?.name).filter(Boolean);
+  const comments = node.comments;
+  const reviews = node.reviews;
+  const threads = node.reviewThreads?.nodes ?? node.reviewThreads ?? [];
+  const suites = node.commits?.nodes?.[0]?.commit?.checkSuites?.nodes ?? [];
+  const checks = [];
+  for (const suite of suites) {
+    for (const run of suite.checkRuns?.nodes ?? []) {
+      checks.push({
+        name: run.name, status: run.status, conclusion: run.conclusion,
+        id: run.databaseId ?? run.id, detailsUrl: run.detailsUrl,
+      });
+    }
+  }
+  if (Array.isArray(node.statusCheckRollup)) {
+    for (const item of node.statusCheckRollup) {
+      checks.push({
+        name: item.name ?? item.context, status: item.status ?? item.state,
+        conclusion: item.conclusion ?? null, id: item.id ?? item.databaseId ?? null,
+        detailsUrl: item.detailsUrl ?? item.link, runAttempt: item.runAttempt,
+      });
+    }
+  }
+  if (Array.isArray(node.checks)) checks.push(...node.checks);
+  const threadTimes = threads.flatMap((thread) => (thread.comments?.nodes ?? []).map((item) => item.updatedAt)).filter(Boolean).sort();
+  return {
+    state: node.state, isDraft: node.isDraft, headRefOid: node.headRefOid, baseRefOid: node.baseRefOid,
+    mergeable: node.mergeable, labels,
+    checks: normalizeChecks(checks),
+    commentCount: comments?.totalCount ?? comments?.length ?? node.commentCount ?? 0,
+    reviewCount: reviews?.totalCount ?? reviews?.length ?? node.reviewCount ?? 0,
+    unresolvedThreads: threads.filter((thread) => thread.isResolved === false).length || node.unresolvedThreads || 0,
+    commentUpdatedAt: comments?.nodes?.[0]?.updatedAt ?? comments?.at?.(-1)?.updatedAt ?? node.commentUpdatedAt ?? null,
+    reviewUpdatedAt: reviews?.nodes?.[0]?.updatedAt ?? reviews?.at?.(-1)?.updatedAt ?? node.reviewUpdatedAt ?? null,
+    threadUpdatedAt: threadTimes.at(-1) ?? node.threadUpdatedAt ?? null,
+  };
+}
 export function pollFingerprint(snapshot) {
+  const normalized = snapshot.checks ? snapshot : normalizePollSnapshot(snapshot);
   return digest({
-    state: snapshot.state, isDraft: snapshot.isDraft, headRefOid: snapshot.headRefOid,
-    baseRefOid: snapshot.baseRefOid, updatedAt: snapshot.updatedAt, mergeable: snapshot.mergeable,
-    labels: snapshot.labels ?? [], checkState: snapshot.checkState,
-    commentCount: snapshot.commentCount ?? 0, reviewCount: snapshot.reviewCount ?? 0,
-    commentUpdatedAt: snapshot.commentUpdatedAt ?? null, reviewUpdatedAt: snapshot.reviewUpdatedAt ?? null,
-    unresolvedThreads: snapshot.unresolvedThreads ?? 0,
+    state: normalized.state, isDraft: normalized.isDraft, headRefOid: normalized.headRefOid,
+    baseRefOid: normalized.baseRefOid, mergeable: normalized.mergeable,
+    labels: [...(normalized.labels ?? [])].map((item) => typeof item === 'string' ? item : item?.name).filter(Boolean).sort(),
+    checks: normalizeChecks(normalized.checks),
+    commentCount: normalized.commentCount ?? 0, reviewCount: normalized.reviewCount ?? 0,
+    commentUpdatedAt: normalized.commentUpdatedAt ?? null, reviewUpdatedAt: normalized.reviewUpdatedAt ?? null,
+    threadUpdatedAt: normalized.threadUpdatedAt ?? null,
+    unresolvedThreads: normalized.unresolvedThreads ?? 0,
   });
+}
+function* fetchPollSnapshot({ nodeId, ghFn }) {
+  const query = 'query($id:ID!){node(id:$id){... on PullRequest{state isDraft headRefOid baseRefOid mergeable labels(first:50){nodes{name}} comments(last:1){totalCount nodes{updatedAt}} reviews(last:1){totalCount nodes{updatedAt}} reviewThreads(first:100){nodes{isResolved comments(last:1){nodes{updatedAt}}}} commits(last:1){nodes{commit{checkSuites(first:30){nodes{checkRuns(first:40){nodes{name status conclusion databaseId detailsUrl}}}}}}}}}}';
+  const raw = yield () => ghFn(['api', 'graphql', '-f', `query=${query}`, '-F', `id=${nodeId}`]);
+  return normalizePollSnapshot(JSON.parse(raw));
 }
 function hasWatchOff(labels) {
   return (labels ?? []).map((item) => typeof item === 'string' ? item : item?.name).includes('mivo-watch:off');
@@ -1004,18 +1065,9 @@ export function* pollWorkflow({
   const events = [];
   const snapshot = snapshotFn
     ? snapshotFn({ nodeId, prNumber: number, previous })
-    : JSON.parse(yield () => ghFn(['pr', 'view', String(number), '--repo', REPO, '--json',
-      'state,isDraft,headRefOid,baseRefOid,updatedAt,mergeable,labels,statusCheckRollup,comments,reviews']));
-  const labels = (snapshot.labels ?? []).map((item) => typeof item === 'string' ? item : item?.name).filter(Boolean);
-  const normalized = snapshotFn ? snapshot : {
-    state: snapshot.state, isDraft: snapshot.isDraft, headRefOid: snapshot.headRefOid,
-    baseRefOid: snapshot.baseRefOid, updatedAt: snapshot.updatedAt, mergeable: snapshot.mergeable, labels,
-    checkState: snapshot.statusCheckRollup?.[0]?.state ?? snapshot.statusCheckRollup?.state ?? null,
-    commentCount: snapshot.comments?.length ?? 0, reviewCount: snapshot.reviews?.length ?? 0,
-    commentUpdatedAt: snapshot.comments?.at?.(-1)?.updatedAt ?? null,
-    reviewUpdatedAt: snapshot.reviews?.at?.(-1)?.updatedAt ?? null,
-    unresolvedThreads: snapshot.unresolvedThreads ?? 0,
-  };
+    : yield* fetchPollSnapshot({ nodeId, ghFn });
+  const normalized = snapshotFn ? normalizePollSnapshot(snapshot) : snapshot;
+  const labels = (normalized.labels ?? []).map((item) => typeof item === 'string' ? item : item?.name).filter(Boolean);
   const fingerprint = pollFingerprint(normalized);
   const save = (entry) => {
     const next = { ...entry, nodeId, number, heartbeatAt: now };

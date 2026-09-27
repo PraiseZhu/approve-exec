@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { pollFingerprint, scanOnce, watcherPaths, watchClosedownMessage } from './bin/mivo-watcher.mjs';
+import { normalizePollSnapshot, pollFingerprint, scanOnce, watcherPaths, watchClosedownMessage } from './bin/mivo-watcher.mjs';
 import { planSessionTitle, repairSessionTitle } from './bin/session-title.mjs';
 import { readPr, writePr as writePrState } from './bin/mivo-state.mjs';
 
@@ -54,6 +54,37 @@ function poll(paths, { snapshot, collect, dispatchFn, enabled = true } = {}) {
   });
   return { result, collected, entry: readPr(paths.home, nodeId) };
 }
+
+test('same SHA pending to failed changes fingerprint', () => {
+  const pending = pollFingerprint(snap({
+    checks: [{ name: 'unit', status: 'IN_PROGRESS', conclusion: null, id: 21, detailsUrl: 'https://github.com/x/y/runs/21/attempts/1' }],
+  }));
+  const failed = pollFingerprint(snap({
+    checks: [{ name: 'unit', status: 'COMPLETED', conclusion: 'FAILURE', id: 21, detailsUrl: 'https://github.com/x/y/runs/21/attempts/1' }],
+  }));
+  assert.notEqual(pending, failed);
+});
+
+test('rerun with new attempt changes fingerprint', () => {
+  const first = pollFingerprint(snap({
+    checks: [{ name: 'unit', status: 'COMPLETED', conclusion: 'FAILURE', id: 21, detailsUrl: 'https://github.com/x/y/runs/21/attempts/1' }],
+  }));
+  const rerun = pollFingerprint(snap({
+    checks: [{ name: 'unit', status: 'COMPLETED', conclusion: 'FAILURE', id: 21, detailsUrl: 'https://github.com/x/y/runs/21/attempts/2' }],
+  }));
+  assert.notEqual(first, rerun);
+});
+
+test('new unresolved thread changes fingerprint', () => {
+  const none = pollFingerprint(snap({
+    reviewThreads: [], unresolvedThreads: 0,
+  }));
+  const added = pollFingerprint(normalizePollSnapshot({
+    ...snap(),
+    reviewThreads: { nodes: [{ isResolved: false, comments: { nodes: [{ updatedAt: '2026-09-28T03:00:00Z' }] } }] },
+  }));
+  assert.notEqual(none, added);
+});
 
 test('unchanged fingerprint writes heartbeat and skips collect', (t) => {
   const { paths } = homeOf(t);
