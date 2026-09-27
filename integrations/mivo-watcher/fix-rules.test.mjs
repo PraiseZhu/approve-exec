@@ -46,6 +46,12 @@ test('classifyReviewFeedback round-marker-only comment is ignore-infra', () => {
   assert.equal(classifyReviewFeedback(botItem(`mivo-code-review depth=3 head_sha=${HEAD}`)), 'ignore-infra');
   assert.equal(classifyReviewFeedback(botItem(`review-complete head_sha=${HEAD} base_sha=${BASE}`)), 'ignore-infra');
 });
+test('HTML-wrapped review-complete marker is ignore-infra', () => {
+  assert.equal(classifyReviewFeedback(botItem(`<!-- review-complete head_sha=${HEAD} base_sha=${BASE} -->`)), 'ignore-infra');
+});
+test('INCOMPLETE plus HTML-wrapped round marker is ignore-infra', () => {
+  assert.equal(classifyReviewFeedback(botItem(verdict('INCOMPLETE', `<!-- mivo-code-review depth=3 head_sha=${HEAD} -->`))), 'ignore-infra');
+});
 
 const pr = { id: 'PR_1', number: 1, headRefOid: HEAD };
 

@@ -109,11 +109,16 @@ function isPublisherBot(comment) {
   return user.id === PUBLISHER_BOT_ID && user.login === 'github-actions[bot]' && user.type === 'Bot';
 }
 
+const ROUND_MARKER = String.raw`mivo-code-review depth=\S+ head_sha=[a-f0-9]{40}`;
+const COMPLETE_MARKER = String.raw`review-complete head_sha=[a-f0-9]{40} base_sha=[a-f0-9]{40}`;
+
 function stripInfraScaffold(body) {
   return String(body ?? '')
     .replace(VERDICT_RE, ' ')
-    .replace(/mivo-code-review depth=\S+ head_sha=[a-f0-9]{40}/g, ' ')
-    .replace(/review-complete head_sha=[a-f0-9]{40} base_sha=[a-f0-9]{40}/g, ' ')
+    .replace(new RegExp(`<!--\\s*${ROUND_MARKER}\\s*-->`, 'g'), ' ')
+    .replace(new RegExp(`<!--\\s*${COMPLETE_MARKER}\\s*-->`, 'g'), ' ')
+    .replace(new RegExp(ROUND_MARKER, 'g'), ' ')
+    .replace(new RegExp(COMPLETE_MARKER, 'g'), ' ')
     .trim();
 }
 
