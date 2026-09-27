@@ -211,7 +211,7 @@ Lead 验收时现读 live routing.json：交卷 `e2e.model` 既不是当前 e2e 
 
 **续跑先于派窗（2026-09-25）**：首个 owner 派窗前，lead 必须已在台账同目录写好 `lead-continuation.json`（真实 `lead_session_id` + 含本台账的 `ledger_paths`）并保存 active script 调度回执 `lead-continuation-schedule.json`；`owner-dispatch.mjs prepare` 核不到就拒派（`CONTINUATION_MISSING`）。调度发给 lead 遇到 `NOT_FOUND`（lead session 不存在）记 `blocked` + `lead_missing` 并让本轮失败，改绑 `lead_session_id` 后下一轮自动重发。
 
-**continuation v2 默认启用（2026-09-23 用户批准）**：新 run 首次派窗后，lead 按 owner-protocol「整包续跑登记」与「continuation v2」写配置并登记 script 调度，不再逐次请批。脚本一律从 live 路径（本仓根的 `scripts/`）运行，禁止再钉 `.worktrees/` 下的部署树——2026-09-19 前后部署树被清掉，live 软链与 Library 包续跑一起断了 4 天（调度每 5 分钟报 `ModuleNotFoundError: owner_continuation`）。宿主 scheduler 不可用时仍按下文记 `continuation_unavailable`，不得声称已自动续跑。
+**continuation v2 只在 lead 实际部署 `schemaVersion=2` 配置时生效（2026-09-23 用户批准的能力，不是默认已开）**：新 run 首次派窗后，lead 按 owner-protocol「整包续跑登记」写配置并登记 script 调度，不再逐次请批。开工包由 `render-pr-handoff` 按台账同目录 `lead-continuation.json` 的实际配置渲染 checkpoint / CI 等待段；未部署 v2 时不得把 waiting-ci checkpoint 命令写进包里。脚本一律从 live 路径（本仓根的 `scripts/`）运行，禁止再钉 `.worktrees/` 下的部署树——2026-09-19 前后部署树被清掉，live 软链与 Library 包续跑一起断了 4 天（调度每 5 分钟报 `ModuleNotFoundError: owner_continuation`）。宿主 scheduler 不可用时仍按下文记 `continuation_unavailable`，不得声称已自动续跑。
 
 **continuation v2 的当前执行合约**：当已批准配置启用 `schemaVersion=2` 时，本节旧协议中逐 PR 唤醒 lead、每 PR 必须归档的默认描述由以下约定替代：零 token 脚本直接续推已绑定 idle owner；busy 不催，CI pending 与明确窗口只检查等待；lead 只处理新增真实决策与整包最终事件。每 owner 用 `owner-checkpoint.py` 写入 ledger 同目录的 `owner-checkpoint.json`，handoff 已提供命令，不能只口头报进度。达成配置中的授权 `completion=delivered` 即本机终态；明确要求归档的才用 `archived`，原批准例外用 `approved-legacy-archive` 验旧凭据，保留原 fail/incomplete。不得因源码存在就宣称实际调度已切换。
 

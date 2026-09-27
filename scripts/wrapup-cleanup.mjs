@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // wrapup-cleanup.mjs — 远端 PR 已 open 后只清本地 worktree/分支。不删远端。不用 cleanup-branch。
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, readdirSync, readlinkSync, rmdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { relative, dirname, isAbsolute, join, resolve } from 'node:path';
 import { LedgerError, latestGroupEvent, latestPrHandoffDelivery, parseTimestamp } from './run-ledger.mjs';
@@ -64,15 +64,65 @@ function parseRetainPaths(value) {
   return parsed;
 }
 
+function ignoredCovers(entry, path) {
+  return entry === path || entry === `${path}/` || entry.startsWith(`${path}/`) || `${path}/`.startsWith(entry);
+}
+
+function isRecursivelyEmptyDir(absPath) {
+  let stat;
+  try { stat = lstatSync(absPath); } catch { return false; }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) return false;
+  for (const child of readdirSync(absPath, { withFileTypes: true })) {
+    const childPath = join(absPath, child.name);
+    if (child.isSymbolicLink() || child.isFile()) return false;
+    if (child.isDirectory()) {
+      if (!isRecursivelyEmptyDir(childPath)) return false;
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+function collectEmptyDirsBottomUp(absPath) {
+  const dirs = [];
+  const walk = (current) => {
+    for (const child of readdirSync(current, { withFileTypes: true })) {
+      if (child.isDirectory() && !child.isSymbolicLink()) walk(join(current, child.name));
+    }
+    dirs.push(current);
+  };
+  walk(absPath);
+  return dirs;
+}
+
+function symlinkTargetAbs(linkPath, target) {
+  return isAbsolute(target) ? target : resolve(dirname(linkPath), target);
+}
+
+function classifyIgnoredPath(worktree, entry) {
+  const rel = entry.replace(/\/$/, '');
+  const abs = join(worktree, rel);
+  if (!existsSync(abs)) return { rel, abs, kind: 'missing' };
+  const stat = lstatSync(abs);
+  if (stat.isSymbolicLink()) return { rel, abs, kind: 'symlink', stat, target: readlinkSync(abs) };
+  if (stat.isDirectory() && isRecursivelyEmptyDir(abs)) return { rel, abs, kind: 'empty-dir', stat };
+  return { rel, abs, kind: 'content', stat };
+}
+
 function ignoredRetentionPlan({ worktree, mainRepo, gitRunner, retainDir, retainPaths }) {
   const allIgnored = gitRunner(['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'], { cwd: worktree }).split('\0').filter(Boolean);
-  const covered = (entry) => retainPaths.some((path) => entry === path || entry === `${path}/` || entry.startsWith(`${path}/`) || `${path}/`.startsWith(entry));
+  const covered = (entry) => retainPaths.some((path) => ignoredCovers(entry, path)) || classifyIgnoredPath(worktree, entry).kind === 'empty-dir';
   if (allIgnored.some((path) => !covered(path))) throw new LedgerError('PRECONDITION', `存在未显式保留的 ignored 内容: ${allIgnored.find((path) => !covered(path))}`);
   for (const entry of allIgnored.filter((path) => path.endsWith('/') && !retainPaths.includes(path.slice(0, -1)))) {
     const parent = join(worktree, entry);
+    if (isRecursivelyEmptyDir(parent)) continue;
     const allowedChildren = retainPaths.filter((path) => `${path}/`.startsWith(entry)).map((path) => path.slice(entry.length).split('/')[0]);
     for (const child of readdirSync(parent, { withFileTypes: true })) {
-      if (!allowedChildren.includes(child.name)) throw new LedgerError('PRECONDITION', `ignored 父目录含未显式保留项: ${entry}${child.name}`);
+      if (allowedChildren.includes(child.name)) continue;
+      const childPath = join(parent, child.name);
+      if (!child.isSymbolicLink() && child.isDirectory() && isRecursivelyEmptyDir(childPath)) continue;
+      throw new LedgerError('PRECONDITION', `ignored 父目录含未显式保留项: ${entry}${child.name}`);
     }
   }
   if (retainDir === undefined) {
@@ -88,23 +138,38 @@ function ignoredRetentionPlan({ worktree, mainRepo, gitRunner, retainDir, retain
   needExistingDirectory(dirname(destination), 'retain-dir 的父目录必须已存在且不是软链接');
   if (realpathSync(dirname(destination)) !== realpathSync(worktreesDir)) throw new LedgerError('PRECONDITION', '--retain-dir 父目录必须是仓内 .worktrees');
   const artifacts = [];
+  const listed = new Set(retainPaths);
   for (const path of retainPaths) {
     const from = join(worktreeReal, path);
     if (!existsSync(from)) continue;
     let cursor = worktreeReal;
-    for (const segment of path.split('/')) {
-      cursor = join(cursor, segment);
+    const segments = path.split('/');
+    for (let i = 0; i < segments.length; i += 1) {
+      cursor = join(cursor, segments[i]);
       const segmentStat = lstatSync(cursor);
-      if (segmentStat.isSymbolicLink()) throw new LedgerError('PRECONDITION', `保留路径中间段是软链接: ${path}`);
+      if (segmentStat.isSymbolicLink() && i !== segments.length - 1) throw new LedgerError('PRECONDITION', `保留路径中间段是软链接: ${path}`);
     }
     const stat = lstatSync(from);
-    if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())) throw new LedgerError('PRECONDITION', `不能保留软链接或特殊文件: ${path}`);
+    if (stat.isSymbolicLink()) {
+      artifacts.push({ from, path, type: 'symlink', target: readlinkSync(from), device: stat.dev, inode: stat.ino });
+      continue;
+    }
+    if (!stat.isDirectory() && !stat.isFile()) throw new LedgerError('PRECONDITION', `不能保留软链接或特殊文件: ${path}`);
+    if (stat.isDirectory() && isRecursivelyEmptyDir(from)) {
+      artifacts.push({ from, path, type: 'empty-dir', device: stat.dev, inode: stat.ino });
+      continue;
+    }
     artifacts.push({ from, to: join(destination, path), path, type: stat.isDirectory() ? 'directory' : 'file', device: stat.dev, inode: stat.ino });
   }
-  if (allIgnored.length > 0 && allIgnored.some((entry) => !artifacts.some((artifact) => entry === artifact.path || entry === `${artifact.path}/` || entry.startsWith(`${artifact.path}/`) || `${artifact.path}/`.startsWith(entry)))) throw new LedgerError('PRECONDITION', '显式保留路径未覆盖全部 ignored 根');
+  for (const entry of allIgnored) {
+    const classified = classifyIgnoredPath(worktreeReal, entry);
+    if (classified.kind !== 'empty-dir' || listed.has(classified.rel)) continue;
+    if (artifacts.some((a) => a.type === 'empty-dir' && a.path === classified.rel)) continue;
+    artifacts.push({ from: classified.abs, path: classified.rel, type: 'empty-dir', device: classified.stat.dev, inode: classified.stat.ino });
+  }
+  if (allIgnored.length > 0 && allIgnored.some((entry) => !artifacts.some((artifact) => ignoredCovers(entry, artifact.path)))) throw new LedgerError('PRECONDITION', '显式保留路径未覆盖全部 ignored 根');
   for (const artifact of artifacts) {
-    const status = gitRunner(['status', '--porcelain', '--ignored', '--', artifact.path], { cwd: worktreeReal });
-    if (!status.split('\n').some((line) => line.startsWith('!! ') && line.slice(3).replace(/\/$/, '') === artifact.path)) throw new LedgerError('PRECONDITION', `保留路径不是 ignored: ${artifact.path}`);
+    if (!allIgnored.some((entry) => ignoredCovers(entry, artifact.path))) throw new LedgerError('PRECONDITION', `保留路径不是 ignored: ${artifact.path}`);
   }
   return { artifacts, retainDir: destination };
 }
@@ -116,6 +181,51 @@ function insidePath(parent, child) {
 
 function needExistingDirectory(path, message) {
   if (!existsSync(path) || !lstatSync(path).isDirectory() || lstatSync(path).isSymbolicLink()) throw new LedgerError('PRECONDITION', message);
+}
+
+function applyRetentionArtifact(artifact) {
+  if (artifact.type === 'empty-dir' && !existsSync(artifact.from)) return;
+  const before = lstatSync(artifact.from);
+  if (before.dev !== artifact.device || before.ino !== artifact.inode) throw new LedgerError('PRECONDITION', `保留路径在删除前发生变化: ${artifact.path}`);
+  if (artifact.type === 'symlink') {
+    if (!before.isSymbolicLink() || readlinkSync(artifact.from) !== artifact.target) throw new LedgerError('PRECONDITION', `保留路径在删除前发生变化: ${artifact.path}`);
+    const targetAbs = symlinkTargetAbs(artifact.from, artifact.target);
+    unlinkSync(artifact.from);
+    if (!existsSync(targetAbs)) throw new LedgerError('PRECONDITION', `解除软链接后目标消失: ${artifact.path} -> ${artifact.target}`);
+    return;
+  }
+  if (artifact.type === 'empty-dir') {
+    if (before.isSymbolicLink() || !before.isDirectory() || !isRecursivelyEmptyDir(artifact.from)) throw new LedgerError('PRECONDITION', `保留路径在删除前发生变化: ${artifact.path}`);
+    for (const dir of collectEmptyDirsBottomUp(artifact.from)) rmdirSync(dir);
+    return;
+  }
+  if (before.isSymbolicLink() || existsSync(artifact.to)) throw new LedgerError('PRECONDITION', `保留路径在删除前发生变化: ${artifact.path}`);
+  mkdirSync(dirname(artifact.to), { recursive: true });
+  renameSync(artifact.from, artifact.to);
+}
+
+function assertRetentionApplied(artifact) {
+  if (existsSync(artifact.from)) throw new LedgerError('PRECONDITION', `保留源路径移动后仍存在: ${artifact.path}`);
+  if (artifact.type === 'symlink') {
+    if (!existsSync(symlinkTargetAbs(artifact.from, artifact.target))) throw new LedgerError('PRECONDITION', `解除软链接后目标消失: ${artifact.path} -> ${artifact.target}`);
+    return;
+  }
+  if (artifact.type === 'empty-dir') return;
+  const after = lstatSync(artifact.to);
+  if (after.dev !== artifact.device || after.ino !== artifact.inode || after.isSymbolicLink()) throw new LedgerError('PRECONDITION', `保留目标 inode 移动后不匹配: ${artifact.path}`);
+}
+
+function rollbackRetentionArtifact(artifact) {
+  if (existsSync(artifact.from)) return;
+  if (artifact.type === 'symlink') {
+    symlinkSync(artifact.target, artifact.from);
+    return;
+  }
+  if (artifact.type === 'empty-dir') {
+    mkdirSync(artifact.from, { recursive: true });
+    return;
+  }
+  if (existsSync(artifact.to)) renameSync(artifact.to, artifact.from);
 }
 
 function ghPr({ repo, branch, ghBin = process.env.GH_BIN ?? 'gh', runner = spawnSync }) {
@@ -250,23 +360,16 @@ export function wrapupCleanup({ worktree, branch, remote = 'origin', gitRunner =
       mkdirSync(retained.retainDir, { recursive: true });
       writeFileSync(manifestPath, `${JSON.stringify({ schema: 'approve-exec-retain-v1', status: 'prepared', checked_at: now, artifacts: retained.artifacts }, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
       for (const artifact of retained.artifacts) {
-        const before = lstatSync(artifact.from);
-        if (before.dev !== artifact.device || before.ino !== artifact.inode || before.isSymbolicLink() || existsSync(artifact.to)) throw new LedgerError('PRECONDITION', `保留路径在删除前发生变化: ${artifact.path}`);
-        mkdirSync(dirname(artifact.to), { recursive: true });
-        renameSync(artifact.from, artifact.to);
+        applyRetentionArtifact(artifact);
         moved.push(artifact);
         writeManifest('moving', moved);
       }
-      for (const artifact of moved) {
-        if (existsSync(artifact.from)) throw new LedgerError('PRECONDITION', `保留源路径移动后仍存在: ${artifact.path}`);
-        const after = lstatSync(artifact.to);
-        if (after.dev !== artifact.device || after.ino !== artifact.inode || after.isSymbolicLink()) throw new LedgerError('PRECONDITION', `保留目标 inode 移动后不匹配: ${artifact.path}`);
-      }
+      for (const artifact of moved) assertRetentionApplied(artifact);
       writeManifest('moved', moved);
     }
   } catch (error) {
     const canRollback = existsSync(worktree);
-    if (canRollback) for (const artifact of [...moved].reverse()) { if (!existsSync(artifact.from) && existsSync(artifact.to)) renameSync(artifact.to, artifact.from); }
+    if (canRollback) for (const artifact of [...moved].reverse()) rollbackRetentionArtifact(artifact);
     writeManifest(canRollback ? 'rolled_back' : 'retained_after_partial_cleanup', retained.artifacts, { moved_paths: moved.map((artifact) => artifact.path), error: error.message });
     throw error;
   }
@@ -283,7 +386,7 @@ export function wrapupCleanup({ worktree, branch, remote = 'origin', gitRunner =
     }
   } catch (error) {
     const canRollback = existsSync(worktree);
-    if (canRollback) for (const artifact of [...moved].reverse()) { if (!existsSync(artifact.from) && existsSync(artifact.to)) renameSync(artifact.to, artifact.from); }
+    if (canRollback) for (const artifact of [...moved].reverse()) rollbackRetentionArtifact(artifact);
     writeManifest(canRollback ? 'rolled_back' : 'retained_after_partial_cleanup', retained.artifacts, { moved_paths: moved.map((artifact) => artifact.path), error: error.message });
     throw error;
   }

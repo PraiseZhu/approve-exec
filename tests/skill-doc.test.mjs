@@ -188,6 +188,9 @@ test('第⑧段：create_workers ≥2 禁连续 create_worker 单发', () => {
   assert.ok(s8.includes('429') && s8.includes('唤醒条件'),
     '⑧段应要求可恢复等待有唤醒条件');
   assert.ok(s8.includes('假设破裂'), '⑧段应含第 5 类停：假设破裂');
+  assert.equal(s8.includes('continuation v2 默认启用'), false, '⑧段不得再写 continuation v2 默认启用');
+  assert.ok(s8.includes('schemaVersion=2'), '⑧段应声明 v2 只在实际部署 schemaVersion=2 时生效');
+  assert.ok(s8.includes('按台账同目录') || s8.includes('按实际配置渲染'), '⑧段应声明开工包按实际续跑配置渲染');
 });
 
 test('第⑨段：新组状态机 + identity 五段 + PR_RECEIPT_KEYS', () => {

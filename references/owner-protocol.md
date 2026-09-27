@@ -50,7 +50,7 @@ prepare 使用台账路径旁固定的 .owners 目录。持久 claim 的作用�
 validation-report 格式为 `schemaVersion=1, kind=mivo-local-validation, repo, number, head, scs:[{id,status,evidence:[命令/回执锚点]}], e2e:{status,evidence}`。各项必须 pass；已批准例外使用 approved-exception 并保留 approvalRef、scope、originalStatus=fail/not_run/incomplete，不改写原失败。candidate 原字节与 release hash 绑定；历史 v1 仍按 exact head 原协议消费，不自动迁写。v2 清场要求本地 clean 且 HEAD=A、A 是当前远端 B 祖先和同一释放 epoch；B 的 CI 红由 Mini 跟进，不追溯污染 A。
 6. 对应任务 lead 验收通过后，立即派 native cleanup sub，不再铸造 Mini lead signal / register。
 7. Mini Cindy 常驻程序以 PR nodeid 维护唯一修复 session，沿用 `{项目名}-{中文任务名}丨 {MMDD}`：短中文任务名与 Asia/Shanghai 首次创建日固定，PR 号、nodeid 和修复角色留在 metadata。旧标题只经宿主 rename 纠正，保留原 session_id；本协议不创建第二个 session。
-8. 清场前用 `get_session_runtime` 读取原 owner 与已知本地 writer，确认都已结束执行、没有 pending 修改；仍在写入则保留现场等待。`wrapup-cleanup --mode delivered-local-only` 只清本地，不删远端分支。存在已知 ignored 目录时显式给 `--retain-dir <本仓 .worktrees 下不存在的新 sibling>` 和 `--retain-paths '["node_modules","cindyplugin/dist"]'`，脚本写保留 manifest 并移动这些内容；未知 ignored 或 keep/lock 拒绝，禁止升级 force。远端已经由 Mini 普通追加提交时，必须证明已验收提交、本地提交、远端提交的祖先关系；没有 Git 对象先常规 fetch 再校验，不猜祖先。成功后 lead `archive_sessions` 并消费真实归档回执。GitHub 合入另需用户授权；本任务 skill 不自动 merge。
+8. 清场前用 `get_session_runtime` 读取原 owner 与已知本地 writer，确认都已结束执行、没有 pending 修改；仍在写入则保留现场等待。`wrapup-cleanup --mode delivered-local-only` 只清本地，不删远端分支。存在已知 ignored 内容时显式给 `--retain-dir <本仓 .worktrees 下不存在的新 sibling>` 和 `--retain-paths`（例如 `'["_tmp"]'` 或要把整目录软链列入时 `'["node_modules","_tmp"]'`）。递归为空的 ignored 目录不用列，清场前记入 manifest 并自底向上 `rmdir`；末段整目录软链只解除链接、不移动、不跟随，目标目录必须仍在。未知 ignored 或 keep/lock 拒绝，禁止升级 force。远端已经由 Mini 普通追加提交时，必须证明已验收提交、本地提交、远端提交的祖先关系；没有 Git 对象先常规 fetch 再校验，不猜祖先。成功后 lead `archive_sessions` 并消费真实归档回执。GitHub 合入另需用户授权；本任务 skill 不自动 merge。
 
 ## 历史兼容：lead 发信号与 Mini 接收（新任务不执行）
 

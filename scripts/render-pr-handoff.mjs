@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // render-pr-handoff.mjs — 用户可见开工包。缺块、乱序、缺绝对路径 = 渲染失败，不得 create session。
-import { readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { sha256 } from './lib/common.mjs';
@@ -50,7 +50,7 @@ export function renderScText(packet) {
 }
 
 // 决策三层（D0/D1/D2）+ Jev 调用约定 + CI 不收工。owner 多为 Pi，不读 ~/.claude/rules，必须内联。
-export function renderDecisionLadder({ jevJournal, actConfidence }) {
+export function renderDecisionLadder({ jevJournal, actConfidence, continuationV2 = false }) {
   const journal = jevJournal ?? '<台账目录>/jev/<sha256(组)>.jsonl（lead 出包时给绝对路径）';
   return [
     '决策三层（owner 自己判；可自决的不要问 lead）：',
@@ -59,7 +59,9 @@ export function renderDecisionLadder({ jevJournal, actConfidence }) {
     `Jev 留痕：每次调用追加一行 JSON 到 ${journal}：{at, head, qid, question, options, choice, confidence, action, paths}。不写进 worktree。`,
     'Jev 不可用（网关没有 typesafe-jev 或调用报错）：在留痕记 JEV_UNAVAILABLE；重跑 CI、等价实现、换策略这类可撤回的 D1 按「改动最小 > 可撤回 > 跟随仓内既有写法 > 不扩写域」自决，不回问 lead；连带文件改动必须有 Jev 结论，没有就按 D2 必须停。owner 自己派的只读 sub 没有网关，它们的 JEV_DECISION_REQUEST 回给 owner，由 owner 代调，不上交 lead。',
     'D2 必须停（DECISION_REQUIRED，保留原 owner 绑定）：硬停六条；hash/身份自检失败；SC、接口兼容、授权或跨 PR 依赖发生变化；allowed_paths 不够且不符合第 5 段连带策略；base 本身红；授权不足；已授权恢复策略和预算耗尽；连续 3 轮零增量。只发一条 decision_required，附已尝试动作、fallbacks_tried 和 Jev 给的选项排序（留痕行号），等 lead 一个决定后同一 owner 继续。等待期间保留任务状态、阻塞原因和唤醒条件，不报完成。',
-    'CI 等待不收工：push 后启用了 continuation v2 就写 --phase waiting-ci 的 checkpoint 再结束本轮，由零 token 脚本在 CI 出结果时唤醒；未启用时本轮内用 gh pr checks <PR> --watch --interval 60 轮询（单条命令超时就重进），不得以「在等 CI」收工或报完成。CI 红先走确定性规则：失败日志命中网络超时 / ETIMEDOUT / ECONNRESET / 429 / runner 失联这类基础设施故障，且同一 head 未重跑过，就 gh run rerun <run-id> --failed 一次；不命中或重跑后仍红，再按 D1 问 Jev 定修法。',
+    continuationV2
+      ? 'CI 等待不收工：push 后启用了 continuation v2 就写 --phase waiting-ci 的 checkpoint 再结束本轮，由零 token 脚本在 CI 出结果时唤醒；未启用时本轮内用 gh pr checks <PR> --watch --interval 60 轮询（单条命令超时就重进），不得以「在等 CI」收工或报完成。CI 红先走确定性规则：失败日志命中网络超时 / ETIMEDOUT / ECONNRESET / 429 / runner 失联这类基础设施故障，且同一 head 未重跑过，就 gh run rerun <run-id> --failed 一次；不命中或重跑后仍红，再按 D1 问 Jev 定修法。'
+      : 'CI 等待不收工：本包未启用 continuation v2，续跑调度只唤醒 lead、不会唤醒你；push 后不得以 waiting-ci 或「在等 CI」结束本轮，必须在本轮内用 gh pr checks <PR> --watch --interval 60 轮询到出结果（单条命令超时就重进），再继续转 Ready、写 pr_ready 和 goal_report。CI 红先走确定性规则：失败日志命中网络超时 / ETIMEDOUT / ECONNRESET / 429 / runner 失联这类基础设施故障，且同一 head 未重跑过，就 gh run rerun <run-id> --failed 一次；不命中或重跑后仍红，再按 D1 问 Jev 定修法。',
   ];
 }
 
@@ -206,7 +208,7 @@ export function renderPrHandoff({
       snapshotNote,
       '可自决：不改变 SC、接口兼容、授权和跨 PR 依赖的域内实现选型；派 read-only sub / e2e worker；本机测试红在 allowed_paths 内修到绿；已授权的 feature branch push 与目标 PR create/update。禁止派 review worker。',
       '429 / Too Many Requests 按 Retry-After 和现有预算在原路由等待重试，记录下一次唤醒；worker 崩溃先查原 worker 状态再恢复。创建失败结果不明时先查绑定，不盲目重复创建。只有 NO_PROVIDER_FOR_AGENT / PROVIDER_ROUTE_UNAVAILABLE / BUDGET_MODEL_REQUIRES_API_MODE 才按现读该档 fallbacks 换 provider、不换代次。每次实际降级写入 fallbacks_tried；未走降级保留空数组并说明原因，禁止空数组就问 lead。',
-      ...renderDecisionLadder({ jevJournal, actConfidence: collateralPolicy.jev.act_confidence }),
+      ...renderDecisionLadder({ jevJournal, actConfidence: collateralPolicy.jev.act_confidence, continuationV2: Boolean(continuation?.command) }),
       '按第⑩节提交 candidate 后继续已授权的本机验证、提交、普通 push 与 Draft PR 收尾；Mivo 必须等当前提交必需 CI 全绿且审查workflow静态入口前提可用后转为 OPEN 非 draft，再写 pr_ready。pr_ready 之后同一 owner 重新执行 confirm-pr-open 确认 PR 仍 OPEN 非 draft、必需 CI 全绿，写 note-event goal_report：逐条 SC（含设计/功能目标）标 achieved|partial|not_achieved 并附证据，如实报告未达成项；CI 转红或 PR 被关就先修到绿再报，释放后不得再改产品则发 decision_required。goal_report 之后由 lead 写 final_acceptance：accepted 才算正式完结，rejected 由同一 owner 返工。lead 验收后立即清本地并归档该 owner；Mini Cindy 常驻程序按 PR 唯一修复 session 处理云端审查反馈。本机不追反馈；必要门禁和远端 head 均已确认。子 session 不合入；任何角色不得自动合并、启用 auto-merge 或调用 gh pr merge，只有用户对指定 PR 的当次明确授权才允许合并。',
     ].join('\n')],
     ['9. 禁做', forbidden.map((f) => `- ${f}`).join('\n')],
@@ -269,6 +271,21 @@ export function renderPrHandoff({
   return out;
 }
 
+export function readLeadContinuationSchemaVersion(ledgerPath) {
+  const configPath = join(dirname(ledgerPath), 'lead-continuation.json');
+  if (!existsSync(configPath)) return 1;
+  try {
+    const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    return raw?.schemaVersion === 2 ? 2 : 1;
+  } catch {
+    return 1;
+  }
+}
+
+function ownerCheckpointCommand(ledgerPath, group) {
+  return 'python3 ' + [resolve(ROOT, 'scripts/owner-checkpoint.py'), '--ledger', resolve(ledgerPath), '--group', group, '--checkpoint', resolve(dirname(ledgerPath), 'owner-checkpoints', sha256(group) + '.json'), '--phase', 'executing', '--step', 'start-authorized-owner'].map(value => "'" + String(value).replaceAll("'", "'\"'\"'") + "'").join(' ');
+}
+
 export function renderPrHandoffFromLedger({
   ledgerPath, group, leadSessionId, seq, repo, title, snapshot, now,
   why, how, excerpts,
@@ -280,11 +297,12 @@ export function renderPrHandoffFromLedger({
   const wave = findGroupWave(ledger, group);
   const wg = wave.groups.find((g) => g.group_id === group);
   const identity = { worktree: wg.worktree, branch: wg.branch, base: wg.base };
+  const continuationV2 = readLeadContinuationSchemaVersion(ledgerPath) === 2;
   return renderPrHandoff({
     executionPlanHash: ledger.pr_plan?.plan_hash,
     jevJournal: resolve(dirname(ledgerPath), 'jev', sha256(group) + '.jsonl'),
     provenance: manifest.provenance,
-    continuation: { command: 'python3 ' + [resolve(ROOT, 'scripts/owner-checkpoint.py'), '--ledger', resolve(ledgerPath), '--group', group, '--checkpoint', resolve(dirname(ledgerPath), 'owner-checkpoints', sha256(group) + '.json'), '--phase', 'executing', '--step', 'start-authorized-owner'].map(value => "'" + String(value).replaceAll("'", "'\"'\"'") + "'").join(' ') },
+    continuation: continuationV2 ? { command: ownerCheckpointCommand(ledgerPath, group) } : undefined,
     packet,
     identity,
     leadSessionId,
