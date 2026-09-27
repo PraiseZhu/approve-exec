@@ -16,8 +16,9 @@ function fixture(t){
  const plan={version:1,home,database:path.join(home,'metadata.db'),id:'fixture-release',files:verify(home),stateSha:createHash('sha256').update(state).digest('hex'),sessionIds:[]};
  return {home,plan,state};
 }
-test('full source deploy preserves state and verifies all ten hashes',t=>{
- const f=fixture(t),r=apply(f.plan);assert.equal(r.status,'installed');assert.equal(r.stateChanged,false);assert.equal(verify(f.home).filter(v=>v.source===v.runtime).length,10);assert.deepEqual(fs.readFileSync(path.join(f.home,'state/state.json')),f.state);
+test('full source deploy preserves state and verifies all eleven hashes',t=>{
+ const f=fixture(t),r=apply(f.plan);assert.equal(r.status,'installed');assert.equal(r.stateChanged,false);assert.equal(verify(f.home).filter(v=>v.source===v.runtime).length,FILES.length);assert.deepEqual(fs.readFileSync(path.join(f.home,'state/state.json')),f.state);
+ assert.ok(FILES.includes('mivo-state.mjs'));
  assert.equal(fs.readFileSync(path.join(f.home,'deployments/fixture-release/before/mivo-watcher.mjs'),'utf8'),'old bytes');
 });
 test('state drift and source drift refuse before lease',t=>{

@@ -6,15 +6,39 @@ import {createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 const here=path.dirname(fileURLToPath(import.meta.url));
-export const FILES=['mivo-ci.mjs','mivo-pr-policy.mjs','mivo-pr-snapshot.mjs','mivo-repair.mjs','mivo-watcher.mjs','public-review.mjs','session-title.mjs','mivo-watch-script.py','protocol.py','session-title-maintenance.py'];
+export const DEFAULT_RUNTIME='/Users/praise/AI-Agent/Claude/projects/Project Mivo Canvas-Plugin/_ops/mivo-watcher';
+export const FILES=['mivo-ci.mjs','mivo-pr-policy.mjs','mivo-pr-snapshot.mjs','mivo-repair.mjs','mivo-state.mjs','mivo-watcher.mjs','public-review.mjs','session-title.mjs','mivo-watch-script.py','protocol.py','session-title-maintenance.py'];
 const sha=file=>fs.existsSync(file)?createHash('sha256').update(fs.readFileSync(file)).digest('hex'):null;
 const requireValue=(v,m)=>{if(!v)throw Error(m);};
 export function verify(runtime,source=path.join(here,'bin')) {
  return FILES.map(name=>({name,source:sha(path.join(source,name)),runtime:sha(path.join(runtime,'bin',name))}));
 }
-function identities(state){
- const ids=Object.values(state.prs).map(v=>v.sessionId).filter(Boolean).sort();
+function identitiesFromState(state){
+ const ids=Object.values(state.prs||{}).map(v=>v.sessionId).filter(Boolean).sort();
  requireValue(new Set(ids).size===ids.length&&ids.every(v=>/^[a-f0-9-]+$/.test(v)),'invalid session identities');return ids;
+}
+function identities(home){
+ const prsDir=path.join(home,'state/prs');
+ if(fs.existsSync(prsDir)){
+  const ids=[];
+  for(const name of fs.readdirSync(prsDir).filter(n=>n.endsWith('.json')).sort()){
+   const entry=JSON.parse(fs.readFileSync(path.join(prsDir,name),'utf8'));
+   if(entry?.sessionId)ids.push(entry.sessionId);
+  }
+  ids.sort();
+  requireValue(new Set(ids).size===ids.length&&ids.every(v=>/^[a-f0-9-]+$/.test(v)),'invalid session identities');
+  return ids;
+ }
+ const stateFile=path.join(home,'state/state.json');
+ return identitiesFromState(JSON.parse(fs.readFileSync(stateFile)));
+}
+function stateFingerprint(home){
+ const index=path.join(home,'state/index.json'),prsDir=path.join(home,'state/prs');
+ if(fs.existsSync(index)||fs.existsSync(prsDir)){
+  const files=fs.existsSync(prsDir)?fs.readdirSync(prsDir).filter(n=>n.endsWith('.json')).sort():[];
+  return createHash('sha256').update(JSON.stringify({index:sha(index),files})).digest('hex');
+ }
+ return sha(path.join(home,'state/state.json'));
 }
 function idle(database,ids){
  if(!ids.length)return;
@@ -33,8 +57,8 @@ export function apply(plan){
  const state=path.join(plan.home,'state/state.json'),lease=path.join(plan.home,'state/lease');
  const record=path.join(plan.home,'deployments',plan.id),owner=`${process.pid} ${plan.id}\n`;
  const check=()=>{
-  requireValue(sha(state)===plan.stateSha,'state changed since preview');
-  requireValue(JSON.stringify(identities(JSON.parse(fs.readFileSync(state))))===JSON.stringify(plan.sessionIds),'session binding changed');
+  requireValue(stateFingerprint(plan.home)===plan.stateSha,'state changed since preview');
+  requireValue(JSON.stringify(identities(plan.home))===JSON.stringify(plan.sessionIds),'session binding changed');
   idle(plan.database,plan.sessionIds);
   for(const item of plan.files){requireValue(sha(path.join(here,'bin',item.name))===item.source,'source changed since preview');requireValue(sha(path.join(plan.home,'bin',item.name))===item.runtime,'runtime changed since preview');}
  };
@@ -45,7 +69,7 @@ export function apply(plan){
  try{
   check();requireValue(!fs.existsSync(record),'release id already exists');
   fs.mkdirSync(path.join(record,'before'),{recursive:true,mode:0o700});
-  fs.copyFileSync(state,path.join(record,'before/state.json'));
+  if(fs.existsSync(state))fs.copyFileSync(state,path.join(record,'before/state.json'));
   fs.writeFileSync(path.join(record,'manifest.json'),JSON.stringify(plan,null,2),{mode:0o600});
   for(const item of plan.files){
    if(item.runtime===item.source)continue;
@@ -54,7 +78,7 @@ export function apply(plan){
    if(item.runtime)fs.copyFileSync(target,path.join(record,'before',item.name));
    fs.copyFileSync(path.join(here,'bin',item.name),tmp);fs.chmodSync(tmp,0o755);fs.renameSync(tmp,target);installed.push(item);
   }
-  requireValue(sha(state)===plan.stateSha,'state changed during install');idle(plan.database,plan.sessionIds);
+  requireValue(stateFingerprint(plan.home)===plan.stateSha,'state changed during install');idle(plan.database,plan.sessionIds);
   requireValue(verify(plan.home).every(v=>v.source===v.runtime),'installed hash mismatch');
   const receipt={status:'installed',at:new Date().toISOString(),files:plan.files,stateChanged:false,sessionIds:plan.sessionIds,schedulerChanged:false,databaseChanged:false};
   fs.writeFileSync(path.join(record,'receipt.json'),JSON.stringify(receipt,null,2),{mode:0o600});return receipt;
@@ -74,10 +98,9 @@ if(process.argv[1]&&fs.realpathSync(process.argv[1])===fileURLToPath(import.meta
  }else if(mode==='preview'){
   const home=get('--home'),database=get('--database'),id=get('--id'),file=get('--plan');
   requireValue(['--home','--database','--id','--plan'].every(k=>args.includes(k))&&path.isAbsolute(file),'explicit home/database/id/absolute plan required');
-  const stateFile=path.join(home,'state/state.json');
-  const plan={version:1,home,database,id,files:verify(home),stateSha:sha(stateFile),sessionIds:identities(JSON.parse(fs.readFileSync(stateFile)))};
+  const plan={version:1,home,database,id,files:verify(home),stateSha:stateFingerprint(home),sessionIds:identities(home)};
   validatePlan(plan);idle(database,plan.sessionIds);fs.writeFileSync(file,JSON.stringify(plan,null,2),{flag:'wx',mode:0o600});console.log(JSON.stringify({mode:'preview',plan:file,files:plan.files.length}));
  }else if(mode==='apply'){
   requireValue(args.includes('--plan'),'--plan required');console.log(JSON.stringify(apply(JSON.parse(fs.readFileSync(get('--plan'))))));
- }else throw Error('use verify --home, preview --home --database --id --plan, or apply --plan');
+ }else throw Error(`use verify --home, preview --home --database --id --plan, or apply --plan (example runtime ${DEFAULT_RUNTIME})`);
 }
