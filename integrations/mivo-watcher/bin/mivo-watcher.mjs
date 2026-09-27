@@ -147,19 +147,30 @@ export function classifyReviewFeedback(item = {}) {
   return 'other';
 }
 
-function requiredName(check) {
-  return typeof check === 'string' ? check : check?.context ?? check?.name ?? null;
-}
-
-function knownRequiredNames({ policy, ci, requiredChecks }) {
+function knownRequiredRules({ policy, ci, requiredChecks }) {
   const verified = policy?.status === 'verified' && Array.isArray(policy.required) && policy.required.length
     ? policy.required : null;
   const evaluated = !verified && ci && ci.status !== 'unknown' && Array.isArray(ci.required) && ci.required.length
     ? ci.required : null;
   const listed = !verified && !evaluated && Array.isArray(requiredChecks) && requiredChecks.length
     ? requiredChecks : null;
-  const source = verified ?? evaluated ?? listed;
-  return source ? new Set(source.map(requiredName).filter(Boolean)) : null;
+  return verified ?? evaluated ?? listed ?? null;
+}
+
+function checkAppId(check) {
+  return check.app?.id ?? check.appId ?? check.producer ?? undefined;
+}
+
+function requiredVerdict(check, rules) {
+  if (!rules) return 'unknown-policy';
+  const name = typeof check === 'string' ? check : check.name ?? check.context ?? 'check';
+  const matching = rules.filter((rule) => (typeof rule === 'string' ? rule : rule.context ?? rule.name) === name);
+  if (!matching.length) return 'optional';
+  const needsApp = matching.some((rule) => typeof rule !== 'string' && rule.appId != null);
+  const hasProducer = check.app?.id != null || check.appId != null || check.app?.slug != null || check.producer != null;
+  if (needsApp && !hasProducer) return 'unknown-producer';
+  const appId = checkAppId(check);
+  return matching.some((rule) => typeof rule === 'string' || rule.appId == null || rule.appId === appId) ? 'required' : 'optional';
 }
 
 function withCategory(item) {
@@ -181,15 +192,15 @@ function withPublisher(item, comment) {
 
 export function feedbackItems({ pr, checks = [], requiredChecks = [], policy, ci, reviews = [], comments = [], threads = [], mergeable, receiptActor }) {
   const items = [];
-  const required = knownRequiredNames({ policy, ci, requiredChecks });
+  const required = knownRequiredRules({ policy, ci, requiredChecks });
   for (const check of checks) {
     const native = check.name ?? check.context ?? 'check';
     const failing = check.bucket === 'fail' || ['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED'].includes(check.state);
+    const verdict = requiredVerdict(check, required);
+    const deferred = verdict === 'unknown-policy' || verdict === 'unknown-producer';
     items.push(withCategory({
       source: 'ci',
-      ...(required
-        ? { actionable: Boolean(failing && required.has(native)) }
-        : { deferred: true, actionable: false }),
+      ...(deferred ? { deferred: true, actionable: false } : { actionable: Boolean(failing && verdict === 'required') }),
       nativeId: native,
       revision: `${check.bucket ?? check.state ?? ''}:${check.sha ?? pr.headRefOid ?? ''}`,
       sha: check.sha ?? pr.headRefOid ?? null,
@@ -892,7 +903,10 @@ function* scanWorkflow({
     } else if (!canResume) {
       dispatch.reason = 'eligibility-blocked';
     }
-    previous = markException(previous, now, events);
+    if (dispatch.reason === 'no-new-feedback' && collected.policy && collected.policy.status !== 'verified') {
+      dispatch.reason = 'policy-unknown';
+    }
+    previous = markException({ ...previous, lastPolicyStatus: collected.policy?.status ?? previous.lastPolicyStatus ?? null }, now, events);
     state.prs[key] = previous;
     report.push({
       number: pr.number, nodeId: pr.id, fresh: fresh.length, admissionVerified: admitted,

@@ -165,12 +165,13 @@ test('unknown policy optional CI is not dispatched and cursor is retained', (t) 
   assert.equal(first.cursor['ci:Greptile Review'], undefined);
   const { paths, listed } = scanHome(t);
   let sent = 0;
-  runScan(paths, listed, () => ({
+  const result = runScan(paths, listed, () => ({
     checks: [{ name: 'Greptile Review', state: 'FAILURE', bucket: 'fail' }],
     policy: { status: 'unknown', required: [] },
     mergeReady: false,
   }), () => { sent += 1; return { target_session_id: 's1' }; });
   assert.equal(sent, 0);
+  assert.equal(result.prs[0].dispatch.reason, 'policy-unknown');
   const cursor = JSON.parse(fs.readFileSync(paths.statePath, 'utf8')).prs.PR_1.feedbackCursor;
   assert.equal(cursor['ci:Greptile Review'], undefined);
 });
@@ -206,6 +207,48 @@ test('policy recovery then required CI red dispatches', (t) => {
   }), () => { sent += 1; return { target_session_id: 's1' }; });
   assert.equal(sent, 1);
   assert.equal(result.prs[0].dispatch.attempted, true);
+});
+
+test('same-name optional app failure does not dispatch', (t) => {
+  const items = feedbackItems({
+    pr,
+    checks: [{ name: 'verify', state: 'FAILURE', bucket: 'fail', app: { id: 8, slug: 'other' } }],
+    policy: { status: 'verified', required: [{ context: 'verify', appId: 7 }] },
+  });
+  assert.equal(items[0].actionable, false);
+  assert.equal(newFeedback({}, items).fresh.length, 0);
+  const { paths, listed } = scanHome(t);
+  let sent = 0;
+  runScan(paths, listed, () => ({
+    checks: [{ name: 'verify', state: 'FAILURE', bucket: 'fail', app: { id: 8, slug: 'other' } }],
+    policy: { status: 'verified', required: [{ context: 'verify', appId: 7 }] },
+    mergeReady: false,
+  }), () => { sent += 1; return { target_session_id: 's1' }; });
+  assert.equal(sent, 0);
+});
+
+test('required app failure dispatches', (t) => {
+  const { paths, listed } = scanHome(t);
+  let sent = 0;
+  const result = runScan(paths, listed, () => ({
+    checks: [{ name: 'verify', state: 'FAILURE', bucket: 'fail', app: { id: 7, slug: 'github-actions' } }],
+    policy: { status: 'verified', required: [{ context: 'verify', appId: 7 }] },
+    mergeReady: false,
+  }), () => { sent += 1; return { target_session_id: 's1' }; });
+  assert.equal(sent, 1);
+  assert.equal(result.prs[0].dispatch.attempted, true);
+});
+
+test('missing producer on app-scoped required is deferred', () => {
+  const items = feedbackItems({
+    pr,
+    checks: [{ name: 'verify', state: 'FAILURE', bucket: 'fail' }],
+    policy: { status: 'verified', required: [{ context: 'verify', appId: 7 }] },
+  });
+  assert.equal(items[0].deferred, true);
+  const first = newFeedback({}, items);
+  assert.equal(first.fresh.length, 0);
+  assert.equal(first.cursor['ci:verify'], undefined);
 });
 
 test('BASE-required failure with empty gh-required still dispatches', (t) => {
