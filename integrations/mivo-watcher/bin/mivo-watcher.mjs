@@ -473,6 +473,34 @@ export function dispatchParams({ pr, mapping, fresh, now, taskPath, home }) {
   return params;
 }
 
+export function watchGuideMessage({ home, prNumber, nodeId }) {
+  const helper = `${home}/bin/mivo-repair.mjs`;
+  return `第 0 步（只做一次）：运行 \`node ${helper} --home ${home} schedule-params --pr ${prNumber} --node-id ${nodeId}\`，把输出 JSON 原样作为 cindy_scheduler 的 schedule_create 参数调用；把工具返回原样存成文件后运行 \`${helper} --home ${home} bind-schedule --pr ${prNumber} --node-id ${nodeId} --result <文件>\`。bind 被拒说明本 PR 已有 owner，立刻停止并回复一句说明。之后本 PR 的所有反馈只会投递到你这里（每 5 分钟由你的轮询脚本检查）。`;
+}
+export function watchSuccessorMessage({ prNumber, predecessorId, reason }) {
+  return `你是 PR #${prNumber} 的接班修复 session，前任 ${predecessorId} 已不可用（${reason}）；先读本 PR 状态摘要 …，再执行第 0 步。`;
+}
+export function watchPollLostMessage({ prNumber, heartbeatAt, scheduleId }) {
+  return `你的 PR #${prNumber} 轮询调度失联（最后心跳 ${heartbeatAt}）：先 schedule_get ${scheduleId ?? ''}；paused 则 schedule_resume；不存在则重新执行第 0 步。`;
+}
+export function watchClosedownMessage({ prNumber, state, scheduleId, home }) {
+  const verb = state === 'MERGED' ? '合并' : '关闭';
+  return `PR #${prNumber} 已${verb}：调用 schedule_delete ${scheduleId ?? ''} 删除本 PR 轮询调度，再运行 \`${home}/bin/mivo-repair.mjs --home ${home} cleanup --pr ${prNumber}\`；不做其它改动。`;
+}
+export function pollFingerprint(snapshot) {
+  return digest({
+    state: snapshot.state, isDraft: snapshot.isDraft, headRefOid: snapshot.headRefOid,
+    baseRefOid: snapshot.baseRefOid, updatedAt: snapshot.updatedAt, mergeable: snapshot.mergeable,
+    labels: snapshot.labels ?? [], checkState: snapshot.checkState,
+    commentCount: snapshot.commentCount ?? 0, reviewCount: snapshot.reviewCount ?? 0,
+    commentUpdatedAt: snapshot.commentUpdatedAt ?? null, reviewUpdatedAt: snapshot.reviewUpdatedAt ?? null,
+    unresolvedThreads: snapshot.unresolvedThreads ?? 0,
+  });
+}
+function hasWatchOff(labels) {
+  return (labels ?? []).map((item) => typeof item === 'string' ? item : item?.name).includes('mivo-watch:off');
+}
+
 function dispatchIntent({ pr, mapping, fresh, now, paths, dryRun }) {
   const dispatchId = `${dryRun ? 'dry' : 'live'}-${pr.number}-${now}`;
   const taskPath = path.join(paths.stateDir, 'tasks', `${dispatchId}.json`);
@@ -627,7 +655,7 @@ function rememberDispatchFailure(state, key, error, now, paths) {
 export function* processPr({
   pr, previous: previousArg, state, paths, now, events, report, viewer, dryRun,
   dispatchFn, collect, ghFn, recheckFn, ownershipSnapshot, maintenanceSessionId,
-  remaining, deadline, clock, resumeCursor, resetPrDeadline,
+  remaining, deadline, clock, resumeCursor, resetPrDeadline, allowCreate = true,
 } = {}) {
   const key = String(pr.id);
   let previous = migrateEntry(clearDryPending(previousArg ?? (state.prs[key] || {})));
@@ -821,6 +849,9 @@ export function* processPr({
       previous = rememberDispatchFailure(state, key, error, now, paths);
       dispatch = { attempted: true, bound: false, reason: 'dispatch-unconfirmed', error: String(error.message).slice(0, 400) };
     }
+  } else if (shouldDispatch && !allowCreate && !previous.sessionId) {
+    previous = { ...previous, needsOwner: true };
+    dispatch = { attempted: false, bound: false, reason: 'needs-owner' };
   } else if (shouldDispatch) {
     const pending = { ...dispatchIntent({ pr, mapping, fresh, now, paths, dryRun }), cursor };
     previous = { ...previous, pendingDispatch: pending };
@@ -951,8 +982,97 @@ function* scanWorkflow({
     viewer, repo: REPO, prs: report, events, scan:state.scan, statePath: paths.statePath };
 }
 
+export function* pollWorkflow({
+  now = new Date().toISOString(),
+  enabled = process.env.MIVO_WATCHER_ENABLED === '1',
+  allowDispatch = process.env.MIVO_WATCHER_DISPATCH === '1',
+  ghFn = gh, collect = collectPr, dispatchFn = null, paths = watcherPaths(),
+  recheckFn = recheckResult, ownershipSnapshot = collectPrOwnership,
+  clock = Date.now, budgetMs = 120000,
+  nodeId = process.env.MIVO_WATCHER_NODE_ID,
+  prNumber = process.env.MIVO_WATCHER_PR,
+  snapshotFn = null,
+} = {}) {
+  const started = clock();
+  const deadline = started + Math.min(120000, Math.max(1, budgetMs));
+  const remaining = () => Math.max(0, deadline - clock());
+  const dryRun = !(enabled && allowDispatch && typeof dispatchFn === 'function');
+  const number = Number(prNumber);
+  let previous = readPr(paths.home, nodeId) || { nodeId, number };
+  const report = [];
+  const events = [];
+  const snapshot = snapshotFn
+    ? snapshotFn({ nodeId, prNumber: number, previous })
+    : JSON.parse(yield () => ghFn(['pr', 'view', String(number), '--repo', REPO, '--json',
+      'state,isDraft,headRefOid,baseRefOid,updatedAt,mergeable,labels,statusCheckRollup,comments,reviews']));
+  const labels = (snapshot.labels ?? []).map((item) => typeof item === 'string' ? item : item?.name).filter(Boolean);
+  const normalized = snapshotFn ? snapshot : {
+    state: snapshot.state, isDraft: snapshot.isDraft, headRefOid: snapshot.headRefOid,
+    baseRefOid: snapshot.baseRefOid, updatedAt: snapshot.updatedAt, mergeable: snapshot.mergeable, labels,
+    checkState: snapshot.statusCheckRollup?.[0]?.state ?? snapshot.statusCheckRollup?.state ?? null,
+    commentCount: snapshot.comments?.length ?? 0, reviewCount: snapshot.reviews?.length ?? 0,
+    commentUpdatedAt: snapshot.comments?.at?.(-1)?.updatedAt ?? null,
+    reviewUpdatedAt: snapshot.reviews?.at?.(-1)?.updatedAt ?? null,
+    unresolvedThreads: snapshot.unresolvedThreads ?? 0,
+  };
+  const fingerprint = pollFingerprint(normalized);
+  const save = (entry) => {
+    const next = { ...entry, nodeId, number, heartbeatAt: now };
+    writePr(paths.home, nodeId, next);
+    return next;
+  };
+  if (normalized.state === 'MERGED' || normalized.state === 'CLOSED') {
+    if (previous.closedHandled) {
+      return { mode: 'poll', dispatch: false, prs: [{ number, nodeId, dispatch: { attempted: false, reason: 'closed-handled' } }] };
+    }
+    let dispatch = { attempted: false, bound: false, reason: 'closedown' };
+    if (!dryRun && previous.sessionId) {
+      try {
+        const params = {
+          title: previous.title || `MivoPlugin-#${number}`,
+          message: watchClosedownMessage({ prNumber: number, state: normalized.state, scheduleId: previous.scheduleId, home: paths.home }),
+          target_session_id: previous.sessionId,
+        };
+        yield () => dispatchFn(params, { timeoutMs: Math.max(1, remaining()) });
+        dispatch = { attempted: true, bound: true, reason: 'closedown' };
+      } catch (error) {
+        dispatch = { attempted: true, bound: false, reason: 'closedown-unconfirmed', error: String(error.message).slice(0, 400) };
+      }
+    }
+    save({ ...previous, closedHandled: true, pollFingerprint: fingerprint });
+    return { mode: 'poll', dispatch: dispatch.attempted, prs: [{ number, nodeId, dispatch }] };
+  }
+  if (hasWatchOff(normalized.labels) || hasWatchOff(labels)) {
+    save({ ...previous, optOut: true });
+    return { mode: 'poll', dispatch: false, prs: [{ number, nodeId, dispatch: { attempted: false, reason: 'opt-out' } }] };
+  }
+  const pendingRetry = previous.pendingDispatch?.status === 'retryable';
+  const recoveryDue = Boolean(readTaskForRecovery(previous, paths, now));
+  if (previous.pollFingerprint === fingerprint && !pendingRetry && !recoveryDue) {
+    save(previous);
+    return { mode: 'poll', dispatch: false, prs: [{ number, nodeId, dispatch: { attempted: false, reason: 'fingerprint-unchanged' } }] };
+  }
+  if (!previous.sessionId) {
+    save({ ...previous, needsOwner: true, pollFingerprint: fingerprint });
+    return { mode: 'poll', dispatch: false, prs: [{ number, nodeId, needsOwner: true, dispatch: { attempted: false, reason: 'needs-owner' } }] };
+  }
+  const viewer = String(yield () => ghFn(['api', 'user', '-q', '.login'])).trim();
+  const pr = {
+    id: nodeId, number, headRefOid: normalized.headRefOid, baseRefOid: normalized.baseRefOid,
+    headRefName: previous.headRefName, title: previous.title || `PR ${number}`, isDraft: normalized.isDraft === true,
+    url: previous.url, state: normalized.state,
+  };
+  const state = { version: 2, repo: REPO, prs: { [String(nodeId)]: previous } };
+  yield* processPr({
+    pr, previous, state, paths, now, events, report, viewer, dryRun, dispatchFn, collect, ghFn,
+    recheckFn, ownershipSnapshot, remaining, deadline, clock, allowCreate: false, resetPrDeadline: () => {},
+  });
+  save({ ...(state.prs[String(nodeId)] || previous), pollFingerprint: fingerprint, needsOwner: false, optOut: false });
+  return { mode: 'poll', dispatch: !dryRun, prs: report, events };
+}
+
 export function scanOnce(options = {}) {
-  const iterator = scanWorkflow(options);
+  const iterator = options.mode === 'poll' ? pollWorkflow(options) : scanWorkflow(options);
   let step = iterator.next();
   while (!step.done) {
     let value;
@@ -965,7 +1085,9 @@ export function scanOnce(options = {}) {
 }
 
 export async function scanOnceAsync(options = {}) {
-  const iterator = scanWorkflow({ collect: collectPrAsync, ...options });
+  const mode = options.mode ?? watcherMode();
+  const workflow = mode === 'poll' ? pollWorkflow : scanWorkflow;
+  const iterator = workflow({ collect: collectPrAsync, ...options });
   let step = iterator.next();
   while (!step.done) {
     let value;
