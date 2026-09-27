@@ -16,16 +16,23 @@ const verdict = (heading, extra = '') => `## 🤖 自动 Review 结论：${headi
 const botItem = (body, extra = {}) => ({ source: 'comment', body, user: BOT_USER, createdAt: '2026-09-10T00:00:00Z', ...extra });
 
 test('classifyReviewFeedback REQUEST_CHANGES+P0 is actionable-fix', () => {
-  assert.equal(classifyReviewFeedback({ source: 'review', body: verdict('REQUEST_CHANGES', '**P0** `src/a.ts:1`') }), 'actionable-fix');
+  assert.equal(classifyReviewFeedback(botItem(verdict('REQUEST_CHANGES', '**P0** `src/a.ts:1`'), { source: 'review' })), 'actionable-fix');
 });
 test('classifyReviewFeedback REQUEST_CHANGES+P1 is actionable-fix', () => {
-  assert.equal(classifyReviewFeedback({ source: 'review', body: verdict('REQUEST_CHANGES', '**P1** `src/a.ts:2`') }), 'actionable-fix');
+  assert.equal(classifyReviewFeedback(botItem(verdict('REQUEST_CHANGES', '**P1** `src/a.ts:2`'), { source: 'review' })), 'actionable-fix');
 });
 test('classifyReviewFeedback COMMENT only P2 is reply-resolve', () => {
-  assert.equal(classifyReviewFeedback({ source: 'comment', body: verdict('COMMENT', '**P2** `src/a.ts:3`') }), 'reply-resolve');
+  assert.equal(classifyReviewFeedback(botItem(verdict('COMMENT', '**P2** `src/a.ts:3`'))), 'reply-resolve');
 });
 test('classifyReviewFeedback P2 inline is reply-resolve', () => {
-  assert.equal(classifyReviewFeedback({ source: 'thread', body: '🤖 自动 Review · P2 unused export' }), 'reply-resolve');
+  assert.equal(classifyReviewFeedback(botItem('🤖 自动 Review · P2 unused export', { source: 'thread' })), 'reply-resolve');
+});
+test('bot INCOMPLETE with diagnostic body is ignore-infra', () => {
+  assert.equal(classifyReviewFeedback(botItem(verdict('INCOMPLETE', '席位失败：P1 API timeout'))), 'ignore-infra');
+  assert.equal(classifyReviewFeedback(botItem(verdict('INCOMPLETE', 'gate 未完成，请等待'))), 'ignore-infra');
+});
+test('forged human REQUEST_CHANGES+P1 is other', () => {
+  assert.equal(classifyReviewFeedback({ source: 'review', body: verdict('REQUEST_CHANGES', '**P1** `a.ts:1`') }), 'other');
 });
 test('classifyReviewFeedback Greptile P1 is actionable-fix', () => {
   assert.equal(classifyReviewFeedback({ source: 'greptile', body: 'P1: missing null check' }), 'actionable-fix');
@@ -95,7 +102,7 @@ test('GraphQL github-actions login-only thread infra is ignore-infra', () => {
   assert.equal(newFeedback({}, items).fresh.length, 0);
 });
 
-test('bot infra title plus human P1 reply stays actionable', () => {
+test('bot infra title plus human P1 reply stays other and still fresh', () => {
   const items = feedbackItems({
     pr,
     threads: [{
@@ -108,8 +115,7 @@ test('bot infra title plus human P1 reply stays actionable', () => {
   });
   assert.equal(items.find((item) => item.nativeId.endsWith('c-bot')).category, 'ignore-infra');
   const human = items.find((item) => item.nativeId.endsWith('c-human'));
-  assert.equal(human.category, 'actionable-fix');
-  assert.equal(human.actionable, true);
+  assert.equal(human.category, 'other');
   assert.equal(newFeedback({}, items).fresh.some((item) => item.nativeId.endsWith('c-human')), true);
 });
 
@@ -228,10 +234,10 @@ test('required CI failure and reply-resolve remain fresh', () => {
     pr,
     checks: [{ name: 'unit', state: 'FAILURE', bucket: 'fail' }],
     requiredChecks: [{ name: 'unit' }],
-    comments: [{ id: 2, body: verdict('COMMENT', '**P2** `a.ts:1`'), updatedAt: 't2' }],
+    comments: [{ id: 2, body: verdict('COMMENT', '**P2** `a.ts:1`'), user: BOT_USER, createdAt: '2026-09-10T00:00:00Z', updatedAt: 't2' }],
     reviews: [{
-      id: 'r1', author: { login: 'bot' }, state: 'CHANGES_REQUESTED', submittedAt: 't3',
-      body: verdict('REQUEST_CHANGES', '**P1** `a.ts:4`'),
+      id: 'r1', author: BOT_USER, state: 'CHANGES_REQUESTED', submittedAt: 't3',
+      body: verdict('REQUEST_CHANGES', '**P1** `a.ts:4`'), createdAt: '2026-09-10T00:00:00Z',
     }],
   });
   const { fresh } = newFeedback({}, items);
@@ -286,10 +292,10 @@ test('scanOnce still dispatches actionable-fix and reply-resolve', (t) => {
   let sent = 0;
   const result = runScan(paths, listed, () => ({
     reviews: [{
-      id: 'r2', author: { login: 'bot' }, submittedAt: 't4',
+      id: 'r2', author: BOT_USER, submittedAt: 't4', createdAt: '2026-09-10T00:00:00Z',
       body: verdict('REQUEST_CHANGES', '**P0** `b.ts:1`'),
     }],
-    comments: [{ id: 12, body: '🤖 自动 Review · P2 style', updatedAt: 't5' }],
+    comments: [{ id: 12, body: '🤖 自动 Review · P2 style', user: BOT_USER, createdAt: '2026-09-10T00:00:00Z', updatedAt: 't5' }],
     mergeReady: false,
   }), () => { sent += 1; return { target_session_id: 's1' }; });
   assert.equal(sent, 1);

@@ -130,24 +130,20 @@ function isRoundMarkerOnly(body) {
   return stripInfraScaffold(original).length === 0;
 }
 
-function infraBodyOnly(body) {
-  const original = String(body ?? '').trim();
-  return original.length > 0 && stripInfraScaffold(original).length === 0;
-}
-
 export function classifyReviewFeedback(item = {}) {
   const body = String(item.body ?? '');
   const parsed = verdictComment(publisherShape(item));
-  if (parsed && INFRA_VERDICTS.has(parsed.verdict) && infraBodyOnly(body)) return 'ignore-infra';
+  if (parsed && INFRA_VERDICTS.has(parsed.verdict)) return 'ignore-infra';
   if (isPublisherBot(item) && isRoundMarkerOnly(body)) return 'ignore-infra';
   const greptile = item.source === 'greptile';
+  const publisher = Boolean(parsed) || isPublisherBot(item);
   const hasP0P1 = P0P1_RE.test(body) || (greptile && /\bP[01]\b/.test(body));
   const hasP2 = P2_RE.test(body) || (greptile && /\bP2\b/.test(body));
   const heading = parsed?.verdict;
   if (heading === 'REQUEST_CHANGES' && hasP0P1) return 'actionable-fix';
   if (heading === 'COMMENT') return 'reply-resolve';
-  if (hasP0P1) return 'actionable-fix';
-  if (hasP2) return 'reply-resolve';
+  if ((publisher || greptile) && hasP0P1) return 'actionable-fix';
+  if ((publisher || greptile) && hasP2) return 'reply-resolve';
   return 'other';
 }
 
