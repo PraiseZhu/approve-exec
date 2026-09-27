@@ -1101,7 +1101,7 @@ export function* pollWorkflow({
   }
   const pendingRetry = previous.pendingDispatch?.status === 'retryable';
   const recoveryDue = Boolean(readTaskForRecovery(previous, paths, now));
-  if (previous.pollFingerprint === fingerprint && !pendingRetry && !recoveryDue) {
+  if (previous.pollFingerprint === fingerprint && !pendingRetry && !recoveryDue && !previous.collectRetry) {
     save(previous);
     return { mode: 'poll', dispatch: false, prs: [{ number, nodeId, dispatch: { attempted: false, reason: 'fingerprint-unchanged' } }] };
   }
@@ -1120,7 +1120,13 @@ export function* pollWorkflow({
     pr, previous, state, paths, now, events, report, viewer, dryRun, dispatchFn, collect, ghFn,
     recheckFn, ownershipSnapshot, remaining, deadline, clock, allowCreate: false, resetPrDeadline: () => {},
   });
-  save({ ...(state.prs[String(nodeId)] || previous), pollFingerprint: fingerprint, needsOwner: false, optOut: false });
+  const latest = state.prs[String(nodeId)] || previous;
+  const collectFailed = report.some((item) => item.dispatch?.reason === 'collection-failed');
+  if (collectFailed) {
+    save({ ...latest, pollFingerprint: previous.pollFingerprint, collectRetry: true });
+  } else {
+    save({ ...latest, pollFingerprint: fingerprint, collectRetry: false, needsOwner: false, optOut: false });
+  }
   return { mode: 'poll', dispatch: !dryRun, prs: report, events };
 }
 

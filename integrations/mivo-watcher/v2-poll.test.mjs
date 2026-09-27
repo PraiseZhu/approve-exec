@@ -154,6 +154,32 @@ test('mivo-watch:off does not dispatch', (t) => {
   assert.equal(entry.heartbeatAt, now);
 });
 
+test('collect failure does not commit fingerprint and retries next round', (t) => {
+  const { paths } = homeOf(t);
+  const oldFp = pollFingerprint(snap());
+  seed(paths, { pollFingerprint: oldFp });
+  const changed = snap({ commentCount: 9, commentUpdatedAt: '2026-09-28T04:00:00Z' });
+  const first = poll(paths, {
+    snapshot: changed,
+    collect: () => { throw new Error('gh timeout'); },
+    dispatchFn: () => ({ target_session_id: 'sess-790' }),
+  });
+  assert.equal(first.result.prs[0].dispatch.reason, 'collection-failed');
+  assert.equal(first.entry.pollFingerprint, oldFp);
+  assert.equal(first.entry.collectRetry, true);
+  let collected = 0;
+  const second = poll(paths, {
+    snapshot: changed,
+    collect: () => {
+      collected += 1;
+      throw new Error('gh timeout again');
+    },
+    dispatchFn: () => ({ target_session_id: 'sess-790' }),
+  });
+  assert.equal(collected, 1);
+  assert.equal(second.entry.pollFingerprint, oldFp);
+});
+
 test('missing sessionId records needsOwner and does not create', (t) => {
   const { paths } = homeOf(t);
   seed(paths, { sessionId: null });
