@@ -141,39 +141,33 @@ test('greptile thread P1 colon and mixed P2 classify separately', () => {
   assert.deepEqual(newFeedback({}, items).fresh.map((item) => item.category).sort(), ['actionable-fix', 'other', 'reply-resolve']);
 });
 
-test('optional CI failure advances cursor but is not fresh', () => {
+test('optional CI failure is not a required CI item', () => {
   const items = feedbackItems({
     pr,
     checks: [{ name: 'Greptile Review', state: 'FAILURE', bucket: 'fail' }],
-    requiredChecks: [{ name: 'unit' }],
+    ci: { status: 'green', required: [{ context: 'unit', status: 'green' }] },
   });
-  assert.equal(items[0].actionable, false);
-  const first = newFeedback({}, items);
-  assert.equal(first.fresh.length, 0);
-  assert.ok(first.cursor['ci:Greptile Review']);
+  assert.equal(items.filter((item) => item.source === 'ci').length, 0);
 });
 
 test('unknown policy optional CI is not dispatched and cursor is retained', (t) => {
   const items = feedbackItems({
     pr,
     checks: [{ name: 'Greptile Review', state: 'FAILURE', bucket: 'fail' }],
+    ci: { status: 'unknown', required: [] },
     policy: { status: 'unknown', required: [] },
   });
-  assert.equal(items[0].deferred, true);
-  const first = newFeedback({}, items);
-  assert.equal(first.fresh.length, 0);
-  assert.equal(first.cursor['ci:Greptile Review'], undefined);
+  assert.equal(items.filter((item) => item.source === 'ci').length, 0);
   const { paths, listed } = scanHome(t);
   let sent = 0;
   const result = runScan(paths, listed, () => ({
     checks: [{ name: 'Greptile Review', state: 'FAILURE', bucket: 'fail' }],
+    ci: { status: 'unknown', required: [] },
     policy: { status: 'unknown', required: [] },
     mergeReady: false,
   }), () => { sent += 1; return { target_session_id: 's1' }; });
   assert.equal(sent, 0);
   assert.equal(result.prs[0].dispatch.reason, 'policy-unknown');
-  const cursor = JSON.parse(fs.readFileSync(paths.statePath, 'utf8')).prs.PR_1.feedbackCursor;
-  assert.equal(cursor['ci:Greptile Review'], undefined);
 });
 
 test('unknown policy still dispatches human review comments', (t) => {
@@ -202,6 +196,7 @@ test('policy recovery then required CI red dispatches', (t) => {
   assert.equal(JSON.parse(fs.readFileSync(paths.statePath, 'utf8')).prs.PR_1.feedbackCursor['ci:lint'], undefined);
   const result = runScan(paths, listed, () => ({
     checks: [{ name: 'lint', state: 'FAILURE', bucket: 'fail' }],
+    ci: { status: 'failed', required: [{ context: 'lint', status: 'failed', evidence: { id: 3, runId: 4, attempt: 1 } }] },
     policy: { status: 'verified', required: [{ context: 'lint' }] },
     mergeReady: false,
   }), () => { sent += 1; return { target_session_id: 's1' }; });
@@ -212,15 +207,15 @@ test('policy recovery then required CI red dispatches', (t) => {
 test('same-name optional app failure does not dispatch', (t) => {
   const items = feedbackItems({
     pr,
-    checks: [{ name: 'verify', state: 'FAILURE', bucket: 'fail', app: { id: 8, slug: 'other' } }],
+    ci: { status: 'green', required: [{ context: 'verify', appId: 7, status: 'green' }] },
     policy: { status: 'verified', required: [{ context: 'verify', appId: 7 }] },
   });
-  assert.equal(items[0].actionable, false);
-  assert.equal(newFeedback({}, items).fresh.length, 0);
+  assert.equal(items.filter((item) => item.source === 'ci').length, 0);
   const { paths, listed } = scanHome(t);
   let sent = 0;
   runScan(paths, listed, () => ({
     checks: [{ name: 'verify', state: 'FAILURE', bucket: 'fail', app: { id: 8, slug: 'other' } }],
+    ci: { status: 'green', required: [{ context: 'verify', appId: 7, status: 'green' }] },
     policy: { status: 'verified', required: [{ context: 'verify', appId: 7 }] },
     mergeReady: false,
   }), () => { sent += 1; return { target_session_id: 's1' }; });
@@ -231,7 +226,7 @@ test('required app failure dispatches', (t) => {
   const { paths, listed } = scanHome(t);
   let sent = 0;
   const result = runScan(paths, listed, () => ({
-    checks: [{ name: 'verify', state: 'FAILURE', bucket: 'fail', app: { id: 7, slug: 'github-actions' } }],
+    ci: { status: 'failed', required: [{ context: 'verify', appId: 7, status: 'failed', evidence: { id: 7, runId: 8, attempt: 1, url: 'https://github.com/x/y' } }] },
     policy: { status: 'verified', required: [{ context: 'verify', appId: 7 }] },
     mergeReady: false,
   }), () => { sent += 1; return { target_session_id: 's1' }; });
@@ -239,16 +234,14 @@ test('required app failure dispatches', (t) => {
   assert.equal(result.prs[0].dispatch.attempted, true);
 });
 
-test('missing producer on app-scoped required is deferred', () => {
+test('unknown ci does not emit required CI items', () => {
   const items = feedbackItems({
     pr,
     checks: [{ name: 'verify', state: 'FAILURE', bucket: 'fail' }],
+    ci: { status: 'unknown', required: [] },
     policy: { status: 'verified', required: [{ context: 'verify', appId: 7 }] },
   });
-  assert.equal(items[0].deferred, true);
-  const first = newFeedback({}, items);
-  assert.equal(first.fresh.length, 0);
-  assert.equal(first.cursor['ci:verify'], undefined);
+  assert.equal(items.filter((item) => item.source === 'ci').length, 0);
 });
 
 test('production gh pr checks without app plus check-runs dispatch required failure', (t) => {
@@ -262,7 +255,7 @@ test('production gh pr checks without app plus check-runs dispatch required fail
         id: 99, name: 'pr-format-gate', conclusion: 'failure', status: 'completed',
         app: { id: 15368, slug: 'github-actions' }, head_sha: HEAD,
       }],
-      required: [{ context: 'pr-format-gate', appId: 15368, status: 'failed' }],
+      required: [{ context: 'pr-format-gate', appId: 15368, status: 'failed', reason: 'required-check-failed', evidence: { id: 99, runId: 100, attempt: 2, url: 'https://github.com/xindong/mivo-canvas-plugin/actions/runs/100/job/99' } }],
     },
     policy: { status: 'verified', required: [{ context: 'pr-format-gate', appId: 15368 }] },
     mergeReady: false,
@@ -270,6 +263,38 @@ test('production gh pr checks without app plus check-runs dispatch required fail
   assert.equal(sent, 1);
   assert.equal(result.prs[0].dispatch.attempted, true);
   assert.equal(result.prs[0].fresh, 1);
+});
+
+test('same check pending then failed is fresh on the failed scan', () => {
+  const pending = feedbackItems({
+    pr,
+    ci: { status: 'pending', required: [{ context: 'verify', appId: 15368, status: 'pending', evidence: { id: 21, runId: 30, attempt: 1 } }] },
+  });
+  const first = newFeedback({}, pending);
+  assert.equal(first.fresh.filter((item) => item.source === 'ci').length, 0);
+  const failed = feedbackItems({
+    pr,
+    ci: { status: 'failed', required: [{ context: 'verify', appId: 15368, status: 'failed', evidence: { id: 21, runId: 30, attempt: 1, url: 'https://github.com/x/y/actions/runs/30' } }] },
+  });
+  const second = newFeedback(first.cursor, failed);
+  assert.equal(second.fresh.length, 1);
+  assert.match(second.fresh[0].body, /failed/);
+  assert.match(second.fresh[0].body, /run=30/);
+});
+
+test('successful rerun of required check is not CI fresh', () => {
+  const failed = feedbackItems({
+    pr,
+    ci: { status: 'failed', required: [{ context: 'verify', appId: 7, status: 'failed', evidence: { id: 1, runId: 2, attempt: 1 } }] },
+  });
+  const first = newFeedback({}, failed);
+  assert.equal(first.fresh.length, 1);
+  const green = feedbackItems({
+    pr,
+    ci: { status: 'green', required: [{ context: 'verify', appId: 7, status: 'green', evidence: { id: 1, runId: 2, attempt: 2 } }] },
+  });
+  const second = newFeedback(first.cursor, green);
+  assert.equal(second.fresh.filter((item) => item.source === 'ci').length, 0);
 });
 
 test('base-file union keeps app scope so other app does not dispatch', (t) => {
@@ -288,10 +313,12 @@ test('base-file union keeps app scope so other app does not dispatch', (t) => {
 });
 
 test('BASE-required failure with empty gh-required still dispatches', (t) => {
+  const ci = { status: 'failed', required: [{ context: 'lint', status: 'failed', evidence: { id: 11, runId: 12, attempt: 1 } }] };
   const items = feedbackItems({
     pr,
     checks: [{ name: 'lint', state: 'FAILURE', bucket: 'fail' }],
     requiredChecks: [],
+    ci,
     policy: { status: 'verified', required: [{ context: 'lint' }] },
   });
   assert.equal(items[0].actionable, true);
@@ -301,6 +328,7 @@ test('BASE-required failure with empty gh-required still dispatches', (t) => {
   const result = runScan(paths, listed, () => ({
     checks: [{ name: 'lint', state: 'FAILURE', bucket: 'fail' }],
     requiredChecks: [],
+    ci,
     policy: { status: 'verified', required: [{ context: 'lint' }] },
     mergeReady: false,
   }), () => { sent += 1; return { target_session_id: 's1' }; });
@@ -312,6 +340,7 @@ test('required CI failure and reply-resolve remain fresh', () => {
   const items = feedbackItems({
     pr,
     checks: [{ name: 'unit', state: 'FAILURE', bucket: 'fail' }],
+    ci: { status: 'failed', required: [{ context: 'unit', status: 'failed', evidence: { id: 5, runId: 6, attempt: 1 } }] },
     requiredChecks: [{ name: 'unit' }],
     comments: [{ id: 2, body: verdict('COMMENT', '**P2** `a.ts:1`'), user: BOT_USER, createdAt: '2026-09-10T00:00:00Z', updatedAt: 't2' }],
     reviews: [{
@@ -363,7 +392,6 @@ test('scanOnce does not dispatch ignore-infra or optional CI, cursor advances', 
   assert.equal(result.prs[0].dispatch.attempted, false);
   const cursor = JSON.parse(fs.readFileSync(paths.statePath, 'utf8')).prs.PR_1.feedbackCursor;
   assert.ok(cursor['comment:11']);
-  assert.ok(cursor['ci:Greptile Review']);
 });
 
 test('scanOnce still dispatches actionable-fix and reply-resolve', (t) => {

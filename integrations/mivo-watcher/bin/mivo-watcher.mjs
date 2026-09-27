@@ -11,8 +11,6 @@ import { fileURLToPath } from 'node:url';
 import { planSessionTitle, repairSessionTitle } from './session-title.mjs';
 import { collectPublicReview, verdictComment } from './public-review.mjs';
 import { collectPrSnapshot, collectPrOwnership } from './mivo-pr-snapshot.mjs';
-import { collectMivoCi, collectMivoCiSync } from './mivo-ci.mjs';
-
 export const REPO = 'xindong/mivo-canvas-plugin';
 const GH = process.env.GH_BIN ?? 'gh';
 
@@ -147,50 +145,31 @@ export function classifyReviewFeedback(item = {}) {
   return 'other';
 }
 
-function knownRequiredRules({ policy, ci, requiredChecks }) {
-  const verified = policy?.status === 'verified' && Array.isArray(policy.required) && policy.required.length
-    ? policy.required : null;
-  const evaluated = !verified && ci && ci.status !== 'unknown' && Array.isArray(ci.required) && ci.required.length
-    ? ci.required : null;
-  const listed = !verified && !evaluated && Array.isArray(requiredChecks) && requiredChecks.length
-    ? requiredChecks : null;
-  return verified ?? evaluated ?? listed ?? null;
-}
-
-function checkAppId(check) {
-  return check.app?.id ?? check.appId ?? check.producer ?? undefined;
-}
-
-function requiredVerdict(check, rules) {
-  if (!rules) return 'unknown-policy';
-  const name = typeof check === 'string' ? check : check.name ?? check.context ?? 'check';
-  const matching = rules.filter((rule) => (typeof rule === 'string' ? rule : rule.context ?? rule.name) === name);
-  if (!matching.length) return 'optional';
-  const needsApp = matching.some((rule) => typeof rule !== 'string' && rule.appId != null);
-  const hasProducer = check.app?.id != null || check.appId != null || check.app?.slug != null || check.producer != null;
-  if (needsApp && !hasProducer) return 'unknown-producer';
-  const appId = checkAppId(check);
-  return matching.some((rule) => typeof rule === 'string' || rule.appId == null || rule.appId === appId) ? 'required' : 'optional';
-}
-
-function isFailingCheck(check) {
-  if (check.bucket === 'fail') return true;
-  if (['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED'].includes(check.state)) return true;
-  return ['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure', 'stale'].includes(String(check.conclusion ?? '').toLowerCase());
-}
-
-function ciSourceChecks({ checks = [], ci } = {}) {
-  if (Array.isArray(ci?.checks) && ci.checks.length) return ci.checks;
-  if (Array.isArray(ci?.required) && ci.required.length) {
-    return ci.required.map((rule) => ({
-      name: rule.context, context: rule.context, appId: rule.appId,
-      app: rule.appId != null ? { id: rule.appId } : undefined,
-      bucket: rule.status === 'failed' ? 'fail' : rule.status === 'green' ? 'pass' : rule.status === 'pending' ? 'pending' : 'unknown',
-      state: rule.status === 'failed' ? 'FAILURE' : rule.status === 'green' ? 'SUCCESS' : 'PENDING',
-      description: rule.reason, sha: rule.evidence?.sha, id: rule.evidence?.id,
-    }));
+function failedRequiredCiItems({ pr, ci }) {
+  if (!ci || ci.status === 'unknown' || !Array.isArray(ci.required)) return [];
+  const items = [];
+  for (const rule of ci.required) {
+    if (rule.status !== 'failed') continue;
+    const evidence = rule.evidence ?? {};
+    const native = rule.context ?? 'check';
+    const checkId = evidence.id ?? null;
+    const runId = evidence.runId ?? null;
+    const attempt = evidence.attempt ?? null;
+    const url = evidence.url ?? '';
+    items.push({
+      source: 'ci',
+      actionable: true,
+      nativeId: rule.appId != null ? `${native}#${rule.appId}` : native,
+      revision: `${rule.status}:${checkId ?? ''}:${attempt ?? ''}`,
+      sha: evidence.sha ?? pr.headRefOid ?? null,
+      body: `${native} failed ${rule.reason ?? ''} check=${checkId ?? ''} run=${runId ?? ''}${attempt != null ? ` attempt=${attempt}` : ''} ${url}`.trim(),
+      contentHash: digest({
+        context: native, appId: rule.appId, status: rule.status,
+        id: checkId, runId, attempt, url,
+      }),
+    });
   }
-  return checks;
+  return items;
 }
 
 function withCategory(item) {
@@ -212,24 +191,7 @@ function withPublisher(item, comment) {
 
 export function feedbackItems({ pr, checks = [], requiredChecks = [], policy, ci, reviews = [], comments = [], threads = [], mergeable, receiptActor }) {
   const items = [];
-  const required = knownRequiredRules({ policy, ci, requiredChecks });
-  const sourceChecks = ciSourceChecks({ checks, ci });
-  const haveRuns = Array.isArray(ci?.checks) && ci.checks.length > 0 || Array.isArray(ci?.required) && ci.required.length > 0;
-  for (const check of sourceChecks) {
-    const native = check.name ?? check.context ?? 'check';
-    const failing = isFailingCheck(check);
-    const verdict = requiredVerdict(check, required);
-    const deferred = !haveRuns && (verdict === 'unknown-policy' || verdict === 'unknown-producer');
-    items.push(withCategory({
-      source: 'ci',
-      ...(deferred ? { deferred: true, actionable: false } : { actionable: Boolean(failing && verdict === 'required') }),
-      nativeId: native,
-      revision: `${check.bucket ?? check.state ?? ''}:${check.sha ?? pr.headRefOid ?? ''}`,
-      sha: check.sha ?? pr.headRefOid ?? null,
-      body: check.description ?? `${native} ${check.state ?? ''} ${check.link ?? ''}`.trim(),
-      contentHash: digest({ native, state: check.state, bucket: check.bucket, desc: check.description }),
-    }));
-  }
+  for (const item of failedRequiredCiItems({ pr, ci })) items.push(withCategory(item));
   for (const review of reviews) {
     if (ownReceipt(review, receiptActor)) continue;
     if (!review.body?.trim() && review.state !== 'CHANGES_REQUESTED') continue;
@@ -378,8 +340,7 @@ export function collectPr(pr, { ghFn = gh } = {}) {
   let step = iterator.next();
   while (!step.done) { let value; try { value = step.value(); } catch(error) { step = iterator.throw(error); continue; } step = iterator.next(value); }
   const collected = step.value;
-  const prInfo = { ...(collected.pr ?? pr), repo: collected.pr?.repo ?? REPO };
-  return attachVerifiedCi(collected, collectMivoCiSync({ pr: prInfo, ghFn }));
+  return attachVerifiedCi(collected, collected.ci);
 }
 
 export async function collectPrAsync(pr, { ghFn = gh } = {}) {
@@ -387,8 +348,7 @@ export async function collectPrAsync(pr, { ghFn = gh } = {}) {
   let step = iterator.next();
   while (!step.done) { let value; try { value = await step.value(); } catch(error) { step = iterator.throw(error); continue; } step = iterator.next(value); }
   const collected = step.value;
-  const prInfo = { ...(collected.pr ?? pr), repo: collected.pr?.repo ?? REPO };
-  return attachVerifiedCi(collected, await collectMivoCi({ pr: prInfo, ghFn }));
+  return attachVerifiedCi(collected, collected.ci);
 }
 
 function loadState(paths = watcherPaths()) {
