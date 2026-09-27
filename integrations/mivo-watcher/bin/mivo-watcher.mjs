@@ -480,7 +480,7 @@ export function watchGuideMessage({ home, prNumber, nodeId }) {
   return `第 0 步（只做一次）：运行 \`node ${helper} --home ${quotedHome} schedule-params --pr ${prNumber} --node-id ${nodeId}\`，把输出 JSON 原样作为 cindy_scheduler 的 schedule_create 参数调用；把工具返回原样存成文件后运行 \`${helper} --home ${quotedHome} bind-schedule --pr ${prNumber} --node-id ${nodeId} --result <文件>\`。bind 若返回 busy（状态锁占用）：等 1 分钟后重跑同一 bind-schedule 命令。bind 若返回 owner-conflict（本 PR 已由他人持有）：立刻停止并回复一句说明。之后本 PR 的所有反馈只会投递到你这里（每 5 分钟由你的轮询脚本检查）。`;
 }
 export function watchSuccessorMessage({ prNumber, predecessorId, reason, summary }) {
-  return `你是 PR #${prNumber} 的接班修复 session，前任 ${predecessorId} 已不可用（${reason}）；先读本 PR 状态摘要 ${summary ?? '…'}，再执行第 0 步。`;
+  return `你是 PR #${prNumber} 的接班修复 session，前任 ${predecessorId} 已不可用（${reason}）；先读本 PR 状态摘要 ${summary ?? '…'}。若状态为 merge-ready，等待人工合并，不要改代码。再执行第 0 步。`;
 }
 export function watchPollLostMessage({ prNumber, heartbeatAt, scheduleId }) {
   return `你的 PR #${prNumber} 轮询调度失联（最后心跳 ${heartbeatAt}）：先 schedule_get ${scheduleId ?? ''}；paused 则 schedule_resume；不存在则重新执行第 0 步。`;
@@ -899,7 +899,7 @@ export function* processPr({
     dispatch.reason = 'invalid-result';
   } else if (admissionBlocked) {
     dispatch.reason = 'admission-not-verified';
-  } else if (collected.mergeReady) {
+  } else if (collected.mergeReady && !forceCreate) {
     dispatch.reason = 'merge-ready';
   } else if (recovery && !dryRun && previous.sessionId) {
     const taskPath = path.join(paths.stateDir, 'tasks', `${recovery.dispatchId}.json`);
