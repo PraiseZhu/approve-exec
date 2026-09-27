@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+export const PR_LOCK_TOKEN_ENV = 'MIVO_PR_LOCK_TOKEN';
 
 export function statePaths(home) {
   const stateDir = path.join(home, 'state');
@@ -48,14 +49,21 @@ function pidAlive(pid) {
   catch (error) { return error.code !== 'ESRCH'; }
 }
 
-export function acquireLock(home, name) {
+export function acquireLock(home, name, env = process.env) {
   const { locksDir } = statePaths(home);
   fs.mkdirSync(locksDir, { recursive: true, mode: 0o700 });
   const lockPath = path.join(locksDir, `${name}.lock`);
-  const payload = `${process.pid} ${new Date().toISOString()}\n`;
+  const token = randomBytes(12).toString('hex');
+  const payload = `${process.pid} ${new Date().toISOString()} ${token}\n`;
   const acquire = () => fs.writeFileSync(lockPath, payload, { mode: 0o600, flag: 'wx' });
   const release = () => { try { fs.unlinkSync(lockPath); } catch {} };
-  try { acquire(); return { held: false, release }; }
+  const inherited = env[PR_LOCK_TOKEN_ENV];
+  if (inherited && fs.existsSync(lockPath)) {
+    const current = fs.readFileSync(lockPath, 'utf8');
+    const parts = current.trim().split(/\s+/);
+    if (parts[2] === inherited) return { held: false, reentrant: true, token: inherited, release: () => {} };
+  }
+  try { acquire(); return { held: false, reentrant: false, token, release }; }
   catch (error) {
     if (error.code !== 'EEXIST') throw error;
     const previous = fs.existsSync(lockPath) ? fs.readFileSync(lockPath, 'utf8') : '';
@@ -63,7 +71,7 @@ export function acquireLock(home, name) {
     if (pidAlive(pid)) return { held: true, release: () => {} };
     if (!(fs.existsSync(lockPath) && fs.readFileSync(lockPath, 'utf8') === previous)) return { held: true, release: () => {} };
     try { fs.unlinkSync(lockPath); } catch { return { held: true, release: () => {} }; }
-    try { acquire(); return { held: false, release }; }
+    try { acquire(); return { held: false, reentrant: false, token, release }; }
     catch (retry) {
       if (retry.code === 'EEXIST') return { held: true, release: () => {} };
       throw retry;

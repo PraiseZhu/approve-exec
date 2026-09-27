@@ -36,7 +36,7 @@ function seed(paths, extra = {}) {
   });
 }
 
-function poll(paths, { snapshot, collect, dispatchFn, enabled = true } = {}) {
+function poll(paths, { snapshot, collect, dispatchFn, enabled = true, recheckFn } = {}) {
   let collected = 0;
   const result = scanOnce({
     mode: 'poll', enabled, allowDispatch: true, paths, now, nodeId, prNumber: 790,
@@ -47,7 +47,7 @@ function poll(paths, { snapshot, collect, dispatchFn, enabled = true } = {}) {
       if (typeof collect === 'function') return collect(...args);
       throw new Error('collect should not run');
     },
-    dispatchFn,
+    dispatchFn, recheckFn,
     ownershipSnapshot: function* () {
       return { pr: { state: 'OPEN', isDraft: false, sameRepository: true, author: { login: 'owner' }, headRefOid: HEAD, baseRefOid: BASE, releaseEpoch: 'e' } };
     },
@@ -181,6 +181,29 @@ test('mivo-watch:off does not dispatch', (t) => {
   assert.equal(result.prs[0].dispatch.reason, 'opt-out');
   assert.equal(entry.optOut, true);
   assert.equal(entry.heartbeatAt, now);
+});
+
+test('recheck failure does not commit fingerprint', (t) => {
+  const { paths } = homeOf(t);
+  const oldFp = pollFingerprint(snap());
+  seed(paths, {
+    pollFingerprint: oldFp,
+    activeTask: { status: 'waiting-ci', evidenceVersion: 2, dispatchId: 'd1', head: HEAD },
+    lastDispatch: { dispatchId: 'd1' },
+  });
+  const { entry } = poll(paths, {
+    snapshot: snap({ commentCount: 8, commentUpdatedAt: '2026-09-28T05:00:00Z' }),
+    collect: () => ({
+      pr: { id: nodeId, number: 790, state: 'OPEN', isDraft: false, sameRepository: true, author: { login: 'owner' }, headRefOid: HEAD, baseRefOid: BASE, releaseEpoch: 'e' },
+      admissionVerified: true, checks: [], comments: [], reviews: [], threads: [], labels: [], mergeReady: false,
+      ci: { status: 'green', required: [] }, policy: { status: 'verified', required: [] },
+    }),
+    dispatchFn: () => ({ target_session_id: 'sess-790' }),
+    recheckFn: () => { throw new Error('PR 状态锁占用，请稍后重试写结果'); },
+  });
+  assert.equal(entry.pollFingerprint, oldFp);
+  assert.equal(entry.collectRetry, true);
+  assert.equal(entry.lastRecheckError.at, now);
 });
 
 test('collect failure does not commit fingerprint and retries next round', (t) => {

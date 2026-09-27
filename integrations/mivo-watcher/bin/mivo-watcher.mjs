@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { planSessionTitle, repairSessionTitle } from './session-title.mjs';
 import { collectPublicReview, verdictComment } from './public-review.mjs';
 import { collectPrSnapshot, collectPrOwnership } from './mivo-pr-snapshot.mjs';
-import { acquireLock, listPrs, migrateLegacy, readPr, statePaths as v2StatePaths, withLock as withPrLock, writePr } from './mivo-state.mjs';
+import { acquireLock, listPrs, migrateLegacy, PR_LOCK_TOKEN_ENV, readPr, statePaths as v2StatePaths, withLock as withPrLock, writePr } from './mivo-state.mjs';
 export const REPO = 'xindong/mivo-canvas-plugin';
 const GH = process.env.GH_BIN ?? 'gh';
 
@@ -1136,7 +1136,8 @@ export function* pollWorkflow({
   });
   const latest = state.prs[String(nodeId)] || previous;
   const collectFailed = report.some((item) => item.dispatch?.reason === 'collection-failed');
-  if (collectFailed) {
+  const recheckFailed = latest.lastRecheckError?.at === now;
+  if (collectFailed || recheckFailed) {
     save({ ...latest, pollFingerprint: previous.pollFingerprint, collectRetry: true });
   } else {
     save({ ...latest, pollFingerprint: fingerprint, collectRetry: false, needsOwner: false, optOut: false });
@@ -1376,7 +1377,11 @@ if (fileURLToPath(import.meta.url) === process.argv[1]) {
     process.exitCode = 2;
   } else {
     const lockName = mode === 'poll' ? `pr-${nodeId}` : 'discover';
-    const ran = await withPrLock(paths.home, lockName, async () => {
+    const lock = acquireLock(paths.home, lockName);
+    if (lock.held) {
+      process.stdout.write(`${JSON.stringify({ mode: 'lock-held', dispatch: false, prs: [] })}\n`);
+    } else {
+      if (lock.token) process.env[PR_LOCK_TOKEN_ENV] = lock.token;
       let dispatchFn;
       try {
         dispatchFn = process.env.MIVO_CINDY_BRIDGE === '1' ? createCindyStdinDispatch() : null;
@@ -1387,10 +1392,9 @@ if (fileURLToPath(import.meta.url) === process.argv[1]) {
         process.exitCode = 1;
       } finally {
         dispatchFn?.close();
+        lock.release();
+        delete process.env[PR_LOCK_TOKEN_ENV];
       }
-    });
-    if (ran?.held) {
-      process.stdout.write(`${JSON.stringify({ mode: 'lock-held', dispatch: false, prs: [] })}\n`);
     }
   }
 }

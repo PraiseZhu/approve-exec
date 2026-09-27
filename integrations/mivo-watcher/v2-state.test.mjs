@@ -4,7 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { listPrs, migrateLegacy, readPr, statePaths, withLock, writePr } from './bin/mivo-state.mjs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { acquireLock, listPrs, migrateLegacy, PR_LOCK_TOKEN_ENV, readPr, statePaths, withLock, writePr } from './bin/mivo-state.mjs';
 
 function homeOf(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'v2-state-'));
@@ -63,6 +65,25 @@ test('two different PR locks do not block each other', (t) => {
   const result = withLock(home, 'pr-PR_2', () => { ran = true; return 'b'; });
   assert.equal(result, 'b');
   assert.equal(ran, true);
+});
+
+test('child process with lock token reenters; without token is held', (t) => {
+  const home = homeOf(t);
+  const lock = acquireLock(home, 'pr-PR_1');
+  t.after(() => lock.release());
+  assert.equal(lock.held, false);
+  const modulePath = fileURLToPath(new URL('./bin/mivo-state.mjs', import.meta.url));
+  const script = `import { acquireLock } from ${JSON.stringify(modulePath)}; const r = acquireLock(process.argv[1], 'pr-PR_1'); process.stdout.write(JSON.stringify({ held: r.held === true, reentrant: r.reentrant === true }));`;
+  const withToken = spawnSync(process.execPath, ['--input-type=module', '-e', script, home], {
+    encoding: 'utf8', env: { ...process.env, [PR_LOCK_TOKEN_ENV]: lock.token },
+  });
+  assert.equal(withToken.status, 0, withToken.stderr);
+  assert.deepEqual(JSON.parse(withToken.stdout), { held: false, reentrant: true });
+  const without = spawnSync(process.execPath, ['--input-type=module', '-e', script, home], {
+    encoding: 'utf8', env: { ...process.env, [PR_LOCK_TOKEN_ENV]: '' },
+  });
+  assert.equal(without.status, 0, without.stderr);
+  assert.equal(JSON.parse(without.stdout).held, true);
 });
 
 test('migrateLegacy only copies open entries and leaves state.json untouched', (t) => {
