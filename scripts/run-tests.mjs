@@ -94,6 +94,9 @@ const CI_HOST_BOUND_FILES = new Map([
   ['graph.test.mjs', 'module load 读取 config.defaults.routingPath（本机 /Users/praise/.../routing.json），云端不存在'],
   ['decision-broker.test.mjs', '含读取同一 live routing.json 的用例；allowed_paths 不允许改测试文件，只能整文件跳过'],
   ['selfcheck.test.mjs', 'selfcheck CLI 始终检查 orcaFanoutScriptsRoot/goalSkillRoot 本机 live 路径；--live 还依赖宿主 symlink'],
+  ['mem-probe.test.mjs', 'mem-probe 现场读 Darwin sysctl -n hw.memsize / vm_stat，ubuntu runner 上 ENOENT'],
+  ['e2e-dryrun.test.mjs', '槽位对账用例 spawn mem-probe，同样依赖 Darwin sysctl'],
+  ['run-ledger.test.mjs', 'mutation-kill 子套件会重跑 e2e-dryrun/mem-probe，失败集在 Linux 上漂移；不走本守卫'],
 ]);
 
 function hostBoundSkipReason(name) {
