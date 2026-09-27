@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { planSessionTitle, repairSessionTitle } from './session-title.mjs';
 import { collectPublicReview } from './public-review.mjs';
 import { collectPrSnapshot, collectPrOwnership } from './mivo-pr-snapshot.mjs';
+import { collectMivoPolicy, collectMivoPolicySync } from './mivo-pr-policy.mjs';
 
 export const REPO = 'xindong/mivo-canvas-plugin';
 const GH = process.env.GH_BIN ?? 'gh';
@@ -114,9 +115,19 @@ export function classifyReviewFeedback(item = {}) {
   return 'other';
 }
 
-function requiredCheckNames(requiredChecks = []) {
-  if (!Array.isArray(requiredChecks)) return new Set();
-  return new Set(requiredChecks.map((check) => (typeof check === 'string' ? check : check?.name ?? check?.context)).filter(Boolean));
+function requiredName(check) {
+  return typeof check === 'string' ? check : check?.context ?? check?.name ?? null;
+}
+
+function knownRequiredNames({ policy, ci, requiredChecks }) {
+  const verified = policy?.status === 'verified' && Array.isArray(policy.required) && policy.required.length
+    ? policy.required : null;
+  const evaluated = !verified && ci && ci.status !== 'unknown' && Array.isArray(ci.required) && ci.required.length
+    ? ci.required : null;
+  const listed = !verified && !evaluated && Array.isArray(requiredChecks) && requiredChecks.length
+    ? requiredChecks : null;
+  const source = verified ?? evaluated ?? listed;
+  return source ? new Set(source.map(requiredName).filter(Boolean)) : null;
 }
 
 function withCategory(item) {
@@ -124,15 +135,15 @@ function withCategory(item) {
   return { ...item, category, ...(category === 'ignore-infra' ? { actionable: false } : {}) };
 }
 
-export function feedbackItems({ pr, checks = [], requiredChecks = [], reviews = [], comments = [], threads = [], mergeable, receiptActor }) {
+export function feedbackItems({ pr, checks = [], requiredChecks = [], policy, ci, reviews = [], comments = [], threads = [], mergeable, receiptActor }) {
   const items = [];
-  const required = requiredCheckNames(requiredChecks);
+  const required = knownRequiredNames({ policy, ci, requiredChecks });
   for (const check of checks) {
     const native = check.name ?? check.context ?? 'check';
     const failing = check.bucket === 'fail' || ['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED'].includes(check.state);
     items.push(withCategory({
       source: 'ci',
-      actionable: failing && required.has(native),
+      actionable: Boolean(failing && (required ? required.has(native) : true)),
       nativeId: native,
       revision: `${check.bucket ?? check.state ?? ''}:${check.sha ?? pr.headRefOid ?? ''}`,
       sha: check.sha ?? pr.headRefOid ?? null,
@@ -266,18 +277,35 @@ async function legacyCollectPrAsync(pr, { ghFn = gh } = {}) {
   };
 }
 
+function bindPolicyRequired(collected, policy) {
+  const known = policy?.status === 'verified' && Array.isArray(policy.required) && policy.required.length > 0;
+  return {
+    ...collected,
+    policy,
+    requiredChecks: known
+      ? policy.required.map((rule) => ({ name: rule.context, context: rule.context, appId: rule.appId }))
+      : null,
+  };
+}
+
 export function collectPr(pr, { ghFn = gh } = {}) {
   const iterator = collectPublicReview(pr, ghFn);
   let step = iterator.next();
   while (!step.done) { let value; try { value = step.value(); } catch(error) { step = iterator.throw(error); continue; } step = iterator.next(value); }
-  return step.value;
+  const collected = step.value;
+  return bindPolicyRequired(collected, collectMivoPolicySync({
+    repo: collected.pr?.repo ?? REPO, number: collected.pr?.number ?? pr.number, gh: ghFn,
+  }));
 }
 
 export async function collectPrAsync(pr, { ghFn = gh } = {}) {
   const iterator = collectPublicReview(pr, ghFn);
   let step = iterator.next();
   while (!step.done) { let value; try { value = await step.value(); } catch(error) { step = iterator.throw(error); continue; } step = iterator.next(value); }
-  return step.value;
+  const collected = step.value;
+  return bindPolicyRequired(collected, await collectMivoPolicy({
+    repo: collected.pr?.repo ?? REPO, number: collected.pr?.number ?? pr.number, gh: ghFn,
+  }));
 }
 
 function loadState(paths = watcherPaths()) {

@@ -73,15 +73,36 @@ test('optional CI failure advances cursor but is not fresh', () => {
   assert.ok(first.cursor['ci:Greptile Review']);
 });
 
-test('missing required list treats CI failures as optional', () => {
+test('missing required list is fail-closed and stays fresh', () => {
   const items = feedbackItems({
     pr,
     checks: [{ name: 'unit', state: 'FAILURE', bucket: 'fail' }],
   });
-  assert.equal(items[0].actionable, false);
+  assert.equal(items[0].actionable, true);
   const first = newFeedback({}, items);
-  assert.equal(first.fresh.length, 0);
-  assert.ok(first.cursor['ci:unit']);
+  assert.equal(first.fresh.length, 1);
+  assert.equal(first.fresh[0].nativeId, 'unit');
+});
+
+test('BASE-required failure with empty gh-required still dispatches', (t) => {
+  const items = feedbackItems({
+    pr,
+    checks: [{ name: 'lint', state: 'FAILURE', bucket: 'fail' }],
+    requiredChecks: [],
+    policy: { status: 'verified', required: [{ context: 'lint' }] },
+  });
+  assert.equal(items[0].actionable, true);
+  assert.equal(newFeedback({}, items).fresh.length, 1);
+  const { paths, listed } = scanHome(t);
+  let sent = 0;
+  const result = runScan(paths, listed, () => ({
+    checks: [{ name: 'lint', state: 'FAILURE', bucket: 'fail' }],
+    requiredChecks: [],
+    policy: { status: 'verified', required: [{ context: 'lint' }] },
+    mergeReady: false,
+  }), () => { sent += 1; return { target_session_id: 's1' }; });
+  assert.equal(sent, 1);
+  assert.equal(result.prs[0].dispatch.attempted, true);
 });
 
 test('required CI failure and reply-resolve remain fresh', () => {

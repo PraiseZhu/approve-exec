@@ -11,7 +11,7 @@ function probe(t,{collectedPr=pr,livePr=pr,priorEpoch='epoch-new',admission=fals
  fs.writeFileSync(paths.statePath,JSON.stringify({version:2,repo:REPO,prs:{[pr.id]:{number:1,nodeId:pr.id,sessionId:'original-session',eligibilityInitialized:true,eligibility:'active',admissionVerified:true,admissionEpoch:priorEpoch,activeTask:{status:'complete'}}}}));
  let calls=0;
  const result=scanOnce({enabled:true,allowDispatch:true,paths,now:'2026-09-10T00:00:00Z',ghFn:args=>args[0]==='api'?'owner':JSON.stringify([pr]),
- collect:()=>({pr:collectedPr,admissionVerified:admission,checks:[{name:'unit',state:'FAILURE',bucket:'fail'}],requiredChecks:[{name:'unit'}],comments:[],reviews:[],threads:[],labels:[],mergeReady:false}),
+ collect:()=>({pr:collectedPr,admissionVerified:admission,checks:[{name:'unit',state:'FAILURE',bucket:'fail'}],requiredChecks:[],policy:{status:'verified',required:[{context:'unit'}]},comments:[],reviews:[],threads:[],labels:[],mergeReady:false}),
  ownershipSnapshot:function*(){return {pr:livePr};},dispatchFn:params=>{calls++;assert.equal(params.target_session_id,'original-session');return {target_session_id:'original-session'};}});
  return {calls,result};
 }
