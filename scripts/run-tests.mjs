@@ -87,6 +87,20 @@ export function buildChildEnv(env) {
   return childEnv;
 }
 
+// 云端（GitHub Actions）没有本机 /Users/praise live 路径。Jev D1（skip_files_in_ci, confidence 0.92）：
+// 只跳过 spawn，不删枚举、不改断言。RUN_TESTS_DIR 夹具路径关闭守卫，避免 run-tests.test.mjs
+// 组C-1/组F-1 在 CI 里继承 GITHUB_ACTIONS 后少跑占位文件。
+const CI_HOST_BOUND_FILES = new Map([
+  ['graph.test.mjs', 'module load 读取 config.defaults.routingPath（本机 /Users/praise/.../routing.json），云端不存在'],
+  ['decision-broker.test.mjs', '含读取同一 live routing.json 的用例；allowed_paths 不允许改测试文件，只能整文件跳过'],
+  ['selfcheck.test.mjs', 'selfcheck CLI 始终检查 orcaFanoutScriptsRoot/goalSkillRoot 本机 live 路径；--live 还依赖宿主 symlink'],
+]);
+
+function hostBoundSkipReason(name) {
+  if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUN_TESTS_DIR) return null;
+  return CI_HOST_BOUND_FILES.get(name) ?? null;
+}
+
 function main() {
   const testsDir = process.env.RUN_TESTS_DIR ? resolve(process.env.RUN_TESTS_DIR) : join(root, 'tests');
 
@@ -107,7 +121,15 @@ function main() {
 
   const testFiles = TEST_FILES.map((f) => join(testsDir, f));
   console.log(`run-tests: 显式枚举 ${testFiles.length} 个测试文件\n`);
-  for (const file of testFiles) {
+  let skipped = 0;
+  for (const name of TEST_FILES) {
+    const file = join(testsDir, name);
+    const skipReason = hostBoundSkipReason(name);
+    if (skipReason) {
+      skipped += 1;
+      console.log(`run-tests: skip ${name} in CI: ${skipReason}\n`);
+      continue;
+    }
     const result = spawnSync(process.execPath, ['--test', '--test-force-exit', file], { stdio: 'inherit', env: buildChildEnv(process.env) });
     if (result.status === null) {
       // 子进程被信号杀死（异常），与"测试失败"区分：非 0 收束，不静默
@@ -120,7 +142,12 @@ function main() {
   }
 
   const failed = process.exitCode === 1;
-  console.log(`run-tests: ${testFiles.length} file(s) run, ${failed ? 'FAIL (exit 1)' : 'all pass (exit 0)'}`);
+  // 汇总行在 skipped=0 时必须保持原句，run-tests.test.mjs 组C-1/组F-1 按 TEST_FILES.length 子串断言。
+  if (skipped === 0) {
+    console.log(`run-tests: ${testFiles.length} file(s) run, ${failed ? 'FAIL (exit 1)' : 'all pass (exit 0)'}`);
+  } else {
+    console.log(`run-tests: ${testFiles.length - skipped} file(s) run, ${skipped} skipped (host-bound), ${failed ? 'FAIL (exit 1)' : 'all pass (exit 0)'}`);
+  }
 }
 
 // main-module guard：作为 CLI 入口才执行主流程；被测试 import（TEST_FILES/checkEnumeration）时静默返回。

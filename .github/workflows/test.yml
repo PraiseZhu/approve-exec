@@ -1,0 +1,36 @@
+# approve-exec 云端测试证据（非 required：私有仓分支保护 403）。
+# 本机 node v26；云端用 actions 支持的 Node 24 LTS。测试未使用 26-only API。
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: watcher tests
+        run: node --test integrations/mivo-watcher/*.test.mjs
+
+      - name: python continuation tests
+        run: python3 -B -m unittest discover -s tests -p 'test_*continuation.py'
+
+      - name: node scripts/run-tests.mjs
+        timeout-minutes: 30
+        run: node scripts/run-tests.mjs
