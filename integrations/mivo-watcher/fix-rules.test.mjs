@@ -73,6 +73,17 @@ test('optional CI failure advances cursor but is not fresh', () => {
   assert.ok(first.cursor['ci:Greptile Review']);
 });
 
+test('missing required list treats CI failures as optional', () => {
+  const items = feedbackItems({
+    pr,
+    checks: [{ name: 'unit', state: 'FAILURE', bucket: 'fail' }],
+  });
+  assert.equal(items[0].actionable, false);
+  const first = newFeedback({}, items);
+  assert.equal(first.fresh.length, 0);
+  assert.ok(first.cursor['ci:unit']);
+});
+
 test('required CI failure and reply-resolve remain fresh', () => {
   const items = feedbackItems({
     pr,
