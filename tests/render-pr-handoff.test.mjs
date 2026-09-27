@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { renderPrHandoff } from '../scripts/render-pr-handoff.mjs';
-import { LedgerError } from '../scripts/run-ledger.mjs';
+import { renderPrHandoff, renderPrHandoffFromLedger } from '../scripts/render-pr-handoff.mjs';
+import { LedgerError, initLedger, setState } from '../scripts/run-ledger.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPT = join(ROOT, 'scripts/render-pr-handoff.mjs');
@@ -96,7 +97,9 @@ test('render-pr-handoff: 决策三层 + Jev 约定 + 连带策略 + 来源标注
   assert.ok(s8.includes(journal), '第 8 段必须给 Jev 留痕绝对路径');
   assert.match(s8, /不给 Jev「上报 lead」选项/);
   assert.match(s8, /连带文件改动必须有 Jev 结论，没有就按 D2 必须停/);
-  assert.match(s8, /不得以「在等 CI」收工或报完成/);
+  assert.match(s8, /不得以 waiting-ci 或「在等 CI」结束本轮/);
+  assert.doesNotMatch(s8, /写 --phase waiting-ci 的 checkpoint 再结束本轮/);
+  assert.doesNotMatch(s8, /owner-checkpoint\.py/);
   assert.match(s10, /collateral_used\[\{path, class, sc_id, reason, jev_ref\}\]/);
   assert.match(s10, /Jev 选项排序与留痕行号/);
   const ctx = renderPrHandoff(baseArgs({ provenance: { kind: 'context-brief', brief_sha256: 'f'.repeat(64) } }));
@@ -170,4 +173,66 @@ test('render-pr-handoff: 合法禁令与否定式不误拦', () => {
     forbiddenExtra: ['合并 PR、启用 auto-merge、gh pr merge、force push', '直接 push main', 'git push --force'],
   }));
   assert.ok(out.includes('## 9. 禁做'));
+});
+
+function continuationLedger(t, config) {
+  const dir = mkdtempSync(join(tmpdir(), 'handoff-cont-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const manifestPath = join(dir, 'manifest.json');
+  copyFileSync(FIXTURE, manifestPath);
+  const ledgerPath = join(dir, 'ledger.json');
+  initLedger({ ledgerPath, manifestPath, runId: 'cont-render', now: '2026-09-27T00:00:00Z', baseline: SHA3 });
+  setState({
+    ledgerPath,
+    group: 'g4',
+    now: '2026-09-27T00:00:00Z',
+    identity: { worktree: ROOT, branch: 'feat/g4', base: SHA3, title: 'MivoPlugin-存图补图修复丨 0902' },
+  });
+  if (config !== undefined) writeFileSync(join(dir, 'lead-continuation.json'), JSON.stringify(config));
+  const out = renderPrHandoffFromLedger({
+    ledgerPath,
+    group: 'g4',
+    leadSessionId: 'lead-1',
+    seq: 1,
+    repo: 'xindong/mivo-canvas-plugin',
+    title: 'MivoPlugin-存图补图修复丨 0902',
+    why: 'Copy as PNG 失败时仍报已复制。',
+    how: 'imageNodeClipboard.ts 走 libraryClipboardPort.write，失败走 copyPngFailed。',
+    excerpts: [{ file: 'scripts/render-pr-handoff.mjs', line: 1, behavior: 'renderPrHandoff 入口' }],
+  });
+  return out;
+}
+
+function assertV1ContinuationHandoff(out) {
+  assert.doesNotMatch(out, /owner-checkpoint\.py/);
+  assert.doesNotMatch(out, /写 waiting-ci checkpoint 再结束本轮/);
+  assert.doesNotMatch(out, /写 --phase waiting-ci 的 checkpoint 再结束本轮/);
+  assert.match(out, /本包未启用 continuation v2，续跑调度只唤醒 lead、不会唤醒你/);
+  assert.match(out, /gh pr checks <PR> --watch --interval 60/);
+}
+
+function assertV2ContinuationHandoff(out) {
+  assert.match(out, /owner-checkpoint\.py/);
+  assert.match(out, /启用 continuation v2 时，绑定完成后先写 checkpoint/);
+  assert.match(out, /写 --phase waiting-ci 的 checkpoint 再结束本轮/);
+  assert.doesNotMatch(out, /本包未启用 continuation v2/);
+}
+
+test('render-pr-handoff: 台账同目录 v1 配置不渲染 owner checkpoint', (t) => {
+  assertV1ContinuationHandoff(continuationLedger(t, { lead_session_id: 'lead-1', ledger_paths: ['/abs/ledger.json'], stalled_after_sec: 1800 }));
+});
+
+test('render-pr-handoff: 台账同目录缺 lead-continuation.json 按 v1 口径写', (t) => {
+  assertV1ContinuationHandoff(continuationLedger(t, undefined));
+});
+
+test('render-pr-handoff: schemaVersion 2 保持 checkpoint 命令与 waiting-ci 文案', (t) => {
+  assertV2ContinuationHandoff(continuationLedger(t, { schemaVersion: 2, lead_session_id: 'lead-1', ledger_paths: ['/abs/ledger.json'] }));
+});
+
+test('render-pr-handoff: 直接传入 continuation 仍按 v2 渲染', () => {
+  const out = renderPrHandoff(baseArgs({
+    continuation: { command: "python3 '/abs/scripts/owner-checkpoint.py' --phase 'executing'" },
+  }));
+  assertV2ContinuationHandoff(out);
 });

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, chmodSync, readFileSync, copyFileSync, existsSync, mkdirSync, rmSync, realpathSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, chmodSync, readFileSync, copyFileSync, existsSync, mkdirSync, rmSync, realpathSync, symlinkSync, lstatSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -902,4 +902,140 @@ test('wrapup-cleanup: worktree 已删但 CAS 失败时保留物标记 partial cl
   assert.equal(existsSync(join(retained, 'node_modules/x')), true);
   const manifest = JSON.parse(readFileSync(join(retained, '.approve-exec-retain-manifest.json'), 'utf8'));
   assert.equal(manifest.status, 'retained_after_partial_cleanup');
+});
+
+function realWrapupRepo(t) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'wrapup-real-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const repo = join(root, 'repo');
+  const bare = join(root, 'remote.git');
+  const wt = join(repo, '.worktrees', 'owner');
+  const branch = 'feat/owner';
+  const git = (args, cwd = repo) => {
+    const r = spawnSync('git', ['-c', 'commit.gpgsign=false', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', ...args], { cwd, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim();
+  };
+  mkdirSync(repo);
+  git(['init', '-b', 'main']);
+  writeFileSync(join(repo, '.gitignore'), '.worktrees/\nnode_modules\nnode_modules/\ncindyplugin/dist\ncindyplugin/dist/\n_tmp\n_tmp/\n');
+  writeFileSync(join(repo, 'base'), '1\n');
+  git(['add', '.']);
+  git(['commit', '-m', 'base']);
+  git(['init', '--bare', bare]);
+  git(['remote', 'add', 'origin', bare]);
+  git(['worktree', 'add', '-b', branch, wt]);
+  writeFileSync(join(wt, 'feature'), 'ok\n');
+  git(['add', 'feature'], wt);
+  git(['commit', '-m', 'feat'], wt);
+  git(['push', 'origin', `HEAD:refs/heads/${branch}`], wt);
+  return { root, repo, wt, branch, git };
+}
+
+function wrapupArgs(f, extra) {
+  return { worktree: f.wt, branch: f.branch, now: NOW, ledgerVersion: 1, assignmentSeq: 0, ...extra };
+}
+
+test('wrapup-cleanup: 空 ignored 目录不列 retain-paths 也能清场（含嵌套空子目录）', (t) => {
+  const f = realWrapupRepo(t);
+  mkdirSync(join(f.wt, 'cindyplugin/dist/nested'), { recursive: true });
+  mkdirSync(join(f.wt, 'node_modules'));
+  writeFileSync(join(f.wt, 'node_modules/x'), 'keep');
+  const retained = join(f.repo, '.worktrees', 'retained-empty');
+  const out = wrapupCleanup(wrapupArgs(f, { retainDir: retained, retainPaths: ['node_modules'] }));
+  assert.equal(out.ok, true);
+  assert.equal(existsSync(f.wt), false);
+  assert.equal(f.git(['branch', '--list', f.branch]), '');
+  assert.equal(readFileSync(join(retained, 'node_modules/x'), 'utf8'), 'keep');
+  const manifest = JSON.parse(readFileSync(join(retained, '.approve-exec-retain-manifest.json'), 'utf8'));
+  assert.equal(manifest.status, 'moved');
+  assert.ok(manifest.artifacts.some((a) => a.type === 'empty-dir' && a.path === 'cindyplugin/dist'));
+  assert.ok(manifest.artifacts.some((a) => a.type === 'directory' && a.path === 'node_modules'));
+  assert.equal(existsSync(join(retained, 'cindyplugin/dist')), false);
+});
+
+test('wrapup-cleanup: 空 ignored 目录即使列在 retain-paths 也是 rmdir 而不是移动', (t) => {
+  const f = realWrapupRepo(t);
+  mkdirSync(join(f.wt, 'cindyplugin/dist'), { recursive: true });
+  mkdirSync(join(f.wt, 'node_modules'));
+  writeFileSync(join(f.wt, 'node_modules/x'), 'keep');
+  const retained = join(f.repo, '.worktrees', 'retained-listed-empty');
+  const out = wrapupCleanup(wrapupArgs(f, { retainDir: retained, retainPaths: ['node_modules', 'cindyplugin/dist'] }));
+  assert.equal(out.ok, true);
+  const manifest = JSON.parse(readFileSync(join(retained, '.approve-exec-retain-manifest.json'), 'utf8'));
+  assert.ok(manifest.artifacts.some((a) => a.type === 'empty-dir' && a.path === 'cindyplugin/dist'));
+  assert.equal(existsSync(join(retained, 'cindyplugin/dist')), false);
+});
+
+test('wrapup-cleanup: 非空 ignored 目录未列 retain-paths 仍拒', (t) => {
+  const f = realWrapupRepo(t);
+  mkdirSync(join(f.wt, 'cindyplugin/dist'), { recursive: true });
+  writeFileSync(join(f.wt, 'cindyplugin/dist/x'), 'keep');
+  mkdirSync(join(f.wt, 'node_modules'));
+  writeFileSync(join(f.wt, 'node_modules/x'), 'keep');
+  const retained = join(f.repo, '.worktrees', 'retained-nonempty');
+  assert.throws(() => wrapupCleanup(wrapupArgs(f, { retainDir: retained, retainPaths: ['node_modules'] })), /未显式保留/);
+  assert.equal(existsSync(join(f.wt, 'cindyplugin/dist/x')), true);
+  assert.equal(existsSync(f.wt), true);
+});
+
+test('wrapup-cleanup: 非空 ignored 目录保留移动与非 ignored 路径仍拒', (t) => {
+  const f = realWrapupRepo(t);
+  mkdirSync(join(f.wt, '_tmp'));
+  writeFileSync(join(f.wt, '_tmp/x'), 'keep-tmp');
+  mkdirSync(join(f.wt, 'node_modules'));
+  writeFileSync(join(f.wt, 'node_modules/x'), 'keep');
+  const retained = join(f.repo, '.worktrees', 'retained-tmp');
+  assert.throws(() => wrapupCleanup(wrapupArgs(f, { retainDir: retained, retainPaths: ['node_modules', '_tmp', 'feature'] })), /保留路径不是 ignored/);
+  const out = wrapupCleanup(wrapupArgs(f, { retainDir: retained, retainPaths: ['node_modules', '_tmp'] }));
+  assert.equal(out.ok, true);
+  assert.equal(readFileSync(join(retained, '_tmp/x'), 'utf8'), 'keep-tmp');
+  assert.equal(readFileSync(join(retained, 'node_modules/x'), 'utf8'), 'keep');
+  const manifest = JSON.parse(readFileSync(join(retained, '.approve-exec-retain-manifest.json'), 'utf8'));
+  assert.equal(manifest.artifacts.find((a) => a.path === '_tmp').type, 'directory');
+  assert.equal(manifest.artifacts.find((a) => a.path === 'node_modules').type, 'directory');
+});
+
+test('wrapup-cleanup: 整目录软链只解除链接且目标仍在；未列入则拒', (t) => {
+  const f = realWrapupRepo(t);
+  const target = join(f.root, 'shared-node-modules');
+  mkdirSync(target);
+  writeFileSync(join(target, 'pkg.json'), 'keep-target');
+  symlinkSync(target, join(f.wt, 'node_modules'));
+  mkdirSync(join(f.wt, '_tmp'));
+  writeFileSync(join(f.wt, '_tmp/x'), 'tmp');
+  const rejected = join(f.repo, '.worktrees', 'retained-symlink-reject');
+  assert.throws(() => wrapupCleanup(wrapupArgs(f, { retainDir: rejected, retainPaths: ['_tmp'] })), /未显式保留/);
+  const retained = join(f.repo, '.worktrees', 'retained-symlink');
+  const out = wrapupCleanup(wrapupArgs(f, { retainDir: retained, retainPaths: ['node_modules', '_tmp'] }));
+  assert.equal(out.ok, true);
+  assert.equal(existsSync(f.wt), false);
+  assert.equal(existsSync(join(target, 'pkg.json')), true);
+  assert.equal(readFileSync(join(target, 'pkg.json'), 'utf8'), 'keep-target');
+  assert.equal(lstatSync(target).isDirectory(), true);
+  assert.equal(existsSync(join(retained, 'node_modules')), false);
+  const manifest = JSON.parse(readFileSync(join(retained, '.approve-exec-retain-manifest.json'), 'utf8'));
+  const link = manifest.artifacts.find((a) => a.path === 'node_modules');
+  assert.equal(link.type, 'symlink');
+  assert.equal(link.target, target);
+  assert.equal(manifest.artifacts.find((a) => a.path === '_tmp').type, 'directory');
+});
+
+test('wrapup-cleanup: 逐项软链的真实 node_modules 目录仍整体移动', (t) => {
+  const f = realWrapupRepo(t);
+  const linked = join(f.root, 'outside-pkg');
+  mkdirSync(linked);
+  writeFileSync(join(linked, 'index.js'), 'pkg');
+  mkdirSync(join(f.wt, 'node_modules'));
+  symlinkSync(linked, join(f.wt, 'node_modules', 'linked'));
+  writeFileSync(join(f.wt, 'node_modules', '.cache'), 'cache');
+  const retained = join(f.repo, '.worktrees', 'retained-nested-links');
+  const out = wrapupCleanup(wrapupArgs(f, { retainDir: retained, retainPaths: ['node_modules'] }));
+  assert.equal(out.ok, true);
+  assert.equal(readFileSync(join(retained, 'node_modules/.cache'), 'utf8'), 'cache');
+  assert.equal(lstatSync(join(retained, 'node_modules/linked')).isSymbolicLink(), true);
+  assert.equal(readFileSync(join(retained, 'node_modules/linked/index.js'), 'utf8'), 'pkg');
+  assert.equal(existsSync(join(linked, 'index.js')), true);
+  const manifest = JSON.parse(readFileSync(join(retained, '.approve-exec-retain-manifest.json'), 'utf8'));
+  assert.equal(manifest.artifacts.find((a) => a.path === 'node_modules').type, 'directory');
 });
