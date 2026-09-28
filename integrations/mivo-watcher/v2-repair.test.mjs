@@ -34,6 +34,9 @@ test('schedule-params matches v2 fields and omits silentWhenIdle', (t) => {
   assert.equal(out.timezone, 'Asia/Shanghai');
   assert.equal(out.recurring, true);
   assert.equal(out.agentKind, 'codex');
+  assert.equal(out.model, 'gpt-6-luna');
+  assert.equal(out.providerId, 'art-cindy');
+  assert.equal(out.effort, 'max');
   assert.equal(out.kind, 'cron');
   assert.equal(out.workingDir, DEFAULT_PLUGIN_REPO);
   assert.equal(out.useWorktree, false);
