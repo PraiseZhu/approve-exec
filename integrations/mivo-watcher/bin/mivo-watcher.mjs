@@ -413,6 +413,32 @@ function clearDryPending(previous) {
 
 const RECOVERY_MIN_MS = 30 * 60 * 1000;
 const MAX_RECOVERIES = 3;
+export const AUTHOR_RECLAIMED = 'author-reclaimed';
+
+// Ready -> Draft means the author session took the PR back. An unfinished
+// watcher task is superseded: no recovery re-delivery, no in-flight lock on
+// the next Ready, and the repair helper refuses to finalize it.
+export function supersedeOnRedraft(entry, now) {
+  const active = entry.activeTask;
+  if (entry.wasDraft === true || !active?.dispatchId) return entry;
+  if (['blocked', 'complete', 'legacy-complete'].includes(active.status)) return entry;
+  return {
+    ...entry,
+    activeTask: { ...active, status: 'blocked', blockedKind: AUTHOR_RECLAIMED, at: now,
+      reason: 'PR returned to Draft; the author session reclaimed it and this watcher task is superseded.' },
+    authorReclaimed: { at: now, dispatchId: active.dispatchId },
+  };
+}
+
+export function reclaimNote(entry, headRefName) {
+  const reclaimed = entry.authorReclaimed;
+  if (!reclaimed?.dispatchId || reclaimed.dispatchId !== entry.lastDispatch?.dispatchId) return '';
+  return [
+    `作者收回过本 PR：${reclaimed.at} PR 从 Ready 转回 Draft，上一轮任务 ${reclaimed.dispatchId} 已作废（helper 拒绝它的 finalize）。`,
+    `本轮先清旧现场：watch 树里上一轮留下、远端没有的本地提交和未提交改动不属于任何一侧成果。先用 git status 和 git log origin/${headRefName}..HEAD 列出并写进 SC 证据，再 git fetch origin ${headRefName} 后 git reset --hard origin/${headRefName} 对齐远端；这是下方「needs-sync 保留本地提交」的唯一例外。`,
+    '之后只按当前 head 重新评估反馈；作者已修掉的意见记 no-change，不重复修。',
+  ].join('\n');
+}
 
 function readTaskForRecovery(previous, paths, now = new Date().toISOString()) {
   const dispatchId = previous?.lastDispatch?.dispatchId;
@@ -715,6 +741,8 @@ function resultFor(previous, paths) {
 
 function consumeResult(previous, result, now) {
   if (!result) return previous;
+  // A result written before the author reclaimed the PR must not revive the superseded task.
+  if (previous.activeTask?.blockedKind === AUTHOR_RECLAIMED && result.dispatchId === previous.activeTask.dispatchId) return previous;
   const verified = result.schemaVersion === 2;
   const status = result.status === 'prepared' ? 'running'
     : result.status === 'complete' && !verified ? 'legacy-complete' : result.status;
@@ -747,6 +775,8 @@ function recheckResult({ paths, previous, timeoutMs = 30000 }) {
 
 function markException(previous, now, events) {
   if (previous.activeTask?.status !== 'blocked' && !previous.dispatchError) return previous;
+  // Author reclaiming a PR is the normal handoff contract, not an incident.
+  if (previous.activeTask?.blockedKind === AUTHOR_RECLAIMED && !previous.dispatchError) return previous;
   const event = {
     kind: previous.dispatchError ? 'dispatch-blocked' : 'repair-blocked', number: previous.number, nodeId: previous.nodeId,
     sessionId: previous.sessionId, dispatchId: previous.dispatchError?.dispatchId ?? previous.activeTask?.dispatchId,
@@ -827,7 +857,7 @@ export function* processPr({
     return;
   }
   if (pr.isDraft === true) {
-    state.prs[key] = markException({ ...base, wasDraft: true, admissionVerified: false, admissionEpoch: null }, now, events);
+    state.prs[key] = markException({ ...supersedeOnRedraft(base, now), wasDraft: true, admissionVerified: false, admissionEpoch: null }, now, events);
     persistState(state,paths);
     report.push({ number: pr.number, nodeId: pr.id, fresh: 0, admissionVerified: false,
       admissionReason: 'draft', mergeReady: false, repairStatus: base.activeTask?.status ?? 'observing',
@@ -1018,7 +1048,8 @@ export function* processPr({
     previous = { ...previous, needsOwner: true };
     dispatch = { attempted: false, bound: false, reason: 'needs-owner' };
   } else if (shouldDispatch) {
-    const pending = { ...dispatchIntent({ pr, mapping, fresh, now, paths, dryRun, messagePrefix }), cursor };
+    const prefix = [reclaimNote(previous, pr.headRefName), messagePrefix].filter(Boolean).join('\n');
+    const pending = { ...dispatchIntent({ pr, mapping, fresh, now, paths, dryRun, messagePrefix: prefix }), cursor };
     previous = { ...previous, pendingDispatch: pending };
     if (dryRun) {
       dispatch = { attempted: false, bound: false, reason: 'dry-run', pending };

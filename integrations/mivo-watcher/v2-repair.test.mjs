@@ -371,3 +371,14 @@ test('prepare reads legacy state.json without ReferenceError', (t) => {
   assert.equal(result.sessionId, 'sess-a');
   assert.equal(result.status, 'prepared');
 });
+
+test('prepare refuses a task superseded by the author reclaiming the PR', (t) => {
+  const home = homeOf(t);
+  const plugin = fs.mkdtempSync(path.join(os.tmpdir(), 'plugin-'));
+  t.after(() => fs.rmSync(plugin, { recursive: true, force: true }));
+  const { taskPath } = writeTask(home);
+  writePr(home, 'PR_790', { number: 790, nodeId: 'PR_790', sessionId: 'sess-a',
+    activeTask: { dispatchId: 'live-790', status: 'blocked', blockedKind: 'author-reclaimed' } });
+  const { ghFn, gitFn } = prepareFns(plugin, watchWorktreePath(plugin, 790));
+  assert.throws(() => prepare({ home, taskPath, ghFn, gitFn }), /task superseded: the author reclaimed this PR/);
+});

@@ -168,6 +168,9 @@ function boundSession(paths, task) {
     ? [entry.activeTask.dispatchId]
     : [entry.lastDispatch?.dispatchId, entry.pendingDispatch?.dispatchId].filter(Boolean);
   if (dispatches.length && !dispatches.includes(task.dispatchId)) fail('task dispatchId is not the active watcher dispatch');
+  if (entry.activeTask?.blockedKind === 'author-reclaimed' && entry.activeTask.dispatchId === task.dispatchId) {
+    fail('task superseded: the author reclaimed this PR (Ready -> Draft); wait for the next watcher dispatch');
+  }
   return { sessionId: entry.sessionId };
 }
 
