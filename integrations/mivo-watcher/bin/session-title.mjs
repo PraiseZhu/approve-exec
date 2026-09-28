@@ -53,31 +53,22 @@ export function shortTaskName({ task, prNumber, repo = MIVO_REPO } = {}) {
   return '审查反馈修复';
 }
 
-function assertProject(project) {
-  if (typeof project !== 'string' || !project.trim() || project !== project.trim()
-      || /[丨\r\n]/u.test(project) || project.length > 40) {
-    throw new Error('session title requires a short project name');
-  }
-}
-
-export function repairSessionTitle({ project = 'MivoPlugin', task, prNumber, createdAt, repo } = {}) {
-  assertProject(project);
+export function repairSessionTitle({ task, prNumber, createdAt, repo } = {}) {
   if (!Number.isInteger(prNumber) || prNumber < 1) throw new Error('session title requires a PR number');
   const date = sessionDate(createdAt);
   const taskName = shortTaskName({ task, prNumber, repo });
-  return `${project}-#${prNumber}-${taskName}丨 ${date.slice(5).replace('-', '')}`;
+  return `#${prNumber}-${taskName}丨${date.slice(5).replace('-', '')}`;
 }
 
-export function planSessionTitle({ pr, existing = {}, createdAt, project = 'MivoPlugin', repo } = {}) {
+export function planSessionTitle({ pr, existing = {}, createdAt, repo } = {}) {
   if (!pr || typeof pr !== 'object') throw new Error('PR metadata is required');
   const nodeId = pr.id ?? pr.nodeId;
   if (existing.nodeId && existing.nodeId !== nodeId) throw new Error('session mapping drifted');
-  assertProject(project);
   // Legacy UTC title suffixes cannot establish the session's local creation date.
   const titleDate = sessionDate(existing.titleDate ?? existing.sessionCreatedAt ?? createdAt);
   const mmdd = titleDate.slice(5).replace('-', '');
-  const prefix = `${project}-#${pr.number}-`;
-  const suffix = `丨 ${mmdd}`;
+  const prefix = `#${pr.number}-`;
+  const suffix = `丨${mmdd}`;
   if (typeof existing.title === 'string' && existing.title.startsWith(prefix) && existing.title.endsWith(suffix)) {
     const taskName = existing.title.slice(prefix.length, -suffix.length);
     if (han.test(taskName) && Array.from(taskName).length <= MAX_TASK_LENGTH
@@ -86,5 +77,5 @@ export function planSessionTitle({ pr, existing = {}, createdAt, project = 'Mivo
     }
   }
   const taskName = shortTaskName({ task: pr.title, prNumber: pr.number, repo });
-  return { title: repairSessionTitle({ project, task: pr.title, prNumber: pr.number, createdAt: titleDate, repo }), titleDate, taskName };
+  return { title: repairSessionTitle({ task: pr.title, prNumber: pr.number, createdAt: titleDate, repo }), titleDate, taskName };
 }

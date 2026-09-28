@@ -8,6 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { collectMivoCiSync } from './mivo-ci.mjs';
+import { taskRepairPolicy } from './mivo-feedback-policy.mjs';
 import { acquireLock, AUTHOR_RECLAIMED, readPr, writePr } from './mivo-state.mjs';
 
 export const REPO = 'xindong/mivo-canvas-plugin';
@@ -107,7 +108,7 @@ function saveResultLocked(paths, task, sessionId, payload) {
   const result = {
     ...payload, schemaVersion: 2, kind: 'mivo-repair-result', ...identity(task, sessionId),
     scope: 'feedback-task', prReady: false,
-    sourceHead: task.headRefOid, observedAt: new Date().toISOString(), receiptId,
+    sourceHead: task.headRefOid, repairPolicy: taskRepairPolicy(task), observedAt: new Date().toISOString(), receiptId,
     historyPath: path.join(history, `${receiptId}.json`),
   };
   immutableJson(result.historyPath, result);
@@ -225,23 +226,36 @@ export function cloneWorktree(paths, task, gitFn, cloneUrl = remoteUrl(task.repo
   return { worktree, head: checked.head, created: true };
 }
 
+// Recompute from the trusted task's feedback, including legacy tasks. A cached
+// category, an SC assertion, or a successful preflight is not repair authority.
+export function assertTaskRepairScope(task, head) {
+  if (!isSha(task?.headRefOid) || !isSha(head)) fail('repair scope requires valid source and target HEAD');
+  const repairPolicy = taskRepairPolicy(task);
+  if (head !== task.headRefOid && !repairPolicy.canChangeCode) {
+    fail('[REPAIR_SCOPE_NO_CODE] This task has no P0/P1, required-CI or conflict repair authority; preserve local changes, do not push. P2/P3 and unknown findings are no-change only.');
+  }
+  return repairPolicy;
+}
+
 export function prepare({ home, taskPath, ghFn = command, gitFn = command, cloneUrl, originUrl = remoteUrl(REPO) } = {}) {
   const { paths, task } = taskFrom(home, taskPath);
   const { sessionId } = boundSession(paths, task);
   const pr = ghPr(task, ghFn, false);
   const checkout = cloneWorktree(paths, task, gitFn, cloneUrl ?? originUrl, originUrl, pr.headRefOid);
+  const repairPolicy = assertTaskRepairScope(task, checkout.head);
   const needsSync = checkout.head !== pr.headRefOid || task.headRefOid !== pr.headRefOid;
-  return { ...identity(task, sessionId), status: needsSync ? 'needs-sync' : 'prepared', needsSync,
+  return { ...identity(task, sessionId), repairPolicy, status: needsSync ? 'needs-sync' : 'prepared', needsSync,
     worktree: checkout.worktree, head: checkout.head, remoteHead: pr.headRefOid, sourceHead: task.headRefOid, created: checkout.created };
 }
 
-function validateScs(report, task) {
+export function validateScs(report, task) {
   const scs = Array.isArray(report) ? report : report?.scs;
   if (!Array.isArray(scs) || scs.length === 0) fail('SC report must contain a non-empty scs array');
   const feedback = task.feedback ?? [];
   if (!Array.isArray(feedback)) fail('task feedback must be an array');
   const expected = new Set(feedback.map((item) => item?.key));
   if ([...expected].some((key) => typeof key !== 'string' || !key.trim()) || expected.size !== feedback.length) fail('task feedback keys must be non-empty and unique');
+  const permissions = new Map(taskRepairPolicy(task).items.map((item) => [item.key, item]));
   const ids = new Set();
   const covered = new Set();
   const checked = scs.map((sc, index) => {
@@ -252,8 +266,12 @@ function validateScs(report, task) {
     if (!Array.isArray(sc.evidence) || sc.evidence.length === 0 || sc.evidence.some((item) => typeof item !== 'string' || !item.trim())) fail(`SC[${index}] evidence must be non-empty strings`);
     const keys = sc.feedbackKeys ?? (expected.size ? null : []);
     if (!Array.isArray(keys) || (expected.size && !keys.length) || new Set(keys).size !== keys.length) fail(`SC[${index}] feedbackKeys must name task feedback`);
+    if (sc.status === 'pass' && !keys.length) fail(`[REPAIR_SCOPE_NO_CODE] SC[${index}] pass requires an authorized feedback key`);
     for (const key of keys) {
       if (!expected.has(key)) fail(`SC[${index}] contains an external feedback key: ${key}`);
+      if (sc.status === 'pass' && permissions.get(key)?.canChangeCode !== true) {
+        fail(`[REPAIR_SCOPE_NO_CODE] SC[${index}] cannot mark ${key} fixed; P2/P3, mixed or unconfirmed findings require no-change/triage`);
+      }
       covered.add(key);
     }
     return { id: sc.id.trim(), status: sc.status, evidence: sc.evidence, feedbackKeys: keys };
@@ -310,6 +328,7 @@ export function validate({ home, taskPath, validatedHead, gitFn = command, runFn
   const { paths, task } = taskFrom(home, taskPath);
   const { sessionId } = boundSession(paths, task);
   if (!isSha(validatedHead)) fail('validated-head must be a 40-character SHA');
+  assertTaskRepairScope(task, validatedHead);
   const worktree = taskWorktree(task);
   const checkout = assertWorktree(worktree, task, gitFn, originUrl);
   if (!checkout || checkout.head !== validatedHead) fail('worktree HEAD does not match validated-head');
@@ -466,6 +485,7 @@ export function finalize({ home, taskPath, scReport, validatedHead, validationRe
   const { paths, task } = taskFrom(home, taskPath);
   const { sessionId } = boundSession(paths, task);
   if (!isSha(validatedHead)) fail('validated-head must be a 40-character SHA');
+  assertTaskRepairScope(task, validatedHead);
   const pr = ghPr(task, ghFn, false);
   const worktree = taskWorktree(task);
   const checkout = assertWorktree(worktree, { ...task, headRefOid: validatedHead }, gitFn, originUrl);
@@ -474,6 +494,9 @@ export function finalize({ home, taskPath, scReport, validatedHead, validationRe
   if (!isSha(branchHead)) fail('remote branch head is unavailable');
   if (branchHead !== pr.headRefOid) fail(`remote branch and PR head disagree: ${branchHead} != ${pr.headRefOid}`);
   const { scs, feedbackCoverage } = loadScs(scReport, task);
+  if (validatedHead !== task.headRefOid && scs.every((sc) => sc.status === 'no-change')) {
+    fail('[REPAIR_SCOPE_NO_CODE] Changed HEAD requires an SC bound to an authorized fix; no-change cannot cover commits');
+  }
   const noChange = validatedHead === task.headRefOid && branchHead === validatedHead && scs.every((sc) => sc.status === 'no-change');
   const verification = noChange
     ? { status: 'not-required-no-change', head: validatedHead, localTests: 'not-run', reason: 'all SCs are no-change and task, checkout and remote HEAD match' }
@@ -496,6 +519,7 @@ export function recheck({ home, taskPath, validatedHead, ghFn = command, gitFn =
   assertIdentity(previous, task, sessionId, 'repair result');
   const head = validatedHead ?? previous.head;
   if (!isSha(head) || previous.head !== head) fail('recheck HEAD does not match the result');
+  assertTaskRepairScope(task, head);
   const { scs, feedbackCoverage } = validateScs(previous.scs, task);
   const worktree = taskWorktree(task);
   const checkout = assertWorktree(worktree, task, gitFn, originUrl);
