@@ -355,3 +355,98 @@ test('maintenance script treats only the new title as canonical', () => {
   assert.equal(re.test('MivoPlugin-#558-终态回执修复丨 0928'), true);
   assert.equal(re.test('MivoPlugin-终态回执修复丨 0928'), false);
 });
+
+function collectFailedCi() {
+  return {
+    pr: { id: nodeId, number: 790, state: 'OPEN', isDraft: false, sameRepository: true, author: { login: 'owner' }, headRefOid: HEAD, baseRefOid: BASE, releaseEpoch: 'e' },
+    admissionVerified: true,
+    checks: [{ name: 'unit', state: 'FAILURE', bucket: 'fail' }],
+    ci: { status: 'failed', required: [{ context: 'unit', status: 'failed', evidence: { id: 1, runId: 2, attempt: 1 } }] },
+    policy: { status: 'verified', required: [{ context: 'unit' }] },
+    comments: [], reviews: [], threads: [], labels: [], mergeReady: false,
+  };
+}
+
+function seedInFlight(paths, extra = {}) {
+  seed(paths, {
+    pollFingerprint: pollFingerprint(snap()),
+    activeTask: { dispatchId: 'live-790-old', sessionId: 'sess-790', head: HEAD, status: 'accepted' },
+    lastDispatch: { dispatchId: 'live-790-old', at: '2026-09-27T00:00:00Z', recoveryCount: 0 },
+    ...extra,
+  });
+}
+
+test('Ready -> Draft supersedes the in-flight task without an incident event', (t) => {
+  const { paths } = homeOf(t);
+  seedInFlight(paths);
+  const { result, entry } = poll(paths, {
+    snapshot: snap({ isDraft: true, updatedAt: '2026-09-28T01:00:00Z' }),
+    dispatchFn: () => { throw new Error('draft must not dispatch'); },
+  });
+  assert.equal(result.prs[0].dispatch.reason, 'draft');
+  assert.equal(entry.activeTask.status, 'blocked');
+  assert.equal(entry.activeTask.blockedKind, 'author-reclaimed');
+  assert.deepEqual(entry.authorReclaimed, { at: now, dispatchId: 'live-790-old' });
+  assert.equal(entry.wasDraft, true);
+  assert.equal(entry.lastException, undefined);
+  assert.equal((result.events ?? []).length, 0);
+});
+
+test('staying Draft does not re-stamp the reclaim', (t) => {
+  const { paths } = homeOf(t);
+  seedInFlight(paths, {
+    wasDraft: true,
+    activeTask: { dispatchId: 'live-790-old', status: 'blocked', blockedKind: 'author-reclaimed', at: '2026-09-27T12:00:00Z' },
+    authorReclaimed: { at: '2026-09-27T12:00:00Z', dispatchId: 'live-790-old' },
+  });
+  const { entry } = poll(paths, {
+    snapshot: snap({ isDraft: true, updatedAt: '2026-09-28T01:00:00Z' }),
+    dispatchFn: () => { throw new Error('draft must not dispatch'); },
+  });
+  assert.equal(entry.authorReclaimed.at, '2026-09-27T12:00:00Z');
+});
+
+test('completed task is not superseded by a later Draft', (t) => {
+  const { paths } = homeOf(t);
+  seed(paths, { pollFingerprint: pollFingerprint(snap()), activeTask: { dispatchId: 'live-790-done', status: 'complete' } });
+  const { entry } = poll(paths, {
+    snapshot: snap({ isDraft: true, updatedAt: '2026-09-28T01:00:00Z' }),
+    dispatchFn: () => { throw new Error('draft must not dispatch'); },
+  });
+  assert.equal(entry.activeTask.status, 'complete');
+  assert.equal(entry.authorReclaimed, undefined);
+});
+
+test('re-Ready after reclaim dispatches fresh work with the reset note, not a recovery', (t) => {
+  const { paths } = homeOf(t);
+  seedInFlight(paths);
+  poll(paths, {
+    snapshot: snap({ isDraft: true, updatedAt: '2026-09-28T01:00:00Z' }),
+    dispatchFn: () => { throw new Error('draft must not dispatch'); },
+  });
+  // A stale pre-draft result for the superseded task must not revive it.
+  fs.mkdirSync(path.join(paths.stateDir, 'results'), { recursive: true });
+  fs.writeFileSync(path.join(paths.stateDir, 'results', 'live-790-old.json'), JSON.stringify({
+    dispatchId: 'live-790-old', nodeId, sessionId: 'sess-790', status: 'waiting-ci', head: HEAD, schemaVersion: 2,
+  }));
+  const calls = [];
+  const { result, entry } = poll(paths, {
+    snapshot: snap({ updatedAt: '2026-09-28T02:00:00Z', commentCount: 2 }),
+    collect: collectFailedCi,
+    dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-790' }; },
+  });
+  assert.equal(result.prs[0].dispatch.attempted, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].target_session_id, 'sess-790');
+  assert.match(calls[0].message, /作者收回过本 PR/);
+  assert.match(calls[0].message, /git reset --hard origin\/fix\/x/);
+  assert.match(calls[0].message, /live-790-old/);
+  assert.notEqual(entry.lastDispatch.dispatchId, 'live-790-old');
+  const later = poll(paths, {
+    snapshot: snap({ updatedAt: '2026-09-28T03:00:00Z', commentCount: 3 }),
+    collect: () => ({ ...collectFailedCi(), ci: { status: 'failed', required: [{ context: 'unit', status: 'failed', evidence: { id: 9, runId: 9, attempt: 1 } }] } }),
+    dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-790' }; },
+  });
+  assert.ok(later);
+  for (const p of calls.slice(1)) assert.doesNotMatch(p.message, /作者收回过本 PR/);
+});
