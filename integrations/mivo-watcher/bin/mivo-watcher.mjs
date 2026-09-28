@@ -537,6 +537,7 @@ export function normalizePollSnapshot(payload) {
   const threadTimes = threads.flatMap((thread) => (thread.comments?.nodes ?? []).map((item) => item.updatedAt)).filter(Boolean).sort();
   const suiteNodes = node.commits?.nodes?.[0]?.commit?.checkSuites;
   const overflow = Boolean(node.overflow
+    || node.labels?.pageInfo?.hasNextPage
     || node.reviewThreads?.pageInfo?.hasNextPage
     || suiteNodes?.pageInfo?.hasNextPage
     || (suiteNodes?.nodes ?? []).some((suite) => suite.checkRuns?.pageInfo?.hasNextPage));
@@ -568,7 +569,7 @@ export function pollFingerprint(snapshot) {
   });
 }
 function* fetchPollSnapshot({ nodeId, ghFn }) {
-  const query = 'query($id:ID!){node(id:$id){... on PullRequest{state isDraft headRefOid baseRefOid mergeable labels(first:50){nodes{name}} comments(last:1){totalCount nodes{updatedAt}} reviews(last:1){totalCount nodes{updatedAt}} reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved comments(last:1){nodes{updatedAt}}}} commits(last:1){nodes{commit{checkSuites(first:30){pageInfo{hasNextPage} nodes{checkRuns(first:40){pageInfo{hasNextPage} nodes{name status conclusion databaseId detailsUrl}}}}}}}}}}';
+  const query = 'query($id:ID!){node(id:$id){... on PullRequest{state isDraft headRefOid baseRefOid mergeable labels(first:50){pageInfo{hasNextPage} nodes{name}} comments(last:1){totalCount nodes{updatedAt}} reviews(last:1){totalCount nodes{updatedAt}} reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved comments(last:1){nodes{updatedAt}}}} commits(last:1){nodes{commit{checkSuites(first:30){pageInfo{hasNextPage} nodes{checkRuns(first:40){pageInfo{hasNextPage} nodes{name status conclusion databaseId detailsUrl}}}}}}}}}}';
   const raw = yield () => ghFn(['api', 'graphql', '-f', `query=${query}`, '-F', `id=${nodeId}`]);
   return normalizePollSnapshot(JSON.parse(raw));
 }
@@ -597,12 +598,21 @@ export function applyDispatchReceipt({ state, pr, mapping, receipt, now, cursor,
     throw new Error('Cindy resumed a different session');
   }
   const key = String(pr.id);
-  const previous = state.prs[key] || {};
-  if (previous.pendingDispatch) {
-    const expected = previous.pendingDispatch.dispatchId;
-    if (receipt.dispatch_id && expected && receipt.dispatch_id !== expected) {
-      throw new Error('dispatch receipt does not match pending dispatch');
-    }
+  const previous = readPr(paths.home, key) || state.prs[key] || {};
+  const thisId = receipt.dispatch_id ?? previous.pendingDispatch?.dispatchId;
+  const expected = previous.pendingDispatch?.dispatchId;
+  if (expected && thisId && expected !== thisId) {
+    throw new Error('dispatch receipt does not match pending dispatch');
+  }
+  if (previous.sessionId && previous.claimedAt && sessionId && previous.sessionId !== sessionId) {
+    state.prs[key] = {
+      ...previous,
+      dispatchConflict: { at: now, receiptSessionId: sessionId, boundSessionId: previous.sessionId },
+      pendingDispatch: null,
+      dispatchError: null,
+    };
+    persistState(state, paths);
+    return { bound: true, sessionId: previous.sessionId, conflict: true, reused: true };
   }
   state.prs[key] = {
     ...previous,
@@ -614,7 +624,9 @@ export function applyDispatchReceipt({ state, pr, mapping, receipt, now, cursor,
     labels: collected?.labels ?? previous.labels ?? [],
     mergeReady: collected?.mergeReady ?? previous.mergeReady ?? false,
     feedbackCursor: cursor ?? previous.feedbackCursor ?? {},
-    sessionId,
+    sessionId: previous.sessionId ?? sessionId,
+    scheduleId: previous.scheduleId,
+    claimedAt: previous.claimedAt,
     title: mapping.title,
     titleDate: mapping.titleDate ?? previous.titleDate,
     taskName: mapping.taskName ?? previous.taskName,
@@ -624,7 +636,7 @@ export function applyDispatchReceipt({ state, pr, mapping, receipt, now, cursor,
     activeTask: {
       ...(recovery ? previous.activeTask : {}),
       dispatchId: receipt.dispatch_id ?? previous.pendingDispatch?.dispatchId,
-      sessionId, head: pr.headRefOid, status: receipt.wake_kind === 'queued' ? 'queued' : 'accepted', at: now,
+      sessionId: previous.sessionId ?? sessionId, head: pr.headRefOid, status: receipt.wake_kind === 'queued' ? 'queued' : 'accepted', at: now,
       hostTurnStatus: 'unverified',
     },
     lastSeenAt: now,
@@ -646,7 +658,7 @@ export function applyDispatchReceipt({ state, pr, mapping, receipt, now, cursor,
     },
   };
   persistState(state, paths);
-  return { bound: true, sessionId, reused: Boolean(mapping.sessionId) };
+  return { bound: true, sessionId: state.prs[key].sessionId, reused: Boolean(mapping.sessionId || previous.claimedAt) };
 }
 
 function resultFor(previous, paths) {
@@ -737,13 +749,22 @@ export function* processPr({
   unlockForDispatch = null, relockForDispatch = null,
 } = {}) {
   const key = String(pr.id);
+  let persistBlocked = false;
   function* yieldDispatch(effect) {
     unlockForDispatch?.();
-    try { return yield effect; }
-    finally {
-      const relocked = relockForDispatch?.();
-      if (relocked?.held) throw new Error('PR 状态锁占用');
+    let value;
+    let thrown;
+    try { value = yield effect; }
+    catch (error) { thrown = error; }
+    const relocked = relockForDispatch?.();
+    if (relocked?.held) {
+      persistBlocked = true;
+      const error = new Error('PR 状态锁占用');
+      error.code = 'LOCK_HELD';
+      throw error;
     }
+    if (thrown) throw thrown;
+    return value;
   }
   let previous = migrateEntry(clearDryPending(previousArg ?? (state.prs[key] || {})));
   previous = { ...previous, number: pr.number, nodeId: pr.id };
@@ -791,6 +812,13 @@ export function* processPr({
   if (collected.pr && (collected.pr.state !== 'OPEN' || collected.pr.isDraft || !collected.pr.sameRepository || collected.pr.author?.login !== viewer)) {
     state.prs[key] = { ...base, admissionVerified: false, admissionEpoch: null };
     report.push({ number: pr.number, dispatch: {attempted:false,reason:'ownership-no-longer-released'} });
+    return;
+  }
+  if (hasWatchOff(collected.labels)) {
+    previous = { ...base, labels: collected.labels ?? [], optOut: true };
+    state.prs[key] = previous;
+    persistState(state, paths);
+    report.push({ number: pr.number, nodeId: pr.id, dispatch: { attempted: false, reason: 'opt-out' } });
     return;
   }
   const sameEpoch = !collected.pr || (previous.admissionEpoch === collected.pr.releaseEpoch && previous.wasDraft !== true);
@@ -904,8 +932,13 @@ export function* processPr({
       previous = state.prs[key];
       dispatch = { attempted: true, ...bound, reason: 'confirmed-nondelivery-retry' };
     } catch (error) {
-      previous = rememberDispatchFailure(state, key, error, now, paths);
-      dispatch = { attempted: true, bound: false, reason: 'dispatch-unconfirmed', error: String(error.message).slice(0, 400) };
+      if (error.code === 'LOCK_HELD' || persistBlocked) {
+        dispatch = { attempted: true, bound: false, reason: 'dispatch-lock-retry', error: String(error.message).slice(0, 400) };
+      } else {
+        const live = readPr(paths.home, key);
+        if (live?.claimedAt && live.sessionId) { state.prs[key] = live; previous = live; dispatch = { attempted: true, bound: true, reason: 'claimed-during-dispatch' }; }
+        else { previous = rememberDispatchFailure(state, key, error, now, paths); dispatch = { attempted: true, bound: false, reason: 'dispatch-unconfirmed', error: String(error.message).slice(0, 400) }; }
+      }
     }
   } else if (previous.pendingDispatch && !String(previous.pendingDispatch.dispatchId ?? '').startsWith('dry-')) {
     dispatch.reason = 'pending-dispatch-unknown';
@@ -933,8 +966,13 @@ export function* processPr({
       previous = state.prs[key];
       dispatch = { attempted: true, ...bound, reason: 'missing-result-recovery' };
     } catch (error) {
-      previous = rememberDispatchFailure(state, key, error, now, paths);
-      dispatch = { attempted: true, bound: false, reason: 'dispatch-unconfirmed', error: String(error.message).slice(0, 400) };
+      if (error.code === 'LOCK_HELD' || persistBlocked) {
+        dispatch = { attempted: true, bound: false, reason: 'dispatch-lock-retry', error: String(error.message).slice(0, 400) };
+      } else {
+        const live = readPr(paths.home, key);
+        if (live?.claimedAt && live.sessionId) { state.prs[key] = live; previous = live; dispatch = { attempted: true, bound: true, reason: 'claimed-during-dispatch' }; }
+        else { previous = rememberDispatchFailure(state, key, error, now, paths); dispatch = { attempted: true, bound: false, reason: 'dispatch-unconfirmed', error: String(error.message).slice(0, 400) }; }
+      }
     }
   } else if (shouldDispatch && !allowCreate && !previous.sessionId) {
     previous = { ...previous, needsOwner: true };
@@ -955,8 +993,13 @@ export function* processPr({
         previous = state.prs[key];
         dispatch = { attempted: true, ...bound };
       } catch (error) {
-        previous = rememberDispatchFailure(state, key, error, now, paths);
-        dispatch = { attempted: true, bound: false, reason: 'dispatch-unconfirmed', error: String(error.message).slice(0, 400) };
+        if (error.code === 'LOCK_HELD' || persistBlocked) {
+          dispatch = { attempted: true, bound: false, reason: 'dispatch-lock-retry', error: String(error.message).slice(0, 400) };
+        } else {
+          const live = readPr(paths.home, key);
+          if (live?.claimedAt && live.sessionId) { state.prs[key] = live; previous = live; dispatch = { attempted: true, bound: true, reason: 'claimed-during-dispatch' }; }
+          else { previous = rememberDispatchFailure(state, key, error, now, paths); dispatch = { attempted: true, bound: false, reason: 'dispatch-unconfirmed', error: String(error.message).slice(0, 400) }; }
+        }
       }
     }
   } else if (hitRoundLimit && fresh.length > 0) {
@@ -969,8 +1012,10 @@ export function* processPr({
   if (dispatch.reason === 'no-new-feedback' && collected.policy && collected.policy.status !== 'verified') {
     dispatch.reason = 'policy-unknown';
   }
+  if (!persistBlocked) {
   previous = markException({ ...previous, lastPolicyStatus: collected.policy?.status ?? previous.lastPolicyStatus ?? null }, now, events);
   state.prs[key] = previous;
+  }
   report.push({
     number: pr.number, nodeId: pr.id, fresh: fresh.length, admissionVerified: admitted,
     admissionReason: collected.admissionReason ?? null, mergeReady: collected.mergeReady,
@@ -1163,7 +1208,7 @@ export function* pollWorkflow({
   if (collectFailed || recheckFailed) {
     save({ ...latest, pollFingerprint: previous.pollFingerprint, collectRetry: true });
   } else {
-    save({ ...latest, pollFingerprint: fingerprint, collectRetry: false, needsOwner: false, optOut: false });
+    save({ ...latest, pollFingerprint: fingerprint, collectRetry: false, needsOwner: false, optOut: latest.optOut === true });
   }
   return { mode: 'poll', dispatch: !dryRun, prs: report, events };
 }
@@ -1310,6 +1355,7 @@ export function* discoverWorkflow({
       unlockForDispatch, relockForDispatch,
     });
     let entry = state.prs[key] || previous;
+    if (!prLock.held) {
     if (!entry.sessionId && entry.pendingDispatch && entry.pendingDispatch.status !== 'retryable'
       && !String(entry.pendingDispatch.dispatchId ?? '').startsWith('dry-')) {
       entry = {
@@ -1318,6 +1364,7 @@ export function* discoverWorkflow({
       };
     }
     writePr(paths.home, key, entry);
+    }
     report.push(inner[0] ?? { number: pr.number, nodeId: key, dispatch: { attempted: false } });
     } finally { prLock.release(); }
   }

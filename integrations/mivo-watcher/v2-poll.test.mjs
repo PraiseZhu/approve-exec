@@ -86,6 +86,23 @@ test('new unresolved thread changes fingerprint', () => {
   assert.notEqual(none, added);
 });
 
+test('label page overflow plus collect opt-out skips dispatch', (t) => {
+  const { paths } = homeOf(t);
+  seed(paths, { pollFingerprint: pollFingerprint(snap()) });
+  const { result, entry } = poll(paths, {
+    snapshot: snap({ overflow: true, labels: [] }),
+    collect: () => ({
+      pr: { id: nodeId, number: 790, state: 'OPEN', isDraft: false, sameRepository: true, author: { login: 'owner' }, headRefOid: HEAD, baseRefOid: BASE, releaseEpoch: 'e' },
+      admissionVerified: true, labels: ['mivo-watch:off'], mergeReady: false,
+      checks: [], comments: [], reviews: [], threads: [],
+      ci: { status: 'green', required: [] }, policy: { status: 'verified', required: [] },
+    }),
+    dispatchFn: () => { throw new Error('should not dispatch'); },
+  });
+  assert.equal(result.prs[0].dispatch.reason, 'opt-out');
+  assert.equal(entry.optOut, true);
+});
+
 test('graphql overflow forces full collect', (t) => {
   const { paths } = homeOf(t);
   const fingerprint = pollFingerprint(snap({ overflow: true }));

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { scanOnce, watcherPaths, watchGuideMessage } from './bin/mivo-watcher.mjs';
-import { clearOwnerUnknown } from './bin/mivo-repair.mjs';
+import { bindSchedule, clearOwnerUnknown } from './bin/mivo-repair.mjs';
 import { acquireLock, readPr, statePaths, writePr } from './bin/mivo-state.mjs';
 
 const HEAD = 'a'.repeat(40);
@@ -71,6 +71,45 @@ test('unbound admitted PR creates with schedule-params and bind-schedule', (t) =
   assert.match(spaced, /busy/);
   assert.match(spaced, /owner-conflict/);
   assert.match(spaced, /'\/tmp\/Project Mivo Canvas-Plugin\/_ops\/mivo-watcher'/);
+});
+
+test('bind during dispatch keeps scheduleId and claimedAt after receipt', (t) => {
+  const { paths, home } = homeOf(t);
+  discover(paths, {
+    collect: collectFail,
+    dispatchFn: (params) => {
+      const dispatchId = /--dispatch-id ([^\s`]+)/.exec(params.message)[1];
+      const resultPath = path.join(home, 'sched.json');
+      fs.writeFileSync(resultPath, JSON.stringify({
+        ok: true, id: 'sched-bind', executionMode: 'script', status: 'active',
+        targetSessionId: 'sess-new', scriptConfig: { command: `python3 x.py --mode poll --pr 790 --node-id ${nodeId}` },
+      }));
+      bindSchedule({ home, pr: 790, nodeId, resultPath, dispatchId, retryMs: 0 });
+      return { target_session_id: 'sess-new', dispatch_id: dispatchId };
+    },
+  });
+  const entry = readPr(home, nodeId);
+  assert.equal(entry.sessionId, 'sess-new');
+  assert.equal(entry.scheduleId, 'sched-bind');
+  assert.ok(entry.claimedAt);
+  assert.equal(entry.pendingDispatch, null);
+});
+
+test('relock failure after dispatch does not overwrite PR state', (t) => {
+  const { paths, home } = homeOf(t);
+  let held;
+  discover(paths, {
+    collect: collectFail,
+    dispatchFn: () => {
+      held = acquireLock(home, `pr-${nodeId}`);
+      return { target_session_id: 'sess-new' };
+    },
+  });
+  t.after(() => held?.release?.());
+  const entry = readPr(home, nodeId);
+  assert.ok(!entry.sessionId);
+  assert.ok(entry.pendingDispatch?.dispatchId);
+  assert.notEqual(entry.pendingDispatch?.status, 'awaiting-claim');
 });
 
 test('discover releases pr lock during create dispatch', (t) => {
