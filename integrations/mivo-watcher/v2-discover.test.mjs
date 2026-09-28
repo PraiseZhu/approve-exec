@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { scanOnce, watcherPaths, watchGuideMessage } from './bin/mivo-watcher.mjs';
+import { scanOnce, watcherPaths, watchGuideMessage, watchPollLostMessage, watchSuccessorMessage } from './bin/mivo-watcher.mjs';
 import { bindSchedule, clearOwnerUnknown } from './bin/mivo-repair.mjs';
 import { acquireLock, readPr, statePaths, writePr } from './bin/mivo-state.mjs';
 
@@ -32,7 +32,7 @@ function collectFail() {
   };
 }
 
-function discover(paths, { now = '2026-09-28T00:00:00Z', prs = [listed], collect, dispatchFn, maxPrs } = {}) {
+function discover(paths, { now = '2026-09-28T00:00:00Z', prs = [listed], collect, dispatchFn, maxPrs, clock, budgetMs, perPrBudgetMs } = {}) {
   let collected = 0;
   const result = scanOnce({
     mode: 'discover', enabled: true, allowDispatch: true, paths, now,
@@ -46,7 +46,7 @@ function discover(paths, { now = '2026-09-28T00:00:00Z', prs = [listed], collect
       if (typeof collect === 'function') return collect(...args);
       throw new Error('collect should not run');
     },
-    dispatchFn, maxPrs,
+    dispatchFn, maxPrs, clock, budgetMs, perPrBudgetMs,
     ownershipSnapshot: function* () {
       return { pr: { state: 'OPEN', isDraft: false, sameRepository: true, author: { login: 'owner' }, headRefOid: HEAD, baseRefOid: BASE, releaseEpoch: 'e' } };
     },
@@ -204,6 +204,9 @@ test('bound stale heartbeat reminds at most once per 30 minutes', (t) => {
   assert.equal(first.collected, 0);
   assert.equal(calls.length, 1);
   assert.match(calls[0].message, /轮询调度失联/);
+  assert.match(calls[0].message, /schedule-params/);
+  assert.match(calls[0].message, /bind-schedule/);
+  assert.doesNotMatch(calls[0].message, /schedule_resume/);
   assert.equal(calls[0].target_session_id, 'sess-790');
   const second = discover(paths, {
     now: '2026-09-28T00:40:00Z',
@@ -415,4 +418,109 @@ test('opt-out label skips discover work', (t) => {
   });
   assert.equal(collected, 0);
   assert.equal(result.prs[0].dispatch.reason, 'opt-out');
+});
+
+function collectFor(pr) {
+  return {
+    ...collectFail(),
+    pr: { id: pr.id, number: pr.number, state: 'OPEN', isDraft: false, sameRepository: true, author: { login: 'owner' }, headRefOid: HEAD, baseRefOid: BASE, releaseEpoch: 'e' },
+  };
+}
+
+test('discover dispatches after 20s collection when global remaining exceeds 65s', (t) => {
+  const { paths } = homeOf(t);
+  let clock = 0;
+  const calls = [];
+  const { result } = discover(paths, {
+    budgetMs: 120000,
+    perPrBudgetMs: 75000,
+    clock: () => clock,
+    collect: (pr) => {
+      clock += 20000;
+      return collectFor(pr);
+    },
+    dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-new' }; },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(result.prs[0].dispatch.attempted, true);
+  assert.notEqual(result.prs[0].dispatch.reason, 'dispatch-budget-deferred');
+});
+
+test('discover still defers dispatch when global remaining is under 65s', (t) => {
+  const { paths } = homeOf(t);
+  let clock = 0;
+  const calls = [];
+  const { result } = discover(paths, {
+    budgetMs: 84000,
+    perPrBudgetMs: 75000,
+    clock: () => clock,
+    collect: (pr) => {
+      clock += 20000;
+      return collectFor(pr);
+    },
+    dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-new' }; },
+  });
+  assert.equal(calls.length, 0);
+  assert.equal(result.prs[0].dispatch.attempted, false);
+  assert.equal(result.prs[0].dispatch.reason, 'dispatch-budget-deferred');
+});
+
+test('discover defers later PRs after the first dispatch exhausts global remaining', (t) => {
+  const { paths } = homeOf(t);
+  const second = { number: 791, id: 'PR_791', headRefOid: HEAD, headRefName: 'fix/y', title: 'fix', isDraft: false, labels: [] };
+  let clock = 0;
+  const calls = [];
+  const { result } = discover(paths, {
+    prs: [listed, second],
+    budgetMs: 120000,
+    perPrBudgetMs: 75000,
+    clock: () => clock,
+    collect: (pr) => {
+      clock += 20000;
+      return collectFor(pr);
+    },
+    dispatchFn: (p) => {
+      calls.push(p);
+      clock += 40000;
+      return { target_session_id: `sess-${calls.length}` };
+    },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(result.prs[0].dispatch.attempted, true);
+  assert.equal(result.prs[1].dispatch.attempted, false);
+  assert.equal(result.prs[1].dispatch.reason, 'dispatch-budget-deferred');
+});
+
+const BAN = /禁止恢复、修改或新建任何其它调度，尤其是名为 Mivo watcher 的共享调度/;
+
+test('lost reminder with null scheduleId embeds step 0 and does not resume', () => {
+  const home = '/tmp/Project Mivo Canvas-Plugin/_ops/mivo-watcher';
+  const text = watchPollLostMessage({
+    prNumber: 790, heartbeatAt: '2026-09-28T00:00:00Z', scheduleId: null, home, nodeId,
+  });
+  assert.match(text, /schedule-params/);
+  assert.match(text, /bind-schedule/);
+  assert.match(text, /--pr 790 --node-id PR_790 --result/);
+  assert.doesNotMatch(text, /--dispatch-id/);
+  assert.doesNotMatch(text, /schedule_resume/);
+  assert.doesNotMatch(text, /schedule_get/);
+  assert.match(text, BAN);
+});
+
+test('lost reminder with scheduleId only resumes that id', () => {
+  const home = '/tmp/Project Mivo Canvas-Plugin/_ops/mivo-watcher';
+  const text = watchPollLostMessage({
+    prNumber: 790, heartbeatAt: '2026-09-28T00:00:00Z', scheduleId: 'sched-790', home, nodeId,
+  });
+  assert.match(text, /schedule_get sched-790/);
+  assert.match(text, /只对该 scheduleId 调用 schedule_resume/);
+  assert.doesNotMatch(text, /schedule_get (?!sched-790)/);
+  assert.match(text, BAN);
+});
+
+test('guide, lost, and successor messages all ban shared watcher schedules', () => {
+  const home = '/tmp/Project Mivo Canvas-Plugin/_ops/mivo-watcher';
+  assert.match(watchGuideMessage({ home, prNumber: 790, nodeId }), BAN);
+  assert.match(watchPollLostMessage({ prNumber: 790, heartbeatAt: 't', scheduleId: 's', home, nodeId }), BAN);
+  assert.match(watchSuccessorMessage({ prNumber: 790, predecessorId: 'old', reason: 'ARCHIVED' }), BAN);
 });
