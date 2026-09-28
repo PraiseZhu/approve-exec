@@ -7,7 +7,7 @@ import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 const here=path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_RUNTIME='/Users/praise/AI-Agent/Claude/projects/Project Mivo Canvas-Plugin/_ops/mivo-watcher';
-export const FILES=['mivo-ci.mjs','mivo-pr-policy.mjs','mivo-pr-snapshot.mjs','mivo-repair.mjs','mivo-state.mjs','mivo-watcher.mjs','public-review.mjs','session-title.mjs','mivo-watch-script.py','protocol.py','session-title-maintenance.py'];
+export const FILES=['mivo-ci.mjs','mivo-pr-policy.mjs','mivo-pr-snapshot.mjs','mivo-repair.mjs','mivo-state.mjs','mivo-ownership.mjs','mivo-watcher.mjs','public-review.mjs','session-title.mjs','mivo-watch-script.py','protocol.py','session-title-maintenance.py'];
 const sha=file=>fs.existsSync(file)?createHash('sha256').update(fs.readFileSync(file)).digest('hex'):null;
 const requireValue=(v,m)=>{if(!v)throw Error(m);};
 export function verify(runtime,source=path.join(here,'bin')) {

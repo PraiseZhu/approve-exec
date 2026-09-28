@@ -495,6 +495,29 @@ export function watchClosedownMessage({ prNumber, state, scheduleId, home }) {
   const helper = shellQuote(path.join(home, 'bin', 'mivo-repair.mjs'));
   return `PR #${prNumber} 已${verb}：调用 schedule_delete ${scheduleId ?? ''} 删除本 PR 轮询调度，再运行 \`node ${helper} --home ${shellQuote(home)} cleanup --pr ${prNumber}\`；不做其它改动。`;
 }
+export function watchDispatchConflictMessage({ prNumber, bindSession, receiptSession, dispatchId }) {
+  return `PR #${prNumber} 回执冲突：合法 owner 是 ${bindSession}，但 dispatch ${dispatchId ?? ''} 的回执指向 ${receiptSession}。请核实 ${receiptSession} 是否也在处理同一 PR，如是请人工归档多余 session。`;
+}
+function* notifyDispatchConflictOnce({ previous, key, paths, now, dryRun, dispatchFn, remaining, pr }) {
+  const conflict = previous?.dispatchConflict;
+  if (dryRun || !conflict || conflict.notifiedAt || !previous.sessionId || typeof dispatchFn !== 'function') {
+    return previous;
+  }
+  try {
+    yield () => dispatchFn({
+      title: previous.title || `MivoPlugin-#${pr.number}`,
+      message: watchDispatchConflictMessage({
+        prNumber: pr.number, bindSession: conflict.bindSession, receiptSession: conflict.receiptSession, dispatchId: conflict.dispatchId,
+      }),
+      target_session_id: previous.sessionId,
+    }, { timeoutMs: Math.max(1, remaining()) });
+    const next = { ...previous, dispatchConflict: { ...conflict, notifiedAt: now } };
+    writePr(paths.home, key, next);
+    return next;
+  } catch {
+    return previous;
+  }
+}
 function runAttemptFromUrl(url) {
   const text = String(url ?? '');
   const match = text.match(/\/attempts\/(\d+)/) || text.match(/[?&]attempt=(\d+)/i);
@@ -608,7 +631,12 @@ export function applyDispatchReceipt({ state, pr, mapping, receipt, now, cursor,
   if (previous.sessionId && previous.claimedAt && sessionId && previous.sessionId !== sessionId) {
     state.prs[key] = {
       ...previous,
-      dispatchConflict: { at: now, receiptSessionId: sessionId, boundSessionId: previous.sessionId },
+      dispatchConflict: {
+        bindSession: previous.sessionId,
+        receiptSession: sessionId,
+        dispatchId: thisId ?? null,
+        at: now,
+      },
       pendingDispatch: null,
       dispatchError: null,
     };
@@ -931,7 +959,8 @@ export function* processPr({
       const bound = applyDispatchReceipt({ state, pr, mapping,
         receipt: { ...receipt, dispatch_id: receipt?.dispatch_id ?? pending.dispatchId },
         now, cursor: pending.cursor ?? retainedCursor, collected, fresh: [], paths, recovery: pending.recovery === true });
-      previous = state.prs[key];
+      previous = yield* notifyDispatchConflictOnce({ previous: state.prs[key], key, paths, now, dryRun, dispatchFn, remaining, pr });
+      state.prs[key] = previous;
       dispatch = { attempted: true, ...bound, reason: 'confirmed-nondelivery-retry' };
     } catch (error) {
       if (error.code === 'LOCK_HELD' || persistBlocked) {
@@ -965,7 +994,8 @@ export function* processPr({
       const bound = applyDispatchReceipt({ state, pr, mapping,
         receipt: { ...receipt, dispatch_id: receipt?.dispatch_id ?? pending.dispatchId },
         now, cursor: retainedCursor, collected, fresh: [], paths, recovery: true });
-      previous = state.prs[key];
+      previous = yield* notifyDispatchConflictOnce({ previous: state.prs[key], key, paths, now, dryRun, dispatchFn, remaining, pr });
+      state.prs[key] = previous;
       dispatch = { attempted: true, ...bound, reason: 'missing-result-recovery' };
     } catch (error) {
       if (error.code === 'LOCK_HELD' || persistBlocked) {
@@ -992,7 +1022,8 @@ export function* processPr({
         const bound = applyDispatchReceipt({ state, pr, mapping,
           receipt: { ...receipt, dispatch_id: receipt?.dispatch_id ?? pending.dispatchId },
           now, cursor, collected, fresh, paths });
-        previous = state.prs[key];
+        previous = yield* notifyDispatchConflictOnce({ previous: state.prs[key], key, paths, now, dryRun, dispatchFn, remaining, pr });
+        state.prs[key] = previous;
         dispatch = { attempted: true, ...bound };
       } catch (error) {
         if (error.code === 'LOCK_HELD' || persistBlocked) {
@@ -1179,10 +1210,24 @@ export function* pollWorkflow({
     }
     return { mode: 'poll', dispatch: dispatch.attempted, prs: [{ number, nodeId, dispatch }] };
   }
+  if (previous.closedHandled === true) {
+    const lock = acquireLock(paths.home, `pr-${nodeId}`);
+    if (!lock.held) {
+      try { previous = save({ ...previous, closedHandled: false, reopenedAt: now }); }
+      finally { lock.release(); }
+    }
+  }
   if (hasWatchOff(normalized.labels) || hasWatchOff(labels)) {
     save({ ...previous, optOut: true });
     return { mode: 'poll', dispatch: false, prs: [{ number, nodeId, dispatch: { attempted: false, reason: 'opt-out' } }] };
   }
+  if (previous.needsHuman) {
+    save(previous);
+    return { mode: 'poll', dispatch: false, prs: [{ number, nodeId, needsHuman: previous.needsHuman, dispatch: { attempted: false, reason: 'needs-human' } }] };
+  }
+  previous = yield* notifyDispatchConflictOnce({
+    previous, key: nodeId, paths, now, dryRun, dispatchFn, remaining, pr: { number },
+  });
   const pendingRetry = previous.pendingDispatch?.status === 'retryable';
   const recoveryDue = Boolean(readTaskForRecovery(previous, paths, now));
   if (previous.pollFingerprint === fingerprint && !pendingRetry && !recoveryDue && !previous.collectRetry && !normalized.overflow) {
@@ -1272,6 +1317,17 @@ export function* discoverWorkflow({
     try {
     let previous = readPr(paths.home, key) || { nodeId: key, number: pr.number };
     const guide = watchGuideMessage({ home: paths.home, prNumber: pr.number, nodeId: key });
+    if (previous.closedHandled === true) {
+      previous = { ...previous, closedHandled: false, reopenedAt: now };
+      writePr(paths.home, key, previous);
+    }
+    previous = yield* notifyDispatchConflictOnce({
+      previous, key, paths, now, dryRun, dispatchFn, remaining, pr,
+    });
+    if (previous.needsHuman) {
+      report.push({ number: pr.number, nodeId: key, needsHuman: previous.needsHuman, dispatch: { attempted: false, reason: 'needs-human' } });
+      continue;
+    }
     if (previous.sessionId) {
       const beat = Date.parse(previous.heartbeatAt ?? '');
       const stale = !Number.isFinite(beat) || nowMs - beat >= HEARTBEAT_STALE_MS;
@@ -1327,10 +1383,6 @@ export function* discoverWorkflow({
           report.push({ number: pr.number, nodeId: key, dispatch: { attempted: true, reason: 'poll-lost-unconfirmed', error: text.slice(0, 400) } });
         }
       }
-      continue;
-    }
-    if (previous.needsHuman?.reason === 'owner-unknown') {
-      report.push({ number: pr.number, nodeId: key, needsHuman: previous.needsHuman, dispatch: { attempted: false, reason: 'needs-human' } });
       continue;
     }
     if (previous.pendingDispatch?.status === 'awaiting-claim') {

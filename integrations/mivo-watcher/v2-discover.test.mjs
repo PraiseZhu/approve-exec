@@ -352,6 +352,60 @@ test('discover summary lists closedownManual items', (t) => {
   assert.equal(result.closedownManual[0].nodeId, 'PR_closed');
 });
 
+test('dispatch receipt conflict keeps bind owner, alerts once, does not set needsHuman', (t) => {
+  const { paths, home } = homeOf(t);
+  const calls = [];
+  const first = discover(paths, {
+    collect: collectFail,
+    dispatchFn: (params) => {
+      calls.push(params);
+      if (params.target_session_id === 'sess-bound') return { target_session_id: 'sess-bound' };
+      const dispatchId = /--dispatch-id ([^\s`]+)/.exec(params.message)[1];
+      const resultPath = path.join(home, 'sched.json');
+      fs.writeFileSync(resultPath, JSON.stringify({
+        ok: true, id: 'sched-conflict', executionMode: 'script', status: 'active',
+        targetSessionId: 'sess-bound',
+        scriptConfig: { command: `python3 x.py --mode poll --pr 790 --node-id ${nodeId}` },
+      }));
+      bindSchedule({ home, pr: 790, nodeId, resultPath, dispatchId, retryMs: 0 });
+      return { target_session_id: 'sess-receipt', dispatch_id: dispatchId };
+    },
+  });
+  const entry = readPr(home, nodeId);
+  assert.equal(entry.sessionId, 'sess-bound');
+  assert.equal(entry.needsHuman, null);
+  assert.equal(entry.dispatchConflict.bindSession, 'sess-bound');
+  assert.equal(entry.dispatchConflict.receiptSession, 'sess-receipt');
+  assert.ok(entry.dispatchConflict.dispatchId);
+  assert.equal(first.result.prs[0].dispatch.conflict, true);
+  assert.equal(calls.filter((p) => /回执冲突/.test(p.message)).length, 1);
+  assert.equal(entry.dispatchConflict.notifiedAt, '2026-09-28T00:00:00Z');
+  const later = discover(paths, {
+    now: '2026-09-28T00:10:00Z',
+    collect: collectFail,
+    dispatchFn: (params) => {
+      assert.equal(params.target_session_id, 'sess-bound');
+      assert.doesNotMatch(params.message, /回执冲突/);
+      return { target_session_id: 'sess-bound' };
+    },
+  });
+  assert.equal(later.collected, 0);
+  assert.notEqual(later.result.prs[0].dispatch.reason, 'needs-human');
+});
+
+test('discover resets closedHandled when listed PR is OPEN', (t) => {
+  const { paths } = homeOf(t);
+  writePr(paths.home, nodeId, {
+    number: 790, nodeId, sessionId: 'sess-790', closedHandled: true, heartbeatAt: '2026-09-28T00:00:00Z',
+  });
+  const { entry } = discover(paths, {
+    now: '2026-09-28T00:05:00Z',
+    dispatchFn: () => { throw new Error('should not dispatch'); },
+  });
+  assert.equal(entry.closedHandled, false);
+  assert.equal(entry.reopenedAt, '2026-09-28T00:05:00Z');
+});
+
 test('opt-out label skips discover work', (t) => {
   const { paths } = homeOf(t);
   const { result, collected } = discover(paths, {
