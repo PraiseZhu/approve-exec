@@ -166,6 +166,38 @@ test('old bind after clear-owner-unknown is rejected; new bind succeeds', (t) =>
   assert.equal(ok.sessionId, 'sess-new');
 });
 
+test('migrated owner can bind-schedule without dispatch-id', (t) => {
+  const home = homeOf(t);
+  writePr(home, 'PR_790', { number: 790, nodeId: 'PR_790', sessionId: 'sess-a' });
+  const resultPath = schedFile(home);
+  const entry = bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, now: '2026-09-28T00:00:00Z', retryMs: 0 });
+  assert.equal(entry.sessionId, 'sess-a');
+  assert.equal(entry.scheduleId, 'sched-1');
+  assert.equal(entry.pendingDispatch, null);
+});
+
+test('bind-schedule without dispatch-id still rejects strangers and pending claims', (t) => {
+  const home = homeOf(t);
+  const resultPath = schedFile(home);
+  assert.throws(
+    () => bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, retryMs: 0 }),
+    /需要 --dispatch-id/,
+  );
+  writePr(home, 'PR_790', { number: 790, nodeId: 'PR_790', sessionId: 'sess-other' });
+  assert.throws(
+    () => bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, retryMs: 0 }),
+    /需要 --dispatch-id/,
+  );
+  writePr(home, 'PR_790', {
+    number: 790, nodeId: 'PR_790', sessionId: 'sess-a',
+    pendingDispatch: { status: 'awaiting-claim', dispatchId: 'disp-1' },
+  });
+  assert.throws(
+    () => bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, retryMs: 0 }),
+    /需要 --dispatch-id/,
+  );
+});
+
 test('cloneWorktree uses git worktree add -B watch/pr-N under plugin repo', (t) => {
   const home = homeOf(t);
   const plugin = fs.mkdtempSync(path.join(os.tmpdir(), 'plugin-'));

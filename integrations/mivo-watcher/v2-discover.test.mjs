@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { scanOnce, watcherPaths, watchGuideMessage } from './bin/mivo-watcher.mjs';
+import { scanOnce, watcherPaths, watchGuideMessage, watchPollLostMessage, watchSuccessorMessage } from './bin/mivo-watcher.mjs';
 import { bindSchedule, clearOwnerUnknown } from './bin/mivo-repair.mjs';
 import { acquireLock, readPr, statePaths, writePr } from './bin/mivo-state.mjs';
 
@@ -204,6 +204,9 @@ test('bound stale heartbeat reminds at most once per 30 minutes', (t) => {
   assert.equal(first.collected, 0);
   assert.equal(calls.length, 1);
   assert.match(calls[0].message, /轮询调度失联/);
+  assert.match(calls[0].message, /schedule-params/);
+  assert.match(calls[0].message, /bind-schedule/);
+  assert.doesNotMatch(calls[0].message, /schedule_resume/);
   assert.equal(calls[0].target_session_id, 'sess-790');
   const second = discover(paths, {
     now: '2026-09-28T00:40:00Z',
@@ -486,4 +489,38 @@ test('discover defers later PRs after the first dispatch exhausts global remaini
   assert.equal(result.prs[0].dispatch.attempted, true);
   assert.equal(result.prs[1].dispatch.attempted, false);
   assert.equal(result.prs[1].dispatch.reason, 'dispatch-budget-deferred');
+});
+
+const BAN = /禁止恢复、修改或新建任何其它调度，尤其是名为 Mivo watcher 的共享调度/;
+
+test('lost reminder with null scheduleId embeds step 0 and does not resume', () => {
+  const home = '/tmp/Project Mivo Canvas-Plugin/_ops/mivo-watcher';
+  const text = watchPollLostMessage({
+    prNumber: 790, heartbeatAt: '2026-09-28T00:00:00Z', scheduleId: null, home, nodeId,
+  });
+  assert.match(text, /schedule-params/);
+  assert.match(text, /bind-schedule/);
+  assert.match(text, /--pr 790 --node-id PR_790 --result/);
+  assert.doesNotMatch(text, /--dispatch-id/);
+  assert.doesNotMatch(text, /schedule_resume/);
+  assert.doesNotMatch(text, /schedule_get/);
+  assert.match(text, BAN);
+});
+
+test('lost reminder with scheduleId only resumes that id', () => {
+  const home = '/tmp/Project Mivo Canvas-Plugin/_ops/mivo-watcher';
+  const text = watchPollLostMessage({
+    prNumber: 790, heartbeatAt: '2026-09-28T00:00:00Z', scheduleId: 'sched-790', home, nodeId,
+  });
+  assert.match(text, /schedule_get sched-790/);
+  assert.match(text, /只对该 scheduleId 调用 schedule_resume/);
+  assert.doesNotMatch(text, /schedule_get (?!sched-790)/);
+  assert.match(text, BAN);
+});
+
+test('guide, lost, and successor messages all ban shared watcher schedules', () => {
+  const home = '/tmp/Project Mivo Canvas-Plugin/_ops/mivo-watcher';
+  assert.match(watchGuideMessage({ home, prNumber: 790, nodeId }), BAN);
+  assert.match(watchPollLostMessage({ prNumber: 790, heartbeatAt: 't', scheduleId: 's', home, nodeId }), BAN);
+  assert.match(watchSuccessorMessage({ prNumber: 790, predecessorId: 'old', reason: 'ARCHIVED' }), BAN);
 });

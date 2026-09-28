@@ -478,17 +478,23 @@ export function dispatchParams({ pr, mapping, fresh, now, taskPath, home, messag
 function shellQuote(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
+function watchScheduleConstraint() {
+  return '只允许创建或恢复本 PR 自己的轮询调度（scheduleId 由 bind-schedule 登记）；禁止恢复、修改或新建任何其它调度，尤其是名为 Mivo watcher 的共享调度。';
+}
 export function watchGuideMessage({ home, prNumber, nodeId, dispatchId } = {}) {
   const helper = shellQuote(path.join(home, 'bin', 'mivo-repair.mjs'));
   const quotedHome = shellQuote(home);
-  const dispatchFlag = dispatchId ? ` --dispatch-id ${dispatchId}` : ' --dispatch-id <dispatchId>';
-  return `第 0 步（只做一次）：运行 \`node ${helper} --home ${quotedHome} schedule-params --pr ${prNumber} --node-id ${nodeId}\`，把输出 JSON 原样作为 cindy_scheduler 的 schedule_create 参数调用；把工具返回原样存成文件后运行 \`${helper} --home ${quotedHome} bind-schedule --pr ${prNumber} --node-id ${nodeId}${dispatchFlag} --result <文件>\`。bind 若返回 busy（状态锁占用）：等 1 分钟后重跑同一 bind-schedule 命令。bind 若返回 owner-conflict（本 PR 已由他人持有）：立刻停止并回复一句说明。之后本 PR 的所有反馈只会投递到你这里（每 5 分钟由你的轮询脚本检查）。`;
+  const dispatchFlag = dispatchId === null ? '' : (dispatchId ? ` --dispatch-id ${dispatchId}` : ' --dispatch-id <dispatchId>');
+  return `第 0 步（只做一次）：运行 \`node ${helper} --home ${quotedHome} schedule-params --pr ${prNumber} --node-id ${nodeId}\`，把输出 JSON 原样作为 cindy_scheduler 的 schedule_create 参数调用；把工具返回原样存成文件后运行 \`${helper} --home ${quotedHome} bind-schedule --pr ${prNumber} --node-id ${nodeId}${dispatchFlag} --result <文件>\`。bind 若返回 busy（状态锁占用）：等 1 分钟后重跑同一 bind-schedule 命令。bind 若返回 owner-conflict（本 PR 已由他人持有）：立刻停止并回复一句说明。之后本 PR 的所有反馈只会投递到你这里（每 5 分钟由你的轮询脚本检查）。${watchScheduleConstraint()}`;
 }
 export function watchSuccessorMessage({ prNumber, predecessorId, reason, summary }) {
-  return `你是 PR #${prNumber} 的接班修复 session，前任 ${predecessorId} 已不可用（${reason}）；先读本 PR 状态摘要 ${summary ?? '…'}。若状态为 merge-ready，等待人工合并，不要改代码。再执行第 0 步。`;
+  return `你是 PR #${prNumber} 的接班修复 session，前任 ${predecessorId} 已不可用（${reason}）；先读本 PR 状态摘要 ${summary ?? '…'}。若状态为 merge-ready，等待人工合并，不要改代码。再执行第 0 步。${watchScheduleConstraint()}`;
 }
-export function watchPollLostMessage({ prNumber, heartbeatAt, scheduleId }) {
-  return `你的 PR #${prNumber} 轮询调度失联（最后心跳 ${heartbeatAt}）：先 schedule_get ${scheduleId ?? ''}；paused 则 schedule_resume；不存在则重新执行第 0 步。`;
+export function watchPollLostMessage({ prNumber, heartbeatAt, scheduleId, home, nodeId } = {}) {
+  if (!scheduleId) {
+    return `你的 PR #${prNumber} 轮询调度失联（最后心跳 ${heartbeatAt}）：不要查询或恢复任何已有调度。${watchGuideMessage({ home, prNumber, nodeId, dispatchId: null })}`;
+  }
+  return `你的 PR #${prNumber} 轮询调度失联（最后心跳 ${heartbeatAt}）：先 schedule_get ${scheduleId}；paused 则只对该 scheduleId 调用 schedule_resume；禁止操作任何其它调度。不存在则重新执行第 0 步：${watchGuideMessage({ home, prNumber, nodeId, dispatchId: null })}`;
 }
 export function watchClosedownMessage({ prNumber, state, scheduleId, home }) {
   const verb = state === 'MERGED' ? '合并' : '关闭';
@@ -1343,7 +1349,10 @@ export function* discoverWorkflow({
       try {
         yield () => dispatchFn({
           title: previous.title || `MivoPlugin-#${pr.number}`,
-          message: watchPollLostMessage({ prNumber: pr.number, heartbeatAt: previous.heartbeatAt, scheduleId: previous.scheduleId }),
+          message: watchPollLostMessage({
+            prNumber: pr.number, heartbeatAt: previous.heartbeatAt, scheduleId: previous.scheduleId,
+            home: paths.home, nodeId: key,
+          }),
           target_session_id: previous.sessionId,
         }, { timeoutMs: Math.max(1, remaining()) });
         previous = { ...previous, lastLostReminderAt: now };

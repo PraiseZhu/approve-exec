@@ -577,22 +577,28 @@ export function bindSchedule({
   try {
     const previous = readPr(root, nodeId) || {};
     const incoming = result.targetSessionId;
-    if (!dispatchId) fail('owner-conflict: bind-schedule 需要 --dispatch-id', 3);
-    const abandoned = previous.abandonedDispatches ?? [];
-    if (abandoned.includes(dispatchId)) fail('owner-conflict: dispatch-id 已作废', 3);
     const pendingId = previous.pendingDispatch?.dispatchId;
     const lateUnknown = previous.needsHuman?.abandonedDispatchId;
-    if (pendingId && pendingId !== dispatchId) fail('owner-conflict: dispatch-id 与当前 pending 不一致', 3);
-    if (!pendingId && previous.needsHuman?.reason === 'owner-unknown' && dispatchId !== lateUnknown) {
-      fail('owner-conflict: dispatch-id 与 owner-unknown 记录不一致', 3);
-    }
-    if (!pendingId && !previous.sessionId && previous.needsHuman?.reason !== 'owner-unknown') {
-      fail('owner-conflict: 无 pending 的未知 dispatch-id', 3);
-    }
-    if (previous.sessionId && previous.sessionId !== incoming) {
-      const awaiting = previous.pendingDispatch?.status === 'awaiting-claim';
-      const needsHuman = previous.needsHuman?.reason === 'owner-unknown';
-      if (!awaiting && !needsHuman) fail(`owner-conflict: 本 PR 已由 ${previous.sessionId} 持有，你应停止`, 3);
+    const currentOwner = Boolean(previous.sessionId && previous.sessionId === incoming);
+    if (!dispatchId) {
+      if (!currentOwner || pendingId || previous.needsHuman?.reason === 'owner-unknown') {
+        fail('owner-conflict: bind-schedule 需要 --dispatch-id', 3);
+      }
+    } else {
+      const abandoned = previous.abandonedDispatches ?? [];
+      if (abandoned.includes(dispatchId)) fail('owner-conflict: dispatch-id 已作废', 3);
+      if (pendingId && pendingId !== dispatchId) fail('owner-conflict: dispatch-id 与当前 pending 不一致', 3);
+      if (!pendingId && previous.needsHuman?.reason === 'owner-unknown' && dispatchId !== lateUnknown) {
+        fail('owner-conflict: dispatch-id 与 owner-unknown 记录不一致', 3);
+      }
+      if (!pendingId && !previous.sessionId && previous.needsHuman?.reason !== 'owner-unknown') {
+        fail('owner-conflict: 无 pending 的未知 dispatch-id', 3);
+      }
+      if (previous.sessionId && previous.sessionId !== incoming) {
+        const awaiting = previous.pendingDispatch?.status === 'awaiting-claim';
+        const needsHuman = previous.needsHuman?.reason === 'owner-unknown';
+        if (!awaiting && !needsHuman) fail(`owner-conflict: 本 PR 已由 ${previous.sessionId} 持有，你应停止`, 3);
+      }
     }
     const entry = {
       ...previous, number: Number(pr), nodeId,
@@ -653,7 +659,7 @@ function cli(argv) {
   const home = value('--home');
   let result;
   if (mode === 'schedule-params') result = scheduleParams({ home, pr: value('--pr'), nodeId: value('--node-id') });
-  else if (mode === 'bind-schedule') result = bindSchedule({ home, pr: value('--pr'), nodeId: value('--node-id'), resultPath: value('--result'), dispatchId: value('--dispatch-id') });
+  else if (mode === 'bind-schedule') result = bindSchedule({ home, pr: value('--pr'), nodeId: value('--node-id'), resultPath: value('--result'), dispatchId: value('--dispatch-id', false) });
   else if (mode === 'cleanup') result = cleanupWatch({ home, pr: value('--pr') });
   else if (mode === 'clear-owner-unknown') result = clearOwnerUnknown({ home, pr: value('--pr'), nodeId: value('--node-id') });
   else {
