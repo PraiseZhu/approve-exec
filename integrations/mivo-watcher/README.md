@@ -27,4 +27,17 @@ node integrations/mivo-watcher/deploy.mjs apply --plan "$EXTERNAL_PLAN"
 
 部署须在目标机器运行，源包来自审核过的 Git commit；preview文件放runtime外的已批准运维目录。复制源码包时包含整个目录但不复制任何运行态。当前版本仅补版本管理，**本次不重新部署**。live watcher SHA `7b10d4b45667b126a1876f9fe9cf8d1109f31d075fe76184ed42d337295c8c1d`，snapshot SHA `b65a36b6846acb9c300f51c330ef3bb07d15e51ae97c140e4019e7bf2443b006`。
 
+## watcher session 归属查询
+
+只读 CLI，不写盘、不调 gh/ssh。按 PR 号或 session id 查 Mini watcher 台账里谁是该 PR 的专属修复 session：
+
+```sh
+node integrations/mivo-watcher/bin/mivo-ownership.mjs --repo xindong/mivo-canvas-plugin --pr 790 [--home "$MIVO_WATCHER_HOME"]
+node integrations/mivo-watcher/bin/mivo-ownership.mjs --repo xindong/mivo-canvas-plugin --session-id <id> [--home "$MIVO_WATCHER_HOME"]
+```
+
+命中输出一行 JSON（`owned:true`，含 `sessionId` / `scheduleId` / `status` / `needsHuman`）；未命中 `owned:false`；台账不可读退出码 3。home 解析：`--home` > 环境 `MIVO_WATCHER_HOME` > 插件仓 `_ops/mivo-watcher` > 旧 Mini Automation 路径（取第一个存在 `state/` 的）。
+
+任何批量归档或清理会话的操作，应先对候选 session 逐个跑 `mivo-ownership.mjs --session-id`；命中且 PR 仍开（`closed` 不是 true）的不要归档。approve-exec 清场前用 `confirm-session-archived.mjs --precheck --session-id <id>` 做同一道闸。
+
 已观测的三次自然调度09:20/09:30/09:40均success约120秒；回执消费、尾部优先续扫及#595新反馈复用原session已验证。审查未通过仍保持waiting/blocked，不把这些运行证据当作所有PR已通过。
