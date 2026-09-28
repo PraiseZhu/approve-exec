@@ -7,10 +7,40 @@ import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 const here=path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_RUNTIME='/Users/praise/AI-Agent/Claude/projects/Project Mivo Canvas-Plugin/_ops/mivo-watcher';
-export const FILES=['mivo-feedback-policy.mjs','mivo-ci.mjs','mivo-pr-policy.mjs','mivo-pr-snapshot.mjs','mivo-repair.mjs','mivo-state.mjs','mivo-ownership.mjs','mivo-watcher.mjs','public-review.mjs','session-title.mjs','mivo-watch-script.py','protocol.py','session-title-maintenance.py'];
+export const FILES=['mivo-feedback-policy.mjs','mivo-ci.mjs','mivo-pr-policy.mjs','mivo-pr-snapshot.mjs','mivo-repair.mjs','mivo-review-resolve.mjs','mivo-state.mjs','mivo-ownership.mjs','mivo-watcher.mjs','public-review.mjs','session-title.mjs','mivo-watch-script.py','protocol.py','session-title-maintenance.py'];
+// Entry points actually spawned/imported directly by the runtime. Any relative import reachable
+// from these (transitively) must be listed in FILES, or the runtime will 500 on `import()` with
+// a healthy-looking manifest (2026-09-29 incident: mivo-review-resolve.mjs was imported by
+// mivo-watcher.mjs but missing from FILES; verify() still reported all-green because it only
+// hashes what's in FILES, never what the entry points actually require).
+const ENTRY_POINTS=['mivo-watcher.mjs','mivo-repair.mjs'];
 const sha=file=>fs.existsSync(file)?createHash('sha256').update(fs.readFileSync(file)).digest('hex'):null;
 const requireValue=(v,m)=>{if(!v)throw Error(m);};
+function relativeImportNames(file){
+ if(!fs.existsSync(file))return [];
+ const src=fs.readFileSync(file,'utf8');
+ return [...src.matchAll(/from\s+['"]\.\/([^'"]+)['"]/g)].map(m=>m[1]);
+}
+function importClosure(sourceDir,entry){
+ const seen=new Set(),stack=[entry];
+ while(stack.length){
+  const name=stack.pop();
+  if(seen.has(name))continue;
+  seen.add(name);
+  for(const dep of relativeImportNames(path.join(sourceDir,name)))stack.push(dep);
+ }
+ return seen;
+}
+export function checkManifestCompleteness(sourceDir=path.join(here,'bin')){
+ const missing=new Set();
+ for(const entry of ENTRY_POINTS){
+  if(!FILES.includes(entry))continue;
+  for(const name of importClosure(sourceDir,entry))if(!FILES.includes(name))missing.add(name);
+ }
+ requireValue(missing.size===0,`deploy manifest missing modules imported by entry points: ${[...missing].join(', ')}`);
+}
 export function verify(runtime,source=path.join(here,'bin')) {
+ checkManifestCompleteness(source);
  return FILES.map(name=>({name,source:sha(path.join(source,name)),runtime:sha(path.join(runtime,'bin',name))}));
 }
 function identitiesFromState(state){
@@ -49,6 +79,7 @@ function idle(database,ids){
  requireValue(rows.length===ids.length&&rows.every(r=>r.active_turn_pid===null),'Host session active or missing');
 }
 export function validatePlan(plan){
+ checkManifestCompleteness();
  requireValue(plan?.version===1&&path.isAbsolute(plan.home)&&path.isAbsolute(plan.database)&&plan.database.endsWith('.db'),'invalid runtime/database');
  requireValue(/^[a-z0-9][a-z0-9-]{1,80}$/.test(plan.id),'invalid release id');
  requireValue(Array.isArray(plan.files)&&plan.files.length===FILES.length&&new Set(plan.files.map(f=>f.name)).size===FILES.length&&plan.files.every(f=>FILES.includes(f.name)&&/^[a-f0-9]{64}$/.test(f.source)&&(f.runtime===null||/^[a-f0-9]{64}$/.test(f.runtime))),'invalid artifact manifest');

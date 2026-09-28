@@ -6,6 +6,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { scanOnce, watcherPaths, watchGuideMessage, watchPollLostMessage, watchSuccessorMessage } from './bin/mivo-watcher.mjs';
 import { bindSchedule, clearOwnerUnknown } from './bin/mivo-repair.mjs';
+import { repairSessionTitle } from './bin/session-title.mjs';
 import { acquireLock, readPr, statePaths, writePr } from './bin/mivo-state.mjs';
 
 const HEAD = 'a'.repeat(40);
@@ -319,6 +320,19 @@ test('bound PR with fresh heartbeat skips collect', (t) => {
   assert.equal(result.prs[0].dispatch.reason, 'bound-heartbeat-ok');
 });
 
+test('poll-lost reminder without persisted title falls back to repairSessionTitle', (t) => {
+  const { paths } = homeOf(t);
+  writePr(paths.home, nodeId, {
+    number: 790, nodeId, sessionId: 'sess-790', heartbeatAt: '2026-09-27T00:00:00Z',
+  });
+  const calls = [];
+  discover(paths, {
+    dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-790' }; },
+  });
+  // discoverWorkflow's main loop has the live `pr` (title 'fix') in scope, unlike the poll-mode call site.
+  assert.equal(calls[0].title, repairSessionTitle({ task: listed.title, prNumber: 790, createdAt: '2026-09-28T00:00:00Z' }));
+});
+
 test('discover skips a PR whose pr lock is held', (t) => {
   const { paths, home } = homeOf(t);
   const { locksDir } = statePaths(home);
@@ -612,6 +626,29 @@ test('claim timeout with known session wakes it once', (t) => {
   assert.equal(result.prs[0].dispatch.reason, 'claim-retry-wakeup');
   assert.equal(entry.sessionId, 'sess-known');
   assert.equal(entry.pendingDispatch, null);
+});
+
+test('claim-retry-wakeup without cached params falls back to repairSessionTitle', (t) => {
+  const { paths } = homeOf(t);
+  writePr(paths.home, nodeId, {
+    number: 790, nodeId,
+    pendingDispatch: {
+      status: 'awaiting-claim',
+      dispatchId: 'live-790-old',
+      claimDeadline: '2026-09-28T00:00:00Z',
+      createdSessionId: 'sess-known',
+      // params intentionally absent so the `?? { title: ..., message: guide }` default is evaluated.
+    },
+  });
+  const calls = [];
+  const { result } = discover(paths, {
+    now: '2026-09-28T01:01:00Z',
+    collect: collectFail,
+    dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-known', dispatch_id: 'live-790-old' }; },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(result.prs[0].dispatch.reason, 'claim-retry-wakeup');
+  assert.equal(calls[0].title, repairSessionTitle({ task: listed.title, prNumber: 790, createdAt: '2026-09-28T01:01:00Z' }));
 });
 
 test('abandoned dispatch-id cannot bind after recreate', (t) => {

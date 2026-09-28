@@ -65,3 +65,19 @@ test('state fingerprint includes PR file content hashes',t=>{
  fs.writeFileSync(path.join(home,'state/prs/PR_1.json'),'{"sessionId":"b"}\n');
  assert.notEqual(stateFingerprint(home),first);
 });
+test('manifest missing a dependency imported by an entry point is rejected', t => {
+ const source = fs.mkdtempSync(path.join(os.tmpdir(), 'watcher-manifest-'));
+ t.after(() => fs.rmSync(source, { recursive: true, force: true }));
+ for (const name of FILES) fs.writeFileSync(path.join(source, name), name.endsWith('.mjs') ? 'export const x = 1;\n' : '# stub\n');
+ // mivo-watcher.mjs is an entry point; make it import a module that is not in FILES.
+ fs.writeFileSync(path.join(source, 'mivo-watcher.mjs'), "import { x } from './not-in-manifest.mjs';\nexport { x };\n");
+ assert.throws(() => verify(source, source), /not-in-manifest\.mjs/);
+});
+test('validatePlan (used by apply) also enforces manifest completeness, not just verify()', t => {
+ const f = fixture(t);
+ const realFile = fileURLToPath(new URL('./bin/mivo-watcher.mjs', import.meta.url));
+ const original = fs.readFileSync(realFile, 'utf8');
+ t.after(() => fs.writeFileSync(realFile, original));
+ fs.writeFileSync(realFile, original + "\nimport { y } from './not-in-manifest-either.mjs';\n");
+ assert.throws(() => validatePlan(f.plan), /not-in-manifest-either\.mjs/);
+});
