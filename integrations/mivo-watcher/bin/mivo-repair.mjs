@@ -584,6 +584,11 @@ export function bindSchedule({
       if (!currentOwner || pendingId || previous.needsHuman?.reason === 'owner-unknown') {
         fail('owner-conflict: bind-schedule 需要 --dispatch-id', 3);
       }
+      const incomingSchedule = result.id ?? result.scheduleId;
+      if (previous.scheduleId) {
+        if (previous.scheduleId === incomingSchedule) return previous;
+        fail(`owner-conflict: 本 PR 已有轮询调度 ${previous.scheduleId}，先 schedule_get 该 id；不要新建第二条`, 3);
+      }
     } else {
       const abandoned = previous.abandonedDispatches ?? [];
       if (abandoned.includes(dispatchId)) fail('owner-conflict: dispatch-id 已作废', 3);

@@ -176,6 +176,39 @@ test('migrated owner can bind-schedule without dispatch-id', (t) => {
   assert.equal(entry.pendingDispatch, null);
 });
 
+test('bind without dispatch-id is idempotent when scheduleId already matches', (t) => {
+  const home = homeOf(t);
+  writePr(home, 'PR_790', {
+    number: 790, nodeId: 'PR_790', sessionId: 'sess-a', scheduleId: 'sched-1', claimedAt: '2026-09-28T00:00:00Z',
+  });
+  const prFile = path.join(statePaths(home).prsDir, 'PR_790.json');
+  const before = fs.readFileSync(prFile);
+  const resultPath = schedFile(home);
+  const entry = bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, now: '2026-09-28T01:00:00Z', retryMs: 0 });
+  assert.equal(entry.scheduleId, 'sched-1');
+  assert.equal(entry.claimedAt, '2026-09-28T00:00:00Z');
+  assert.equal(fs.readFileSync(prFile).equals(before), true);
+});
+
+test('bind without dispatch-id rejects a second schedule and leaves bytes unchanged', (t) => {
+  const home = homeOf(t);
+  writePr(home, 'PR_790', {
+    number: 790, nodeId: 'PR_790', sessionId: 'sess-a', scheduleId: 'sched-old', claimedAt: '2026-09-28T00:00:00Z',
+  });
+  const prFile = path.join(statePaths(home).prsDir, 'PR_790.json');
+  const before = fs.readFileSync(prFile);
+  const resultPath = schedFile(home);
+  try {
+    bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, now: '2026-09-28T01:00:00Z', retryMs: 0 });
+    assert.fail('expected owner-conflict');
+  } catch (error) {
+    assert.match(error.message, /本 PR 已有轮询调度 sched-old/);
+    assert.match(error.message, /不要新建第二条/);
+    assert.equal(error.exitCode, 3);
+  }
+  assert.equal(fs.readFileSync(prFile).equals(before), true);
+});
+
 test('bind-schedule without dispatch-id still rejects strangers and pending claims', (t) => {
   const home = homeOf(t);
   const resultPath = schedFile(home);
