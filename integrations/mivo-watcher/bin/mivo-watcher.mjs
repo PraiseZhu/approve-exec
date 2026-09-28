@@ -506,7 +506,7 @@ function* notifyDispatchConflictOnce({ previous, key, paths, now, dryRun, dispat
   }
   try {
     yield () => dispatchFn({
-      title: previous.title || `MivoPlugin-#${pr.number}`,
+      title: previous.title || repairSessionTitle({ task: pr.title, prNumber: pr.number, createdAt: now }),
       message: watchDispatchConflictMessage({
         prNumber: pr.number, bindSession: conflict.bindSession, receiptSession: conflict.receiptSession, dispatchId: conflict.dispatchId,
       }),
@@ -1278,7 +1278,7 @@ function* deliverClosedown({
   if (!dryRun && previous.sessionId && typeof dispatchFn === 'function') {
     try {
       yield () => dispatchFn({
-        title: previous.title || `MivoPlugin-#${prNumber}`,
+        title: previous.title || repairSessionTitle({ prNumber, createdAt: now }),
         message: watchClosedownMessage({
           prNumber, state, scheduleId: previous.scheduleId, home: paths.home,
         }),
@@ -1386,7 +1386,7 @@ export function* discoverWorkflow({
       }
       try {
         yield () => dispatchFn({
-          title: previous.title || `MivoPlugin-#${pr.number}`,
+          title: previous.title || repairSessionTitle({ task: pr.title, prNumber: pr.number, createdAt: now }),
           message: watchPollLostMessage({
             prNumber: pr.number, heartbeatAt: previous.heartbeatAt, scheduleId: previous.scheduleId,
             home: paths.home, nodeId: key,
@@ -1448,7 +1448,7 @@ export function* discoverWorkflow({
       if (retries < CLAIM_RETRY_LIMIT && !dryRun && remaining() >= 1000) {
         if (targetSessionId && typeof dispatchFn === 'function') {
           const retryParams = constrainRetryDispatch({
-            ...(previous.pendingDispatch.params ?? { title: previous.title || `MivoPlugin-#${pr.number}`, message: guide }),
+            ...(previous.pendingDispatch.params ?? { title: previous.title || repairSessionTitle({ task: pr.title, prNumber: pr.number, createdAt: now }), message: guide }),
             target_session_id: targetSessionId,
           }, readDispatchTask(paths, previous.pendingDispatch.dispatchId));
           try {

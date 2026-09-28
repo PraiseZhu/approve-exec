@@ -165,6 +165,33 @@ test('dispatch-conflict still polls owner and alerts only once', (t) => {
   assert.doesNotMatch(calls.at(-1).message, /回执冲突/);
 });
 
+test('dispatch-conflict without persisted title falls back to repairSessionTitle', (t) => {
+  const { paths } = homeOf(t);
+  seed(paths, {
+    title: undefined,
+    pollFingerprint: pollFingerprint(snap()),
+    dispatchConflict: {
+      bindSession: 'sess-790', receiptSession: 'sess-other', dispatchId: 'live-790-x', at: now,
+    },
+  });
+  const calls = [];
+  const collectFailCi = () => ({
+    pr: { id: nodeId, number: 790, state: 'OPEN', isDraft: false, sameRepository: true, author: { login: 'owner' }, headRefOid: HEAD, baseRefOid: BASE, releaseEpoch: 'e' },
+    admissionVerified: true,
+    checks: [{ name: 'unit', state: 'FAILURE', bucket: 'fail' }],
+    ci: { status: 'failed', required: [{ context: 'unit', status: 'failed', evidence: { id: 1, runId: 2, attempt: 1 } }] },
+    policy: { status: 'verified', required: [{ context: 'unit' }] },
+    comments: [], reviews: [], threads: [], labels: [], mergeReady: false,
+  });
+  poll(paths, {
+    snapshot: snap({ updatedAt: '2026-09-28T01:00:00Z', commentCount: 2 }),
+    collect: collectFailCi,
+    dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-790' }; },
+  });
+  // pollWorkflow only has { number } in scope at this call site, never a title.
+  assert.equal(calls[0].title, repairSessionTitle({ prNumber: 790, createdAt: now }));
+});
+
 test('poll resets closedHandled when OPEN after close', (t) => {
   const { paths } = homeOf(t);
   seed(paths, { closedHandled: true, pollFingerprint: pollFingerprint(snap()) });
@@ -247,6 +274,18 @@ test('MERGED ARCHIVED marks closedHandled for manual schedule cleanup', (t) => {
   assert.equal(entry.closedHandled, true);
   assert.equal(result.prs[0].dispatch.reason, 'closedown-session-gone');
   assert.equal(entry.closedownManual.scheduleId, 'sched-gone');
+});
+
+test('MERGED closedown without persisted title falls back to repairSessionTitle', (t) => {
+  const { paths } = homeOf(t);
+  seed(paths, { title: undefined, scheduleId: 'sched-1' });
+  const calls = [];
+  poll(paths, {
+    snapshot: snap({ state: 'MERGED' }),
+    dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-790' }; },
+  });
+  // deliverClosedown never has a pr object (only prNumber) in scope, so task stays unset.
+  assert.equal(calls[0].title, repairSessionTitle({ prNumber: 790, createdAt: now }));
 });
 
 test('mivo-watch:off does not dispatch', (t) => {
