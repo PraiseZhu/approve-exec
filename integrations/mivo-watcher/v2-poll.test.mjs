@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { normalizePollSnapshot, pollFingerprint, scanOnce, watcherPaths, watchClosedownMessage } from './bin/mivo-watcher.mjs';
+import { normalizePollSnapshot, pollFingerprint, scanOnce, watcherPaths, watchClosedownMessage, watchDispatchConflictMessage } from './bin/mivo-watcher.mjs';
 import { planSessionTitle, repairSessionTitle } from './bin/session-title.mjs';
 import { readPr, writePr as writePrState } from './bin/mivo-state.mjs';
 
@@ -125,21 +125,56 @@ test('unchanged fingerprint writes heartbeat and skips collect', (t) => {
   assert.equal(entry.heartbeatAt, now);
 });
 
-test('needsHuman dispatch-conflict skips poll auto-dispatch', (t) => {
+test('dispatch-conflict still polls owner and alerts only once', (t) => {
   const { paths } = homeOf(t);
   seed(paths, {
     pollFingerprint: pollFingerprint(snap()),
-    needsHuman: { reason: 'dispatch-conflict', sessions: ['sess-790', 'sess-other'], at: now },
+    dispatchConflict: {
+      bindSession: 'sess-790', receiptSession: 'sess-other', dispatchId: 'live-790-x', at: now,
+    },
   });
-  const { result, collected } = poll(paths, {
+  const calls = [];
+  const collectFailCi = () => ({
+    pr: { id: nodeId, number: 790, state: 'OPEN', isDraft: false, sameRepository: true, author: { login: 'owner' }, headRefOid: HEAD, baseRefOid: BASE, releaseEpoch: 'e' },
+    admissionVerified: true,
+    checks: [{ name: 'unit', state: 'FAILURE', bucket: 'fail' }],
+    ci: { status: 'failed', required: [{ context: 'unit', status: 'failed', evidence: { id: 1, runId: 2, attempt: 1 } }] },
+    policy: { status: 'verified', required: [{ context: 'unit' }] },
+    comments: [], reviews: [], threads: [], labels: [], mergeReady: false,
+  });
+  const first = poll(paths, {
     snapshot: snap({ updatedAt: '2026-09-28T01:00:00Z', commentCount: 2 }),
-    collect: () => { throw new Error('should not collect'); },
+    collect: collectFailCi,
+    dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-790' }; },
+  });
+  assert.equal(first.collected, 1);
+  assert.equal(calls[0].target_session_id, 'sess-790');
+  assert.match(calls[0].message, /回执冲突/);
+  assert.equal(first.entry.dispatchConflict.notifiedAt, now);
+  assert.match(watchDispatchConflictMessage({
+    prNumber: 790, bindSession: 'sess-790', receiptSession: 'sess-other', dispatchId: 'live-790-x',
+  }), /人工归档多余 session/);
+  const later = poll(paths, {
+    snapshot: snap({ updatedAt: '2026-09-28T02:00:00Z', commentCount: 3 }),
+    collect: collectFailCi,
+    dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-790' }; },
+  });
+  assert.equal(later.collected, 1);
+  assert.equal(calls.filter((p) => /回执冲突/.test(p.message)).length, 1);
+  assert.equal(calls.at(-1).target_session_id, 'sess-790');
+  assert.doesNotMatch(calls.at(-1).message, /回执冲突/);
+});
+
+test('poll resets closedHandled when OPEN after close', (t) => {
+  const { paths } = homeOf(t);
+  seed(paths, { closedHandled: true, pollFingerprint: pollFingerprint(snap()) });
+  const { entry, collected } = poll(paths, {
+    snapshot: snap(),
     dispatchFn: () => { throw new Error('should not dispatch'); },
   });
   assert.equal(collected, 0);
-  assert.equal(result.prs[0].dispatch.attempted, false);
-  assert.equal(result.prs[0].dispatch.reason, 'needs-human');
-  assert.equal(result.prs[0].needsHuman.reason, 'dispatch-conflict');
+  assert.equal(entry.closedHandled, false);
+  assert.equal(entry.reopenedAt, now);
 });
 
 test('fingerprint change dispatches to bound session', (t) => {

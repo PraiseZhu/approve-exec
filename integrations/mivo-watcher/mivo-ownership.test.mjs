@@ -21,7 +21,9 @@ function homeOf(t, { v2 = true } = {}) {
     number: 790, nodeId, sessionId, scheduleId: 'sched-790',
     eligibility: 'active', activeTask: { status: 'accepted' },
     optOut: false, closedHandled: false,
-    needsHuman: { reason: 'dispatch-conflict', sessions: [sessionId, 'sess-other'], at: '2026-09-28T00:00:00Z' },
+    dispatchConflict: {
+      bindSession: sessionId, receiptSession: 'sess-other', dispatchId: 'live-790-x', at: '2026-09-28T00:00:00Z',
+    },
   };
   if (v2) {
     fs.mkdirSync(path.join(home, 'state/prs'), { recursive: true });
@@ -38,7 +40,7 @@ function spawnCli(args, extra = {}) {
   });
 }
 
-test('v2 按 --pr 命中且带 needsHuman', (t) => {
+test('v2 按 --pr 命中且带 dispatchConflict', (t) => {
   const { home } = homeOf(t);
   const result = lookupWatchOwner({ home, repo: WATCHED_REPO, pr: 790 });
   assert.equal(result.owned, true);
@@ -50,10 +52,12 @@ test('v2 按 --pr 命中且带 needsHuman', (t) => {
   assert.equal(result.source, 'v2');
   assert.equal(result.home, home);
   assert.equal(result.closed, false);
-  assert.equal(result.needsHuman.reason, 'dispatch-conflict');
+  assert.equal(result.dispatchConflict.bindSession, sessionId);
+  assert.equal(result.dispatchConflict.receiptSession, 'sess-other');
   const cli = spawnCli(['--repo', WATCHED_REPO, '--pr', '790', '--home', home]);
   assert.equal(cli.status, 0, cli.stderr);
   assert.equal(JSON.parse(cli.stdout).sessionId, sessionId);
+  assert.equal(JSON.parse(cli.stdout).dispatchConflict.receiptSession, 'sess-other');
 });
 
 test('v2 按 --session-id 命中', (t) => {

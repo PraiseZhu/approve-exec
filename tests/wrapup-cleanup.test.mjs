@@ -706,9 +706,14 @@ test('watcher 持有且 PR 开 → precheck 禁止归档', () => {
 });
 
 test('watcher 持有但 PR 已关闭 → precheck 放行', () => {
+  const ghFn = (args) => {
+    assert.deepEqual(args, ['pr', 'view', '790', '--repo', 'xindong/mivo-canvas-plugin', '--json', 'state']);
+    return JSON.stringify({ state: 'MERGED' });
+  };
   assert.doesNotThrow(() => assertNotWatchOwner({
     sessionId: 'sess-closed',
     lookup: () => ({ owned: true, pr: 790, closed: true }),
+    ghFn,
   }));
   const originalOut = process.stdout.write;
   let stdout = '';
@@ -716,10 +721,39 @@ test('watcher 持有但 PR 已关闭 → precheck 放行', () => {
   try {
     const code = runArchiveCli(['--precheck', '--session-id', 'sess-closed'], {
       lookup: () => ({ owned: true, pr: 790, closed: true }),
+      ghFn,
     });
     assert.equal(code, 0);
     assert.equal(JSON.parse(stdout).precheck, true);
   } finally { process.stdout.write = originalOut; }
+});
+
+test('precheck closed:true 但 gh 返回 OPEN → 拒绝', () => {
+  try {
+    assertNotWatchOwner({
+      sessionId: 'sess-reopen',
+      lookup: () => ({ owned: true, pr: 790, closed: true }),
+      ghFn: () => JSON.stringify({ state: 'OPEN' }),
+    });
+    assert.fail('expected LedgerError');
+  } catch (err) {
+    assert.equal(err instanceof LedgerError, true);
+    assert.match(err.message, /禁止归档/);
+  }
+});
+
+test('precheck closed:true 且 gh 失败 → 拒绝', () => {
+  try {
+    assertNotWatchOwner({
+      sessionId: 'sess-gh-fail',
+      lookup: () => ({ owned: true, pr: 790, closed: true }),
+      ghFn: () => { throw new Error('gh timed out'); },
+    });
+    assert.fail('expected LedgerError');
+  } catch (err) {
+    assert.equal(err instanceof LedgerError, true);
+    assert.match(err.message, /核实失败|禁止归档/);
+  }
 });
 
 test('watcher 未命中 → precheck 放行', () => {
@@ -742,7 +776,7 @@ test('watcher 台账不可读 → precheck 拒绝', () => {
   }
 });
 
-test('confirm-session-archived CLI --precheck 读真实台账：开着拒绝、关闭放行、缺 state 拒绝', (t) => {
+test('confirm-session-archived CLI --precheck 读真实台账：开着拒绝、缺 state 拒绝', (t) => {
   const home = mkdtempSync(join(tmpdir(), 'archive-precheck-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   mkdirSync(join(home, 'state/prs'), { recursive: true });
@@ -756,13 +790,6 @@ test('confirm-session-archived CLI --precheck 读真实台账：开着拒绝、�
   });
   assert.notEqual(blocked.status, 0, blocked.stdout);
   assert.match(blocked.stderr, /禁止归档/);
-  writePr('PR_791.json', {
-    number: 791, nodeId: 'PR_791', sessionId: 'sess-closed', closedHandled: true,
-  });
-  const allowed = spawnSync(process.execPath, [script, '--precheck', '--session-id', 'sess-closed', '--home', home], {
-    encoding: 'utf8', timeout: 15_000,
-  });
-  assert.equal(allowed.status, 0, allowed.stderr);
   const missingHome = mkdtempSync(join(tmpdir(), 'archive-precheck-missing-'));
   t.after(() => rmSync(missingHome, { recursive: true, force: true }));
   const unread = spawnSync(process.execPath, [script, '--precheck', '--session-id', 'sess-x', '--home', missingHome], {

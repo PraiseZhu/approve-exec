@@ -50,6 +50,7 @@ function hit(entry, { repo, home, source, nodeId }) {
     source,
     home,
     needsHuman: entry.needsHuman ?? null,
+    dispatchConflict: entry.dispatchConflict ?? null,
   };
 }
 

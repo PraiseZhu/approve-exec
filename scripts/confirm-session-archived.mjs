@@ -1,9 +1,43 @@
 #!/usr/bin/env node
 // confirm-session-archived.mjs — 核 PI session 已 archived，产出台账回执。
 import { realpathSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { LedgerError, parseTimestamp, ARCHIVE_RECEIPT_KEYS } from './run-ledger.mjs';
 import { lookupWatchOwner, WATCHED_REPO } from '../integrations/mivo-watcher/bin/mivo-ownership.mjs';
+
+const GH = process.env.GH_BIN ?? 'gh';
+
+function defaultGh(args) {
+  return execFileSync(GH, args, {
+    encoding: 'utf8', timeout: 12000, maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+function verifyClosedPrState({ pr, repo, sessionId, ghFn }) {
+  const number = Number(pr);
+  if (!Number.isSafeInteger(number) || number < 1) {
+    throw new LedgerError('PRECONDITION', `session ${sessionId} 台账标记已关闭但缺少有效 PR 号，禁止归档`);
+  }
+  let raw;
+  try {
+    raw = ghFn(['pr', 'view', String(number), '--repo', repo, '--json', 'state']);
+  } catch (error) {
+    throw new LedgerError('PRECONDITION', `session ${sessionId} 的 PR #${number} 当前状态核实失败，禁止归档（${error.message}）`);
+  }
+  let state;
+  try {
+    state = JSON.parse(raw)?.state;
+  } catch {
+    throw new LedgerError('PRECONDITION', `session ${sessionId} 的 PR #${number} 当前状态不可解析，禁止归档`);
+  }
+  if (state !== 'MERGED' && state !== 'CLOSED') {
+    throw new LedgerError(
+      'PRECONDITION',
+      `session ${sessionId} 是 PR #${number} 的 watcher 专属修复 session，PR 仍开着，禁止归档；如需停盯请给 PR 打 mivo-watch:off 标签`,
+    );
+  }
+}
 
 const BOOLEAN_FLAGS = new Set(['precheck']);
 
@@ -95,13 +129,14 @@ export function confirmSessionArchived({
 }
 
 export function assertNotWatchOwner({
-  sessionId, lookup, home, repo, env,
+  sessionId, lookup, home, repo, env, ghFn,
 } = {}) {
   if (typeof sessionId !== 'string' || sessionId.length === 0) {
     throw new LedgerError('ARGS', 'session-id 必须是非空字符串');
   }
+  const watchedRepo = repo || WATCHED_REPO;
   const query = lookup ?? ((id) => lookupWatchOwner({
-    home, repo: repo || WATCHED_REPO, sessionId: id, env,
+    home, repo: watchedRepo, sessionId: id, env,
   }));
   let result;
   try {
@@ -118,6 +153,11 @@ export function assertNotWatchOwner({
       `session ${sessionId} 是 PR #${result.pr} 的 watcher 专属修复 session，PR 仍开着，禁止归档；如需停盯请给 PR 打 mivo-watch:off 标签`,
     );
   }
+  if (result.owned === true && result.closed === true) {
+    verifyClosedPrState({
+      pr: result.pr, repo: watchedRepo, sessionId, ghFn: ghFn ?? defaultGh,
+    });
+  }
   return result;
 }
 
@@ -132,7 +172,7 @@ export function runCli(argv, options = {}) {
       env: options.env,
     }));
     if (flags.precheck === true || flags.result !== undefined) {
-      assertNotWatchOwner({ sessionId, lookup });
+      assertNotWatchOwner({ sessionId, lookup, ghFn: options.ghFn });
     }
     if (flags.precheck === true && flags.result === undefined) {
       process.stdout.write(`${JSON.stringify({ ok: true, precheck: true, session_id: sessionId })}\n`);

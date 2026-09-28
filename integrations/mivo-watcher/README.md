@@ -36,7 +36,7 @@ node integrations/mivo-watcher/bin/mivo-ownership.mjs --repo xindong/mivo-canvas
 node integrations/mivo-watcher/bin/mivo-ownership.mjs --repo xindong/mivo-canvas-plugin --session-id <id> [--home "$MIVO_WATCHER_HOME"]
 ```
 
-命中输出一行 JSON（`owned:true`，含 `sessionId` / `scheduleId` / `status` / `needsHuman`）；未命中 `owned:false`；台账不可读退出码 3。home 解析：`--home` > 环境 `MIVO_WATCHER_HOME` > 插件仓 `_ops/mivo-watcher` > 旧 Mini Automation 路径（取第一个存在 `state/` 的）。
+命中输出一行 JSON（`owned:true`，含 `sessionId` / `scheduleId` / `status` / `dispatchConflict`）；未命中 `owned:false`；台账不可读退出码 3。`closed` 只反映台账 `closedHandled`，不访问网络；归档闸在 `closed:true` 时另用 `gh pr view` 核实当前不是 OPEN。home 解析：`--home` > 环境 `MIVO_WATCHER_HOME` > 插件仓 `_ops/mivo-watcher` > 旧 Mini Automation 路径（取第一个存在 `state/` 的）。
 
 任何批量归档或清理会话的操作，应先对候选 session 逐个跑 `mivo-ownership.mjs --session-id`；命中且 PR 仍开（`closed` 不是 true）的不要归档。approve-exec 清场前用 `confirm-session-archived.mjs --precheck --session-id <id>` 做同一道闸。
 
