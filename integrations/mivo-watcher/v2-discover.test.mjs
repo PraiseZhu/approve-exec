@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { scanOnce, watcherPaths, watchGuideMessage } from './bin/mivo-watcher.mjs';
 import { bindSchedule, clearOwnerUnknown } from './bin/mivo-repair.mjs';
 import { acquireLock, readPr, statePaths, writePr } from './bin/mivo-state.mjs';
@@ -93,6 +94,45 @@ test('bind during dispatch keeps scheduleId and claimedAt after receipt', (t) =>
   assert.equal(entry.scheduleId, 'sched-bind');
   assert.ok(entry.claimedAt);
   assert.equal(entry.pendingDispatch, null);
+});
+
+test('LOCK_HELD after bind leaves disk bytes unchanged and next round recovers', (t) => {
+  const { paths, home } = homeOf(t);
+  const prFile = path.join(statePaths(home).prsDir, `${nodeId}.json`);
+  let held;
+  let bytesBefore;
+  const first = discover(paths, {
+    now: '2026-09-28T08:40:00.000Z',
+    collect: collectFail,
+    dispatchFn: (params) => {
+      const dispatchId = /--dispatch-id ([^\s`]+)/.exec(params.message)[1];
+      const resultPath = path.join(home, 'sched.json');
+      fs.writeFileSync(resultPath, JSON.stringify({
+        ok: true, id: 'sched-lock', executionMode: 'script', status: 'active',
+        targetSessionId: 'sess-bound-lock',
+        scriptConfig: { command: `python3 x.py --mode poll --pr 790 --node-id ${nodeId}` },
+      }));
+      bindSchedule({ home, pr: 790, nodeId, resultPath, dispatchId, retryMs: 0 });
+      bytesBefore = fs.readFileSync(prFile);
+      held = acquireLock(home, `pr-${nodeId}`);
+      return { target_session_id: 'sess-bound-lock', dispatch_id: dispatchId };
+    },
+  });
+  t.after(() => held?.release?.());
+  assert.equal(first.result.prs[0].dispatch.reason, 'dispatch-lock-retry');
+  assert.equal(createHash('sha256').update(fs.readFileSync(prFile)).digest('hex'), createHash('sha256').update(bytesBefore).digest('hex'));
+  const bound = readPr(home, nodeId);
+  assert.equal(bound.sessionId, 'sess-bound-lock');
+  assert.equal(bound.scheduleId, 'sched-lock');
+  assert.ok(bound.claimedAt);
+  held.release();
+  const second = discover(paths, {
+    now: '2026-09-28T08:41:00.000Z',
+    collect: collectFail,
+    dispatchFn: () => { throw new Error('should not create'); },
+  });
+  assert.notEqual(second.result.prs[0].dispatch.reason, 'pending-dispatch-unknown');
+  assert.equal(readPr(home, nodeId).sessionId, 'sess-bound-lock');
 });
 
 test('relock failure after dispatch does not overwrite PR state', (t) => {

@@ -372,7 +372,8 @@ function loadState(paths = watcherPaths()) {
 }
 
 function persistState(state, paths = watcherPaths()) {
-  const { _dirty, ...rest } = state;
+  if (state?._persistBlocked) return;
+  const { _dirty, _persistBlocked, ...rest } = state;
   if (isV2State(paths)) {
     const keys = _dirty?.size ? [..._dirty] : Object.keys(rest.prs ?? {});
     for (const key of keys) {
@@ -759,6 +760,7 @@ export function* processPr({
     const relocked = relockForDispatch?.();
     if (relocked?.held) {
       persistBlocked = true;
+      state._persistBlocked = true;
       const error = new Error('PR 状态锁占用');
       error.code = 'LOCK_HELD';
       throw error;
@@ -1355,7 +1357,7 @@ export function* discoverWorkflow({
       unlockForDispatch, relockForDispatch,
     });
     let entry = state.prs[key] || previous;
-    if (!prLock.held) {
+    if (!prLock.held && !state._persistBlocked) {
     if (!entry.sessionId && entry.pendingDispatch && entry.pendingDispatch.status !== 'retryable'
       && !String(entry.pendingDispatch.dispatchId ?? '').startsWith('dry-')) {
       entry = {
