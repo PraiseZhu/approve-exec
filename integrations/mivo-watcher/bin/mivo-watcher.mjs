@@ -609,6 +609,7 @@ export function applyDispatchReceipt({ state, pr, mapping, receipt, now, cursor,
     state.prs[key] = {
       ...previous,
       dispatchConflict: { at: now, receiptSessionId: sessionId, boundSessionId: previous.sessionId },
+      needsHuman: { reason: 'dispatch-conflict', sessions: [previous.sessionId, sessionId], at: now },
       pendingDispatch: null,
       dispatchError: null,
     };
@@ -1183,6 +1184,10 @@ export function* pollWorkflow({
     save({ ...previous, optOut: true });
     return { mode: 'poll', dispatch: false, prs: [{ number, nodeId, dispatch: { attempted: false, reason: 'opt-out' } }] };
   }
+  if (previous.needsHuman) {
+    save(previous);
+    return { mode: 'poll', dispatch: false, prs: [{ number, nodeId, needsHuman: previous.needsHuman, dispatch: { attempted: false, reason: 'needs-human' } }] };
+  }
   const pendingRetry = previous.pendingDispatch?.status === 'retryable';
   const recoveryDue = Boolean(readTaskForRecovery(previous, paths, now));
   if (previous.pollFingerprint === fingerprint && !pendingRetry && !recoveryDue && !previous.collectRetry && !normalized.overflow) {
@@ -1272,6 +1277,10 @@ export function* discoverWorkflow({
     try {
     let previous = readPr(paths.home, key) || { nodeId: key, number: pr.number };
     const guide = watchGuideMessage({ home: paths.home, prNumber: pr.number, nodeId: key });
+    if (previous.needsHuman) {
+      report.push({ number: pr.number, nodeId: key, needsHuman: previous.needsHuman, dispatch: { attempted: false, reason: 'needs-human' } });
+      continue;
+    }
     if (previous.sessionId) {
       const beat = Date.parse(previous.heartbeatAt ?? '');
       const stale = !Number.isFinite(beat) || nowMs - beat >= HEARTBEAT_STALE_MS;
@@ -1327,10 +1336,6 @@ export function* discoverWorkflow({
           report.push({ number: pr.number, nodeId: key, dispatch: { attempted: true, reason: 'poll-lost-unconfirmed', error: text.slice(0, 400) } });
         }
       }
-      continue;
-    }
-    if (previous.needsHuman?.reason === 'owner-unknown') {
-      report.push({ number: pr.number, nodeId: key, needsHuman: previous.needsHuman, dispatch: { attempted: false, reason: 'needs-human' } });
       continue;
     }
     if (previous.pendingDispatch?.status === 'awaiting-claim') {

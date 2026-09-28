@@ -319,7 +319,7 @@ collateral_used 可选；[{path, class, sc_id, reason, jev_ref}]，jev_ref 为 {
 
 ## ⑯ 防越域与验收
 
-Lead 允许：读码、写开工包、派/收回 session、只读验收证据、按第⑱节 replan；验收本组 pr_ready 后立即派 native cleanup sub，清本地成功后用 `archive_sessions` 归档 PI session。不允许：改产品代码、替子 session 修 bug、替 owner 开 PR、追 CI/review、手工搬 receipt、git merge、resume 旧盯梢班车、缺 pr_ready 或未验收就清本地。本 skill 不 register、不等待 Mini 接管。happy path 产品执行调用数为 0；编排派窗、验收决定、派清场 sub 与归档是 lead 的职责。越域 commit 验收失败。`gate_goal` 过账后才允许 worktree 出现本 PR 的新 commit。该 PR diff 触碰了别组 site-report 里的 read 依赖文件 → 即使在自己 `allowed_paths` 内也标「需重协调」，下游不得开工直到 lead 重发包。
+Lead 允许：读码、写开工包、派/收回 session、只读验收证据、按第⑱节 replan；验收本组 pr_ready 后立即派 native cleanup sub，清本地成功后用 `archive_sessions` 归档 PI session。调用 archive_sessions 前先跑 confirm-session-archived.mjs --precheck --session-id <id>；命中 watcher 专属 session（PR 仍开）就不归档。不允许：改产品代码、替子 session 修 bug、替 owner 开 PR、追 CI/review、手工搬 receipt、git merge、resume 旧盯梢班车、缺 pr_ready 或未验收就清本地。本 skill 不 register、不等待 Mini 接管。happy path 产品执行调用数为 0；编排派窗、验收决定、派清场 sub 与归档是 lead 的职责。越域 commit 验收失败。`gate_goal` 过账后才允许 worktree 出现本 PR 的新 commit。该 PR diff 触碰了别组 site-report 里的 read 依赖文件 → 即使在自己 `allowed_paths` 内也标「需重协调」，下游不得开工直到 lead 重发包。
 
 ## ⑰ Fable 决策 sidecar（非第六席）
 

@@ -125,6 +125,23 @@ test('unchanged fingerprint writes heartbeat and skips collect', (t) => {
   assert.equal(entry.heartbeatAt, now);
 });
 
+test('needsHuman dispatch-conflict skips poll auto-dispatch', (t) => {
+  const { paths } = homeOf(t);
+  seed(paths, {
+    pollFingerprint: pollFingerprint(snap()),
+    needsHuman: { reason: 'dispatch-conflict', sessions: ['sess-790', 'sess-other'], at: now },
+  });
+  const { result, collected } = poll(paths, {
+    snapshot: snap({ updatedAt: '2026-09-28T01:00:00Z', commentCount: 2 }),
+    collect: () => { throw new Error('should not collect'); },
+    dispatchFn: () => { throw new Error('should not dispatch'); },
+  });
+  assert.equal(collected, 0);
+  assert.equal(result.prs[0].dispatch.attempted, false);
+  assert.equal(result.prs[0].dispatch.reason, 'needs-human');
+  assert.equal(result.prs[0].needsHuman.reason, 'dispatch-conflict');
+});
+
 test('fingerprint change dispatches to bound session', (t) => {
   const { paths } = homeOf(t);
   seed(paths, { pollFingerprint: pollFingerprint(snap()) });

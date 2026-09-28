@@ -3,6 +3,9 @@
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { LedgerError, parseTimestamp, ARCHIVE_RECEIPT_KEYS } from './run-ledger.mjs';
+import { lookupWatchOwner, WATCHED_REPO } from '../integrations/mivo-watcher/bin/mivo-ownership.mjs';
+
+const BOOLEAN_FLAGS = new Set(['precheck']);
 
 export function parseArchiveArgs(argv) {
   const flags = {};
@@ -10,6 +13,10 @@ export function parseArchiveArgs(argv) {
     const a = argv[i];
     if (!a.startsWith('--')) throw new LedgerError('ARGS', `非法参数: ${a}`);
     const key = a.slice(2);
+    if (BOOLEAN_FLAGS.has(key)) {
+      flags[key] = true;
+      continue;
+    }
     const value = argv[i + 1];
     if (value === undefined || value.startsWith('--')) throw new LedgerError('ARGS', `参数 --${key} 缺值`);
     flags[key] = value;
@@ -87,14 +94,55 @@ export function confirmSessionArchived({
   return receipt;
 }
 
-function runCli(argv) {
+export function assertNotWatchOwner({
+  sessionId, lookup, home, repo, env,
+} = {}) {
+  if (typeof sessionId !== 'string' || sessionId.length === 0) {
+    throw new LedgerError('ARGS', 'session-id 必须是非空字符串');
+  }
+  const query = lookup ?? ((id) => lookupWatchOwner({
+    home, repo: repo || WATCHED_REPO, sessionId: id, env,
+  }));
+  let result;
+  try {
+    result = typeof query === 'function' ? query(sessionId) : query;
+  } catch (error) {
+    throw new LedgerError('PRECONDITION', `session ${sessionId} 的 watcher 台账不可读，禁止归档（${error.message}）`);
+  }
+  if (!result || result.reason === 'state-unreadable') {
+    throw new LedgerError('PRECONDITION', `session ${sessionId} 的 watcher 台账不可读，禁止归档`);
+  }
+  if (result.owned === true && result.closed !== true) {
+    throw new LedgerError(
+      'PRECONDITION',
+      `session ${sessionId} 是 PR #${result.pr} 的 watcher 专属修复 session，PR 仍开着，禁止归档；如需停盯请给 PR 打 mivo-watch:off 标签`,
+    );
+  }
+  return result;
+}
+
+export function runCli(argv, options = {}) {
   try {
     const flags = parseArchiveArgs(argv);
+    const sessionId = flags['session-id'];
+    const lookup = options.lookup ?? ((id) => lookupWatchOwner({
+      home: flags.home,
+      repo: flags.repo || WATCHED_REPO,
+      sessionId: id,
+      env: options.env,
+    }));
+    if (flags.precheck === true || flags.result !== undefined) {
+      assertNotWatchOwner({ sessionId, lookup });
+    }
+    if (flags.precheck === true && flags.result === undefined) {
+      process.stdout.write(`${JSON.stringify({ ok: true, precheck: true, session_id: sessionId })}\n`);
+      return 0;
+    }
     if (flags.result === undefined) {
       throw new LedgerError('ARGS', '必须传 --result <archive_sessions JSON>；本脚本不直接调 MCP');
     }
     const out = confirmSessionArchived({
-      sessionId: flags['session-id'],
+      sessionId,
       archiveResult: flags.result,
       now: flags.now,
       ledgerVersion: flags['ledger-version'],

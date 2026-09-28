@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { assertReadyPr, confirmPrOpen } from '../scripts/confirm-pr-open.mjs';
 import { wrapupCleanup } from '../scripts/wrapup-cleanup.mjs';
 import { confirmWatchRegistered, parseRegisterStdout, runWatchCli, MINI_WATCH_STATE_DIR, MINI_HOST } from '../scripts/confirm-watch-registered.mjs';
-import { confirmSessionArchived, extractArchiveResult } from '../scripts/confirm-session-archived.mjs';
+import { assertNotWatchOwner, confirmSessionArchived, extractArchiveResult, runCli as runArchiveCli } from '../scripts/confirm-session-archived.mjs';
 import {
   LedgerError,
   PR_OPEN_RECEIPT_KEYS,
@@ -680,6 +680,96 @@ test('confirm-session-archived 只吃 archive_sessions 工具结果', () => {
   assert.throws(() => extractArchiveResult({
     ok: true, status: 'archived', changed: [{ session_id: 'other', status: 'archived' }],
   }, 'target-not-in-changed'), LedgerError);
+});
+
+test('watcher 持有且 PR 开 → precheck 禁止归档', () => {
+  try {
+    assertNotWatchOwner({
+      sessionId: 'sess-open',
+      lookup: () => ({ owned: true, pr: 790, closed: false }),
+    });
+    assert.fail('expected LedgerError');
+  } catch (err) {
+    assert.equal(err instanceof LedgerError, true);
+    assert.match(err.message, /禁止归档/);
+  }
+  const captured = [];
+  const originalErr = console.error;
+  console.error = (...args) => { captured.push(args.join(' ')); };
+  try {
+    const code = runArchiveCli(['--precheck', '--session-id', 'sess-open'], {
+      lookup: () => ({ owned: true, pr: 790, closed: false }),
+    });
+    assert.notEqual(code, 0);
+    assert.match(captured.join('\n'), /禁止归档/);
+  } finally { console.error = originalErr; }
+});
+
+test('watcher 持有但 PR 已关闭 → precheck 放行', () => {
+  assert.doesNotThrow(() => assertNotWatchOwner({
+    sessionId: 'sess-closed',
+    lookup: () => ({ owned: true, pr: 790, closed: true }),
+  }));
+  const originalOut = process.stdout.write;
+  let stdout = '';
+  process.stdout.write = (chunk) => { stdout += chunk; return true; };
+  try {
+    const code = runArchiveCli(['--precheck', '--session-id', 'sess-closed'], {
+      lookup: () => ({ owned: true, pr: 790, closed: true }),
+    });
+    assert.equal(code, 0);
+    assert.equal(JSON.parse(stdout).precheck, true);
+  } finally { process.stdout.write = originalOut; }
+});
+
+test('watcher 未命中 → precheck 放行', () => {
+  assert.doesNotThrow(() => assertNotWatchOwner({
+    sessionId: 'sess-free',
+    lookup: () => ({ owned: false, reason: 'not-found' }),
+  }));
+});
+
+test('watcher 台账不可读 → precheck 拒绝', () => {
+  try {
+    assertNotWatchOwner({
+      sessionId: 'sess-bad',
+      lookup: () => ({ owned: false, reason: 'state-unreadable', error: 'EACCES' }),
+    });
+    assert.fail('expected LedgerError');
+  } catch (err) {
+    assert.equal(err instanceof LedgerError, true);
+    assert.match(err.message, /台账不可读/);
+  }
+});
+
+test('confirm-session-archived CLI --precheck 读真实台账：开着拒绝、关闭放行、缺 state 拒绝', (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'archive-precheck-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  mkdirSync(join(home, 'state/prs'), { recursive: true });
+  const script = join(dirname(fileURLToPath(import.meta.url)), '../scripts/confirm-session-archived.mjs');
+  const writePr = (name, body) => writeFileSync(join(home, 'state/prs', name), `${JSON.stringify(body)}\n`);
+  writePr('PR_790.json', {
+    number: 790, nodeId: 'PR_790', sessionId: 'sess-open', closedHandled: false,
+  });
+  const blocked = spawnSync(process.execPath, [script, '--precheck', '--session-id', 'sess-open', '--home', home], {
+    encoding: 'utf8', timeout: 15_000,
+  });
+  assert.notEqual(blocked.status, 0, blocked.stdout);
+  assert.match(blocked.stderr, /禁止归档/);
+  writePr('PR_791.json', {
+    number: 791, nodeId: 'PR_791', sessionId: 'sess-closed', closedHandled: true,
+  });
+  const allowed = spawnSync(process.execPath, [script, '--precheck', '--session-id', 'sess-closed', '--home', home], {
+    encoding: 'utf8', timeout: 15_000,
+  });
+  assert.equal(allowed.status, 0, allowed.stderr);
+  const missingHome = mkdtempSync(join(tmpdir(), 'archive-precheck-missing-'));
+  t.after(() => rmSync(missingHome, { recursive: true, force: true }));
+  const unread = spawnSync(process.execPath, [script, '--precheck', '--session-id', 'sess-x', '--home', missingHome], {
+    encoding: 'utf8', timeout: 15_000,
+  });
+  assert.notEqual(unread.status, 0, unread.stdout);
+  assert.match(unread.stderr, /台账不可读|禁止归档/);
 });
 
 test('confirm-watch-registered CLI 拒 --stdout，state-dir 必须钉 Mini 名册', () => {
