@@ -32,7 +32,7 @@ function collectFail() {
   };
 }
 
-function discover(paths, { now = '2026-09-28T00:00:00Z', prs = [listed], collect, dispatchFn, maxPrs } = {}) {
+function discover(paths, { now = '2026-09-28T00:00:00Z', prs = [listed], collect, dispatchFn, maxPrs, clock, budgetMs, perPrBudgetMs } = {}) {
   let collected = 0;
   const result = scanOnce({
     mode: 'discover', enabled: true, allowDispatch: true, paths, now,
@@ -46,7 +46,7 @@ function discover(paths, { now = '2026-09-28T00:00:00Z', prs = [listed], collect
       if (typeof collect === 'function') return collect(...args);
       throw new Error('collect should not run');
     },
-    dispatchFn, maxPrs,
+    dispatchFn, maxPrs, clock, budgetMs, perPrBudgetMs,
     ownershipSnapshot: function* () {
       return { pr: { state: 'OPEN', isDraft: false, sameRepository: true, author: { login: 'owner' }, headRefOid: HEAD, baseRefOid: BASE, releaseEpoch: 'e' } };
     },
@@ -415,4 +415,75 @@ test('opt-out label skips discover work', (t) => {
   });
   assert.equal(collected, 0);
   assert.equal(result.prs[0].dispatch.reason, 'opt-out');
+});
+
+function collectFor(pr) {
+  return {
+    ...collectFail(),
+    pr: { id: pr.id, number: pr.number, state: 'OPEN', isDraft: false, sameRepository: true, author: { login: 'owner' }, headRefOid: HEAD, baseRefOid: BASE, releaseEpoch: 'e' },
+  };
+}
+
+test('discover dispatches after 20s collection when global remaining exceeds 65s', (t) => {
+  const { paths } = homeOf(t);
+  let clock = 0;
+  const calls = [];
+  const { result } = discover(paths, {
+    budgetMs: 120000,
+    perPrBudgetMs: 75000,
+    clock: () => clock,
+    collect: (pr) => {
+      clock += 20000;
+      return collectFor(pr);
+    },
+    dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-new' }; },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(result.prs[0].dispatch.attempted, true);
+  assert.notEqual(result.prs[0].dispatch.reason, 'dispatch-budget-deferred');
+});
+
+test('discover still defers dispatch when global remaining is under 65s', (t) => {
+  const { paths } = homeOf(t);
+  let clock = 0;
+  const calls = [];
+  const { result } = discover(paths, {
+    budgetMs: 84000,
+    perPrBudgetMs: 75000,
+    clock: () => clock,
+    collect: (pr) => {
+      clock += 20000;
+      return collectFor(pr);
+    },
+    dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-new' }; },
+  });
+  assert.equal(calls.length, 0);
+  assert.equal(result.prs[0].dispatch.attempted, false);
+  assert.equal(result.prs[0].dispatch.reason, 'dispatch-budget-deferred');
+});
+
+test('discover defers later PRs after the first dispatch exhausts global remaining', (t) => {
+  const { paths } = homeOf(t);
+  const second = { number: 791, id: 'PR_791', headRefOid: HEAD, headRefName: 'fix/y', title: 'fix', isDraft: false, labels: [] };
+  let clock = 0;
+  const calls = [];
+  const { result } = discover(paths, {
+    prs: [listed, second],
+    budgetMs: 120000,
+    perPrBudgetMs: 75000,
+    clock: () => clock,
+    collect: (pr) => {
+      clock += 20000;
+      return collectFor(pr);
+    },
+    dispatchFn: (p) => {
+      calls.push(p);
+      clock += 40000;
+      return { target_session_id: `sess-${calls.length}` };
+    },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(result.prs[0].dispatch.attempted, true);
+  assert.equal(result.prs[1].dispatch.attempted, false);
+  assert.equal(result.prs[1].dispatch.reason, 'dispatch-budget-deferred');
 });

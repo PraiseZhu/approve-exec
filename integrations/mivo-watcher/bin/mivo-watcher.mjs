@@ -925,6 +925,8 @@ export function* processPr({
     };
   }
   const wantsDelivery=shouldDispatch || recovery || previous.pendingDispatch?.status==='retryable';
+  // Per-PR budget caps collection only. Dispatch reserve (65s/61s) uses the global deadline.
+  if (wantsDelivery) resetPrDeadline?.();
   if (!dryRun && wantsDelivery && remaining()<65000) {
     state.prs[key]=previous;
     report.push({number:pr.number,dispatch:{attempted:false,reason:'dispatch-budget-deferred'}});
@@ -1276,6 +1278,7 @@ export function* discoverWorkflow({
   const deadline = started + Math.min(120000, Math.max(1, budgetMs));
   let prDeadline = deadline;
   const remaining = () => Math.max(0, Math.min(deadline, prDeadline) - clock());
+  const resetPrDeadline = () => { prDeadline = deadline; };
   const dryRun = !(enabled && allowDispatch && typeof dispatchFn === 'function');
   const v2 = v2StatePaths(paths.home);
   fs.mkdirSync(v2.prsDir, { recursive: true, mode: 0o700 });
@@ -1374,7 +1377,7 @@ export function* discoverWorkflow({
           const inner = [];
           yield* processPr({
             pr, previous, state, paths, now, events, report: inner, viewer, dryRun, dispatchFn, collect, ghFn,
-            recheckFn, ownershipSnapshot, remaining, deadline, clock, resetPrDeadline: () => {}, forceCreate: true,
+            recheckFn, ownershipSnapshot, remaining, deadline, clock, resetPrDeadline, forceCreate: true,
             messagePrefix: `${watchSuccessorMessage({ prNumber: pr.number, predecessorId, reason: text.slice(0, 120), summary })}\n${guide}`,
             unlockForDispatch, relockForDispatch,
           });
@@ -1405,7 +1408,7 @@ export function* discoverWorkflow({
     const inner = [];
     yield* processPr({
       pr, previous, state, paths, now, events, report: inner, viewer, dryRun, dispatchFn, collect, ghFn,
-      recheckFn, ownershipSnapshot, remaining, deadline, clock, resetPrDeadline: () => {}, messagePrefix: guide,
+      recheckFn, ownershipSnapshot, remaining, deadline, clock, resetPrDeadline, messagePrefix: guide,
       unlockForDispatch, relockForDispatch,
     });
     let entry = state.prs[key] || previous;
