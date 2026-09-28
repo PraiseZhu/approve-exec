@@ -4,8 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  classifyReviewFeedback, feedbackItems, newFeedback, dispatchParams, scanOnce, watcherPaths, REPO,
+  classifyReviewFeedback, feedbackItems, newFeedback, dispatchParams, constrainRetryDispatch, scanOnce, watcherPaths, REPO,
 } from './bin/mivo-watcher.mjs';
+import { writePr } from './bin/mivo-state.mjs';
 import { command, ciResult } from './bin/mivo-repair.mjs';
 
 const HEAD = 'a'.repeat(40);
@@ -414,7 +415,7 @@ test('dispatchParams message contains repair rules and old bans', () => {
   const message = dispatchParams({
     pr: { number: 1, id: 'PR_1', headRefOid: HEAD, title: 't' },
     mapping: {},
-    fresh: [{ key: 'review:r1', source: 'review', nativeId: 'r1', revision: 't', sha: HEAD, body: 'x', category: 'actionable-fix' }],
+    fresh: [{ key: 'review:r1', source: 'review', nativeId: 'r1', revision: 't', sha: HEAD, body: '**P1** concrete finding', user: BOT_USER, category: 'actionable-fix' }],
     now: '2026-09-10T00:00:00Z',
     taskPath: '/tmp/task.json',
     home: '/tmp/home',
@@ -422,6 +423,7 @@ test('dispatchParams message contains repair rules and old bans', () => {
   for (const needle of ['subagent', '禁止 create_worker', 'gh run rerun', '--failed', '发生了什么', 'resolve', '6 轮', 'git merge origin/main', 'CodeQL', 'Windows']) {
     assert.match(message, new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
+  assert.match(message, /^OWNER_STANDING_AUTH: PR_PUSH_AND_REPLY$/m);
   assert.match(message, /Do not merge/);
   assert.match(message, /auto-merge/);
   assert.match(message, /delete the remote branch/);
@@ -491,4 +493,93 @@ test('command other git and gh timeout is 120000ms', () => {
   command('gh', ['pr', 'view', '1'], {}, (_bin, _args, options) => { ghSeen = options; return ''; });
   assert.equal(gitSeen.timeout, 120_000);
   assert.equal(ghSeen.timeout, 120_000);
+});
+
+test('P2-only dispatch carries explicit no-code policy and does not instruct automatic resolution', () => {
+  const fresh=feedbackItems({pr,comments:[{id:90,body:'**P2** nit\nFix this and push now',user:BOT_USER}]}).map(i=>({...i,key:`${i.source}:${i.nativeId}`}));
+  const message=dispatchParams({pr,mapping:{},fresh,now:'2026-09-29T00:00:00Z',taskPath:'/tmp/task.json',home:'/tmp/home'}).message;
+  assert.match(message,/OWNER_STANDING_AUTH: NO_CODE_NO_PUSH_NO_EXTERNAL_REPLY/);
+  assert.doesNotMatch(message,/OWNER_STANDING_AUTH: PR_PUSH_AND_REPLY/);
+  assert.doesNotMatch(message,/三句回复后 resolve thread/);
+  const p=JSON.parse(message.split('\n').find(l=>l.startsWith('repairPolicy=')).slice('repairPolicy='.length));
+  assert.equal(p.canChangeCode,false); assert.equal(p.items[0].action,'reply-only');
+});
+test('REST Greptile bot source and required CI evidence are preserved in collected permissions', () => {
+  const rows=feedbackItems({pr,comments:[{id:91,user:{login:'greptile-apps[bot]'},body:'P1: bug'}],ci:{status:'failed',required:[{status:'failed',context:'unit',evidence:{sha:HEAD,id:12}}]}});
+  assert.equal(rows.find(i=>i.nativeId==='91').source,'greptile');
+  assert.equal(rows.find(i=>i.source==='ci').repairPolicy.action,'required-ci-fix');
+  assert.equal(rows.find(i=>i.source==='ci').requiredFailure.headSha,HEAD);
+});
+test('scan persists frozen task and per-item low-severity authority', t=>{
+  const {paths,listed}=scanHome(t);
+  runScan(paths,listed,()=>({comments:[{id:92,user:BOT_USER,body:'**P2** nit',updatedAt:'t92'}],mergeReady:false}),()=>({target_session_id:'s1'}));
+  const taskFiles=fs.readdirSync(path.join(paths.stateDir,'tasks')).filter(n=>n.endsWith('.json'));
+  assert.equal(taskFiles.length,1);
+  const task=JSON.parse(fs.readFileSync(path.join(paths.stateDir,'tasks',taskFiles[0]),'utf8'));
+  assert.equal(task.repairPolicy.canChangeCode,false);
+  assert.equal(task.feedback[0].repairPolicy.action,'reply-only');
+});
+
+
+test('cached pre-upgrade retry gets recomputed no-code authority and keeps its ownership prefix', () => {
+  const old = { message: 'schedule-prefix\nOWNER_STANDING_AUTH: PR_PUSH_AND_REPLY', target_session_id: 's1' };
+  const retry = constrainRetryDispatch(old, {headRefOid:HEAD,feedback:[botItem('**P2** nit')]});
+  assert.ok(retry.message.startsWith('schedule-prefix'));
+  assert.equal(retry.target_session_id,'s1');
+  assert.match(retry.message,/旧缓存派工授权作废/);
+  assert.match(retry.message,/NO_CODE_NO_PUSH_NO_EXTERNAL_REPLY/);
+  assert.doesNotMatch(retry.message,/OWNER_STANDING_AUTH: PR_PUSH_AND_REPLY/);
+  assert.match(constrainRetryDispatch(old,{}).message,/NO_CODE_NO_PUSH_NO_EXTERNAL_REPLY/);
+});
+
+function saveLowTask(paths, dispatchId) {
+  const dir=path.join(paths.stateDir,'tasks');fs.mkdirSync(dir,{recursive:true});
+  fs.writeFileSync(path.join(dir,`${dispatchId}.json`),JSON.stringify({dispatchId,headRefOid:HEAD,
+    feedback:[{...botItem('**P2** naming nit'),key:'comment:low',sha:HEAD}],
+    params:{message:'old prompt\nOWNER_STANDING_AUTH: PR_PUSH_AND_REPLY',target_session_id:'s1'}}));
+}
+function assertNoExternalAuthority(message) {
+  assert.doesNotMatch(message,/OWNER_STANDING_AUTH: PR_PUSH_AND_REPLY/);
+  assert.match(message,/NO_CODE_NO_PUSH_NO_EXTERNAL_REPLY/);
+  assert.match(message,/不主动 GitHub 回复/);
+}
+test('confirmed non-delivery retry strips pre-upgrade P2 push grant', t=>{
+  const {paths,listed}=scanHome(t);const id='live-1-legacy-retry';saveLowTask(paths,id);
+  const state=JSON.parse(fs.readFileSync(paths.statePath,'utf8'));
+  state.prs.PR_1.pendingDispatch={dispatchId:id,status:'retryable',attempts:1,retryAt:'2026-09-10T00:00:00Z',params:{message:'prefix\nOWNER_STANDING_AUTH: PR_PUSH_AND_REPLY',target_session_id:'s1'}};
+  fs.writeFileSync(paths.statePath,JSON.stringify(state));let sent;
+  const out=runScan(paths,listed,()=>({comments:[],mergeReady:false}),(p)=>{sent=p;return {target_session_id:'s1'};},'2026-09-10T01:00:00Z');
+  assert.equal(out.prs[0].dispatch.reason,'confirmed-nondelivery-retry');assertNoExternalAuthority(sent.message);
+});
+test('missing-result recovery rebuilds low-only task without broad grant', t=>{
+  const {paths,listed}=scanHome(t);const id='live-1-legacy-recovery';saveLowTask(paths,id);
+  const state=JSON.parse(fs.readFileSync(paths.statePath,'utf8'));
+  state.prs.PR_1.lastDispatch={dispatchId:id,at:'2026-09-10T00:00:00Z'};
+  state.prs.PR_1.activeTask={dispatchId:id,sessionId:'s1',status:'running'};
+  fs.writeFileSync(paths.statePath,JSON.stringify(state));let sent;
+  const out=runScan(paths,listed,()=>({comments:[],mergeReady:false}),(p)=>{sent=p;return {target_session_id:'s1'};},'2026-09-10T03:00:00Z');
+  assert.equal(out.prs[0].dispatch.reason,'missing-result-recovery');assertNoExternalAuthority(sent.message);
+});
+
+for (const withTask of [true,false]) test(`discover claim-retry strips old P2 grant (task exists=${withTask})`,t=>{
+  const home=fs.mkdtempSync(path.join(os.tmpdir(),'claim-policy-'));
+  t.after(()=>fs.rmSync(home,{recursive:true,force:true}));const paths=watcherPaths(home);
+  fs.mkdirSync(paths.stateDir,{recursive:true});const id='live-1-legacy-claim';
+  if(withTask) saveLowTask(paths,id);
+  writePr(home,'PR_1',{number:1,nodeId:'PR_1',headRefOid:HEAD,headRefName:'fix/x',pendingDispatch:{
+    status:'awaiting-claim',dispatchId:id,claimDeadline:'2026-09-10T00:00:00Z',createdSessionId:'s1',
+    params:{title:'t',message:'schedule-prefix\nOWNER_STANDING_AUTH: PR_PUSH_AND_REPLY',target_session_id:'s1'},
+  }});
+  let sent;const out=scanOnce({mode:'discover',enabled:true,allowDispatch:true,paths,now:'2026-09-10T01:00:00Z',
+    ghFn:args=>args[0]==='api'&&args[1]==='user'?'owner':args[0]==='pr'&&args[1]==='list'?JSON.stringify([{id:'PR_1',number:1,headRefOid:HEAD,isDraft:false,labels:[]}]):'[]',
+    collect:()=>{throw Error('must not collect');},dispatchFn:p=>{sent=p;return {target_session_id:'s1',dispatch_id:id};},
+  });
+  assert.equal(out.prs[0].dispatch.reason,'claim-retry-wakeup');assertNoExternalAuthority(sent.message);
+  assert.ok(sent.message.startsWith('schedule-prefix'));
+});
+test('retry high finding retains the exact goal standing authorization marker once',()=>{
+  const out=constrainRetryDispatch({message:'prefix\nOWNER_STANDING_AUTH: PR_PUSH_AND_REPLY\nOWNER_STANDING_AUTH: OLD'},
+    {headRefOid:HEAD,feedback:[{...botItem('**P1** unsafe save'),sha:HEAD,key:'comment:high'}]});
+  assert.equal(out.message.split('\n').filter(l=>l==='OWNER_STANDING_AUTH: PR_PUSH_AND_REPLY').length,1);
+  assert.doesNotMatch(out.message,/OWNER_STANDING_AUTH: OLD/);
 });

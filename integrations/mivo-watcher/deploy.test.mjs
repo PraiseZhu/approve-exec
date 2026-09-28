@@ -18,6 +18,7 @@ function fixture(t){
 }
 test('full source deploy preserves state and verifies all artifact hashes',t=>{
  const f=fixture(t),r=apply(f.plan);assert.equal(r.status,'installed');assert.equal(r.stateChanged,false);assert.equal(verify(f.home).filter(v=>v.source===v.runtime).length,FILES.length);assert.deepEqual(fs.readFileSync(path.join(f.home,'state/state.json')),f.state);
+ assert.ok(FILES.includes('mivo-feedback-policy.mjs'));
  assert.ok(FILES.includes('mivo-state.mjs'));
  assert.ok(FILES.includes('mivo-ownership.mjs'));
  assert.equal(fs.readFileSync(path.join(f.home,'deployments/fixture-release/before/mivo-watcher.mjs'),'utf8'),'old bytes');
@@ -43,6 +44,17 @@ test('legacy deploy symlink invokes CLI and cannot silently succeed',t=>{
  const f=fixture(t),link=path.join(f.home,'legacy-deploy.mjs');fs.symlinkSync(fileURLToPath(new URL('./deploy.mjs',import.meta.url)),link);
  const result=spawnSync(process.execPath,[link,'verify','--home',f.home],{encoding:'utf8'});
  assert.equal(result.status,1);assert.equal(JSON.parse(result.stdout).match,false);
+});
+test('new policy artifact is installed and removed again on failed deployment',t=>{
+ const f=fixture(t),name='mivo-feedback-policy.mjs';
+ fs.unlinkSync(path.join(f.home,'bin',name));f.plan.files=verify(f.home);
+ assert.equal(f.plan.files.find(item=>item.name===name).runtime,null);
+ const rename=fs.renameSync;let failed=false;
+ fs.renameSync=(from,to)=>{if(!failed&&to.endsWith('mivo-pr-policy.mjs')&&from.includes('.install-')){failed=true;throw Error('injected after new module');}return rename(from,to);};
+ try{assert.throws(()=>apply(f.plan),/injected after new module/);}finally{fs.renameSync=rename;}
+ assert.equal(fs.existsSync(path.join(f.home,'bin',name)),false);
+ assert.deepEqual(fs.readFileSync(path.join(f.home,'state/state.json')),f.state);
+ assert.equal(fs.existsSync(path.join(f.home,'state/lease')),false);
 });
 test('state fingerprint includes PR file content hashes',t=>{
  const home=fs.mkdtempSync(path.join(os.tmpdir(),'watcher-fp-'));t.after(()=>fs.rmSync(home,{recursive:true,force:true}));

@@ -4,6 +4,12 @@
 
 本机 owner 做到 push、当前 CI 绿并满足审查入口后交接。Mini 复用唯一 session 修后续反馈、CI 和冲突，直到生产公开审查协议判定整体通过。helper 的 complete 仅表示一轮修复完成；不会合并 PR、自动合并，也不会修改审查机 workflow 或配置。
 
+## 自动改动权限
+
+PR 审查反馈只有明确的 P0/P1 才授权自动改动并提交；P2/P3、建议或无法确定优先级的反馈不构成改代码权限，只在本会话说明状态（reply-only 不表示 GitHub 外发），不启动修复 Goal、不主动回帖或自动 resolve。分类、派工和 helper 提交前复核共用 `bin/mivo-feedback-policy.mjs`，不得仅凭任务总类、模型判断或已通过本地检查把低优先级反馈升级成修复授权。
+
+已有派工同样受提交前复核约束。无改动权限的任务即使产生了本地 commit，也不能因此 push；保留现场并报告，不自动丢弃工作树或重置远端。CI 失败、合并冲突等独立输入沿用各自已有门禁，不能拿它们为同轮 P2/P3 改动授权。
+
 旧治理根的运行文件软链只供源码引用，不作旧CLI兼容保证；执行watcher/repair使用这里或Mini runtime的真实路径。只有旧`deploy-watcher.mjs`入口明确支持软链调用，参数改为下述verify/preview/apply。
 
 `bin/` 现为 v2：发现器 + 每 PR 轮询脚本 + 每 PR 状态文件（`state/prs/<nodeId>.json`）。旧单文件 `state/state.json` 只做一次性迁移，不改写。发现器每 5 分钟列本人 open PR，给未绑定且准入的 PR 建专属 session；已绑定 PR 只看心跳。每 PR 轮询脚本由该 session 自己 `schedule_create`（script 模式，禁止 `silentWhenIdle`），5 分钟只扫这一个 PR。工作树落在插件仓 `<P>/.worktrees/watch/pr-<N>`。原治理目录父级源码与旧部署脚本不再是维护入口；历史 release/备份仅供取证和回滚。
