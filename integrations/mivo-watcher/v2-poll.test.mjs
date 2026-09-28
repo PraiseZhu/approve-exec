@@ -328,32 +328,32 @@ test('missing sessionId records needsOwner and does not create', (t) => {
   assert.equal(entry.sessionId, null);
 });
 
-test('repairSessionTitle uses MivoPlugin-#N-task format', () => {
+test('repairSessionTitle uses #N-task format without project prefix', () => {
   assert.equal(
     repairSessionTitle({ task: '终态回执修复', prNumber: 558, createdAt: '2026-09-28' }),
-    'MivoPlugin-#558-终态回执修复丨 0928',
+    '#558-终态回执修复丨0928',
   );
 });
 
 test('planSessionTitle keeps new titles and rewrites old titles', () => {
   const pr = { id: 'PR_558', number: 558, title: '终态回执修复' };
   const kept = planSessionTitle({
+    pr, existing: { title: '#558-终态回执修复丨0928', titleDate: '2026-09-28' }, createdAt: '2026-09-28',
+  });
+  assert.equal(kept.title, '#558-终态回执修复丨0928');
+  const rewritten = planSessionTitle({
     pr, existing: { title: 'MivoPlugin-#558-终态回执修复丨 0928', titleDate: '2026-09-28' }, createdAt: '2026-09-28',
   });
-  assert.equal(kept.title, 'MivoPlugin-#558-终态回执修复丨 0928');
-  const rewritten = planSessionTitle({
-    pr, existing: { title: 'MivoPlugin-终态回执修复丨 0928', titleDate: '2026-09-28' }, createdAt: '2026-09-28',
-  });
-  assert.equal(rewritten.title, 'MivoPlugin-#558-终态回执修复丨 0928');
+  assert.equal(rewritten.title, '#558-终态回执修复丨0928');
 });
 
 test('maintenance script treats only the new title as canonical', () => {
   const src = fs.readFileSync(new URL('./bin/session-title-maintenance.py', import.meta.url), 'utf8');
-  const match = src.match(/re\.fullmatch\(r"(MivoPlugin-[^"]+)"/);
+  const match = src.match(/if not re\.fullmatch\(r"([^"]+)",\s*change\.get\("title"/);
   assert.ok(match);
   const re = new RegExp(`^${match[1]}$`, 'u');
-  assert.equal(re.test('MivoPlugin-#558-终态回执修复丨 0928'), true);
-  assert.equal(re.test('MivoPlugin-终态回执修复丨 0928'), false);
+  assert.equal(re.test('#558-终态回执修复丨0928'), true);
+  assert.equal(re.test('MivoPlugin-#558-终态回执修复丨 0928'), false);
 });
 
 function collectFailedCi() {

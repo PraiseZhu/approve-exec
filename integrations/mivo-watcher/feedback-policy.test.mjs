@@ -30,9 +30,31 @@ for (const body of [
 for (const body of ['P1 0 findings', '**P1**: no findings', 'No P1 findings', 'Fix all problems', 'P0 0 · P1 0 · P2 2']) {
   test(`unknown/count/negative not code authority: ${body}`, () => assert.equal(policy(body).canChangeCode, false));
 }
-test('mixed finding body is not wholesale authorization', () => {
+test('structurally separable P1+P2 authorizes the P1 finding, P2 stays no-change', () => {
+  // 场景A：单条评论内同时有 P0/P1 + P2 混合，且各severity各占一行(结构上可拆分)。
   const p = policy('**P1** broken save\n**P2** naming');
-  assert.equal(p.action, 'needs-triage'); assert.deepEqual(p.severities, ['P1', 'P2']);
+  assert.equal(p.action, 'code-fix');
+  assert.equal(p.canChangeCode, true);
+  assert.deepEqual(p.severities, ['P1', 'P2']);
+});
+test('structurally separable P0+P2 authorizes the P0 finding, P2 stays no-change', () => {
+  const p = policy('**P0** crash on load\n**P2** naming');
+  assert.equal(p.action, 'code-fix');
+  assert.equal(p.canChangeCode, true);
+  assert.deepEqual(p.severities, ['P0', 'P2']);
+});
+test('single line mixing multiple severity tokens cannot be split, stays needs-triage', () => {
+  // 无法从结构上拆分：同一行混讲多个级别，无法确定对应关系。
+  const p = policy('**P1** 这个问题和另一处 P2 是同一段代码里连带的，改一起改');
+  assert.equal(p.action, 'needs-triage');
+  assert.equal(p.canChangeCode, false);
+});
+test('pure P1-only finding (no mixing) remains normally fixable', () => {
+  // 场景B：单条评论内是纯 P1(无混合)。
+  const p = policy('**P1** null dereference on save path');
+  assert.equal(p.action, 'code-fix');
+  assert.equal(p.canChangeCode, true);
+  assert.deepEqual(p.severities, ['P1']);
 });
 test('nonzero high summary with only a low detail remains unresolved', () => {
   const p = policy('三席聚合：P0 0 · P1 1 · P2 1\n**P2** naming');

@@ -83,7 +83,19 @@ export function feedbackRepairPolicy(item = {}, { headSha } = {}) {
   const high = severities.some(s => s === 'P0' || s === 'P1');
   const low = severities.some(s => s === 'P2' || s === 'P3');
   if (high && heading === 'APPROVE') return result('needs-triage', severities, 'approve-conflicts-with-high-finding');
-  if (high && low) return result('needs-triage', severities, 'mixed-severity-item');
+  // Structurally separable only when each severity came from its own line (no
+  // single line mixes a high token with a low token). A single line mixing
+  // both cannot be attributed to one finding or the other, so it can never
+  // authorize a split fix even if the header scan only recognized one of them.
+  const mixedOnSameLine = substantive.some((line) => {
+    if (/三席聚合|(?:findings?|severity)\s*(?:counts?|summary)|汇总|统计/i.test(line)) return false;
+    const tokens = line.match(/P[0-3]|CRITICAL|HIGH|MEDIUM|LOW/gi) ?? [];
+    if (tokens.length < 2) return false;
+    const mapped = tokens.map((t) => aliases[t.toUpperCase()]);
+    return mapped.some((s) => s === 'P0' || s === 'P1') && mapped.some((s) => s === 'P2' || s === 'P3');
+  });
+  if (mixedOnSameLine) return result('needs-triage', severities, 'mixed-severity-inseparable');
+  if (high && low) return result('code-fix', severities, 'mixed-severity-high-authorized-low-no-change');
   if (summaryHigh && !high) return result('needs-triage', severities, 'high-summary-without-finding');
   if (high) return result('code-fix', severities, 'explicit-p0-p1-finding');
   if (low) return result('reply-only', severities, 'p2-p3-no-code-authority');

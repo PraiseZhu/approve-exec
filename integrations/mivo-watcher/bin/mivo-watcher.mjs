@@ -13,6 +13,7 @@ import { collectPublicReview } from './public-review.mjs';
 import { collectPrSnapshot, collectPrOwnership } from './mivo-pr-snapshot.mjs';
 import { acquireLock, AUTHOR_RECLAIMED, listPrs, migrateLegacy, PR_LOCK_TOKEN_ENV, readPr, statePaths as v2StatePaths, withLock as withPrLock, writePr } from './mivo-state.mjs';
 import { feedbackRepairPolicy, taskRepairPolicy, isGreptileAuthor } from './mivo-feedback-policy.mjs';
+import { partitionAutoClose, autoCloseThreads } from './mivo-review-resolve.mjs';
 export const REPO = 'xindong/mivo-canvas-plugin';
 const GH = process.env.GH_BIN ?? 'gh';
 
@@ -118,9 +119,9 @@ function failedRequiredCiItems({ pr, ci }) {
   return items;
 }
 
-function withCategory(item) {
+function withCategory(item, { headSha } = {}) {
   const category = classifyReviewFeedback(item);
-  return { ...item, category, repairPolicy: feedbackRepairPolicy(item, { headSha: item.sha }), ...(category === 'ignore-infra' ? { actionable: false } : {}) };
+  return { ...item, category, repairPolicy: feedbackRepairPolicy(item, { headSha }), ...(category === 'ignore-infra' ? { actionable: false } : {}) };
 }
 
 function withPublisher(item, comment) {
@@ -137,7 +138,7 @@ function withPublisher(item, comment) {
 
 export function feedbackItems({ pr, checks = [], requiredChecks = [], policy, ci, reviews = [], comments = [], threads = [], mergeable, receiptActor }) {
   const items = [];
-  for (const item of failedRequiredCiItems({ pr, ci })) items.push(withCategory(item));
+  for (const item of failedRequiredCiItems({ pr, ci })) items.push(withCategory(item, { headSha: pr.headRefOid ?? null }));
   for (const review of reviews) {
     if (ownReceipt(review, receiptActor)) continue;
     if (!review.body?.trim() && review.state !== 'CHANGES_REQUESTED') continue;
@@ -148,7 +149,7 @@ export function feedbackItems({ pr, checks = [], requiredChecks = [], policy, ci
       sha: review.commit?.oid ?? pr.headRefOid ?? null,
       body: review.body ?? '',
       contentHash: digest({ state: review.state, body: review.body ?? '' }),
-    }, review)));
+    }, review), { headSha: pr.headRefOid ?? null }));
   }
   for (const comment of comments) {
     if (ownReceipt(comment, receiptActor)) continue;
@@ -159,7 +160,7 @@ export function feedbackItems({ pr, checks = [], requiredChecks = [], policy, ci
       sha: pr.headRefOid ?? null,
       body: comment.body ?? '',
       contentHash: digest({ body: comment.body ?? '', updated: comment.updatedAt ?? comment.updated_at }),
-    }, comment)));
+    }, comment), { headSha: pr.headRefOid ?? null }));
   }
   for (const thread of threads) {
     const threadComments = Array.isArray(thread.comments) ? thread.comments : (thread.comments?.nodes ?? []);
@@ -169,15 +170,16 @@ export function feedbackItems({ pr, checks = [], requiredChecks = [], policy, ci
       items.push(withCategory(withPublisher({
         source: isGreptileAuthor(author) ? 'greptile' : 'thread',
         actionable: thread.isResolved !== true,
+        threadId: thread.id,
         nativeId: `${thread.id}:${comment.id ?? author ?? 'comment'}`,
         revision: `${thread.isResolved === true}:${thread.isOutdated === true}:${comment.updatedAt ?? comment.updated_at ?? comment.createdAt ?? ''}`,
         sha: pr.headRefOid ?? null,
         body: comment.body ?? '',
         contentHash: digest({ path: thread.path, resolved: thread.isResolved === true, id: comment.id, author, body: comment.body ?? '' }),
-      }, comment)));
+      }, comment), { headSha: pr.headRefOid ?? null }));
     }
   }
-  if (mergeable === 'CONFLICTING') items.push(withCategory({ source: 'conflict', nativeId: 'merge-conflict', revision: pr.headRefOid, sha: pr.headRefOid, body: 'PR has merge conflicts with its base branch.', contentHash: digest({ mergeable }) }));
+  if (mergeable === 'CONFLICTING') items.push(withCategory({ source: 'conflict', nativeId: 'merge-conflict', revision: pr.headRefOid, sha: pr.headRefOid, body: 'PR has merge conflicts with its base branch.', contentHash: digest({ mergeable }) }, { headSha: pr.headRefOid ?? null }));
   return items;
 }
 
@@ -857,11 +859,24 @@ export function* processPr({
   const sameEpoch = !collected.pr || (previous.admissionEpoch === collected.pr.releaseEpoch && previous.wasDraft !== true);
   if (!sameEpoch) previous = {...previous, admissionVerified:false};
   const cursorBase = previous.wasDraft === true ? {} : (previous.feedbackCursor || {});
-  const { fresh, cursor } = newFeedback(cursorBase, feedbackItems({ pr, ...collected, receiptActor: viewer }));
+  const { fresh: rawFresh, cursor } = newFeedback(cursorBase, feedbackItems({ pr, ...collected, receiptActor: viewer }));
+  // Autonomous P2/P3 review-thread closure happens here, before any dispatch
+  // accounting below sees these items — closed items never reach a session,
+  // never need a human, and are never counted as pending feedback.
+  const { eligible: autoCloseEligible, remaining: fresh } = partitionAutoClose(rawFresh);
+  let autoClosedThisRound = [];
+  if (autoCloseEligible.length > 0 && !dryRun) {
+    const outcome = yield* autoCloseThreads({ eligible: autoCloseEligible, previous, ghFn, now });
+    previous = outcome.previous;
+    autoClosedThisRound = outcome.closed;
+  }
   const admitted = previous.admissionVerified === true || collected.admissionVerified === true;
   const admissionBlocked = collected.admissionVerified === false && previous.admissionVerified !== true;
   previous = {
-    ...base, labels: collected.labels ?? [], mergeReady: collected.mergeReady === true,
+    // `base` predates the auto-close step above; carry its receipt forward explicitly
+    // so it isn't silently dropped by this reassignment.
+    ...base, autoClosedThreads: previous.autoClosedThreads ?? base.autoClosedThreads,
+    labels: collected.labels ?? [], mergeReady: collected.mergeReady === true,
     reviewReason: collected.reviewReason ?? null, reviewEvidence: collected.reviewEvidence ?? null,
     admissionVerified: admitted, admissionReason: collected.admissionReason ?? previous.admissionReason ?? null,
     admissionEpoch: admitted ? collected.pr?.releaseEpoch ?? previous.admissionEpoch : null,
@@ -1063,6 +1078,7 @@ export function* processPr({
     evidenceVersion: previous.activeTask?.evidenceVersion ?? null,
     session: mapping, dispatch,
     ...(previous.lastRecheckError ? { recheckError: previous.lastRecheckError } : {}),
+    ...(autoClosedThisRound.length > 0 ? { autoClosed: autoClosedThisRound } : {}),
   });
   } finally {
     state.updatedAt=now;
