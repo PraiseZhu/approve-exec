@@ -679,6 +679,66 @@ export function cleanupWatch({ home, pr, ghFn = command, gitFn = command, env = 
   return { removed: true, worktree, branch: watchBranchName(number) };
 }
 
+// branchAncestorOfMain 判断 watch 分支的提交是否已全部并入 origin/main（即已被合并、
+// 不会因删除分支丢失内容）。用于决定自动清理时是否需要先备份。
+export function branchAncestorOfMain(plugin, branch, gitFn = command) {
+  try {
+    gitOutput(['-C', plugin, 'merge-base', '--is-ancestor', branch, 'origin/main'], gitFn);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// backupWatchBranch 在删除前把 watch 分支打成 git bundle，存进插件仓的
+// `_backup/pr<N>-<日期>/` 下，只在分支可能含未合入 main 的提交时调用。
+export function backupWatchBranch({ plugin, number, branch, gitFn = command, now = new Date().toISOString() }) {
+  const day = now.slice(0, 10);
+  const dir = path.join(plugin, '_backup', `pr${number}-${day}`);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const bundlePath = path.join(dir, `${branch.replace(/\//g, '-')}.bundle`);
+  gitOutput(['-C', plugin, 'bundle', 'create', bundlePath, branch], gitFn);
+  return { bundlePath };
+}
+
+// autoCleanupWatch 是脚本自己（无人工环节）对 watch worktree/分支执行的兜底清理：
+// 只在明确已合并、worktree 干净的前提下删除；分支已完全并入 main 直接删，否则先
+// bundle 备份再强删；worktree 脏、PR 未合并、或出现任何异常都只记录、不删除。
+export function autoCleanupWatch({
+  home, pr, plugin, gitFn = command, ghFn = command, env = process.env,
+  now = new Date().toISOString(), knownMerged = false,
+}) {
+  const number = Number(pr);
+  const repoPlugin = plugin || pluginRepoPath(env);
+  const branch = watchBranchName(number);
+  const worktree = watchWorktreePath(repoPlugin, number);
+  try {
+    if (!knownMerged) {
+      const view = ghJson(['pr', 'view', String(number), '--repo', REPO, '--json', 'state'], ghFn);
+      if (view.state !== 'MERGED') return { removed: false, reason: 'not-merged', worktree, branch };
+    }
+    if (!fs.existsSync(worktree)) {
+      try { gitOutput(['-C', repoPlugin, 'branch', '-d', branch], gitFn); } catch {}
+      return { removed: true, worktree, branch, backup: null, note: 'worktree-missing' };
+    }
+    const status = gitOutput(['-C', worktree, 'status', '--porcelain'], gitFn);
+    if (status) return { removed: false, reason: 'dirty', worktree, branch };
+    const ancestor = branchAncestorOfMain(repoPlugin, branch, gitFn);
+    let backup = null;
+    if (ancestor) {
+      gitOutput(['-C', repoPlugin, 'worktree', 'remove', worktree], gitFn);
+      try { gitOutput(['-C', repoPlugin, 'branch', '-d', branch], gitFn); } catch {}
+    } else {
+      backup = backupWatchBranch({ plugin: repoPlugin, number, branch, gitFn, now });
+      gitOutput(['-C', repoPlugin, 'worktree', 'remove', worktree], gitFn);
+      try { gitOutput(['-C', repoPlugin, 'branch', '-D', branch], gitFn); } catch {}
+    }
+    return { removed: true, worktree, branch, backup };
+  } catch (error) {
+    return { removed: false, reason: 'error', error: String(error?.message || error), worktree, branch };
+  }
+}
+
 function cli(argv) {
   const args = [...argv];
   const modes = new Set(['prepare', 'validate', 'finalize', 'recheck', 'blocked', 'schedule-params', 'bind-schedule', 'cleanup', 'clear-owner-unknown']);

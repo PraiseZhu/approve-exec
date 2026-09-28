@@ -14,6 +14,7 @@ import { collectPrSnapshot, collectPrOwnership } from './mivo-pr-snapshot.mjs';
 import { acquireLock, AUTHOR_RECLAIMED, listPrs, migrateLegacy, PR_LOCK_TOKEN_ENV, readPr, statePaths as v2StatePaths, withLock as withPrLock, writePr } from './mivo-state.mjs';
 import { feedbackRepairPolicy, taskRepairPolicy, isGreptileAuthor } from './mivo-feedback-policy.mjs';
 import { partitionAutoClose, autoCloseThreads } from './mivo-review-resolve.mjs';
+import { autoCleanupWatch, command as gitDefaultFn, pluginRepoPath, watchBranchName, watchWorktreePath } from './mivo-repair.mjs';
 export const REPO = 'xindong/mivo-canvas-plugin';
 const GH = process.env.GH_BIN ?? 'gh';
 
@@ -491,10 +492,15 @@ export function watchPollLostMessage({ prNumber, heartbeatAt, scheduleId, home, 
   }
   return `你的 PR #${prNumber} 轮询调度失联（最后心跳 ${heartbeatAt}）：先 schedule_get ${scheduleId}；paused 则只对该 scheduleId 调用 schedule_resume；禁止操作任何其它调度。不存在则重新执行第 0 步：${watchGuideMessage({ home, prNumber, nodeId, dispatchId: null })}`;
 }
-export function watchClosedownMessage({ prNumber, state, scheduleId, home }) {
+export function watchClosedownMessage({ prNumber, state, scheduleId, home, env = process.env }) {
   const verb = state === 'MERGED' ? '合并' : '关闭';
   const helper = shellQuote(path.join(home, 'bin', 'mivo-repair.mjs'));
-  return `PR #${prNumber} 已${verb}：调用 schedule_delete ${scheduleId ?? ''} 删除本 PR 轮询调度，再运行 \`node ${helper} --home ${shellQuote(home)} cleanup --pr ${prNumber}\`；不做其它改动。`;
+  const base = `PR #${prNumber} 已${verb}：调用 schedule_delete ${scheduleId ?? ''} 删除本 PR 轮询调度，再运行 \`node ${helper} --home ${shellQuote(home)} cleanup --pr ${prNumber}\`；不做其它改动。`;
+  if (state !== 'MERGED') return base;
+  const plugin = pluginRepoPath(env);
+  const worktree = watchWorktreePath(plugin, prNumber);
+  const branch = watchBranchName(prNumber);
+  return `${base}本地 worktree：${worktree}；本地分支：${branch}。cleanup 命令会先确认 PR 已合并、worktree 干净后再删除，不要手动 rm -rf。`;
 }
 export function watchDispatchConflictMessage({ prNumber, bindSession, receiptSession, dispatchId }) {
   return `PR #${prNumber} 回执冲突：合法 owner 是 ${bindSession}，但 dispatch ${dispatchId ?? ''} 的回执指向 ${receiptSession}。请核实 ${receiptSession} 是否也在处理同一 PR，如是请人工归档多余 session。`;
@@ -1180,6 +1186,8 @@ export function* pollWorkflow({
   nodeId = process.env.MIVO_WATCHER_NODE_ID,
   prNumber = process.env.MIVO_WATCHER_PR,
   snapshotFn = null,
+  gitFn = gitDefaultFn,
+  env = process.env,
 } = {}) {
   const started = clock();
   const deadline = started + Math.min(120000, Math.max(1, budgetMs));
@@ -1203,7 +1211,7 @@ export function* pollWorkflow({
   if (normalized.state === 'MERGED' || normalized.state === 'CLOSED') {
     const { dispatch } = yield* deliverClosedown({
       previous, prNumber: number, nodeId, state: normalized.state, paths, now, dryRun, dispatchFn, remaining,
-      extra: { heartbeatAt: now, pollFingerprint: fingerprint },
+      extra: { heartbeatAt: now, pollFingerprint: fingerprint }, gitFn, env,
     });
     return { mode: 'poll', dispatch: dispatch.attempted, prs: [{ number, nodeId, dispatch }] };
   }
@@ -1265,6 +1273,7 @@ const CLOSEDOWN_MIN_MS = 12000;
 
 function* deliverClosedown({
   previous, prNumber, nodeId, state, paths, now, dryRun, dispatchFn, remaining, extra = {},
+  gitFn = gitDefaultFn, env = process.env,
 }) {
   if (previous.closedHandled) {
     return { previous, dispatch: { attempted: false, bound: false, reason: 'closed-handled' } };
@@ -1280,7 +1289,7 @@ function* deliverClosedown({
       yield () => dispatchFn({
         title: previous.title || repairSessionTitle({ prNumber, createdAt: now }),
         message: watchClosedownMessage({
-          prNumber, state, scheduleId: previous.scheduleId, home: paths.home,
+          prNumber, state, scheduleId: previous.scheduleId, home: paths.home, env,
         }),
         target_session_id: previous.sessionId,
       }, { timeoutMs: Math.max(1, remaining()) });
@@ -1289,9 +1298,25 @@ function* deliverClosedown({
     } catch (error) {
       const text = String(error.message);
       if (/ARCHIVED|NOT_FOUND|DELETED/.test(text)) {
+        // 会话不可达（已归档/不存在/被删）且 dispatch 失败：session 不会再收到清理指令，
+        // 脚本自己对 watcher 创建的那棵 watch worktree 执行同样的安全清理；
+        // 只有确认已合并才做，且只在能安全判断时才真的删除，否则只记录。
+        let autoCleanup = null;
+        if (state === 'MERGED') {
+          try {
+            autoCleanup = autoCleanupWatch({
+              home: paths.home, pr: prNumber, gitFn, env, now, knownMerged: true,
+            });
+          } catch (cleanupError) {
+            autoCleanup = { removed: false, reason: 'error', error: String(cleanupError?.message || cleanupError) };
+          }
+        }
         previous = save({
           ...previous, closedHandled: true,
-          closedownManual: { scheduleId: previous.scheduleId ?? null, reason: text.slice(0, 400), at: now },
+          closedownManual: {
+            scheduleId: previous.scheduleId ?? null, reason: text.slice(0, 400), at: now,
+            ...(autoCleanup ? { autoCleanup } : {}),
+          },
         });
         dispatch = { attempted: true, bound: false, reason: 'closedown-session-gone' };
       } else {
@@ -1312,6 +1337,7 @@ export function* discoverWorkflow({
   ghFn = gh, collect = collectPr, dispatchFn = null, paths = watcherPaths(),
   recheckFn = recheckResult, ownershipSnapshot = collectPrOwnership,
   clock = Date.now, budgetMs = 120000, maxPrs = 1000, perPrBudgetMs = 75000,
+  gitFn = gitDefaultFn, env = process.env,
 } = {}) {
   const started = clock();
   const deadline = started + Math.min(120000, Math.max(1, budgetMs));
@@ -1602,6 +1628,7 @@ export function* discoverWorkflow({
       const { dispatch } = yield* deliverClosedown({
         previous: live, prNumber: live.number, nodeId: staleKey, state: prState,
         paths, now, dryRun, dispatchFn, remaining: () => Math.max(0, deadline - clock()),
+        gitFn, env,
       });
       report.push({ number: live.number, nodeId: staleKey, dispatch });
     } finally { staleLock.release(); }
