@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { planSessionTitle, repairSessionTitle } from './session-title.mjs';
 import { collectPublicReview, verdictComment } from './public-review.mjs';
 import { collectPrSnapshot, collectPrOwnership } from './mivo-pr-snapshot.mjs';
+import { acquireLock, listPrs, migrateLegacy, PR_LOCK_TOKEN_ENV, readPr, statePaths as v2StatePaths, withLock as withPrLock, writePr } from './mivo-state.mjs';
 export const REPO = 'xindong/mivo-canvas-plugin';
 const GH = process.env.GH_BIN ?? 'gh';
 
@@ -351,14 +352,38 @@ export async function collectPrAsync(pr, { ghFn = gh } = {}) {
   return attachVerifiedCi(collected, collected.ci);
 }
 
+function isV2State(paths) {
+  const v2 = v2StatePaths(paths.home);
+  if (fs.existsSync(v2.indexPath)) return true;
+  return fs.existsSync(v2.prsDir) && fs.readdirSync(v2.prsDir).some((name) => name.endsWith('.json'));
+}
+
 function loadState(paths = watcherPaths()) {
+  if (isV2State(paths)) {
+    const prs = {};
+    for (const entry of listPrs(paths.home)) {
+      const key = String(entry?.nodeId ?? '');
+      if (key) prs[key] = entry;
+    }
+    return { version: 2, repo: REPO, prs };
+  }
   if (!fs.existsSync(paths.statePath)) return { version: 2, repo: REPO, prs: {} };
   return JSON.parse(fs.readFileSync(paths.statePath, 'utf8'));
 }
 
 function persistState(state, paths = watcherPaths()) {
+  if (state?._persistBlocked) return;
+  const { _dirty, _persistBlocked, ...rest } = state;
+  if (isV2State(paths)) {
+    const keys = _dirty?.size ? [..._dirty] : Object.keys(rest.prs ?? {});
+    for (const key of keys) {
+      if (rest.prs?.[key]) writePr(paths.home, key, rest.prs[key]);
+    }
+    _dirty?.clear();
+    return;
+  }
   fs.mkdirSync(paths.stateDir, { recursive: true });
-  atomic(paths.statePath, `${JSON.stringify(state, null, 2)}\n`);
+  atomic(paths.statePath, `${JSON.stringify(rest, null, 2)}\n`);
 }
 
 function canRepair(previous) {
@@ -410,11 +435,12 @@ function readTaskForRecovery(previous, paths, now = new Date().toISOString()) {
   return { dispatchId, params: task.params, task, recoveryCount: count + 1 };
 }
 
-export function dispatchParams({ pr, mapping, fresh, now, taskPath, home }) {
+export function dispatchParams({ pr, mapping, fresh, now, taskPath, home, messagePrefix = '' }) {
   const title = mapping.title || repairSessionTitle({ task: pr.title, prNumber: pr.number, createdAt: now });
   const params = {
     title,
     message: [
+      ...(messagePrefix ? [messagePrefix] : []),
       `Mivo PR repair for ${REPO}#${pr.number}.`,
       `nodeid=${pr.id}`,
       `head=${pr.headRefOid}`,
@@ -431,7 +457,7 @@ export function dispatchParams({ pr, mapping, fresh, now, taskPath, home }) {
       '三审/Greptile：actionable-fix 修代码；reply-resolve 用「发生了什么 / 对本 PR 意味着什么 / 要不要改代码」三句回复后 resolve thread；ignore-infra 不处理。product-arch-gate 争议写 blocked 交用户。同一 PR 修复轮次上限 6 轮。冲突用 git merge origin/main（不 rebase，不 force push）。',
       ...(taskPath ? [
         `task=${taskPath}`,
-        `第一步：node ${JSON.stringify(path.join(home, 'bin', 'mivo-repair.mjs'))} --home ${JSON.stringify(home)} --task ${JSON.stringify(taskPath)} prepare。等待 watcher 的真实 session 绑定；只在返回的独立 worktree 改代码，禁止在 automation 根目录改产品。`,
+        `第一步：node ${shellQuote(path.join(home, 'bin', 'mivo-repair.mjs'))} --home ${shellQuote(home)} --task ${shellQuote(taskPath)} prepare。等待 watcher 的真实 session 绑定；只在返回的独立 worktree 改代码，禁止在 automation 根目录改产品。`,
         '允许路径：当前 PR 代码及解决反馈必需的直接调用/测试/文档；新增产品范围、CI配置、模型路由、密钥、生产数据不在授权内。外部服务失败写 blocked；禁止无依据反复 rerun。',
         '验证：该 worktree 仓库规定的 preflight 和受影响测试；每个 SC 记录真实命令/结果/HEAD，不伪造 PASS。',
         '验证收据：commit 后先运行同一 helper validate --validated-head <完整SHA>，由 helper 执行仓库 preflight；禁止 PREFLIGHT_SKIP 或自行写验证 PASS。无改动必须全部 SC=no-change 并保留未运行本地验证的事实。',
@@ -449,10 +475,116 @@ export function dispatchParams({ pr, mapping, fresh, now, taskPath, home }) {
   return params;
 }
 
-function dispatchIntent({ pr, mapping, fresh, now, paths, dryRun }) {
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+export function watchGuideMessage({ home, prNumber, nodeId, dispatchId } = {}) {
+  const helper = shellQuote(path.join(home, 'bin', 'mivo-repair.mjs'));
+  const quotedHome = shellQuote(home);
+  const dispatchFlag = dispatchId ? ` --dispatch-id ${dispatchId}` : ' --dispatch-id <dispatchId>';
+  return `第 0 步（只做一次）：运行 \`node ${helper} --home ${quotedHome} schedule-params --pr ${prNumber} --node-id ${nodeId}\`，把输出 JSON 原样作为 cindy_scheduler 的 schedule_create 参数调用；把工具返回原样存成文件后运行 \`${helper} --home ${quotedHome} bind-schedule --pr ${prNumber} --node-id ${nodeId}${dispatchFlag} --result <文件>\`。bind 若返回 busy（状态锁占用）：等 1 分钟后重跑同一 bind-schedule 命令。bind 若返回 owner-conflict（本 PR 已由他人持有）：立刻停止并回复一句说明。之后本 PR 的所有反馈只会投递到你这里（每 5 分钟由你的轮询脚本检查）。`;
+}
+export function watchSuccessorMessage({ prNumber, predecessorId, reason, summary }) {
+  return `你是 PR #${prNumber} 的接班修复 session，前任 ${predecessorId} 已不可用（${reason}）；先读本 PR 状态摘要 ${summary ?? '…'}。若状态为 merge-ready，等待人工合并，不要改代码。再执行第 0 步。`;
+}
+export function watchPollLostMessage({ prNumber, heartbeatAt, scheduleId }) {
+  return `你的 PR #${prNumber} 轮询调度失联（最后心跳 ${heartbeatAt}）：先 schedule_get ${scheduleId ?? ''}；paused 则 schedule_resume；不存在则重新执行第 0 步。`;
+}
+export function watchClosedownMessage({ prNumber, state, scheduleId, home }) {
+  const verb = state === 'MERGED' ? '合并' : '关闭';
+  const helper = shellQuote(path.join(home, 'bin', 'mivo-repair.mjs'));
+  return `PR #${prNumber} 已${verb}：调用 schedule_delete ${scheduleId ?? ''} 删除本 PR 轮询调度，再运行 \`node ${helper} --home ${shellQuote(home)} cleanup --pr ${prNumber}\`；不做其它改动。`;
+}
+function runAttemptFromUrl(url) {
+  const text = String(url ?? '');
+  const match = text.match(/\/attempts\/(\d+)/) || text.match(/[?&]attempt=(\d+)/i);
+  return match ? Number(match[1]) : null;
+}
+function normalizeChecks(list) {
+  return [...(list ?? [])].map((item) => ({
+    name: item.name ?? item.context ?? null,
+    status: item.status ?? item.state ?? null,
+    conclusion: item.conclusion ?? null,
+    id: item.id ?? item.databaseId ?? null,
+    runAttempt: item.runAttempt ?? runAttemptFromUrl(item.detailsUrl ?? item.details_url ?? item.link),
+  })).sort((a, b) => String(a.id ?? a.name).localeCompare(String(b.id ?? b.name)));
+}
+export function normalizePollSnapshot(payload) {
+  const node = payload?.data?.node ?? payload;
+  const labels = (node.labels?.nodes ?? node.labels ?? []).map((item) => typeof item === 'string' ? item : item?.name).filter(Boolean);
+  const comments = node.comments;
+  const reviews = node.reviews;
+  const threads = node.reviewThreads?.nodes ?? node.reviewThreads ?? [];
+  const suites = node.commits?.nodes?.[0]?.commit?.checkSuites?.nodes ?? [];
+  const checks = [];
+  for (const suite of suites) {
+    for (const run of suite.checkRuns?.nodes ?? []) {
+      checks.push({
+        name: run.name, status: run.status, conclusion: run.conclusion,
+        id: run.databaseId ?? run.id, detailsUrl: run.detailsUrl,
+      });
+    }
+  }
+  if (Array.isArray(node.statusCheckRollup)) {
+    for (const item of node.statusCheckRollup) {
+      checks.push({
+        name: item.name ?? item.context, status: item.status ?? item.state,
+        conclusion: item.conclusion ?? null, id: item.id ?? item.databaseId ?? null,
+        detailsUrl: item.detailsUrl ?? item.link, runAttempt: item.runAttempt,
+      });
+    }
+  }
+  if (Array.isArray(node.checks)) checks.push(...node.checks);
+  const threadTimes = threads.flatMap((thread) => (thread.comments?.nodes ?? []).map((item) => item.updatedAt)).filter(Boolean).sort();
+  const suiteNodes = node.commits?.nodes?.[0]?.commit?.checkSuites;
+  const overflow = Boolean(node.overflow
+    || node.labels?.pageInfo?.hasNextPage
+    || node.reviewThreads?.pageInfo?.hasNextPage
+    || suiteNodes?.pageInfo?.hasNextPage
+    || (suiteNodes?.nodes ?? []).some((suite) => suite.checkRuns?.pageInfo?.hasNextPage));
+  return {
+    state: node.state, isDraft: node.isDraft, headRefOid: node.headRefOid, baseRefOid: node.baseRefOid,
+    mergeable: node.mergeable, labels,
+    checks: normalizeChecks(checks),
+    commentCount: comments?.totalCount ?? comments?.length ?? node.commentCount ?? 0,
+    reviewCount: reviews?.totalCount ?? reviews?.length ?? node.reviewCount ?? 0,
+    unresolvedThreads: threads.filter((thread) => thread.isResolved === false).length || node.unresolvedThreads || 0,
+    commentUpdatedAt: comments?.nodes?.[0]?.updatedAt ?? comments?.at?.(-1)?.updatedAt ?? node.commentUpdatedAt ?? null,
+    reviewUpdatedAt: reviews?.nodes?.[0]?.updatedAt ?? reviews?.at?.(-1)?.updatedAt ?? node.reviewUpdatedAt ?? null,
+    threadUpdatedAt: threadTimes.at(-1) ?? node.threadUpdatedAt ?? null,
+    overflow,
+  };
+}
+export function pollFingerprint(snapshot) {
+  const normalized = snapshot.checks ? snapshot : normalizePollSnapshot(snapshot);
+  return digest({
+    state: normalized.state, isDraft: normalized.isDraft, headRefOid: normalized.headRefOid,
+    baseRefOid: normalized.baseRefOid, mergeable: normalized.mergeable,
+    labels: [...(normalized.labels ?? [])].map((item) => typeof item === 'string' ? item : item?.name).filter(Boolean).sort(),
+    checks: normalizeChecks(normalized.checks),
+    commentCount: normalized.commentCount ?? 0, reviewCount: normalized.reviewCount ?? 0,
+    commentUpdatedAt: normalized.commentUpdatedAt ?? null, reviewUpdatedAt: normalized.reviewUpdatedAt ?? null,
+    threadUpdatedAt: normalized.threadUpdatedAt ?? null,
+    unresolvedThreads: normalized.unresolvedThreads ?? 0,
+    overflow: normalized.overflow === true,
+  });
+}
+function* fetchPollSnapshot({ nodeId, ghFn }) {
+  const query = 'query($id:ID!){node(id:$id){... on PullRequest{state isDraft headRefOid baseRefOid mergeable labels(first:50){pageInfo{hasNextPage} nodes{name}} comments(last:1){totalCount nodes{updatedAt}} reviews(last:1){totalCount nodes{updatedAt}} reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved comments(last:1){nodes{updatedAt}}}} commits(last:1){nodes{commit{checkSuites(first:30){pageInfo{hasNextPage} nodes{checkRuns(first:40){pageInfo{hasNextPage} nodes{name status conclusion databaseId detailsUrl}}}}}}}}}}';
+  const raw = yield () => ghFn(['api', 'graphql', '-f', `query=${query}`, '-F', `id=${nodeId}`]);
+  return normalizePollSnapshot(JSON.parse(raw));
+}
+function hasWatchOff(labels) {
+  return (labels ?? []).map((item) => typeof item === 'string' ? item : item?.name).includes('mivo-watch:off');
+}
+
+function dispatchIntent({ pr, mapping, fresh, now, paths, dryRun, messagePrefix = '' }) {
   const dispatchId = `${dryRun ? 'dry' : 'live'}-${pr.number}-${now}`;
   const taskPath = path.join(paths.stateDir, 'tasks', `${dispatchId}.json`);
-  const pending = { dispatchId, params: dispatchParams({ pr, mapping, fresh, now, taskPath, home: paths.home }), at: now, taskPath };
+  const prefix = messagePrefix?.includes('bind-schedule')
+    ? messagePrefix.replace(/--dispatch-id <dispatchId>/g, `--dispatch-id ${dispatchId}`)
+    : messagePrefix;
+  const pending = { dispatchId, params: dispatchParams({ pr, mapping, fresh, now, taskPath, home: paths.home, messagePrefix: prefix }), at: now, taskPath };
   if (!dryRun) {
     fs.mkdirSync(path.dirname(taskPath), { recursive: true });
     atomic(taskPath, JSON.stringify({ dispatchId, nodeId: pr.id, number: pr.number, repo: REPO, headRefOid: pr.headRefOid, headRefName: pr.headRefName, feedback: fresh, params: pending.params, createdAt: now }));
@@ -467,12 +599,21 @@ export function applyDispatchReceipt({ state, pr, mapping, receipt, now, cursor,
     throw new Error('Cindy resumed a different session');
   }
   const key = String(pr.id);
-  const previous = state.prs[key] || {};
-  if (previous.pendingDispatch) {
-    const expected = previous.pendingDispatch.dispatchId;
-    if (receipt.dispatch_id && expected && receipt.dispatch_id !== expected) {
-      throw new Error('dispatch receipt does not match pending dispatch');
-    }
+  const previous = readPr(paths.home, key) || state.prs[key] || {};
+  const thisId = receipt.dispatch_id ?? previous.pendingDispatch?.dispatchId;
+  const expected = previous.pendingDispatch?.dispatchId;
+  if (expected && thisId && expected !== thisId) {
+    throw new Error('dispatch receipt does not match pending dispatch');
+  }
+  if (previous.sessionId && previous.claimedAt && sessionId && previous.sessionId !== sessionId) {
+    state.prs[key] = {
+      ...previous,
+      dispatchConflict: { at: now, receiptSessionId: sessionId, boundSessionId: previous.sessionId },
+      pendingDispatch: null,
+      dispatchError: null,
+    };
+    persistState(state, paths);
+    return { bound: true, sessionId: previous.sessionId, conflict: true, reused: true };
   }
   state.prs[key] = {
     ...previous,
@@ -484,7 +625,9 @@ export function applyDispatchReceipt({ state, pr, mapping, receipt, now, cursor,
     labels: collected?.labels ?? previous.labels ?? [],
     mergeReady: collected?.mergeReady ?? previous.mergeReady ?? false,
     feedbackCursor: cursor ?? previous.feedbackCursor ?? {},
-    sessionId,
+    sessionId: previous.sessionId ?? sessionId,
+    scheduleId: previous.scheduleId,
+    claimedAt: previous.claimedAt,
     title: mapping.title,
     titleDate: mapping.titleDate ?? previous.titleDate,
     taskName: mapping.taskName ?? previous.taskName,
@@ -494,7 +637,7 @@ export function applyDispatchReceipt({ state, pr, mapping, receipt, now, cursor,
     activeTask: {
       ...(recovery ? previous.activeTask : {}),
       dispatchId: receipt.dispatch_id ?? previous.pendingDispatch?.dispatchId,
-      sessionId, head: pr.headRefOid, status: receipt.wake_kind === 'queued' ? 'queued' : 'accepted', at: now,
+      sessionId: previous.sessionId ?? sessionId, head: pr.headRefOid, status: receipt.wake_kind === 'queued' ? 'queued' : 'accepted', at: now,
       hostTurnStatus: 'unverified',
     },
     lastSeenAt: now,
@@ -516,7 +659,7 @@ export function applyDispatchReceipt({ state, pr, mapping, receipt, now, cursor,
     },
   };
   persistState(state, paths);
-  return { bound: true, sessionId, reused: Boolean(mapping.sessionId) };
+  return { bound: true, sessionId: state.prs[key].sessionId, reused: Boolean(mapping.sessionId || previous.claimedAt) };
 }
 
 function resultFor(previous, paths) {
@@ -600,6 +743,296 @@ function rememberDispatchFailure(state, key, error, now, paths) {
   return state.prs[key];
 }
 
+export function* processPr({
+  pr, previous: previousArg, state, paths, now, events, report, viewer, dryRun,
+  dispatchFn, collect, ghFn, recheckFn, ownershipSnapshot, maintenanceSessionId,
+  remaining, deadline, clock, resumeCursor, resetPrDeadline, allowCreate = true, messagePrefix = '', forceCreate = false,
+  unlockForDispatch = null, relockForDispatch = null,
+} = {}) {
+  const key = String(pr.id);
+  let persistBlocked = false;
+  function* yieldDispatch(effect) {
+    unlockForDispatch?.();
+    let value;
+    let thrown;
+    try { value = yield effect; }
+    catch (error) { thrown = error; }
+    const relocked = relockForDispatch?.();
+    if (relocked?.held) {
+      persistBlocked = true;
+      state._persistBlocked = true;
+      const error = new Error('PR 状态锁占用');
+      error.code = 'LOCK_HELD';
+      throw error;
+    }
+    if (thrown) throw thrown;
+    return value;
+  }
+  let previous = migrateEntry(clearDryPending(previousArg ?? (state.prs[key] || {})));
+  previous = { ...previous, number: pr.number, nodeId: pr.id };
+  let resultError;
+  try { previous = consumeResult(previous, resultFor(previous, paths), now); }
+  catch (error) { resultError = error.message; }
+  if (resultError) {
+    previous = { ...previous, eligibility: 'blocked', activeTask: {
+      ...previous.activeTask, dispatchId: previous.activeTask?.dispatchId ?? previous.lastDispatch?.dispatchId,
+      status: 'blocked', blockedKind: 'invalid-result', reason: resultError,
+    } };
+  }
+  const mapping = planSession({ pr, existing: previous, date: now });
+  const base = {
+    ...previous, headRefOid: pr.headRefOid, headRefName: pr.headRefName, url: pr.url,
+    title: mapping.title, titleDate: mapping.titleDate, taskName: mapping.taskName, lastSeenAt: now,
+    ...(previous.activeTask ? {activeTask:{...previous.activeTask,resultHeadCurrent:previous.activeTask.head===pr.headRefOid}} : {}),
+  };
+  if (previous.sessionId && previous.sessionId === maintenanceSessionId) {
+    state.prs[key] = base;
+    persistState(state,paths);
+    report.push({ number: pr.number, nodeId: pr.id, session: mapping,
+      dispatch: { attempted: false, bound: false, reason: 'session-title-maintenance' } });
+    return;
+  }
+  if (pr.isDraft === true) {
+    state.prs[key] = markException({ ...base, wasDraft: true, admissionVerified: false, admissionEpoch: null }, now, events);
+    persistState(state,paths);
+    report.push({ number: pr.number, nodeId: pr.id, fresh: 0, admissionVerified: false,
+      admissionReason: 'draft', mergeReady: false, repairStatus: base.activeTask?.status ?? 'observing',
+      session: mapping, dispatch: { attempted: false, bound: false, reason: 'draft' } });
+    return;
+  }
+  let collected;
+  try {
+  try { collected = yield () => collect(pr, { ghFn }); }
+  catch (error) {
+    state.prs[key] = {...base,lastCollectionError:{at:now,reason:String(error.message).slice(0,400)},mergeReady:false,reviewEvidence:null};
+    // A PR cut short only because earlier PRs used this run's time gets a
+    // full budget first next round. Its own per-PR cap still advances past it.
+    if (deadline-clock()<1000) state.scan={...state.scan,cursor:resumeCursor,deferredNumber:pr.number};
+    report.push({ number: pr.number, nodeId: pr.id, dispatch: { attempted: false, reason: 'collection-failed' }, error: String(error.message).slice(0, 400) });
+    return;
+  }
+  if (collected.pr && (collected.pr.state !== 'OPEN' || collected.pr.isDraft || !collected.pr.sameRepository || collected.pr.author?.login !== viewer)) {
+    state.prs[key] = { ...base, admissionVerified: false, admissionEpoch: null };
+    report.push({ number: pr.number, dispatch: {attempted:false,reason:'ownership-no-longer-released'} });
+    return;
+  }
+  if (hasWatchOff(collected.labels)) {
+    previous = { ...base, labels: collected.labels ?? [], optOut: true };
+    state.prs[key] = previous;
+    persistState(state, paths);
+    report.push({ number: pr.number, nodeId: pr.id, dispatch: { attempted: false, reason: 'opt-out' } });
+    return;
+  }
+  const sameEpoch = !collected.pr || (previous.admissionEpoch === collected.pr.releaseEpoch && previous.wasDraft !== true);
+  if (!sameEpoch) previous = {...previous, admissionVerified:false};
+  const cursorBase = previous.wasDraft === true ? {} : (previous.feedbackCursor || {});
+  const { fresh, cursor } = newFeedback(cursorBase, feedbackItems({ pr, ...collected, receiptActor: viewer }));
+  const admitted = previous.admissionVerified === true || collected.admissionVerified === true;
+  const admissionBlocked = collected.admissionVerified === false && previous.admissionVerified !== true;
+  previous = {
+    ...base, labels: collected.labels ?? [], mergeReady: collected.mergeReady === true,
+    reviewReason: collected.reviewReason ?? null, reviewEvidence: collected.reviewEvidence ?? null,
+    admissionVerified: admitted, admissionReason: collected.admissionReason ?? previous.admissionReason ?? null,
+    admissionEpoch: admitted ? collected.pr?.releaseEpoch ?? previous.admissionEpoch : null,
+    eligibilityInitialized: true, wasDraft: false,
+  };
+  const active = previous.activeTask;
+  const waiting = active?.status === 'waiting-ci'
+    || (active?.status === 'blocked' && ['required-ci', 'optional-ci', 'ci-transport'].includes(active.blockedKind));
+  if (waiting && active.evidenceVersion === 2 && !dryRun && !resultError) {
+    try {
+      if (remaining()<1000) throw Error('scan-budget-exhausted');
+      yield () => recheckFn({ paths, previous, pr, timeoutMs:Math.max(1,Math.min(30000,remaining())) });
+      previous = consumeResult(previous, resultFor(previous, paths), now);
+    } catch (error) {
+      // A transport failure is not a new agent task or proof of completion.
+      previous = { ...previous, lastRecheckError: { at: now, message: String(error.message).slice(0, 400) } };
+      if (deadline-clock()<1000) state.scan={...state.scan,cursor:resumeCursor,deferredNumber:pr.number};
+    }
+  }
+  if (!resultError && !['blocked', 'complete', 'legacy-complete', 'waiting-ci'].includes(previous.activeTask?.status)
+    && Number(previous.lastDispatch?.recoveryCount ?? 0) >= MAX_RECOVERIES
+    && Date.parse(now) - Date.parse(previous.lastDispatch?.lastRecoveryAt ?? previous.lastDispatch?.at) >= RECOVERY_MIN_MS) {
+    previous = { ...previous, eligibility: 'blocked', activeTask: {
+      ...previous.activeTask, dispatchId: previous.lastDispatch.dispatchId,
+      sessionId: previous.sessionId, status: 'blocked', blockedKind: 'missing-result-limit',
+      reason: 'No result after three bounded recovery deliveries; inspect the existing session before resuming.',
+    } };
+  }
+  const terminal = ['blocked', 'complete', 'legacy-complete'].includes(previous.activeTask?.status);
+  const inFlight = Boolean(previous.lastDispatch?.dispatchId) && !terminal;
+  const recovery = admitted && !collected.mergeReady && !resultError
+    && previous.activeTask?.status !== 'waiting-ci' && !terminal
+    ? readTaskForRecovery(previous, paths, now) : null;
+  const repairRounds = Number(previous.repairRounds ?? 0);
+  const hitRoundLimit = repairRounds >= REPAIR_ROUND_LIMIT;
+  const canResume = !resultError && (canRepair(previous) || (
+    fresh.length > 0 && previous.activeTask?.status === 'blocked'
+    && !['invalid-result', 'missing-result-limit', 'round-limit'].includes(previous.activeTask?.blockedKind)
+  ));
+  const shouldDispatch = forceCreate || (fresh.length > 0 && !collected.mergeReady && canResume && !admissionBlocked && !inFlight && !hitRoundLimit);
+  let dispatch = { attempted: false, bound: false, reason: 'no-new-feedback' };
+  // Advance only non-actionable observations until a delivery is acknowledged.
+  const retainedCursor = { ...cursor };
+  for (const item of fresh) {
+    if (Object.hasOwn(cursorBase, item.key)) retainedCursor[item.key] = cursorBase[item.key];
+    else delete retainedCursor[item.key];
+  }
+  previous = {
+    ...previous, feedbackCursor: retainedCursor, pendingFeedback: fresh.length,
+    sessionId: mapping.sessionId ?? previous.sessionId ?? null,
+  };
+  if (hitRoundLimit && fresh.length > 0 && !collected.mergeReady && !admissionBlocked && !resultError && !inFlight) {
+    previous = {
+      ...previous,
+      eligibility: 'blocked',
+      activeTask: {
+        ...previous.activeTask,
+        dispatchId: previous.activeTask?.dispatchId ?? previous.lastDispatch?.dispatchId,
+        sessionId: previous.sessionId,
+        status: 'blocked',
+        blockedKind: 'round-limit',
+        reason: 'Same PR reached the 6-round repair limit.',
+      },
+    };
+  }
+  const wantsDelivery=shouldDispatch || recovery || previous.pendingDispatch?.status==='retryable';
+  if (!dryRun && wantsDelivery && remaining()<65000) {
+    state.prs[key]=previous;
+    report.push({number:pr.number,dispatch:{attempted:false,reason:'dispatch-budget-deferred'}});
+    return;
+  }
+  if (!dryRun && collected.pr && (shouldDispatch || recovery || previous.pendingDispatch?.status === 'retryable')) {
+    let live;
+    try { live = yield* ownershipSnapshot({pr:{number:pr.number,repo:REPO},ghFn}); }
+    catch { live = null; }
+    if (!live || live.pr.state !== 'OPEN' || live.pr.isDraft || !live.pr.sameRepository
+      || live.pr.author.login !== viewer || live.pr.headRefOid !== collected.pr.headRefOid
+      || live.pr.baseRefOid !== collected.pr.baseRefOid || live.pr.releaseEpoch !== collected.pr.releaseEpoch) {
+      state.prs[key] = {...previous, lastDispatchGuard:{at:now,reason:'ownership-changed-before-dispatch'}};
+      report.push({number:pr.number,dispatch:{attempted:false,reason:'ownership-changed-before-dispatch'}});
+      return;
+    }
+  }
+  if (!dryRun && wantsDelivery && remaining()<61000) {
+    state.prs[key]=previous;
+    report.push({number:pr.number,dispatch:{attempted:false,reason:'dispatch-budget-deferred'}});
+    return;
+  }
+  if (!dryRun && previous.pendingDispatch?.status === 'retryable'
+    && Number(previous.pendingDispatch.attempts ?? 1) < 3
+    && Date.parse(previous.pendingDispatch.retryAt) <= Date.parse(now)) {
+    const pending = { ...previous.pendingDispatch, attempts: Number(previous.pendingDispatch.attempts ?? 1) + 1,
+      params: { ...previous.pendingDispatch.params, title: mapping.title } };
+    state.prs[key] = { ...previous, pendingDispatch: pending };
+    persistState(state, paths);
+    try {
+      const receipt = yield* yieldDispatch(() => dispatchFn(pending.params,{timeoutMs:Math.max(1,remaining())}));
+      const bound = applyDispatchReceipt({ state, pr, mapping,
+        receipt: { ...receipt, dispatch_id: receipt?.dispatch_id ?? pending.dispatchId },
+        now, cursor: pending.cursor ?? retainedCursor, collected, fresh: [], paths, recovery: pending.recovery === true });
+      previous = state.prs[key];
+      dispatch = { attempted: true, ...bound, reason: 'confirmed-nondelivery-retry' };
+    } catch (error) {
+      if (error.code === 'LOCK_HELD' || persistBlocked) {
+        dispatch = { attempted: true, bound: false, reason: 'dispatch-lock-retry', error: String(error.message).slice(0, 400) };
+      } else {
+        const live = readPr(paths.home, key);
+        if (live?.claimedAt && live.sessionId) { state.prs[key] = live; previous = live; dispatch = { attempted: true, bound: true, reason: 'claimed-during-dispatch' }; }
+        else { previous = rememberDispatchFailure(state, key, error, now, paths); dispatch = { attempted: true, bound: false, reason: 'dispatch-unconfirmed', error: String(error.message).slice(0, 400) }; }
+      }
+    }
+  } else if (previous.pendingDispatch && !String(previous.pendingDispatch.dispatchId ?? '').startsWith('dry-')) {
+    dispatch.reason = 'pending-dispatch-unknown';
+  } else if (resultError) {
+    dispatch.reason = 'invalid-result';
+  } else if (admissionBlocked) {
+    dispatch.reason = 'admission-not-verified';
+  } else if (collected.mergeReady && !forceCreate) {
+    dispatch.reason = 'merge-ready';
+  } else if (recovery && !dryRun && previous.sessionId) {
+    const taskPath = path.join(paths.stateDir, 'tasks', `${recovery.dispatchId}.json`);
+    const pending = {
+      dispatchId: recovery.dispatchId,
+      params: dispatchParams({ pr: { ...pr, headRefOid: recovery.task?.headRefOid ?? pr.headRefOid },
+        mapping, fresh: recovery.task?.feedback ?? [], now, taskPath, home: paths.home }),
+      at: now, taskPath, recovery: true, cursor: retainedCursor,
+    };
+    state.prs[key] = { ...previous, pendingDispatch: pending };
+    persistState(state, paths);
+    try {
+      const receipt = yield* yieldDispatch(() => dispatchFn(pending.params,{timeoutMs:Math.max(1,remaining())}));
+      const bound = applyDispatchReceipt({ state, pr, mapping,
+        receipt: { ...receipt, dispatch_id: receipt?.dispatch_id ?? pending.dispatchId },
+        now, cursor: retainedCursor, collected, fresh: [], paths, recovery: true });
+      previous = state.prs[key];
+      dispatch = { attempted: true, ...bound, reason: 'missing-result-recovery' };
+    } catch (error) {
+      if (error.code === 'LOCK_HELD' || persistBlocked) {
+        dispatch = { attempted: true, bound: false, reason: 'dispatch-lock-retry', error: String(error.message).slice(0, 400) };
+      } else {
+        const live = readPr(paths.home, key);
+        if (live?.claimedAt && live.sessionId) { state.prs[key] = live; previous = live; dispatch = { attempted: true, bound: true, reason: 'claimed-during-dispatch' }; }
+        else { previous = rememberDispatchFailure(state, key, error, now, paths); dispatch = { attempted: true, bound: false, reason: 'dispatch-unconfirmed', error: String(error.message).slice(0, 400) }; }
+      }
+    }
+  } else if (shouldDispatch && !allowCreate && !previous.sessionId) {
+    previous = { ...previous, needsOwner: true };
+    dispatch = { attempted: false, bound: false, reason: 'needs-owner' };
+  } else if (shouldDispatch) {
+    const pending = { ...dispatchIntent({ pr, mapping, fresh, now, paths, dryRun, messagePrefix }), cursor };
+    previous = { ...previous, pendingDispatch: pending };
+    if (dryRun) {
+      dispatch = { attempted: false, bound: false, reason: 'dry-run', pending };
+    } else {
+      state.prs[key] = previous;
+      persistState(state, paths);
+      try {
+        const receipt = yield* yieldDispatch(() => dispatchFn(pending.params,{timeoutMs:Math.max(1,remaining())}));
+        const bound = applyDispatchReceipt({ state, pr, mapping,
+          receipt: { ...receipt, dispatch_id: receipt?.dispatch_id ?? pending.dispatchId },
+          now, cursor, collected, fresh, paths });
+        previous = state.prs[key];
+        dispatch = { attempted: true, ...bound };
+      } catch (error) {
+        if (error.code === 'LOCK_HELD' || persistBlocked) {
+          dispatch = { attempted: true, bound: false, reason: 'dispatch-lock-retry', error: String(error.message).slice(0, 400) };
+        } else {
+          const live = readPr(paths.home, key);
+          if (live?.claimedAt && live.sessionId) { state.prs[key] = live; previous = live; dispatch = { attempted: true, bound: true, reason: 'claimed-during-dispatch' }; }
+          else { previous = rememberDispatchFailure(state, key, error, now, paths); dispatch = { attempted: true, bound: false, reason: 'dispatch-unconfirmed', error: String(error.message).slice(0, 400) }; }
+        }
+      }
+    }
+  } else if (hitRoundLimit && fresh.length > 0) {
+    dispatch.reason = 'round-limit';
+  } else if (inFlight) {
+    dispatch.reason = previous.activeTask?.status === 'waiting-ci' ? 'waiting-ci' : 'task-in-flight';
+  } else if (!canResume) {
+    dispatch.reason = 'eligibility-blocked';
+  }
+  if (dispatch.reason === 'no-new-feedback' && collected.policy && collected.policy.status !== 'verified') {
+    dispatch.reason = 'policy-unknown';
+  }
+  if (!persistBlocked) {
+  previous = markException({ ...previous, lastPolicyStatus: collected.policy?.status ?? previous.lastPolicyStatus ?? null }, now, events);
+  state.prs[key] = previous;
+  }
+  report.push({
+    number: pr.number, nodeId: pr.id, fresh: fresh.length, admissionVerified: admitted,
+    admissionReason: collected.admissionReason ?? null, mergeReady: collected.mergeReady,
+    repairStatus: previous.activeTask?.status ?? 'observing',
+    evidenceVersion: previous.activeTask?.evidenceVersion ?? null,
+    session: mapping, dispatch,
+    ...(previous.lastRecheckError ? { recheckError: previous.lastRecheckError } : {}),
+  });
+  } finally {
+    state.updatedAt=now;
+    persistState(state,paths);
+    resetPrDeadline?.();
+  }
+}
+
 // Sync tests and the asynchronous Cindy transport share one state machine.
 // Yielded effects keep external calls outside the transition logic.
 function* scanWorkflow({
@@ -668,243 +1101,12 @@ function* scanWorkflow({
     // Advance before effects: a killed/slow PR cannot starve later PRs forever.
     state.scan={...state.scan,version:2,cursor:pr.number,deferredNumber:null,startedAt:now,partial:true,visited:[...visited],listed:listed.length};
     persistState(state,paths);
-    const key = String(pr.id);
-    let previous = migrateEntry(clearDryPending(state.prs[key] || {}));
-    previous = { ...previous, number: pr.number, nodeId: pr.id };
-    let resultError;
-    try { previous = consumeResult(previous, resultFor(previous, paths), now); }
-    catch (error) { resultError = error.message; }
-    if (resultError) {
-      previous = { ...previous, eligibility: 'blocked', activeTask: {
-        ...previous.activeTask, dispatchId: previous.activeTask?.dispatchId ?? previous.lastDispatch?.dispatchId,
-        status: 'blocked', blockedKind: 'invalid-result', reason: resultError,
-      } };
-    }
-    const mapping = planSession({ pr, existing: previous, date: now });
-    const base = {
-      ...previous, headRefOid: pr.headRefOid, headRefName: pr.headRefName, url: pr.url,
-      title: mapping.title, titleDate: mapping.titleDate, taskName: mapping.taskName, lastSeenAt: now,
-      ...(previous.activeTask ? {activeTask:{...previous.activeTask,resultHeadCurrent:previous.activeTask.head===pr.headRefOid}} : {}),
-    };
-    if (previous.sessionId && previous.sessionId === maintenanceSessionId) {
-      state.prs[key] = base;
-      persistState(state,paths);
-      report.push({ number: pr.number, nodeId: pr.id, session: mapping,
-        dispatch: { attempted: false, bound: false, reason: 'session-title-maintenance' } });
-      continue;
-    }
-    if (pr.isDraft === true) {
-      state.prs[key] = markException({ ...base, wasDraft: true, admissionVerified: false, admissionEpoch: null }, now, events);
-      persistState(state,paths);
-      report.push({ number: pr.number, nodeId: pr.id, fresh: 0, admissionVerified: false,
-        admissionReason: 'draft', mergeReady: false, repairStatus: base.activeTask?.status ?? 'observing',
-        session: mapping, dispatch: { attempted: false, bound: false, reason: 'draft' } });
-      continue;
-    }
-    let collected;
-    try {
-    try { collected = yield () => collect(pr, { ghFn }); }
-    catch (error) {
-      state.prs[key] = {...base,lastCollectionError:{at:now,reason:String(error.message).slice(0,400)},mergeReady:false,reviewEvidence:null};
-      // A PR cut short only because earlier PRs used this run's time gets a
-      // full budget first next round. Its own per-PR cap still advances past it.
-      if (deadline-clock()<1000) state.scan={...state.scan,cursor:resumeCursor,deferredNumber:pr.number};
-      report.push({ number: pr.number, nodeId: pr.id, dispatch: { attempted: false, reason: 'collection-failed' }, error: String(error.message).slice(0, 400) });
-      continue;
-    }
-    if (collected.pr && (collected.pr.state !== 'OPEN' || collected.pr.isDraft || !collected.pr.sameRepository || collected.pr.author?.login !== viewer)) {
-      state.prs[key] = { ...base, admissionVerified: false, admissionEpoch: null };
-      report.push({ number: pr.number, dispatch: {attempted:false,reason:'ownership-no-longer-released'} });
-      continue;
-    }
-    const sameEpoch = !collected.pr || (previous.admissionEpoch === collected.pr.releaseEpoch && previous.wasDraft !== true);
-    if (!sameEpoch) previous = {...previous, admissionVerified:false};
-    const cursorBase = previous.wasDraft === true ? {} : (previous.feedbackCursor || {});
-    const { fresh, cursor } = newFeedback(cursorBase, feedbackItems({ pr, ...collected, receiptActor: viewer }));
-    const admitted = previous.admissionVerified === true || collected.admissionVerified === true;
-    const admissionBlocked = collected.admissionVerified === false && previous.admissionVerified !== true;
-    previous = {
-      ...base, labels: collected.labels ?? [], mergeReady: collected.mergeReady === true,
-      reviewReason: collected.reviewReason ?? null, reviewEvidence: collected.reviewEvidence ?? null,
-      admissionVerified: admitted, admissionReason: collected.admissionReason ?? previous.admissionReason ?? null,
-      admissionEpoch: admitted ? collected.pr?.releaseEpoch ?? previous.admissionEpoch : null,
-      eligibilityInitialized: true, wasDraft: false,
-    };
-    const active = previous.activeTask;
-    const waiting = active?.status === 'waiting-ci'
-      || (active?.status === 'blocked' && ['required-ci', 'optional-ci', 'ci-transport'].includes(active.blockedKind));
-    if (waiting && active.evidenceVersion === 2 && !dryRun && !resultError) {
-      try {
-        if (remaining()<1000) throw Error('scan-budget-exhausted');
-        yield () => recheckFn({ paths, previous, pr, timeoutMs:Math.max(1,Math.min(30000,remaining())) });
-        previous = consumeResult(previous, resultFor(previous, paths), now);
-      } catch (error) {
-        // A transport failure is not a new agent task or proof of completion.
-        previous = { ...previous, lastRecheckError: { at: now, message: String(error.message).slice(0, 400) } };
-        if (deadline-clock()<1000) state.scan={...state.scan,cursor:resumeCursor,deferredNumber:pr.number};
-      }
-    }
-    if (!resultError && !['blocked', 'complete', 'legacy-complete', 'waiting-ci'].includes(previous.activeTask?.status)
-      && Number(previous.lastDispatch?.recoveryCount ?? 0) >= MAX_RECOVERIES
-      && Date.parse(now) - Date.parse(previous.lastDispatch?.lastRecoveryAt ?? previous.lastDispatch?.at) >= RECOVERY_MIN_MS) {
-      previous = { ...previous, eligibility: 'blocked', activeTask: {
-        ...previous.activeTask, dispatchId: previous.lastDispatch.dispatchId,
-        sessionId: previous.sessionId, status: 'blocked', blockedKind: 'missing-result-limit',
-        reason: 'No result after three bounded recovery deliveries; inspect the existing session before resuming.',
-      } };
-    }
-    const terminal = ['blocked', 'complete', 'legacy-complete'].includes(previous.activeTask?.status);
-    const inFlight = Boolean(previous.lastDispatch?.dispatchId) && !terminal;
-    const recovery = admitted && !collected.mergeReady && !resultError
-      && previous.activeTask?.status !== 'waiting-ci' && !terminal
-      ? readTaskForRecovery(previous, paths, now) : null;
-    const repairRounds = Number(previous.repairRounds ?? 0);
-    const hitRoundLimit = repairRounds >= REPAIR_ROUND_LIMIT;
-    const canResume = !resultError && (canRepair(previous) || (
-      fresh.length > 0 && previous.activeTask?.status === 'blocked'
-      && !['invalid-result', 'missing-result-limit', 'round-limit'].includes(previous.activeTask?.blockedKind)
-    ));
-    const shouldDispatch = fresh.length > 0 && !collected.mergeReady && canResume && !admissionBlocked && !inFlight && !hitRoundLimit;
-    let dispatch = { attempted: false, bound: false, reason: 'no-new-feedback' };
-    // Advance only non-actionable observations until a delivery is acknowledged.
-    const retainedCursor = { ...cursor };
-    for (const item of fresh) {
-      if (Object.hasOwn(cursorBase, item.key)) retainedCursor[item.key] = cursorBase[item.key];
-      else delete retainedCursor[item.key];
-    }
-    previous = {
-      ...previous, feedbackCursor: retainedCursor, pendingFeedback: fresh.length,
-      sessionId: mapping.sessionId ?? previous.sessionId ?? null,
-    };
-    if (hitRoundLimit && fresh.length > 0 && !collected.mergeReady && !admissionBlocked && !resultError && !inFlight) {
-      previous = {
-        ...previous,
-        eligibility: 'blocked',
-        activeTask: {
-          ...previous.activeTask,
-          dispatchId: previous.activeTask?.dispatchId ?? previous.lastDispatch?.dispatchId,
-          sessionId: previous.sessionId,
-          status: 'blocked',
-          blockedKind: 'round-limit',
-          reason: 'Same PR reached the 6-round repair limit.',
-        },
-      };
-    }
-    const wantsDelivery=shouldDispatch || recovery || previous.pendingDispatch?.status==='retryable';
-    if (!dryRun && wantsDelivery && deadline-clock()<65000) {
-      state.prs[key]=previous;
-      report.push({number:pr.number,dispatch:{attempted:false,reason:'dispatch-budget-deferred'}});
-      continue;
-    }
-    if (!dryRun && collected.pr && (shouldDispatch || recovery || previous.pendingDispatch?.status === 'retryable')) {
-      let live;
-      try { live = yield* ownershipSnapshot({pr:{number:pr.number,repo:REPO},ghFn}); }
-      catch { live = null; }
-      if (!live || live.pr.state !== 'OPEN' || live.pr.isDraft || !live.pr.sameRepository
-        || live.pr.author.login !== viewer || live.pr.headRefOid !== collected.pr.headRefOid
-        || live.pr.baseRefOid !== collected.pr.baseRefOid || live.pr.releaseEpoch !== collected.pr.releaseEpoch) {
-        state.prs[key] = {...previous, lastDispatchGuard:{at:now,reason:'ownership-changed-before-dispatch'}};
-        report.push({number:pr.number,dispatch:{attempted:false,reason:'ownership-changed-before-dispatch'}});
-        continue;
-      }
-    }
-    if (!dryRun && wantsDelivery && deadline-clock()<61000) {
-      state.prs[key]=previous;
-      report.push({number:pr.number,dispatch:{attempted:false,reason:'dispatch-budget-deferred'}});
-      continue;
-    }
-    if (!dryRun && previous.pendingDispatch?.status === 'retryable'
-      && Number(previous.pendingDispatch.attempts ?? 1) < 3
-      && Date.parse(previous.pendingDispatch.retryAt) <= Date.parse(now)) {
-      const pending = { ...previous.pendingDispatch, attempts: Number(previous.pendingDispatch.attempts ?? 1) + 1,
-        params: { ...previous.pendingDispatch.params, title: mapping.title } };
-      state.prs[key] = { ...previous, pendingDispatch: pending };
-      persistState(state, paths);
-      try {
-        const receipt = yield () => dispatchFn(pending.params,{timeoutMs:Math.max(1,remaining())});
-        const bound = applyDispatchReceipt({ state, pr, mapping,
-          receipt: { ...receipt, dispatch_id: receipt?.dispatch_id ?? pending.dispatchId },
-          now, cursor: pending.cursor ?? retainedCursor, collected, fresh: [], paths, recovery: pending.recovery === true });
-        previous = state.prs[key];
-        dispatch = { attempted: true, ...bound, reason: 'confirmed-nondelivery-retry' };
-      } catch (error) {
-        previous = rememberDispatchFailure(state, key, error, now, paths);
-        dispatch = { attempted: true, bound: false, reason: 'dispatch-unconfirmed', error: String(error.message).slice(0, 400) };
-      }
-    } else if (previous.pendingDispatch && !String(previous.pendingDispatch.dispatchId ?? '').startsWith('dry-')) {
-      dispatch.reason = 'pending-dispatch-unknown';
-    } else if (resultError) {
-      dispatch.reason = 'invalid-result';
-    } else if (admissionBlocked) {
-      dispatch.reason = 'admission-not-verified';
-    } else if (collected.mergeReady) {
-      dispatch.reason = 'merge-ready';
-    } else if (recovery && !dryRun && previous.sessionId) {
-      const taskPath = path.join(paths.stateDir, 'tasks', `${recovery.dispatchId}.json`);
-      const pending = {
-        dispatchId: recovery.dispatchId,
-        params: dispatchParams({ pr: { ...pr, headRefOid: recovery.task?.headRefOid ?? pr.headRefOid },
-          mapping, fresh: recovery.task?.feedback ?? [], now, taskPath, home: paths.home }),
-        at: now, taskPath, recovery: true, cursor: retainedCursor,
-      };
-      state.prs[key] = { ...previous, pendingDispatch: pending };
-      persistState(state, paths);
-      try {
-        const receipt = yield () => dispatchFn(pending.params,{timeoutMs:Math.max(1,remaining())});
-        const bound = applyDispatchReceipt({ state, pr, mapping,
-          receipt: { ...receipt, dispatch_id: receipt?.dispatch_id ?? pending.dispatchId },
-          now, cursor: retainedCursor, collected, fresh: [], paths, recovery: true });
-        previous = state.prs[key];
-        dispatch = { attempted: true, ...bound, reason: 'missing-result-recovery' };
-      } catch (error) {
-        previous = rememberDispatchFailure(state, key, error, now, paths);
-        dispatch = { attempted: true, bound: false, reason: 'dispatch-unconfirmed', error: String(error.message).slice(0, 400) };
-      }
-    } else if (shouldDispatch) {
-      const pending = { ...dispatchIntent({ pr, mapping, fresh, now, paths, dryRun }), cursor };
-      previous = { ...previous, pendingDispatch: pending };
-      if (dryRun) {
-        dispatch = { attempted: false, bound: false, reason: 'dry-run', pending };
-      } else {
-        state.prs[key] = previous;
-        persistState(state, paths);
-        try {
-          const receipt = yield () => dispatchFn(pending.params,{timeoutMs:Math.max(1,remaining())});
-          const bound = applyDispatchReceipt({ state, pr, mapping,
-            receipt: { ...receipt, dispatch_id: receipt?.dispatch_id ?? pending.dispatchId },
-            now, cursor, collected, fresh, paths });
-          previous = state.prs[key];
-          dispatch = { attempted: true, ...bound };
-        } catch (error) {
-          previous = rememberDispatchFailure(state, key, error, now, paths);
-          dispatch = { attempted: true, bound: false, reason: 'dispatch-unconfirmed', error: String(error.message).slice(0, 400) };
-        }
-      }
-    } else if (hitRoundLimit && fresh.length > 0) {
-      dispatch.reason = 'round-limit';
-    } else if (inFlight) {
-      dispatch.reason = previous.activeTask?.status === 'waiting-ci' ? 'waiting-ci' : 'task-in-flight';
-    } else if (!canResume) {
-      dispatch.reason = 'eligibility-blocked';
-    }
-    if (dispatch.reason === 'no-new-feedback' && collected.policy && collected.policy.status !== 'verified') {
-      dispatch.reason = 'policy-unknown';
-    }
-    previous = markException({ ...previous, lastPolicyStatus: collected.policy?.status ?? previous.lastPolicyStatus ?? null }, now, events);
-    state.prs[key] = previous;
-    report.push({
-      number: pr.number, nodeId: pr.id, fresh: fresh.length, admissionVerified: admitted,
-      admissionReason: collected.admissionReason ?? null, mergeReady: collected.mergeReady,
-      repairStatus: previous.activeTask?.status ?? 'observing',
-      evidenceVersion: previous.activeTask?.evidenceVersion ?? null,
-      session: mapping, dispatch,
-      ...(previous.lastRecheckError ? { recheckError: previous.lastRecheckError } : {}),
+    yield* processPr({
+      pr, state, paths, now, events, report, viewer, dryRun, dispatchFn,
+      collect, ghFn, recheckFn, ownershipSnapshot, maintenanceSessionId,
+      remaining, deadline, clock, resumeCursor,
+      resetPrDeadline: () => { prDeadline = deadline; },
     });
-    } finally {
-      state.updatedAt=now;
-      persistState(state,paths);
-      prDeadline=deadline;
-    }
   }
   state.scan={...state.scan,partial,visited,listed:listed.length,finishedAt:now,elapsedMs:clock()-started};
   state.updatedAt = now;
@@ -914,8 +1116,271 @@ function* scanWorkflow({
     viewer, repo: REPO, prs: report, events, scan:state.scan, statePath: paths.statePath };
 }
 
+export function* pollWorkflow({
+  now = new Date().toISOString(),
+  enabled = process.env.MIVO_WATCHER_ENABLED === '1',
+  allowDispatch = process.env.MIVO_WATCHER_DISPATCH === '1',
+  ghFn = gh, collect = collectPr, dispatchFn = null, paths = watcherPaths(),
+  recheckFn = recheckResult, ownershipSnapshot = collectPrOwnership,
+  clock = Date.now, budgetMs = 120000,
+  nodeId = process.env.MIVO_WATCHER_NODE_ID,
+  prNumber = process.env.MIVO_WATCHER_PR,
+  snapshotFn = null,
+} = {}) {
+  const started = clock();
+  const deadline = started + Math.min(120000, Math.max(1, budgetMs));
+  const remaining = () => Math.max(0, deadline - clock());
+  const dryRun = !(enabled && allowDispatch && typeof dispatchFn === 'function');
+  const number = Number(prNumber);
+  let previous = readPr(paths.home, nodeId) || { nodeId, number };
+  const report = [];
+  const events = [];
+  const snapshot = snapshotFn
+    ? snapshotFn({ nodeId, prNumber: number, previous })
+    : yield* fetchPollSnapshot({ nodeId, ghFn });
+  const normalized = snapshotFn ? normalizePollSnapshot(snapshot) : snapshot;
+  const labels = (normalized.labels ?? []).map((item) => typeof item === 'string' ? item : item?.name).filter(Boolean);
+  const fingerprint = pollFingerprint(normalized);
+  const save = (entry) => {
+    const next = { ...entry, nodeId, number, heartbeatAt: now };
+    writePr(paths.home, nodeId, next);
+    return next;
+  };
+  if (normalized.state === 'MERGED' || normalized.state === 'CLOSED') {
+    if (previous.closedHandled) {
+      return { mode: 'poll', dispatch: false, prs: [{ number, nodeId, dispatch: { attempted: false, reason: 'closed-handled' } }] };
+    }
+    let dispatch = { attempted: false, bound: false, reason: 'closedown' };
+    if (!dryRun && previous.sessionId) {
+      try {
+        const params = {
+          title: previous.title || `MivoPlugin-#${number}`,
+          message: watchClosedownMessage({ prNumber: number, state: normalized.state, scheduleId: previous.scheduleId, home: paths.home }),
+          target_session_id: previous.sessionId,
+        };
+        yield () => dispatchFn(params, { timeoutMs: Math.max(1, remaining()) });
+        dispatch = { attempted: true, bound: true, reason: 'closedown' };
+        save({ ...previous, closedHandled: true, pollFingerprint: fingerprint });
+      } catch (error) {
+        const text = String(error.message);
+        if (/ARCHIVED|NOT_FOUND|DELETED/.test(text)) {
+          dispatch = { attempted: true, bound: false, reason: 'closedown-session-gone' };
+          save({
+            ...previous, closedHandled: true, pollFingerprint: fingerprint,
+            closedownManual: { scheduleId: previous.scheduleId ?? null, reason: text.slice(0, 400), at: now },
+          });
+        } else {
+          dispatch = { attempted: true, bound: false, reason: 'closedown-unconfirmed', error: text.slice(0, 400) };
+          save({ ...previous, closedHandled: false, pollFingerprint: fingerprint });
+        }
+      }
+    } else {
+      save({ ...previous, closedHandled: true, pollFingerprint: fingerprint });
+    }
+    return { mode: 'poll', dispatch: dispatch.attempted, prs: [{ number, nodeId, dispatch }] };
+  }
+  if (hasWatchOff(normalized.labels) || hasWatchOff(labels)) {
+    save({ ...previous, optOut: true });
+    return { mode: 'poll', dispatch: false, prs: [{ number, nodeId, dispatch: { attempted: false, reason: 'opt-out' } }] };
+  }
+  const pendingRetry = previous.pendingDispatch?.status === 'retryable';
+  const recoveryDue = Boolean(readTaskForRecovery(previous, paths, now));
+  if (previous.pollFingerprint === fingerprint && !pendingRetry && !recoveryDue && !previous.collectRetry && !normalized.overflow) {
+    save(previous);
+    return { mode: 'poll', dispatch: false, prs: [{ number, nodeId, dispatch: { attempted: false, reason: 'fingerprint-unchanged' } }] };
+  }
+  if (!previous.sessionId) {
+    save({ ...previous, needsOwner: true, pollFingerprint: fingerprint });
+    return { mode: 'poll', dispatch: false, prs: [{ number, nodeId, needsOwner: true, dispatch: { attempted: false, reason: 'needs-owner' } }] };
+  }
+  const viewer = String(yield () => ghFn(['api', 'user', '-q', '.login'])).trim();
+  const pr = {
+    id: nodeId, number, headRefOid: normalized.headRefOid, baseRefOid: normalized.baseRefOid,
+    headRefName: previous.headRefName, title: previous.title || `PR ${number}`, isDraft: normalized.isDraft === true,
+    url: previous.url, state: normalized.state,
+  };
+  const state = { version: 2, repo: REPO, prs: { [String(nodeId)]: previous } };
+  yield* processPr({
+    pr, previous, state, paths, now, events, report, viewer, dryRun, dispatchFn, collect, ghFn,
+    recheckFn, ownershipSnapshot, remaining, deadline, clock, allowCreate: false, resetPrDeadline: () => {},
+  });
+  const latest = state.prs[String(nodeId)] || previous;
+  const collectFailed = report.some((item) => item.dispatch?.reason === 'collection-failed');
+  const recheckFailed = latest.lastRecheckError?.at === now;
+  if (collectFailed || recheckFailed) {
+    save({ ...latest, pollFingerprint: previous.pollFingerprint, collectRetry: true });
+  } else {
+    save({ ...latest, pollFingerprint: fingerprint, collectRetry: false, needsOwner: false, optOut: latest.optOut === true });
+  }
+  return { mode: 'poll', dispatch: !dryRun, prs: report, events };
+}
+
+const HEARTBEAT_STALE_MS = 15 * 60 * 1000;
+const LOST_REMIND_MS = 30 * 60 * 1000;
+const CLAIM_MS = 60 * 60 * 1000;
+
+export function* discoverWorkflow({
+  now = new Date().toISOString(),
+  enabled = process.env.MIVO_WATCHER_ENABLED === '1',
+  allowDispatch = process.env.MIVO_WATCHER_DISPATCH === '1',
+  ghFn = gh, collect = collectPr, dispatchFn = null, paths = watcherPaths(),
+  recheckFn = recheckResult, ownershipSnapshot = collectPrOwnership,
+  clock = Date.now, budgetMs = 120000, maxPrs = 1000, perPrBudgetMs = 75000,
+} = {}) {
+  const started = clock();
+  const deadline = started + Math.min(120000, Math.max(1, budgetMs));
+  let prDeadline = deadline;
+  const remaining = () => Math.max(0, Math.min(deadline, prDeadline) - clock());
+  const dryRun = !(enabled && allowDispatch && typeof dispatchFn === 'function');
+  const v2 = v2StatePaths(paths.home);
+  fs.mkdirSync(v2.prsDir, { recursive: true, mode: 0o700 });
+  if (!fs.existsSync(v2.indexPath)) {
+    fs.writeFileSync(v2.indexPath, `${JSON.stringify({ version: 2, migratedAt: now }, null, 2)}\n`, { mode: 0o600 });
+  }
+  const viewer = String(yield () => ghFn(['api', 'user', '-q', '.login'])).trim();
+  const listed = JSON.parse(yield () => ghFn([
+    'pr', 'list', '--repo', REPO, '--author', viewer, '--state', 'open', '--limit', '1000',
+    '--json', 'number,id,headRefOid,headRefName,isDraft,labels,url,updatedAt,title',
+  ]));
+  if (!Array.isArray(listed)) throw new Error('Open PR listing is not an array');
+  migrateLegacy(paths.home, listed.map((pr) => pr.id));
+  const report = [];
+  const events = [];
+  const nowMs = Date.parse(now);
+  let index = JSON.parse(fs.readFileSync(v2.indexPath, 'utf8'));
+  const sorted = [...listed].sort((a, b) => a.number - b.number);
+  const previousCursor = Number(index.cursor ?? 0);
+  const ordered = [...sorted.filter((pr) => pr.number > previousCursor), ...sorted.filter((pr) => pr.number <= previousCursor)];
+  for (const pr of ordered) {
+    if (deadline - clock() < 1000 || report.length >= maxPrs) break;
+    prDeadline = Math.min(deadline, clock() + perPrBudgetMs);
+    index = { ...index, version: 2, cursor: pr.number, startedAt: now };
+    fs.writeFileSync(v2.indexPath, `${JSON.stringify(index, null, 2)}\n`, { mode: 0o600 });
+    const key = String(pr.id);
+    const labels = (pr.labels ?? []).map((item) => typeof item === 'string' ? item : item?.name);
+    if (hasWatchOff(labels)) {
+      report.push({ number: pr.number, nodeId: pr.id, dispatch: { attempted: false, reason: 'opt-out' } });
+      continue;
+    }
+    let prLock = acquireLock(paths.home, `pr-${key}`);
+    if (prLock.held) {
+      report.push({ number: pr.number, nodeId: key, dispatch: { attempted: false, reason: 'pr-lock-held' } });
+      continue;
+    }
+    const unlockForDispatch = () => { prLock.release(); prLock = { release() {} }; };
+    const relockForDispatch = () => { prLock = acquireLock(paths.home, `pr-${key}`); return prLock; };
+    try {
+    let previous = readPr(paths.home, key) || { nodeId: key, number: pr.number };
+    const guide = watchGuideMessage({ home: paths.home, prNumber: pr.number, nodeId: key });
+    if (previous.sessionId) {
+      const beat = Date.parse(previous.heartbeatAt ?? '');
+      const stale = !Number.isFinite(beat) || nowMs - beat >= HEARTBEAT_STALE_MS;
+      const reminded = Date.parse(previous.lastLostReminderAt ?? '');
+      const canRemind = !Number.isFinite(reminded) || nowMs - reminded >= LOST_REMIND_MS;
+      if (!stale || !canRemind || dryRun) {
+        report.push({ number: pr.number, nodeId: key, dispatch: { attempted: false, reason: stale ? 'lost-reminder-throttled' : 'bound-heartbeat-ok' } });
+        continue;
+      }
+      try {
+        yield () => dispatchFn({
+          title: previous.title || `MivoPlugin-#${pr.number}`,
+          message: watchPollLostMessage({ prNumber: pr.number, heartbeatAt: previous.heartbeatAt, scheduleId: previous.scheduleId }),
+          target_session_id: previous.sessionId,
+        }, { timeoutMs: Math.max(1, remaining()) });
+        previous = { ...previous, lastLostReminderAt: now };
+        writePr(paths.home, key, previous);
+        report.push({ number: pr.number, nodeId: key, dispatch: { attempted: true, reason: 'poll-lost' } });
+      } catch (error) {
+        const text = String(error.message);
+        if (/ARCHIVED|NOT_FOUND|DELETED/.test(text)) {
+          const predecessorId = previous.sessionId;
+          const summary = JSON.stringify({
+            activeTask: previous.activeTask ?? null,
+            pendingDispatch: previous.pendingDispatch ?? null,
+            lastDispatch: previous.lastDispatch ?? null,
+          });
+          previous = {
+            ...previous,
+            sessionId: null,
+            lastLostReminderAt: now,
+            activeTask: null,
+            pendingDispatch: null,
+            lastDispatch: null,
+            predecessors: [...(previous.predecessors ?? []), {
+              sessionId: predecessorId, at: now, reason: text.slice(0, 120),
+              activeTask: previous.activeTask ?? null,
+              pendingDispatch: previous.pendingDispatch ?? null,
+              lastDispatch: previous.lastDispatch ?? null,
+            }],
+          };
+          writePr(paths.home, key, previous);
+          const state = { version: 2, repo: REPO, prs: { [key]: previous } };
+          const inner = [];
+          yield* processPr({
+            pr, previous, state, paths, now, events, report: inner, viewer, dryRun, dispatchFn, collect, ghFn,
+            recheckFn, ownershipSnapshot, remaining, deadline, clock, resetPrDeadline: () => {}, forceCreate: true,
+            messagePrefix: `${watchSuccessorMessage({ prNumber: pr.number, predecessorId, reason: text.slice(0, 120), summary })}\n${guide}`,
+            unlockForDispatch, relockForDispatch,
+          });
+          report.push(inner[0] ?? { number: pr.number, nodeId: key, dispatch: { attempted: true, reason: 'successor' }, predecessors: previous.predecessors });
+        } else {
+          report.push({ number: pr.number, nodeId: key, dispatch: { attempted: true, reason: 'poll-lost-unconfirmed', error: text.slice(0, 400) } });
+        }
+      }
+      continue;
+    }
+    if (previous.needsHuman?.reason === 'owner-unknown') {
+      report.push({ number: pr.number, nodeId: key, needsHuman: previous.needsHuman, dispatch: { attempted: false, reason: 'needs-human' } });
+      continue;
+    }
+    if (previous.pendingDispatch?.status === 'awaiting-claim') {
+      const until = Date.parse(previous.pendingDispatch.claimDeadline ?? '');
+      if (Number.isFinite(until) && nowMs < until) {
+        report.push({ number: pr.number, nodeId: key, dispatch: { attempted: false, reason: 'awaiting-claim' } });
+        continue;
+      }
+      previous = {
+        ...previous,
+        abandonedDispatches: [...(previous.abandonedDispatches ?? []), previous.pendingDispatch.dispatchId].filter(Boolean),
+        pendingDispatch: null, dispatchError: null,
+        needsHuman: { reason: 'owner-unknown', at: now, abandonedDispatchId: previous.pendingDispatch.dispatchId },
+      };
+      writePr(paths.home, key, previous);
+      report.push({ number: pr.number, nodeId: key, needsHuman: previous.needsHuman, dispatch: { attempted: false, reason: 'needs-human' } });
+      continue;
+    }
+    const state = { version: 2, repo: REPO, prs: { [key]: previous } };
+    const inner = [];
+    yield* processPr({
+      pr, previous, state, paths, now, events, report: inner, viewer, dryRun, dispatchFn, collect, ghFn,
+      recheckFn, ownershipSnapshot, remaining, deadline, clock, resetPrDeadline: () => {}, messagePrefix: guide,
+      unlockForDispatch, relockForDispatch,
+    });
+    let entry = state.prs[key] || previous;
+    if (!prLock.held && !state._persistBlocked) {
+    if (!entry.sessionId && entry.pendingDispatch && entry.pendingDispatch.status !== 'retryable'
+      && !String(entry.pendingDispatch.dispatchId ?? '').startsWith('dry-')) {
+      entry = {
+        ...entry, dispatchError: null,
+        pendingDispatch: { ...entry.pendingDispatch, status: 'awaiting-claim', claimDeadline: new Date(nowMs + CLAIM_MS).toISOString() },
+      };
+    }
+    writePr(paths.home, key, entry);
+    }
+    report.push(inner[0] ?? { number: pr.number, nodeId: key, dispatch: { attempted: false } });
+    } finally { prLock.release(); }
+  }
+  index = { ...index, finishedAt: now, elapsedMs: clock() - started };
+  fs.writeFileSync(v2.indexPath, `${JSON.stringify(index, null, 2)}\n`, { mode: 0o600 });
+  const closedownManual = listPrs(paths.home)
+    .filter((entry) => entry?.closedownManual)
+    .map((entry) => ({ number: entry.number, nodeId: entry.nodeId, ...entry.closedownManual }));
+  return { mode: 'discover', dispatch: !dryRun, viewer, repo: REPO, prs: report, events, closedownManual, scan: { cursor: index.cursor ?? 0, listed: listed.length } };
+}
+
 export function scanOnce(options = {}) {
-  const iterator = scanWorkflow(options);
+  const iterator = options.mode === 'poll' ? pollWorkflow(options)
+    : options.mode === 'discover' ? discoverWorkflow(options) : scanWorkflow(options);
   let step = iterator.next();
   while (!step.done) {
     let value;
@@ -928,7 +1393,9 @@ export function scanOnce(options = {}) {
 }
 
 export async function scanOnceAsync(options = {}) {
-  const iterator = scanWorkflow({ collect: collectPrAsync, ...options });
+  const mode = options.mode ?? watcherMode();
+  const workflow = mode === 'poll' ? pollWorkflow : mode === 'discover' ? discoverWorkflow : scanWorkflow;
+  const iterator = workflow({ collect: collectPrAsync, ...options });
   let step = iterator.next();
   while (!step.done) {
     let value;
@@ -975,34 +1442,38 @@ export function createCindyStdinDispatch() {
   return dispatch;
 }
 
+function watcherMode() {
+  return process.env.MIVO_WATCHER_MODE === 'poll' ? 'poll' : 'discover';
+}
+
 if (fileURLToPath(import.meta.url) === process.argv[1]) {
   const paths = watcherPaths();
   fs.mkdirSync(paths.stateDir, { recursive: true });
-  if (fs.existsSync(paths.lockPath)) {
-    const previous = fs.readFileSync(paths.lockPath, 'utf8');
-    const pid = Number(previous.split(' ')[0]);
-    let alive = true;
-    if (Number.isSafeInteger(pid) && pid > 0) {
-      try { process.kill(pid, 0); } catch (error) { if (error.code === 'ESRCH') alive = false; }
+  const mode = watcherMode();
+  const nodeId = process.env.MIVO_WATCHER_NODE_ID;
+  if (mode === 'poll' && (!process.env.MIVO_WATCHER_PR || !nodeId)) {
+    process.stderr.write('poll mode requires MIVO_WATCHER_PR and MIVO_WATCHER_NODE_ID\n');
+    process.exitCode = 2;
+  } else {
+    const lockName = mode === 'poll' ? `pr-${nodeId}` : 'discover';
+    const lock = acquireLock(paths.home, lockName);
+    if (lock.held) {
+      process.stdout.write(`${JSON.stringify({ mode: 'lock-held', dispatch: false, prs: [] })}\n`);
+    } else {
+      if (lock.token) process.env[PR_LOCK_TOKEN_ENV] = lock.token;
+      let dispatchFn;
+      try {
+        dispatchFn = process.env.MIVO_CINDY_BRIDGE === '1' ? createCindyStdinDispatch() : null;
+        const result = await scanOnceAsync({ paths, dispatchFn, mode, nodeId, prNumber: process.env.MIVO_WATCHER_PR });
+        process.stdout.write(`${JSON.stringify(result)}\n`);
+      } catch (error) {
+        process.stderr.write(`${error.stderr?.toString() || error.message}\n`);
+        process.exitCode = 1;
+      } finally {
+        dispatchFn?.close();
+        lock.release();
+        delete process.env[PR_LOCK_TOKEN_ENV];
+      }
     }
-    if (!alive && fs.readFileSync(paths.lockPath, 'utf8') === previous) fs.unlinkSync(paths.lockPath);
-  }
-  try { fs.writeFileSync(paths.lockPath, `${process.pid} ${new Date().toISOString()}\n`, { mode: 0o600, flag: 'wx' }); }
-  catch (error) {
-    if (error.code !== 'EEXIST') throw error;
-    process.stdout.write(`${JSON.stringify({ mode: 'lease-held', dispatch: false, prs: [], statePath: paths.statePath })}\n`);
-    process.exit(0);
-  }
-  let dispatchFn;
-  try {
-    dispatchFn = process.env.MIVO_CINDY_BRIDGE === '1' ? createCindyStdinDispatch() : null;
-    const result = await scanOnceAsync({ paths, dispatchFn });
-    process.stdout.write(`${JSON.stringify(result)}\n`);
-  } catch (error) {
-    process.stderr.write(`${error.stderr?.toString() || error.message}\n`);
-    process.exitCode = 1;
-  } finally {
-    dispatchFn?.close();
-    try { fs.unlinkSync(paths.lockPath); } catch {}
   }
 }

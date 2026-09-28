@@ -6,7 +6,7 @@
 
 旧治理根的运行文件软链只供源码引用，不作旧CLI兼容保证；执行watcher/repair使用这里或Mini runtime的真实路径。只有旧`deploy-watcher.mjs`入口明确支持软链调用，参数改为下述verify/preview/apply。
 
-`bin/` 十个文件逐字节来自 2026-09-10 已验收 live。包含120秒有界续扫、回执先落盘、公平游标、公开 APPROVE/SKIP 校验和唯一 session 交付。原治理目录父级源码与旧部署脚本不再是维护入口；历史 release/备份仅供取证和回滚。
+`bin/` 现为 v2：发现器 + 每 PR 轮询脚本 + 每 PR 状态文件（`state/prs/<nodeId>.json`）。旧单文件 `state/state.json` 只做一次性迁移，不改写。发现器每 5 分钟列本人 open PR，给未绑定且准入的 PR 建专属 session；已绑定 PR 只看心跳。每 PR 轮询脚本由该 session 自己 `schedule_create`（script 模式，禁止 `silentWhenIdle`），5 分钟只扫这一个 PR。工作树落在插件仓 `<P>/.worktrees/watch/pr-<N>`。原治理目录父级源码与旧部署脚本不再是维护入口；历史 release/备份仅供取证和回滚。
 
 验证：
 
@@ -15,7 +15,7 @@ node --test integrations/mivo-watcher/*.test.mjs
 node scripts/run-tests.mjs
 ```
 
-源码与运行态分开。不得在本目录执行 live watcher 或存放 state、worktree、DB、日志、凭证、实际部署计划和原始备份。运行时必须显式设置 `MIVO_WATCHER_HOME` 到已批准的项目二级 runtime；Cindy 现有调度使用该 runtime 的 `bin/mivo-watch-script.py`，不改变其180秒上限。
+源码与运行态分开。不得在本目录执行 live watcher 或存放 state、worktree、DB、日志、凭证、实际部署计划和原始备份。默认 runtime 示例：`/Users/praise/AI-Agent/Claude/projects/Project Mivo Canvas-Plugin/_ops/mivo-watcher`（即插件仓根 `P` 下 `_ops/mivo-watcher`）。运行时必须显式设置 `MIVO_WATCHER_HOME`。发现器调度：`workingDir=P`，command `... mivo-watch-script.py --mode discover`，cron `*/5`，timeout 180s。每 PR 轮询由修复 session 用 `mivo-repair.mjs schedule-params` 生成参数后 `schedule_create`。
 
 唯一新部署入口 `deploy.mjs`：先保存显式目标的 preview，审核后 apply；使用源/目标/状态 hash CAS、session idle 只读核对、租约、唯一备份、失败原子回滚。不会写 Host 数据库或调度。持锁时等待 watcher 正常释放，不强抢；unknown/stale lease 由既有 watcher 处理。
 

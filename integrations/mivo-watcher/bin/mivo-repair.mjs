@@ -8,14 +8,20 @@ import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { collectMivoCiSync } from './mivo-ci.mjs';
+import { acquireLock, readPr, writePr } from './mivo-state.mjs';
 
 export const REPO = 'xindong/mivo-canvas-plugin';
+export const DEFAULT_PLUGIN_REPO = '/Users/praise/AI-Agent/Claude/projects/Project Mivo Canvas-Plugin';
 const GH = process.env.GH_BIN ?? 'gh';
 const GIT = process.env.GIT_BIN ?? 'git';
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const GIT_PUSH_TIMEOUT_MS = 60 * 60 * 1000;
 
-function fail(message) { throw new Error(message); }
+function fail(message, exitCode = 1) {
+  const error = new Error(message);
+  error.exitCode = exitCode;
+  throw error;
+}
 
 function requireAbs(value, label) {
   if (typeof value !== 'string' || !path.isAbsolute(value)) fail(`${label} must be an absolute path`);
@@ -25,6 +31,13 @@ function requireAbs(value, label) {
 function isSha(value) { return typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value); }
 function hash(value) { return createHash('sha256').update(value).digest('hex'); }
 
+export function pluginRepoPath(env = process.env) {
+  return env.MIVO_PLUGIN_REPO || DEFAULT_PLUGIN_REPO;
+}
+export function watchBranchName(number) { return `watch/pr-${number}`; }
+export function watchWorktreePath(pluginRepo, number) {
+  return path.join(pluginRepo, '.worktrees', 'watch', `pr-${number}`);
+}
 export function repairPaths(home) {
   const root = requireAbs(home, 'home');
   return {
@@ -36,6 +49,9 @@ export function repairPaths(home) {
     approvals: path.join(root, 'state', 'approvals'),
     worktrees: path.join(root, 'worktrees'),
   };
+}
+function taskWorktree(task, env = process.env) {
+  return watchWorktreePath(pluginRepoPath(env), task.number);
 }
 
 function under(file, dir) {
@@ -71,6 +87,13 @@ function assertIdentity(value, task, sessionId, label) {
 }
 
 function saveResult(paths, task, sessionId, payload) {
+  const lock = acquireLock(paths.home, `pr-${task.nodeId}`);
+  if (lock.held) fail('PR 状态锁占用，请稍后重试写结果');
+  try {
+  return saveResultLocked(paths, task, sessionId, payload);
+  } finally { lock.release(); }
+}
+function saveResultLocked(paths, task, sessionId, payload) {
   const latest = path.join(paths.results, `${task.dispatchId}.json`);
   const history = path.join(paths.results, 'history', task.dispatchId);
   if (fs.existsSync(latest)) {
@@ -134,15 +157,18 @@ function taskFrom(home, taskPath) {
 }
 
 function boundSession(paths, task) {
-  const state = readJson(paths.state, 'scanner state');
-  const entry = state?.prs?.[task.nodeId];
+  let entry = readPr(paths.home, task.nodeId);
+  if (!entry) {
+    const state = fs.existsSync(paths.state) ? readJson(paths.state, 'scanner state') : { prs: {} };
+    entry = state?.prs?.[task.nodeId];
+  }
   if (!entry?.sessionId) fail(`scanner state has no bound session for nodeId ${task.nodeId}`);
   if (task.sessionId && task.sessionId !== entry.sessionId) fail('task sessionId does not match scanner binding');
   const dispatches = entry.activeTask?.dispatchId
     ? [entry.activeTask.dispatchId]
     : [entry.lastDispatch?.dispatchId, entry.pendingDispatch?.dispatchId].filter(Boolean);
   if (dispatches.length && !dispatches.includes(task.dispatchId)) fail('task dispatchId is not the active watcher dispatch');
-  return { state, sessionId: entry.sessionId };
+  return { sessionId: entry.sessionId };
 }
 
 function ghPr(task, ghFn, requireHead = true) {
@@ -170,7 +196,9 @@ function assertWorktree(worktree, task, gitFn, expectedUrl = remoteUrl(task.repo
   if (fs.realpathSync(top) !== fs.realpathSync(worktree)) fail('worktree path is not an independent git checkout');
   assertOrigin(worktree, task.repo, gitFn, expectedUrl);
   const branch = gitOutput(['-C', worktree, 'symbolic-ref', '--quiet', '--short', 'HEAD'], gitFn);
-  if (branch !== task.headRefName) fail(`worktree branch mismatch: ${branch}`);
+  if (branch !== watchBranchName(task.number)) fail(`worktree branch mismatch: ${branch}`);
+  const upstream = gitOutput(['-C', worktree, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], gitFn);
+  if (upstream !== `origin/${task.headRefName}`) fail(`worktree upstream mismatch: ${upstream}`);
   const status = gitOutput(['-C', worktree, 'status', '--porcelain'], gitFn);
   if (status) fail('worktree is dirty');
   const head = gitOutput(['-C', worktree, 'rev-parse', 'HEAD'], gitFn);
@@ -178,15 +206,17 @@ function assertWorktree(worktree, task, gitFn, expectedUrl = remoteUrl(task.repo
   return { head };
 }
 
-function cloneWorktree(paths, task, gitFn, cloneUrl = remoteUrl(task.repo), expectedUrl = remoteUrl(task.repo), remoteHead = task.headRefOid) {
-  const worktree = path.join(paths.worktrees, `pr-${task.number}`);
+export function cloneWorktree(paths, task, gitFn, cloneUrl = remoteUrl(task.repo), expectedUrl = remoteUrl(task.repo), remoteHead = task.headRefOid, env = process.env) {
+  const plugin = pluginRepoPath(env);
+  const worktree = watchWorktreePath(plugin, task.number);
+  const branch = watchBranchName(task.number);
   const existing = assertWorktree(worktree, task, gitFn, expectedUrl);
-  if (existing) {
-    return { worktree, head: existing.head, created: false };
-  }
-  fs.mkdirSync(paths.worktrees, { recursive: true, mode: 0o700 });
+  if (existing) return { worktree, head: existing.head, created: false };
+  fs.mkdirSync(path.dirname(worktree), { recursive: true, mode: 0o700 });
   if (fs.existsSync(worktree)) fail('worktree path is unknown; refusing to remove it');
-  gitOutput(['clone', '--branch', task.headRefName, '--single-branch', cloneUrl, worktree], gitFn);
+  gitOutput(['-C', plugin, 'fetch', 'origin', task.headRefName], gitFn);
+  gitOutput(['-C', plugin, 'worktree', 'add', '-B', branch, worktree, `origin/${task.headRefName}`], gitFn);
+  gitOutput(['-C', worktree, 'branch', '--set-upstream-to', `origin/${task.headRefName}`], gitFn);
   const checked = assertWorktree(worktree, task, gitFn, expectedUrl);
   if (!checked || checked.head !== remoteHead) fail('cloned worktree HEAD does not match observed remote head');
   return { worktree, head: checked.head, created: true };
@@ -277,7 +307,7 @@ export function validate({ home, taskPath, validatedHead, gitFn = command, runFn
   const { paths, task } = taskFrom(home, taskPath);
   const { sessionId } = boundSession(paths, task);
   if (!isSha(validatedHead)) fail('validated-head must be a 40-character SHA');
-  const worktree = path.join(paths.worktrees, `pr-${task.number}`);
+  const worktree = taskWorktree(task);
   const checkout = assertWorktree(worktree, task, gitFn, originUrl);
   if (!checkout || checkout.head !== validatedHead) fail('worktree HEAD does not match validated-head');
   const exception = validationException(paths, task, sessionId, validatedHead, worktree, gitFn);
@@ -411,7 +441,7 @@ export function ciResult(ci) {
   return { status: 'complete' };
 }
 
-function pushIfNeeded(worktree, task, validatedHead, remoteHead, gitFn, originUrl = remoteUrl(task.repo)) {
+export function pushIfNeeded(worktree, task, validatedHead, remoteHead, gitFn, originUrl = remoteUrl(task.repo)) {
   if (remoteHead === validatedHead) return { pushed: false };
   const checkout = assertWorktree(worktree, task, gitFn, originUrl);
   if (!checkout || checkout.head !== validatedHead) fail('local HEAD changed before push');
@@ -422,7 +452,7 @@ function pushIfNeeded(worktree, task, validatedHead, remoteHead, gitFn, originUr
     catch { return false; }
   })();
   if (!ancestor) fail('remote branch advanced independently; refusing non-fast-forward push');
-  gitOutput(['-C', worktree, 'push', originUrl, `${validatedHead}:refs/heads/${task.headRefName}`], gitFn);
+  gitOutput(['-C', worktree, 'push', 'origin', `HEAD:refs/heads/${task.headRefName}`], gitFn);
   const after = gitOutput(['ls-remote', originUrl, `refs/heads/${task.headRefName}`], gitFn).split(/\s+/)[0];
   if (after !== validatedHead) fail('remote branch changed after push; pushed commit requires reconciliation');
   return { pushed: true };
@@ -434,7 +464,7 @@ export function finalize({ home, taskPath, scReport, validatedHead, validationRe
   const { sessionId } = boundSession(paths, task);
   if (!isSha(validatedHead)) fail('validated-head must be a 40-character SHA');
   const pr = ghPr(task, ghFn, false);
-  const worktree = path.join(paths.worktrees, `pr-${task.number}`);
+  const worktree = taskWorktree(task);
   const checkout = assertWorktree(worktree, { ...task, headRefOid: validatedHead }, gitFn, originUrl);
   if (!checkout || checkout.head !== validatedHead) fail('worktree HEAD does not match validated-head');
   const branchHead = gitOutput(['ls-remote', originUrl, `refs/heads/${task.headRefName}`], gitFn).split(/\s+/)[0];
@@ -464,7 +494,7 @@ export function recheck({ home, taskPath, validatedHead, ghFn = command, gitFn =
   const head = validatedHead ?? previous.head;
   if (!isSha(head) || previous.head !== head) fail('recheck HEAD does not match the result');
   const { scs, feedbackCoverage } = validateScs(previous.scs, task);
-  const worktree = path.join(paths.worktrees, `pr-${task.number}`);
+  const worktree = taskWorktree(task);
   const checkout = assertWorktree(worktree, task, gitFn, originUrl);
   if (!checkout || checkout.head !== head) fail('recheck worktree HEAD changed');
   let verification;
@@ -496,12 +526,121 @@ export function blocked({ home, taskPath, reason, ghFn = command } = {}) {
   const { paths, task } = taskFrom(home, taskPath);
   const { sessionId } = boundSession(paths, task);
   if (typeof reason !== 'string' || !reason.trim()) fail('blocked reason is required');
-  return saveResult(paths, task, sessionId, { status: 'blocked', blockedKind: 'external', reason: reason.trim(), worktree: path.join(paths.worktrees, `pr-${task.number}`) });
+  return saveResult(paths, task, sessionId, { status: 'blocked', blockedKind: 'external', reason: reason.trim(), worktree: taskWorktree(task) });
+}
+
+export function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+export function scheduleParams({ home, pr, nodeId, env = process.env }) {
+  const root = requireAbs(home, 'home');
+  const plugin = pluginRepoPath(env);
+  const script = path.join(root, 'bin', 'mivo-watch-script.py');
+  const commandLine = `/usr/bin/env MIVO_WATCHER_LIVE=1 MIVO_WATCHER_HOME=${shellQuote(root)} PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin /usr/bin/python3 ${shellQuote(script)} --mode poll --pr ${pr} --node-id ${nodeId}`;
+  return {
+    name: `Mivo watch #${pr}`,
+    executionMode: 'script',
+    scriptConfig: { command: commandLine, capabilities: ['sessions.dispatch'], timeoutMs: 180000 },
+    cronExpr: '*/5 * * * *',
+    timezone: 'Asia/Shanghai',
+    recurring: true,
+    agentKind: 'codex',
+    kind: 'cron',
+    workingDir: plugin,
+    useWorktree: false,
+    bindToCurrentSession: true,
+    notify: { desktop: false, feishu: false },
+  };
+}
+
+export function bindSchedule({
+  home, pr, nodeId, resultPath, dispatchId, now = new Date().toISOString(),
+  retryMs = 180000, retryDelayMs = 5000, sleepFn = null,
+} = {}) {
+  const root = requireAbs(home, 'home');
+  const result = readJson(requireAbs(resultPath, 'result'), 'schedule_create result');
+  const command = result.scriptConfig?.command ?? result.command ?? '';
+  if (result.ok !== true) fail('schedule_create result is not ok');
+  if (result.executionMode !== 'script') fail('schedule_create executionMode must be script');
+  if (result.status !== 'active') fail('schedule_create status must be active');
+  if (typeof result.targetSessionId !== 'string' || !result.targetSessionId) fail('schedule_create targetSessionId is required');
+  if (!String(command).includes(`--pr ${pr}`)) fail('schedule command does not target this PR');
+  const sleep = sleepFn ?? ((ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); });
+  const deadline = Date.now() + retryMs;
+  let lock = acquireLock(root, `pr-${nodeId}`);
+  while (lock.held && Date.now() < deadline) {
+    sleep(retryDelayMs);
+    lock = acquireLock(root, `pr-${nodeId}`);
+  }
+  if (lock.held) fail('busy: PR 状态锁占用，请等 1 分钟后重试 bind-schedule', 2);
+  try {
+    const previous = readPr(root, nodeId) || {};
+    const incoming = result.targetSessionId;
+    if (!dispatchId) fail('owner-conflict: bind-schedule 需要 --dispatch-id', 3);
+    const abandoned = previous.abandonedDispatches ?? [];
+    if (abandoned.includes(dispatchId)) fail('owner-conflict: dispatch-id 已作废', 3);
+    const pendingId = previous.pendingDispatch?.dispatchId;
+    const lateUnknown = previous.needsHuman?.abandonedDispatchId;
+    if (pendingId && pendingId !== dispatchId) fail('owner-conflict: dispatch-id 与当前 pending 不一致', 3);
+    if (!pendingId && previous.needsHuman?.reason === 'owner-unknown' && dispatchId !== lateUnknown) {
+      fail('owner-conflict: dispatch-id 与 owner-unknown 记录不一致', 3);
+    }
+    if (!pendingId && !previous.sessionId && previous.needsHuman?.reason !== 'owner-unknown') {
+      fail('owner-conflict: 无 pending 的未知 dispatch-id', 3);
+    }
+    if (previous.sessionId && previous.sessionId !== incoming) {
+      const awaiting = previous.pendingDispatch?.status === 'awaiting-claim';
+      const needsHuman = previous.needsHuman?.reason === 'owner-unknown';
+      if (!awaiting && !needsHuman) fail(`owner-conflict: 本 PR 已由 ${previous.sessionId} 持有，你应停止`, 3);
+    }
+    const entry = {
+      ...previous, number: Number(pr), nodeId,
+      scheduleId: result.id ?? result.scheduleId,
+      sessionId: incoming, claimedAt: now, pendingDispatch: null, dispatchError: null, needsHuman: null,
+    };
+    writePr(root, nodeId, entry);
+    return entry;
+  } finally { lock.release(); }
+}
+
+export function clearOwnerUnknown({ home, pr, nodeId, now = new Date().toISOString() }) {
+  const root = requireAbs(home, 'home');
+  const lock = acquireLock(root, `pr-${nodeId}`);
+  if (lock.held) fail('PR 状态锁占用，请稍后重试');
+  try {
+    const previous = readPr(root, nodeId) || {};
+    if (previous.needsHuman?.reason !== 'owner-unknown') fail('PR 没有 owner-unknown 标记');
+    const abandonedId = previous.needsHuman.abandonedDispatchId ?? previous.pendingDispatch?.dispatchId;
+    const abandoned = [...(previous.abandonedDispatches ?? []), abandonedId].filter(Boolean);
+    const entry = {
+      ...previous, number: Number(pr), nodeId,
+      needsHuman: null, pendingDispatch: null, dispatchError: null, clearedOwnerUnknownAt: now,
+      abandonedDispatches: [...new Set(abandoned)],
+    };
+    writePr(root, nodeId, entry);
+    return entry;
+  } finally { lock.release(); }
+}
+
+export function cleanupWatch({ home, pr, ghFn = command, gitFn = command, env = process.env }) {
+  const plugin = pluginRepoPath(env);
+  const number = Number(pr);
+  const view = ghJson(['pr', 'view', String(number), '--repo', REPO, '--json', 'state'], ghFn);
+  if (!['MERGED', 'CLOSED'].includes(view.state)) fail('cleanup requires MERGED or CLOSED PR');
+  const worktree = watchWorktreePath(plugin, number);
+  if (fs.existsSync(worktree)) {
+    const status = gitOutput(['-C', worktree, 'status', '--porcelain'], gitFn);
+    if (status) fail('worktree is dirty');
+    gitOutput(['-C', plugin, 'worktree', 'remove', worktree], gitFn);
+  }
+  try { gitOutput(['-C', plugin, 'branch', '-d', watchBranchName(number)], gitFn); } catch {}
+  return { removed: true, worktree, branch: watchBranchName(number) };
 }
 
 function cli(argv) {
   const args = [...argv];
-  const modes = new Set(['prepare', 'validate', 'finalize', 'recheck', 'blocked']);
+  const modes = new Set(['prepare', 'validate', 'finalize', 'recheck', 'blocked', 'schedule-params', 'bind-schedule', 'cleanup', 'clear-owner-unknown']);
   const modeIndex = args.findIndex((item) => modes.has(item));
   const mode = modeIndex >= 0 ? args.splice(modeIndex, 1)[0] : undefined;
   const value = (name, required = true) => {
@@ -512,14 +651,20 @@ function cli(argv) {
     return item;
   };
   const home = value('--home');
-  const task = value('--task');
   let result;
-  if (mode === 'prepare') result = prepare({ home, taskPath: task });
-  else if (mode === 'validate') result = validate({ home, taskPath: task, validatedHead: value('--validated-head') });
-  else if (mode === 'finalize') result = finalize({ home, taskPath: task, scReport: value('--sc-report'), validatedHead: value('--validated-head'), validationReceipt: value('--validation-receipt', false) });
-  else if (mode === 'recheck') result = recheck({ home, taskPath: task, validatedHead: value('--validated-head', false) });
-  else if (mode === 'blocked') result = blocked({ home, taskPath: task, reason: value('--reason') });
-  else fail('mode must be prepare, validate, finalize, recheck, or blocked');
+  if (mode === 'schedule-params') result = scheduleParams({ home, pr: value('--pr'), nodeId: value('--node-id') });
+  else if (mode === 'bind-schedule') result = bindSchedule({ home, pr: value('--pr'), nodeId: value('--node-id'), resultPath: value('--result'), dispatchId: value('--dispatch-id') });
+  else if (mode === 'cleanup') result = cleanupWatch({ home, pr: value('--pr') });
+  else if (mode === 'clear-owner-unknown') result = clearOwnerUnknown({ home, pr: value('--pr'), nodeId: value('--node-id') });
+  else {
+    const task = value('--task');
+    if (mode === 'prepare') result = prepare({ home, taskPath: task });
+    else if (mode === 'validate') result = validate({ home, taskPath: task, validatedHead: value('--validated-head') });
+    else if (mode === 'finalize') result = finalize({ home, taskPath: task, scReport: value('--sc-report'), validatedHead: value('--validated-head'), validationReceipt: value('--validation-receipt', false) });
+    else if (mode === 'recheck') result = recheck({ home, taskPath: task, validatedHead: value('--validated-head', false) });
+    else if (mode === 'blocked') result = blocked({ home, taskPath: task, reason: value('--reason') });
+    else fail('mode must be prepare, validate, finalize, recheck, blocked, schedule-params, bind-schedule, cleanup, or clear-owner-unknown');
+  }
   process.stdout.write(`${JSON.stringify(result)}\n`);
   if (mode === 'validate' && result.status === 'fail') process.exitCode = 1;
 }
@@ -527,5 +672,5 @@ function cli(argv) {
 if (process.argv[1] && fs.existsSync(process.argv[1])
   && fs.realpathSync(fileURLToPath(import.meta.url)) === fs.realpathSync(process.argv[1])) {
   try { cli(process.argv.slice(2)); }
-  catch (error) { process.stderr.write(`mivo-repair: ${error.message}\n`); process.exitCode = 1; }
+  catch (error) { process.stderr.write(`mivo-repair: ${error.message}\n`); process.exitCode = Number(error.exitCode) || 1; }
 }

@@ -6,7 +6,7 @@ import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {FILES,verify,validatePlan,apply} from './deploy.mjs';
+import {FILES,verify,validatePlan,apply,stateFingerprint} from './deploy.mjs';
 function fixture(t){
  const home=fs.mkdtempSync(path.join(os.tmpdir(),'watcher-deploy-'));t.after(()=>fs.rmSync(home,{recursive:true,force:true}));
  fs.mkdirSync(path.join(home,'bin'));fs.mkdirSync(path.join(home,'state'));
@@ -16,8 +16,9 @@ function fixture(t){
  const plan={version:1,home,database:path.join(home,'metadata.db'),id:'fixture-release',files:verify(home),stateSha:createHash('sha256').update(state).digest('hex'),sessionIds:[]};
  return {home,plan,state};
 }
-test('full source deploy preserves state and verifies all ten hashes',t=>{
- const f=fixture(t),r=apply(f.plan);assert.equal(r.status,'installed');assert.equal(r.stateChanged,false);assert.equal(verify(f.home).filter(v=>v.source===v.runtime).length,10);assert.deepEqual(fs.readFileSync(path.join(f.home,'state/state.json')),f.state);
+test('full source deploy preserves state and verifies all eleven hashes',t=>{
+ const f=fixture(t),r=apply(f.plan);assert.equal(r.status,'installed');assert.equal(r.stateChanged,false);assert.equal(verify(f.home).filter(v=>v.source===v.runtime).length,FILES.length);assert.deepEqual(fs.readFileSync(path.join(f.home,'state/state.json')),f.state);
+ assert.ok(FILES.includes('mivo-state.mjs'));
  assert.equal(fs.readFileSync(path.join(f.home,'deployments/fixture-release/before/mivo-watcher.mjs'),'utf8'),'old bytes');
 });
 test('state drift and source drift refuse before lease',t=>{
@@ -41,4 +42,13 @@ test('legacy deploy symlink invokes CLI and cannot silently succeed',t=>{
  const f=fixture(t),link=path.join(f.home,'legacy-deploy.mjs');fs.symlinkSync(fileURLToPath(new URL('./deploy.mjs',import.meta.url)),link);
  const result=spawnSync(process.execPath,[link,'verify','--home',f.home],{encoding:'utf8'});
  assert.equal(result.status,1);assert.equal(JSON.parse(result.stdout).match,false);
+});
+test('state fingerprint includes PR file content hashes',t=>{
+ const home=fs.mkdtempSync(path.join(os.tmpdir(),'watcher-fp-'));t.after(()=>fs.rmSync(home,{recursive:true,force:true}));
+ fs.mkdirSync(path.join(home,'state/prs'),{recursive:true});
+ fs.writeFileSync(path.join(home,'state/index.json'),'{"version":2}\n');
+ fs.writeFileSync(path.join(home,'state/prs/PR_1.json'),'{"sessionId":"a"}\n');
+ const first=stateFingerprint(home);
+ fs.writeFileSync(path.join(home,'state/prs/PR_1.json'),'{"sessionId":"b"}\n');
+ assert.notEqual(stateFingerprint(home),first);
 });

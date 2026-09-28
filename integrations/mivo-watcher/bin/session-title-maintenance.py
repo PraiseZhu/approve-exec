@@ -67,7 +67,7 @@ def _run_title_maintenance(home: Path, client) -> dict | None:
         session_id = change.get("sessionId")
         if not session_id or session_id in ids or entry.get("sessionId") != session_id:
             raise ValueError("title migration must preserve unique existing bindings")
-        if not re.fullmatch(r"MivoPlugin-[^丨\r\n:#]{2,20}丨 [0-9]{4}", change.get("title", "")):
+        if not re.fullmatch(r"MivoPlugin-#\d+-[^丨\r\n:#]{2,20}丨 [0-9]{4}", change.get("title", "")):
             raise ValueError("invalid canonical title")
         ids.add(session_id)
     target = request.get("targetSessionId")

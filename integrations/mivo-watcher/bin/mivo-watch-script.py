@@ -161,9 +161,31 @@ def _run_watcher(env: dict[str, str], watcher: Path, node: str, client, live: bo
     return scan
 
 
+def parse_args(argv: list[str]) -> tuple[str, str | None, str | None]:
+    mode = "discover"
+    pr = None
+    node_id = None
+    args = list(argv)
+    i = 0
+    while i < len(args):
+        if args[i] == "--mode" and i + 1 < len(args):
+            mode = args[i + 1]; i += 2; continue
+        if args[i] == "--pr" and i + 1 < len(args):
+            pr = args[i + 1]; i += 2; continue
+        if args[i] == "--node-id" and i + 1 < len(args):
+            node_id = args[i + 1]; i += 2; continue
+        i += 1
+    if mode not in {"discover", "poll"}:
+        raise SystemExit("--mode must be discover or poll")
+    if mode == "poll" and (not pr or not node_id):
+        raise SystemExit("poll mode requires --pr and --node-id")
+    return mode, pr, node_id
+
+
 def main() -> None:
     if os.environ.get("CINDY_SCRIPT_PROTOCOL") != "1" and os.environ.get("XDT_MAKER_SCRIPT_PROTOCOL") != "1":
         raise SystemExit("必须在 Cindy script 调度下运行，拒绝空跑")
+    mode, pr, node_id = parse_args(sys.argv[1:])
     client = _import_client()
     if hasattr(client, "_ensure_started"):
         client._ensure_started()
@@ -179,12 +201,17 @@ def main() -> None:
     home = watcher_home()
     env = os.environ.copy()
     env["MIVO_WATCHER_HOME"] = str(home)
+    env["MIVO_WATCHER_MODE"] = mode
+    if pr:
+        env["MIVO_WATCHER_PR"] = pr
+    if node_id:
+        env["MIVO_WATCHER_NODE_ID"] = node_id
     # Live dispatch is fail-closed: the scheduler must explicitly opt in after
     # granting sessions.dispatch. Capability discovery alone never enables it.
     live = os.environ.get("MIVO_WATCHER_LIVE") == "1"
     maintenance_path = HERE / "session-title-maintenance.py"
     pending = None
-    if live and maintenance_path.exists():
+    if live and mode == "discover" and maintenance_path.exists():
         spec = importlib.util.spec_from_file_location("session_title_maintenance", maintenance_path)
         maintenance = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(maintenance)
