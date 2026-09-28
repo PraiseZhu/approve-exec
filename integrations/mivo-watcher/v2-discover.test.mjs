@@ -32,13 +32,14 @@ function collectFail() {
   };
 }
 
-function discover(paths, { now = '2026-09-28T00:00:00Z', prs = [listed], collect, dispatchFn, maxPrs, clock, budgetMs, perPrBudgetMs } = {}) {
+function discover(paths, { now = '2026-09-28T00:00:00Z', prs = [listed], collect, dispatchFn, maxPrs, clock, budgetMs, perPrBudgetMs, ghExtra } = {}) {
   let collected = 0;
   const result = scanOnce({
     mode: 'discover', enabled: true, allowDispatch: true, paths, now,
     ghFn: (args) => {
       if (args[0] === 'api' && args[1] === 'user') return 'owner';
       if (args[0] === 'pr' && args[1] === 'list') return JSON.stringify(prs);
+      if (typeof ghExtra === 'function') return ghExtra(args);
       return '[]';
     },
     collect: (...args) => {
@@ -167,24 +168,29 @@ test('discover releases pr lock during create dispatch', (t) => {
   assert.equal(heldDuringDispatch, false);
 });
 
-test('create receipt timeout never auto-recreates; needsHuman until clear-owner-unknown', (t) => {
+test('create receipt timeout recreates once then needsHuman', (t) => {
   const { paths, home } = homeOf(t);
   const boom = () => { throw new Error('Cindy dispatch receipt timed out; pending dispatch retained'); };
   const first = discover(paths, { now: '2026-09-28T00:00:00Z', collect: collectFail, dispatchFn: boom });
   assert.equal(first.entry.pendingDispatch.status, 'awaiting-claim');
+  const oldId = first.entry.pendingDispatch.dispatchId;
   const mid = discover(paths, { now: '2026-09-28T00:59:00Z', collect: collectFail, dispatchFn: boom });
   assert.equal(mid.collected, 0);
   assert.equal(mid.result.prs[0].dispatch.reason, 'awaiting-claim');
   const later = discover(paths, { now: '2026-09-28T01:01:00Z', collect: collectFail, dispatchFn: boom });
-  assert.equal(later.collected, 0);
-  assert.equal(later.entry.needsHuman.reason, 'owner-unknown');
-  assert.equal(later.result.prs[0].dispatch.reason, 'needs-human');
-  const still = discover(paths, { now: '2026-09-28T03:00:00Z', collect: collectFail, dispatchFn: boom });
+  assert.equal(later.collected, 1);
+  assert.equal(later.result.prs[0].dispatch.reason, 'claim-retry-recreate');
+  assert.ok(later.entry.abandonedDispatches.includes(oldId));
+  assert.equal(later.entry.pendingDispatch.status, 'awaiting-claim');
+  assert.notEqual(later.entry.pendingDispatch.dispatchId, oldId);
+  const still = discover(paths, { now: '2026-09-28T02:02:00Z', collect: collectFail, dispatchFn: boom });
   assert.equal(still.collected, 0);
+  assert.equal(still.entry.needsHuman.reason, 'owner-unknown');
+  assert.equal(still.result.prs[0].dispatch.reason, 'needs-human');
   clearOwnerUnknown({ home, pr: 790, nodeId });
   const after = discover(paths, {
-    now: '2026-09-28T03:01:00Z', collect: collectFail,
-    dispatchFn: (p) => ({ target_session_id: 'sess-new' }),
+    now: '2026-09-28T02:03:00Z', collect: collectFail,
+    dispatchFn: () => ({ target_session_id: 'sess-new' }),
   });
   assert.equal(after.collected, 1);
   assert.equal(after.entry.sessionId, 'sess-new');
@@ -523,4 +529,104 @@ test('guide, lost, and successor messages all ban shared watcher schedules', () 
   assert.match(watchGuideMessage({ home, prNumber: 790, nodeId }), BAN);
   assert.match(watchPollLostMessage({ prNumber: 790, heartbeatAt: 't', scheduleId: 's', home, nodeId }), BAN);
   assert.match(watchSuccessorMessage({ prNumber: 790, predecessorId: 'old', reason: 'ARCHIVED' }), BAN);
+});
+
+test('discover closedown for ledger PR missing from open list', (t) => {
+  const { paths } = homeOf(t);
+  writePr(paths.home, nodeId, {
+    number: 790, nodeId, sessionId: 'sess-790', scheduleId: 'sched-790', closedHandled: false,
+  });
+  const calls = [];
+  const { result, collected, entry } = discover(paths, {
+    prs: [],
+    dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-790' }; },
+    ghExtra: (args) => {
+      if (args[0] === 'pr' && args[1] === 'view') {
+        return JSON.stringify({ state: 'MERGED', id: nodeId });
+      }
+      return '[]';
+    },
+  });
+  assert.equal(collected, 0);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].message, /已合并/);
+  assert.equal(calls[0].target_session_id, 'sess-790');
+  assert.equal(entry.closedHandled, true);
+  assert.equal(result.prs.find((item) => item.nodeId === nodeId).dispatch.reason, 'closedown');
+});
+
+test('discover closedown without session just marks closedHandled', (t) => {
+  const { paths } = homeOf(t);
+  writePr(paths.home, nodeId, { number: 790, nodeId, sessionId: null, closedHandled: false });
+  const { collected, entry } = discover(paths, {
+    prs: [],
+    dispatchFn: () => { throw new Error('should not dispatch'); },
+    ghExtra: (args) => {
+      if (args[0] === 'pr' && args[1] === 'view') return JSON.stringify({ state: 'CLOSED', id: nodeId });
+      return '[]';
+    },
+  });
+  assert.equal(collected, 0);
+  assert.equal(entry.closedHandled, true);
+});
+
+test('discover does not closedown still-open PR missing from list', (t) => {
+  const { paths } = homeOf(t);
+  writePr(paths.home, nodeId, {
+    number: 790, nodeId, sessionId: 'sess-790', closedHandled: false,
+  });
+  const { collected, entry, result } = discover(paths, {
+    prs: [],
+    dispatchFn: () => { throw new Error('should not dispatch'); },
+    ghExtra: (args) => {
+      if (args[0] === 'pr' && args[1] === 'view') return JSON.stringify({ state: 'OPEN', id: nodeId });
+      return '[]';
+    },
+  });
+  assert.equal(collected, 0);
+  assert.equal(entry.closedHandled, false);
+  assert.equal(result.prs.find((item) => item.nodeId === nodeId).dispatch.reason, 'stale-still-open');
+});
+
+test('claim timeout with known session wakes it once', (t) => {
+  const { paths } = homeOf(t);
+  writePr(paths.home, nodeId, {
+    number: 790, nodeId,
+    pendingDispatch: {
+      status: 'awaiting-claim',
+      dispatchId: 'live-790-old',
+      claimDeadline: '2026-09-28T00:00:00Z',
+      createdSessionId: 'sess-known',
+      params: { title: 't', message: 'step 0', target_session_id: 'sess-known' },
+    },
+  });
+  const calls = [];
+  const { collected, entry, result } = discover(paths, {
+    now: '2026-09-28T01:01:00Z',
+    collect: collectFail,
+    dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-known', dispatch_id: 'live-790-old' }; },
+  });
+  assert.equal(collected, 0);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].target_session_id, 'sess-known');
+  assert.equal(result.prs[0].dispatch.reason, 'claim-retry-wakeup');
+  assert.equal(entry.sessionId, 'sess-known');
+  assert.equal(entry.pendingDispatch, null);
+});
+
+test('abandoned dispatch-id cannot bind after recreate', (t) => {
+  const { paths, home } = homeOf(t);
+  const boom = () => { throw new Error('Cindy dispatch receipt timed out; pending dispatch retained'); };
+  const first = discover(paths, { now: '2026-09-28T00:00:00Z', collect: collectFail, dispatchFn: boom });
+  const oldId = first.entry.pendingDispatch.dispatchId;
+  discover(paths, { now: '2026-09-28T01:01:00Z', collect: collectFail, dispatchFn: boom });
+  const resultPath = path.join(home, 'sched.json');
+  fs.writeFileSync(resultPath, JSON.stringify({
+    ok: true, id: 'sched-old', executionMode: 'script', status: 'active',
+    targetSessionId: 'sess-old', scriptConfig: { command: `python3 x.py --mode poll --pr 790 --node-id ${nodeId}` },
+  }));
+  assert.throws(
+    () => bindSchedule({ home, pr: 790, nodeId, resultPath, dispatchId: oldId, retryMs: 0 }),
+    /dispatch-id 已作废/,
+  );
 });
