@@ -2,6 +2,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
+
+// Shared by watcher (writes it) and repair helper (refuses superseded tasks).
+export const AUTHOR_RECLAIMED = 'author-reclaimed';
 export const PR_LOCK_TOKEN_ENV = 'MIVO_PR_LOCK_TOKEN';
 
 export function statePaths(home) {

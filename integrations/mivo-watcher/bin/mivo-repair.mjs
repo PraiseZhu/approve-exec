@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { collectMivoCiSync } from './mivo-ci.mjs';
-import { acquireLock, readPr, writePr } from './mivo-state.mjs';
+import { acquireLock, AUTHOR_RECLAIMED, readPr, writePr } from './mivo-state.mjs';
 
 export const REPO = 'xindong/mivo-canvas-plugin';
 export const DEFAULT_PLUGIN_REPO = '/Users/praise/AI-Agent/Claude/projects/Project Mivo Canvas-Plugin';
@@ -168,7 +168,7 @@ function boundSession(paths, task) {
     ? [entry.activeTask.dispatchId]
     : [entry.lastDispatch?.dispatchId, entry.pendingDispatch?.dispatchId].filter(Boolean);
   if (dispatches.length && !dispatches.includes(task.dispatchId)) fail('task dispatchId is not the active watcher dispatch');
-  if (entry.activeTask?.blockedKind === 'author-reclaimed' && entry.activeTask.dispatchId === task.dispatchId) {
+  if (entry.activeTask?.blockedKind === AUTHOR_RECLAIMED && entry.activeTask.dispatchId === task.dispatchId) {
     fail('task superseded: the author reclaimed this PR (Ready -> Draft); wait for the next watcher dispatch');
   }
   return { sessionId: entry.sessionId };

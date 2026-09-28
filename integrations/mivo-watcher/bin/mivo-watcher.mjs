@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { planSessionTitle, repairSessionTitle } from './session-title.mjs';
 import { collectPublicReview, verdictComment } from './public-review.mjs';
 import { collectPrSnapshot, collectPrOwnership } from './mivo-pr-snapshot.mjs';
-import { acquireLock, listPrs, migrateLegacy, PR_LOCK_TOKEN_ENV, readPr, statePaths as v2StatePaths, withLock as withPrLock, writePr } from './mivo-state.mjs';
+import { acquireLock, AUTHOR_RECLAIMED, listPrs, migrateLegacy, PR_LOCK_TOKEN_ENV, readPr, statePaths as v2StatePaths, withLock as withPrLock, writePr } from './mivo-state.mjs';
 export const REPO = 'xindong/mivo-canvas-plugin';
 const GH = process.env.GH_BIN ?? 'gh';
 
@@ -413,7 +413,6 @@ function clearDryPending(previous) {
 
 const RECOVERY_MIN_MS = 30 * 60 * 1000;
 const MAX_RECOVERIES = 3;
-export const AUTHOR_RECLAIMED = 'author-reclaimed';
 
 // Ready -> Draft means the author session took the PR back. An unfinished
 // watcher task is superseded: no recovery re-delivery, no in-flight lock on
@@ -1384,6 +1383,11 @@ export function* discoverWorkflow({
     });
     if (previous.needsHuman) {
       report.push({ number: pr.number, nodeId: key, needsHuman: previous.needsHuman, dispatch: { attempted: false, reason: 'needs-human' } });
+      continue;
+    }
+    if (previous.sessionId && pr.isDraft === true) {
+      // Draft belongs to the author session; never wake the watcher session for it.
+      report.push({ number: pr.number, nodeId: key, dispatch: { attempted: false, reason: 'draft-author-owned' } });
       continue;
     }
     if (previous.sessionId) {

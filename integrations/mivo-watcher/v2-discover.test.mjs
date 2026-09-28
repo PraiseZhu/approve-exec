@@ -630,3 +630,18 @@ test('abandoned dispatch-id cannot bind after recreate', (t) => {
     /dispatch-id 已作废/,
   );
 });
+
+test('bound Draft PR with stale heartbeat is left to the author, not woken', (t) => {
+  const { paths } = homeOf(t);
+  writePr(paths.home, nodeId, {
+    number: 790, nodeId, sessionId: 'sess-790', heartbeatAt: '2026-09-27T00:00:00Z', scheduleId: 'sch-790',
+    activeTask: { dispatchId: 'live-790-a', status: 'accepted' },
+  });
+  const { result, collected, entry } = discover(paths, {
+    prs: [{ ...listed, isDraft: true }],
+    dispatchFn: () => { throw new Error('draft must not wake the watcher session'); },
+  });
+  assert.equal(collected, 0);
+  assert.equal(result.prs[0].dispatch.reason, 'draft-author-owned');
+  assert.equal(entry.lastLostReminderAt, undefined);
+});
