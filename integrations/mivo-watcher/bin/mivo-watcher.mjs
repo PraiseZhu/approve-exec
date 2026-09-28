@@ -1186,36 +1186,10 @@ export function* pollWorkflow({
     return next;
   };
   if (normalized.state === 'MERGED' || normalized.state === 'CLOSED') {
-    if (previous.closedHandled) {
-      return { mode: 'poll', dispatch: false, prs: [{ number, nodeId, dispatch: { attempted: false, reason: 'closed-handled' } }] };
-    }
-    let dispatch = { attempted: false, bound: false, reason: 'closedown' };
-    if (!dryRun && previous.sessionId) {
-      try {
-        const params = {
-          title: previous.title || `MivoPlugin-#${number}`,
-          message: watchClosedownMessage({ prNumber: number, state: normalized.state, scheduleId: previous.scheduleId, home: paths.home }),
-          target_session_id: previous.sessionId,
-        };
-        yield () => dispatchFn(params, { timeoutMs: Math.max(1, remaining()) });
-        dispatch = { attempted: true, bound: true, reason: 'closedown' };
-        save({ ...previous, closedHandled: true, pollFingerprint: fingerprint });
-      } catch (error) {
-        const text = String(error.message);
-        if (/ARCHIVED|NOT_FOUND|DELETED/.test(text)) {
-          dispatch = { attempted: true, bound: false, reason: 'closedown-session-gone' };
-          save({
-            ...previous, closedHandled: true, pollFingerprint: fingerprint,
-            closedownManual: { scheduleId: previous.scheduleId ?? null, reason: text.slice(0, 400), at: now },
-          });
-        } else {
-          dispatch = { attempted: true, bound: false, reason: 'closedown-unconfirmed', error: text.slice(0, 400) };
-          save({ ...previous, closedHandled: false, pollFingerprint: fingerprint });
-        }
-      }
-    } else {
-      save({ ...previous, closedHandled: true, pollFingerprint: fingerprint });
-    }
+    const { dispatch } = yield* deliverClosedown({
+      previous, prNumber: number, nodeId, state: normalized.state, paths, now, dryRun, dispatchFn, remaining,
+      extra: { heartbeatAt: now, pollFingerprint: fingerprint },
+    });
     return { mode: 'poll', dispatch: dispatch.attempted, prs: [{ number, nodeId, dispatch }] };
   }
   if (previous.closedHandled === true) {
@@ -1271,6 +1245,50 @@ export function* pollWorkflow({
 const HEARTBEAT_STALE_MS = 15 * 60 * 1000;
 const LOST_REMIND_MS = 30 * 60 * 1000;
 const CLAIM_MS = 60 * 60 * 1000;
+const CLAIM_RETRY_LIMIT = 1;
+const CLOSEDOWN_MIN_MS = 12000;
+
+function* deliverClosedown({
+  previous, prNumber, nodeId, state, paths, now, dryRun, dispatchFn, remaining, extra = {},
+}) {
+  if (previous.closedHandled) {
+    return { previous, dispatch: { attempted: false, bound: false, reason: 'closed-handled' } };
+  }
+  const save = (entry) => {
+    const next = { ...entry, nodeId, number: prNumber, ...extra };
+    writePr(paths.home, nodeId, next);
+    return next;
+  };
+  let dispatch = { attempted: false, bound: false, reason: 'closedown' };
+  if (!dryRun && previous.sessionId && typeof dispatchFn === 'function') {
+    try {
+      yield () => dispatchFn({
+        title: previous.title || `MivoPlugin-#${prNumber}`,
+        message: watchClosedownMessage({
+          prNumber, state, scheduleId: previous.scheduleId, home: paths.home,
+        }),
+        target_session_id: previous.sessionId,
+      }, { timeoutMs: Math.max(1, remaining()) });
+      previous = save({ ...previous, closedHandled: true });
+      dispatch = { attempted: true, bound: true, reason: 'closedown' };
+    } catch (error) {
+      const text = String(error.message);
+      if (/ARCHIVED|NOT_FOUND|DELETED/.test(text)) {
+        previous = save({
+          ...previous, closedHandled: true,
+          closedownManual: { scheduleId: previous.scheduleId ?? null, reason: text.slice(0, 400), at: now },
+        });
+        dispatch = { attempted: true, bound: false, reason: 'closedown-session-gone' };
+      } else {
+        previous = save({ ...previous, closedHandled: false });
+        dispatch = { attempted: true, bound: false, reason: 'closedown-unconfirmed', error: text.slice(0, 400) };
+      }
+    }
+  } else {
+    previous = save({ ...previous, closedHandled: true });
+  }
+  return { previous, dispatch };
+}
 
 export function* discoverWorkflow({
   now = new Date().toISOString(),
@@ -1403,6 +1421,101 @@ export function* discoverWorkflow({
         report.push({ number: pr.number, nodeId: key, dispatch: { attempted: false, reason: 'awaiting-claim' } });
         continue;
       }
+      const retries = Number(previous.pendingDispatch.claimRetries ?? 0);
+      const targetSessionId = previous.pendingDispatch.createdSessionId
+        ?? previous.pendingDispatch.params?.target_session_id
+        ?? null;
+      if (retries < CLAIM_RETRY_LIMIT && !dryRun && remaining() >= 1000) {
+        if (targetSessionId && typeof dispatchFn === 'function') {
+          const retryParams = {
+            ...(previous.pendingDispatch.params ?? { title: previous.title || `MivoPlugin-#${pr.number}`, message: guide }),
+            target_session_id: targetSessionId,
+          };
+          try {
+            const receipt = yield () => dispatchFn(retryParams, { timeoutMs: Math.max(1, remaining()) });
+            if (receipt?.target_session_id) {
+              const state = { version: 2, repo: REPO, prs: { [key]: previous } };
+              applyDispatchReceipt({
+                state,
+                pr: { id: key, number: pr.number, headRefOid: previous.headRefOid, headRefName: previous.headRefName, url: previous.url },
+                mapping: { sessionId: previous.sessionId, title: previous.title, titleDate: previous.titleDate, taskName: previous.taskName },
+                receipt: { ...receipt, dispatch_id: receipt.dispatch_id ?? previous.pendingDispatch.dispatchId },
+                now, paths,
+              });
+              previous = state.prs[key];
+              writePr(paths.home, key, previous);
+              report.push({ number: pr.number, nodeId: key, dispatch: { attempted: true, bound: true, reason: 'claim-retry-wakeup' } });
+              continue;
+            }
+            previous = {
+              ...previous,
+              pendingDispatch: {
+                ...previous.pendingDispatch,
+                status: 'awaiting-claim',
+                claimDeadline: new Date(nowMs + CLAIM_MS).toISOString(),
+                claimRetries: retries + 1,
+                createdSessionId: targetSessionId,
+                lastClaimRetryAt: now,
+              },
+            };
+            writePr(paths.home, key, previous);
+            report.push({ number: pr.number, nodeId: key, dispatch: { attempted: true, reason: 'claim-retry-wakeup' } });
+          } catch (error) {
+            const text = String(error.message);
+            previous = {
+              ...previous,
+              pendingDispatch: {
+                ...previous.pendingDispatch,
+                claimRetries: retries + 1,
+                lastClaimRetryAt: now,
+                lastClaimRetryError: text.slice(0, 400),
+                claimDeadline: new Date(nowMs + CLAIM_MS).toISOString(),
+              },
+            };
+            writePr(paths.home, key, previous);
+            report.push({
+              number: pr.number, nodeId: key,
+              dispatch: { attempted: true, reason: 'claim-retry-unconfirmed', error: text.slice(0, 400) },
+            });
+          }
+          continue;
+        }
+        previous = {
+          ...previous,
+          abandonedDispatches: [...(previous.abandonedDispatches ?? []), previous.pendingDispatch.dispatchId].filter(Boolean),
+          pendingDispatch: null, dispatchError: null, claimRetries: retries + 1,
+        };
+        writePr(paths.home, key, previous);
+        const state = { version: 2, repo: REPO, prs: { [key]: previous } };
+        const inner = [];
+        yield* processPr({
+          pr, previous, state, paths, now, events, report: inner, viewer, dryRun, dispatchFn, collect, ghFn,
+          recheckFn, ownershipSnapshot, remaining, deadline, clock, resetPrDeadline, messagePrefix: guide,
+          unlockForDispatch, relockForDispatch,
+        });
+        let entry = state.prs[key] || previous;
+        if (!prLock.held && !state._persistBlocked) {
+          if (!entry.sessionId && entry.pendingDispatch && entry.pendingDispatch.status !== 'retryable'
+            && !String(entry.pendingDispatch.dispatchId ?? '').startsWith('dry-')) {
+            entry = {
+              ...entry, dispatchError: null,
+              pendingDispatch: {
+                ...entry.pendingDispatch,
+                status: 'awaiting-claim',
+                claimDeadline: new Date(nowMs + CLAIM_MS).toISOString(),
+                claimRetries: retries + 1,
+              },
+            };
+          }
+          writePr(paths.home, key, entry);
+        }
+        const created = inner[0] ?? { number: pr.number, nodeId: key, dispatch: { attempted: false } };
+        report.push({
+          ...created,
+          dispatch: { ...(created.dispatch ?? {}), reason: created.dispatch?.attempted ? 'claim-retry-recreate' : (created.dispatch?.reason ?? 'claim-retry-recreate') },
+        });
+        continue;
+      }
       previous = {
         ...previous,
         abandonedDispatches: [...(previous.abandonedDispatches ?? []), previous.pendingDispatch.dispatchId].filter(Boolean),
@@ -1433,6 +1546,45 @@ export function* discoverWorkflow({
     }
     report.push(inner[0] ?? { number: pr.number, nodeId: key, dispatch: { attempted: false } });
     } finally { prLock.release(); }
+  }
+  const listedIds = new Set(listed.map((pr) => String(pr.id)));
+  for (const stale of listPrs(paths.home)) {
+    if (deadline - clock() < CLOSEDOWN_MIN_MS) break;
+    if (!stale?.nodeId || listedIds.has(String(stale.nodeId))) continue;
+    if (stale.closedHandled === true || stale.optOut === true) continue;
+    const staleKey = String(stale.nodeId);
+    const staleLock = acquireLock(paths.home, `pr-${staleKey}`);
+    if (staleLock.held) {
+      report.push({ number: stale.number, nodeId: staleKey, dispatch: { attempted: false, reason: 'pr-lock-held' } });
+      continue;
+    }
+    try {
+      const live = readPr(paths.home, staleKey) || stale;
+      if (live.closedHandled === true || live.optOut === true) continue;
+      if (listedIds.has(String(live.nodeId))) continue;
+      let view;
+      try {
+        view = JSON.parse(yield () => ghFn([
+          'pr', 'view', String(live.number), '--repo', REPO, '--json', 'state,id',
+        ]));
+      } catch (error) {
+        report.push({
+          number: live.number, nodeId: staleKey,
+          dispatch: { attempted: false, reason: 'closedown-lookup-failed', error: String(error.message).slice(0, 400) },
+        });
+        continue;
+      }
+      const prState = view?.state;
+      if (prState !== 'MERGED' && prState !== 'CLOSED') {
+        report.push({ number: live.number, nodeId: staleKey, dispatch: { attempted: false, reason: 'stale-still-open' } });
+        continue;
+      }
+      const { dispatch } = yield* deliverClosedown({
+        previous: live, prNumber: live.number, nodeId: staleKey, state: prState,
+        paths, now, dryRun, dispatchFn, remaining: () => Math.max(0, deadline - clock()),
+      });
+      report.push({ number: live.number, nodeId: staleKey, dispatch });
+    } finally { staleLock.release(); }
   }
   index = { ...index, finishedAt: now, elapsedMs: clock() - started };
   fs.writeFileSync(v2.indexPath, `${JSON.stringify(index, null, 2)}\n`, { mode: 0o600 });
