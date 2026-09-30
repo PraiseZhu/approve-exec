@@ -1,0 +1,65 @@
+export const SESSION_TITLE_TIME_ZONE = 'Asia/Shanghai';
+const CINDY_REPO = 'makecindy/cindy';
+const MAX_TASK_LENGTH = 20;
+const han = /\p{Script=Han}/u;
+
+export function sessionDate(createdAt) {
+  if (typeof createdAt === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(createdAt)) {
+    const date = new Date(`${createdAt}T00:00:00Z`);
+    if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== createdAt) {
+      throw new Error('session creation date is invalid');
+    }
+    return createdAt;
+  }
+  if (!(createdAt instanceof Date) && typeof createdAt !== 'number'
+      && !(typeof createdAt === 'string' && /T.*(?:Z|[+-]\d{2}:\d{2})$/i.test(createdAt))) {
+    throw new Error('session creation timestamp with timezone is required');
+  }
+  const date = new Date(createdAt);
+  if (!Number.isFinite(date.getTime())) throw new Error('session creation date is invalid');
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: SESSION_TITLE_TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(date);
+  const value = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
+  return `${value.year}-${value.month}-${value.day}`;
+}
+
+export function shortTaskName({ task } = {}) {
+  const text = String(task ?? '').normalize('NFKC')
+    .replace(/^(?:feat|fix|chore|docs|test|refactor|perf|build|ci)(?:\([^)]*\))?!?:\s*/i, '')
+    .replace(/(?:\bPR\s*#?\s*|#)\d+\b/gi, '');
+  const chinese = (text.match(/\p{Script=Han}+/gu) ?? []).join('');
+  if (chinese.length >= 2) return Array.from(chinese).slice(0, MAX_TASK_LENGTH).join('');
+  const source = String(task ?? '').toLowerCase();
+  if (/changelog|release.notes/.test(source)) return '更新日志修复';
+  if (/preflight|dco|verify/.test(source)) return '预检反馈修复';
+  if (/^docs\b|documentation/.test(source)) return '文档反馈修复';
+  if (/^test\b|regression/.test(source)) return '测试反馈修复';
+  return '审查反馈修复';
+}
+
+export function repairSessionTitle({ task, prNumber, createdAt, repo = CINDY_REPO } = {}) {
+  if (!Number.isInteger(prNumber) || prNumber < 1) throw new Error('session title requires a PR number');
+  const date = sessionDate(createdAt);
+  const taskName = shortTaskName({ task, prNumber, repo });
+  return `#${prNumber}-${taskName}丨${date.slice(5).replace('-', '')}`;
+}
+
+export function planSessionTitle({ pr, existing = {}, createdAt, repo } = {}) {
+  if (!pr || typeof pr !== 'object') throw new Error('PR metadata is required');
+  const nodeId = pr.id ?? pr.nodeId;
+  if (existing.nodeId && existing.nodeId !== nodeId) throw new Error('session mapping drifted');
+  const titleDate = sessionDate(existing.titleDate ?? existing.sessionCreatedAt ?? createdAt);
+  const mmdd = titleDate.slice(5).replace('-', '');
+  const prefix = `#${pr.number}-`;
+  const suffix = `丨${mmdd}`;
+  if (typeof existing.title === 'string' && existing.title.startsWith(prefix) && existing.title.endsWith(suffix)) {
+    const taskName = existing.title.slice(prefix.length, -suffix.length);
+    if (han.test(taskName) && Array.from(taskName).length <= MAX_TASK_LENGTH
+        && !/[丨\r\n:#]/u.test(taskName) && !/\bPR\s*\d+/i.test(taskName)) {
+      return { title: existing.title, titleDate, taskName };
+    }
+  }
+  const taskName = shortTaskName({ task: pr.title, prNumber: pr.number, repo });
+  return { title: repairSessionTitle({ task: pr.title, prNumber: pr.number, createdAt: titleDate, repo }), titleDate, taskName };
+}
