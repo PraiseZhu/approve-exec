@@ -99,6 +99,21 @@ export function anyLiveRuntimeLock(home) {
   }
   return false;
 }
+export function acquireDeployExclusive(home, afterLock) {
+  const deployLock = acquireLock(home, DEPLOY_LOCK_NAME);
+  if (deployLock.held) {
+    const error = new Error('deploy lock held');
+    throw error;
+  }
+  try {
+    if (typeof afterLock === 'function') afterLock();
+    if (anyLiveRuntimeLock(home)) throw new Error('runtime lock held');
+    return deployLock;
+  } catch (error) {
+    deployLock.release();
+    throw error;
+  }
+}
 export function withLock(home, name, fn) {
   const lock = acquireLock(home, name);
   if (lock.held) return { held: true };

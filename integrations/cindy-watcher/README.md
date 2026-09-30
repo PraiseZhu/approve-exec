@@ -43,7 +43,8 @@ helper 的 complete 仅表示一轮修复完成；不会合并 PR、不会开 au
 
 - `name`: `Cindy watch #<N>`
 - primary：`agentKind` `codex`，`model` `openai/gpt-6-luna`，`providerId` `xd`（界面「Cindy AI」），`effort` `max`
-- fallback：`agentKind` `codex`，`model` `gpt-6-luna`，`providerId` `art-cindy`，`effort` `max`（仅当 schedule_create / 首轮 dispatch 报 `NO_PROVIDER_FOR_AGENT`、`PROVIDER_ROUTE_UNAVAILABLE` 或模型不存在时用一次；其它错误直接 blocked，不静默换模型）
+- fallback：`agentKind` `codex`，`model` `gpt-6-luna`，`providerId` `art-cindy`，`effort` `max`（**只**用于每 PR 轮询调度的 `schedule_create`：仅当它报 `NO_PROVIDER_FOR_AGENT`、`PROVIDER_ROUTE_UNAVAILABLE` 或模型不存在时重建一次；其它错误直接 blocked，不静默换模型）
+- 首个修复 session 的模型继承发现器调度（primary）。sessions.dispatch 不带 model/effort/providerId；若因 provider 失败未认领，走既有认领超时（叫醒或重建一次，其后 owner-unknown），不对 dispatch 做模型降级
 - `executionMode` `script`，`capabilities` `["sessions.dispatch"]`，禁止 `silentWhenIdle`
 - command 形态：
 

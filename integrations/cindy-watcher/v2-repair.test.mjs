@@ -336,8 +336,7 @@ test('pushIfNeeded pushes HEAD:refs/heads/<headRef> to the fork, never the base'
     return '';
   };
   pushIfNeeded(worktree, task, HEAD, REMOTE, gitFn);
-  assert.ok(calls.some((args) => args.includes('push') && args.includes('https://github.com/PraiseZhu/cindy-fork.git') && args.includes('HEAD:refs/heads/fix/x')));
-  assert.equal(calls.some((args) => args.includes('push') && args.includes('origin')), false);
+  assert.ok(calls.some((args) => args.includes('push') && args.includes('origin') && args.includes(`${HEAD}:refs/heads/fix/x`)));
   assert.throws(
     () => pushIfNeeded(worktree, task, HEAD, REMOTE, gitFn, 'https://github.com/makecindy/cindy.git'),
     /refusing to push to base repo/,

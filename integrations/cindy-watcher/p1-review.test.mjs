@@ -9,12 +9,13 @@ import { feedbackRepairPolicy } from './bin/cindy-feedback-policy.mjs';
 import { collectCindyPolicySync, isGhHttp404 } from './bin/cindy-pr-policy.mjs';
 import { evaluateCindyReview } from './bin/cindy-review-status.mjs';
 import {
-  assertOriginPushTargets, cleanupWatch, prepare, watchWorktreePath,
+  assertOriginPushTargets, bindSchedule, command, cleanupWatch, localCommitsNotReachable,
+  prepare, watchWorktreePath,
 } from './bin/cindy-repair.mjs';
 import { isAutoCloseEligible } from './bin/cindy-review-resolve.mjs';
-import { acquireLock, DEPLOY_LOCK_NAME, writePr } from './bin/cindy-state.mjs';
+import { acquireDeployExclusive, acquireLock, DEPLOY_LOCK_NAME, lockStatus, readPr, writePr } from './bin/cindy-state.mjs';
 import {
-  DISPATCH_PARAM_KEYS, dispatchParams, feedbackItems, scanOnce, watcherPaths,
+  DISPATCH_PARAM_KEYS, dispatchParams, feedbackItems, scanOnce, watchGuideMessage, watcherPaths,
 } from './bin/cindy-watcher.mjs';
 
 const HEAD = 'a'.repeat(40);
@@ -273,4 +274,79 @@ test('apply refuses a live runtime lock; discover skips when deploy lock is live
   });
   assert.equal(result.mode, 'deploy-lock-held');
   assert.equal(result.dispatch, false);
+});
+
+test('pushInsteadOf rewriting fork to base is refused after get-url rewrite', (t) => {
+  const worktree = fs.mkdtempSync(path.join(os.tmpdir(), 'instead-'));
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+  git(worktree, ['init', '-b', 'main']);
+  git(worktree, ['remote', 'add', 'origin', FORK]);
+  git(worktree, ['config', `url.${BASE_URL}.pushInsteadOf`, FORK]);
+  const rewritten = execFileSync('git', ['-C', worktree, 'remote', 'get-url', '--push', '--all', 'origin'], { encoding: 'utf8' });
+  assert.match(rewritten, /makecindy\/cindy/);
+  assert.throws(
+    () => assertOriginPushTargets(worktree, 'PraiseZhu/cindy-fork', (_bin, args) => execFileSync('git', args, { encoding: 'utf8' }).trim(), FORK),
+    /pushurl pointing at base repo|rewriting fork/,
+  );
+});
+
+test('runtime lock appearing after deploy.lock is acquired still refuses deploy', (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'deploy-race-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  let runtime;
+  assert.throws(() => acquireDeployExclusive(home, () => {
+    runtime = acquireLock(home, 'discover');
+  }), /runtime lock held/);
+  t.after(() => runtime?.release());
+  assert.equal(lockStatus(home, DEPLOY_LOCK_NAME).live, false);
+  assert.equal(lockStatus(home, DEPLOY_LOCK_NAME).exists, false);
+});
+
+test('bind-schedule does not write ledger while deploy.lock is held', (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'bind-deploy-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  writePr(home, 'PR_790', { number: 790, nodeId: 'PR_790', pendingDispatch: { status: 'awaiting-claim', dispatchId: 'disp-1' } });
+  const deploy = acquireLock(home, DEPLOY_LOCK_NAME);
+  t.after(() => deploy.release());
+  const resultPath = path.join(home, 'sched.json');
+  fs.writeFileSync(resultPath, JSON.stringify({
+    ok: true, id: 'sched-1', executionMode: 'script', status: 'active',
+    targetSessionId: 'sess-a', scriptConfig: { command: 'python3 x.py --mode poll --pr 790 --node-id PR_790' },
+  }));
+  assert.throws(
+    () => bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, dispatchId: 'disp-1', retryMs: 0 }),
+    /deploy lock held/,
+  );
+  const entry = readPr(home, 'PR_790');
+  assert.equal(entry.sessionId, undefined);
+  assert.equal(entry.pendingDispatch.dispatchId, 'disp-1');
+});
+
+test('localCommitsNotReachable is empty when every commit is on origin/main', (t) => {
+  const plugin = fs.mkdtempSync(path.join(os.tmpdir(), 'revlist-'));
+  t.after(() => fs.rmSync(plugin, { recursive: true, force: true }));
+  git(plugin, ['init', '-b', 'main']);
+  git(plugin, ['config', 'user.name', 't']);
+  git(plugin, ['config', 'user.email', 't@example.invalid']);
+  fs.writeFileSync(path.join(plugin, 'a.txt'), 'a\n');
+  git(plugin, ['add', '.']);
+  git(plugin, ['-c', 'commit.gpgsign=false', 'commit', '-s', '-m', 'base']);
+  const head = git(plugin, ['rev-parse', 'HEAD']);
+  git(plugin, ['update-ref', 'refs/remotes/origin/main', head]);
+  git(plugin, ['branch', 'watch/pr-1', 'main']);
+  const worktree = watchWorktreePath(plugin, 1);
+  fs.mkdirSync(path.dirname(worktree), { recursive: true });
+  git(plugin, ['worktree', 'add', worktree, 'watch/pr-1']);
+  assert.deepEqual(localCommitsNotReachable({
+    worktree, gitFn: command, branch: 'watch/pr-1', headRefName: 'main',
+  }), []);
+});
+
+test('step 0 does not fallback the first session dispatch', () => {
+  const text = watchGuideMessage({ home: '/tmp/cindy-home', prNumber: 1, nodeId: 'PR_1' });
+  assert.doesNotMatch(text, /首轮 dispatch 因/);
+  assert.match(text, /schedule_create/);
+  assert.match(text, /认领超时/);
+  assert.match(text, /不要对 dispatch 降级/);
+  assert.match(text, /用于本 PR 轮询调度的 schedule_create/);
 });

@@ -137,7 +137,8 @@ function saveResult(paths, task, sessionId, payload) {
   const lock = acquireLock(paths.home, `pr-${task.nodeId}`);
   if (lock.held) fail('PR 状态锁占用，请稍后重试写结果');
   try {
-  return saveResultLocked(paths, task, sessionId, payload);
+    refuseDeployLock(paths.home);
+    return saveResultLocked(paths, task, sessionId, payload);
   } finally { lock.release(); }
 }
 function saveResultLocked(paths, task, sessionId, payload) {
@@ -243,7 +244,25 @@ export function originPushUrls(worktree, gitFn) {
   const raw = gitOutput(['-C', worktree, 'remote', 'get-url', '--push', '--all', 'origin'], gitFn);
   return String(raw).split(/\n/).map((item) => item.trim()).filter(Boolean);
 }
+export function insteadOfRewritesFork(worktree, forkUrl, gitFn) {
+  let listed = '';
+  try {
+    listed = gitOutput(['-C', worktree, 'config', '--get-regexp', '^url\..*insteadOf$'], gitFn);
+  } catch { return null; }
+  const fork = normalizeGithubUrl(forkUrl);
+  for (const line of String(listed).split(/\n/).map((item) => item.trim()).filter(Boolean)) {
+    const match = /^(url\.(.+)\.(pushInsteadOf|insteadOf))\s+(.+)$/i.exec(line);
+    if (!match) continue;
+    const replacement = match[2];
+    const source = match[4];
+    if (normalizeGithubUrl(source) !== fork) continue;
+    if (normalizeGithubUrl(replacement) !== fork) return match[1];
+  }
+  return null;
+}
 export function assertOriginPushTargets(worktree, repo, gitFn, expectedUrl = remoteUrl(repo)) {
+  const rewrite = insteadOfRewritesFork(worktree, expectedUrl, gitFn);
+  if (rewrite) fail(`refusing ${rewrite} rewriting fork ${expectedUrl}`);
   const urls = originPushUrls(worktree, gitFn);
   if (!urls.length) fail('origin has no push URL');
   for (const url of urls) {
@@ -605,7 +624,7 @@ export function pushIfNeeded(worktree, task, validatedHead, remoteHead, gitFn, o
   })();
   if (!ancestor) fail('remote branch advanced independently; refusing non-fast-forward push');
   assertOriginPushTargets(worktree, resolveHeadRepo(task), gitFn, forkUrl);
-  gitOutput(['-C', worktree, 'push', forkUrl, `HEAD:refs/heads/${task.headRefName}`], gitFn);
+  gitOutput(['-C', worktree, 'push', 'origin', `${validatedHead}:refs/heads/${task.headRefName}`], gitFn);
   const after = gitOutput(['ls-remote', forkUrl, `refs/heads/${task.headRefName}`], gitFn).split(/\s+/)[0];
   if (after !== validatedHead) fail('remote branch changed after push; pushed commit requires reconciliation');
   return { pushed: true };
@@ -766,6 +785,7 @@ export function bindSchedule({
   }
   if (lock.held) fail('busy: PR 状态锁占用，请等 1 分钟后重试 bind-schedule', 2);
   try {
+    refuseDeployLock(root);
     const previous = readPr(root, nodeId) || {};
     const incoming = result.targetSessionId;
     const pendingId = previous.pendingDispatch?.dispatchId;
@@ -813,6 +833,7 @@ export function clearOwnerUnknown({ home, pr, nodeId, now = new Date().toISOStri
   const lock = acquireLock(root, `pr-${nodeId}`);
   if (lock.held) fail('PR 状态锁占用，请稍后重试');
   try {
+    refuseDeployLock(root);
     const previous = readPr(root, nodeId) || {};
     if (previous.needsHuman?.reason !== 'owner-unknown') fail('PR 没有 owner-unknown 标记');
     const abandonedId = previous.needsHuman.abandonedDispatchId ?? previous.pendingDispatch?.dispatchId;
@@ -851,9 +872,10 @@ function refExists(worktree, ref, gitFn) {
 export function localCommitsNotReachable({ worktree, gitFn, branch, headRefName }) {
   const excludes = [];
   for (const ref of [`origin/${headRefName}`, 'upstream/main', 'origin/main']) {
-    if (headRefName && refExists(worktree, ref, gitFn)) excludes.push('--not', ref);
+    if (headRefName && refExists(worktree, ref, gitFn)) excludes.push(ref);
   }
-  const args = ['-C', worktree, 'rev-list', branch, ...excludes];
+  const args = ['-C', worktree, 'rev-list', branch];
+  if (excludes.length) args.push('--not', ...excludes);
   const out = gitOutput(args, gitFn);
   return String(out).split(/\n/).map((item) => item.trim()).filter(Boolean);
 }
