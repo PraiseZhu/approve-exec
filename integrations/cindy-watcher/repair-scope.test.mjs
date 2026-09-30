@@ -89,7 +89,7 @@ function fixture(t, { changed = true } = {}) {
     if (endpoint === `repos/${REPO}/branches/main/protection`) return JSON.stringify({ required_status_checks: {
       contexts: ['verify'], checks: [{ context: 'verify', app_id: 123 }],
     } });
-    if (endpoint === `repos/${REPO}/rules/branches/main?per_page=100`) return JSON.stringify([[]]);
+    if (String(endpoint).startsWith(`repos/${REPO}/rules/branches/main`)) return JSON.stringify([[]]);
     if (endpoint === `repos/${REPO}/contents/docs/sync/required-checks.json?ref=${sourceHead}`) {
       assert.fail('cindy policy must not read docs/sync/required-checks.json');
     }

@@ -9,7 +9,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { collectCindyCiSync } from './cindy-ci.mjs';
 import { taskRepairPolicy } from './cindy-feedback-policy.mjs';
-import { acquireLock, AUTHOR_RECLAIMED, readPr, writePr } from './cindy-state.mjs';
+import { acquireLock, AUTHOR_RECLAIMED, DEPLOY_LOCK_NAME, lockStatus, readPr, writePr } from './cindy-state.mjs';
 
 export const REPO = 'makecindy/cindy';
 export const DEFAULT_PLUGIN_REPO = '/Users/praise/AI-Agent/Claude/projects/Project CINDY';
@@ -188,8 +188,12 @@ function ghJson(args, ghFn = command) {
 
 function gitOutput(args, gitFn = command) { return String(gitFn(GIT, args)); }
 
+function refuseDeployLock(home) {
+  if (lockStatus(home, DEPLOY_LOCK_NAME).live) fail('deploy lock held');
+}
 function taskFrom(home, taskPath) {
   const paths = repairPaths(home);
+  refuseDeployLock(paths.home);
   const file = requireAbs(taskPath, 'task');
   if (!under(file, paths.tasks)) fail('task must be inside home/state/tasks');
   const task = readJson(file, 'task');
@@ -235,6 +239,21 @@ function ghPr(task, ghFn, requireHead = true) {
 
 function remoteUrl(repo) { return githubRepoUrl(repo); }
 
+export function originPushUrls(worktree, gitFn) {
+  const raw = gitOutput(['-C', worktree, 'remote', 'get-url', '--push', '--all', 'origin'], gitFn);
+  return String(raw).split(/\n/).map((item) => item.trim()).filter(Boolean);
+}
+export function assertOriginPushTargets(worktree, repo, gitFn, expectedUrl = remoteUrl(repo)) {
+  const urls = originPushUrls(worktree, gitFn);
+  if (!urls.length) fail('origin has no push URL');
+  for (const url of urls) {
+    if (isBaseGithubUrl(url)) fail(`refusing origin pushurl pointing at base repo ${REPO}: ${url}`);
+    if (!sameGithubRepo(url, repo) && normalizeGithubUrl(url) !== normalizeGithubUrl(expectedUrl)) {
+      fail(`origin pushurl mismatch: ${url}`);
+    }
+  }
+  return urls;
+}
 export function assertOrigin(worktree, repo, gitFn, expectedUrl = remoteUrl(repo)) {
   const origin = gitOutput(['-C', worktree, 'remote', 'get-url', 'origin'], gitFn);
   if (!sameGithubRepo(origin, repo) && normalizeGithubUrl(origin) !== normalizeGithubUrl(expectedUrl)) {
@@ -242,6 +261,7 @@ export function assertOrigin(worktree, repo, gitFn, expectedUrl = remoteUrl(repo
   }
   if (repo !== REPO && isBaseGithubUrl(origin)) fail(`refusing origin pointing at base repo ${REPO}`);
   if (isBaseGithubUrl(expectedUrl) && repo !== REPO) fail(`refusing origin=${REPO}`);
+  assertOriginPushTargets(worktree, repo, gitFn, expectedUrl);
 }
 
 export function assertUpstreamFetchOnly(worktree, gitFn) {
@@ -584,7 +604,8 @@ export function pushIfNeeded(worktree, task, validatedHead, remoteHead, gitFn, o
     catch { return false; }
   })();
   if (!ancestor) fail('remote branch advanced independently; refusing non-fast-forward push');
-  gitOutput(['-C', worktree, 'push', 'origin', `HEAD:refs/heads/${task.headRefName}`], gitFn);
+  assertOriginPushTargets(worktree, resolveHeadRepo(task), gitFn, forkUrl);
+  gitOutput(['-C', worktree, 'push', forkUrl, `HEAD:refs/heads/${task.headRefName}`], gitFn);
   const after = gitOutput(['ls-remote', forkUrl, `refs/heads/${task.headRefName}`], gitFn).split(/\s+/)[0];
   if (after !== validatedHead) fail('remote branch changed after push; pushed commit requires reconciliation');
   return { pushed: true };
@@ -823,20 +844,39 @@ function removeWatchCheckout({ plugin, worktree, number, branch, gitFn, force = 
   fs.rmSync(worktree, { recursive: true, force: false });
   return 'clone';
 }
-export function cleanupWatch({ home, pr, ghFn = command, gitFn = command, env = process.env }) {
+function refExists(worktree, ref, gitFn) {
+  try { gitOutput(['-C', worktree, 'rev-parse', '--verify', ref], gitFn); return true; }
+  catch { return false; }
+}
+export function localCommitsNotReachable({ worktree, gitFn, branch, headRefName }) {
+  const excludes = [];
+  for (const ref of [`origin/${headRefName}`, 'upstream/main', 'origin/main']) {
+    if (headRefName && refExists(worktree, ref, gitFn)) excludes.push('--not', ref);
+  }
+  const args = ['-C', worktree, 'rev-list', branch, ...excludes];
+  const out = gitOutput(args, gitFn);
+  return String(out).split(/\n/).map((item) => item.trim()).filter(Boolean);
+}
+export function cleanupWatch({ home, pr, ghFn = command, gitFn = command, env = process.env, now = new Date().toISOString() }) {
+  refuseDeployLock(repairPaths(home).home);
   const plugin = pluginRepoPath(env);
   const number = Number(pr);
-  const view = ghJson(['pr', 'view', String(number), '--repo', REPO, '--json', 'state'], ghFn);
+  const view = ghJson(['pr', 'view', String(number), '--repo', REPO, '--json', 'state,headRefName'], ghFn);
   if (!['MERGED', 'CLOSED'].includes(view.state)) fail('cleanup requires MERGED or CLOSED PR');
   const worktree = watchWorktreePath(plugin, number);
   const branch = watchBranchName(number);
-  if (fs.existsSync(worktree)) {
-    const status = gitOutput(['-C', worktree, 'status', '--porcelain'], gitFn);
-    if (status) fail('worktree is dirty');
-    removeWatchCheckout({ plugin, worktree, number, branch, gitFn, force: false });
+  if (!fs.existsSync(worktree)) return { removed: false, reason: 'missing', worktree, branch };
+  const status = gitOutput(['-C', worktree, 'status', '--porcelain'], gitFn);
+  if (status) fail('worktree is dirty');
+  if (view.state === 'CLOSED') return { removed: false, reason: 'closed-unmerged', worktree, branch };
+  const unreachable = localCommitsNotReachable({ worktree, gitFn, branch, headRefName: view.headRefName });
+  let backup = null;
+  if (unreachable.length) {
+    backup = backupWatchBranch({ plugin, number, branch, gitFn, now, worktree });
+    gitOutput(['bundle', 'verify', backup.bundlePath], gitFn);
   }
-  try { gitOutput(['-C', plugin, 'branch', '-d', branch], gitFn); } catch {}
-  return { removed: true, worktree, branch };
+  removeWatchCheckout({ plugin, worktree, number, branch, gitFn, force: unreachable.length > 0 });
+  return { removed: true, worktree, branch, backup, unreachableCount: unreachable.length };
 }
 
 // branchAncestorOfMain 判断 watch 分支的提交是否已全部并入 origin/main（即已被合并、

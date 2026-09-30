@@ -12,8 +12,7 @@ import {
   SCHEDULE_MODEL_FALLBACK, SCHEDULE_MODEL_PRIMARY,
 } from './bin/cindy-repair.mjs';
 import {
-  hasWatchOffComment, headOwnerOf, ownershipMatchesViewer, readOptout, scanOnce, watcherPaths,
-  wrapDispatchModelFallback,
+  DISPATCH_PARAM_KEYS, dispatchParams, hasWatchOffComment, headOwnerOf, ownershipMatchesViewer, readOptout, scanOnce, watcherPaths,
 } from './bin/cindy-watcher.mjs';
 import { writePr } from './bin/cindy-state.mjs';
 
@@ -90,7 +89,7 @@ test('optout file and author /cindy-watch off comments are recognized', () => {
   try {
     fs.mkdirSync(path.join(home, 'config'), { recursive: true });
     fs.writeFileSync(path.join(home, 'config/optout.json'), '[5307, 12]\n');
-    assert.deepEqual(readOptout(home), [5307, 12]);
+    assert.deepEqual(readOptout(home), { ok: true, prs: [5307, 12] });
     assert.equal(hasWatchOffComment([{ author: { login: 'PraiseZhu' }, body: '/cindy-watch off' }], 'PraiseZhu'), true);
     assert.equal(hasWatchOffComment([{ author: { login: 'other' }, body: '/cindy-watch off' }], 'PraiseZhu'), false);
     assert.equal(hasWatchOffComment([{ author: { login: 'PraiseZhu' }, body: '/cindy-watch off please' }], 'PraiseZhu'), false);
@@ -155,37 +154,17 @@ test('model-unavailable classifier only matches provider/model route errors', ()
   assert.equal(isScheduleModelUnavailable(new Error('ARCHIVED')), false);
 });
 
-test('wrapDispatchModelFallback retries create once on provider errors and records reason', () => {
-  const calls = [];
-  const dispatchFn = wrapDispatchModelFallback((params) => {
-    calls.push(params);
-    if (params.providerId === 'xd') {
-      const error = new Error('NO_PROVIDER_FOR_AGENT: xd');
-      error.code = 'NO_PROVIDER_FOR_AGENT';
-      throw error;
-    }
-    return { target_session_id: 'sess-fallback' };
+test('dispatchParams only emits Cindy broker-legal keys', () => {
+  const params = dispatchParams({
+    pr: { number: 1, id: 'PR_1', headRefOid: HEAD, title: 't', headRepositoryOwner: { login: 'PraiseZhu' }, headRepository: { name: 'cindy-fork' } },
+    mapping: {}, fresh: [], now: '2026-09-29T00:00:00Z', taskPath: '/tmp/task.json', home: '/tmp/home',
   });
-  const receipt = dispatchFn({ title: 't', message: 'm', fallback: { ...SCHEDULE_MODEL_FALLBACK } });
-  assert.equal(calls.length, 2);
-  assert.equal(calls[0].providerId, 'xd');
-  assert.equal(calls[0].model, 'openai/gpt-6-luna');
-  assert.equal(calls[1].providerId, 'art-cindy');
-  assert.equal(calls[1].model, 'gpt-6-luna');
-  assert.equal(calls[1].effort, 'max');
-  assert.equal(receipt.target_session_id, 'sess-fallback');
-  assert.equal(receipt.modelFallback, true);
-  assert.match(receipt.modelFallbackReason, /NO_PROVIDER_FOR_AGENT/);
-});
-
-test('wrapDispatchModelFallback does not fallback on other errors or reuse dispatch', () => {
-  const reuse = wrapDispatchModelFallback((params) => {
-    assert.equal(params.providerId, undefined);
-    throw new Error('NO_PROVIDER_FOR_AGENT');
-  });
-  assert.throws(() => reuse({ title: 't', target_session_id: 'sess-1' }), /NO_PROVIDER_FOR_AGENT/);
-  const other = wrapDispatchModelFallback(() => { throw new Error('ARCHIVED'); });
-  assert.throws(() => other({ title: 't', message: 'm' }), /ARCHIVED/);
+  for (const key of Object.keys(params)) assert.equal(DISPATCH_PARAM_KEYS.includes(key), true, key);
+  assert.equal(Object.hasOwn(params, 'model'), false);
+  assert.equal(Object.hasOwn(params, 'effort'), false);
+  assert.equal(Object.hasOwn(params, 'providerId'), false);
+  assert.equal(Object.hasOwn(params, 'agentKind'), false);
+  assert.equal(Object.hasOwn(params, 'fallback'), false);
 });
 
 test('scheduleModelFromResult defaults to primary when route is omitted', () => {

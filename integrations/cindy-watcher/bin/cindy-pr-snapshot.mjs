@@ -95,7 +95,7 @@ export function* collectPrSnapshot({ pr, ghFn }) {
     requireValue(comment && comment.id && typeof comment.body === 'string', 'invalid issue comment');
     return { ...comment, author: comment.author ?? comment.user, createdAt: comment.createdAt ?? comment.created_at, updatedAt: comment.updatedAt ?? comment.updated_at };
   });
-  const reviews = yield* connection({ id: before.id, field: 'reviews', selection: 'id body state submittedAt author{login} commit{oid}', ghFn });
+  const reviews = yield* connection({ id: before.id, field: 'reviews', selection: 'id body state submittedAt author{login __typename} commit{oid}', ghFn });
   const labelNodes = yield* connection({ id: before.id, field: 'labels', selection: 'name', ghFn });
   requireValue(labelNodes.every((label) => typeof label.name === 'string'), 'invalid labels');
   const after = basic(yield () => ghFn(viewArgs), repo, number);

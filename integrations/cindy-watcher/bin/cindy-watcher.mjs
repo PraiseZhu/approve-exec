@@ -11,13 +11,13 @@ import { fileURLToPath } from 'node:url';
 import { planSessionTitle, repairSessionTitle } from './session-title.mjs';
 import { collectCindyReview } from './cindy-review-status.mjs';
 import { collectPrSnapshot, collectPrOwnership } from './cindy-pr-snapshot.mjs';
-import { acquireLock, AUTHOR_RECLAIMED, listPrs, migrateLegacy, PR_LOCK_TOKEN_ENV, readPr, statePaths as v2StatePaths, withLock as withPrLock, writePr } from './cindy-state.mjs';
+import { acquireLock, AUTHOR_RECLAIMED, DEPLOY_LOCK_NAME, listPrs, lockStatus, migrateLegacy, PR_LOCK_TOKEN_ENV, readPr, statePaths as v2StatePaths, withLock as withPrLock, writePr } from './cindy-state.mjs';
 import { feedbackRepairPolicy, taskRepairPolicy, isGreptileAuthor, normalizeActorLogin } from './cindy-feedback-policy.mjs';
 import { partitionAutoClose, autoCloseThreads } from './cindy-review-resolve.mjs';
 import {
   autoCleanupWatch, command as gitDefaultFn, pluginRepoPath, watchBranchName, watchWorktreePath,
-  SCHEDULE_MODEL_FALLBACK, SCHEDULE_MODEL_PRIMARY, isScheduleModelUnavailable,
 } from './cindy-repair.mjs';
+export const DISPATCH_PARAM_KEYS = Object.freeze(['title', 'message', 'target_session_id']);
 export const REPO = 'makecindy/cindy';
 const GH = process.env.GH_BIN ?? 'gh';
 
@@ -69,12 +69,17 @@ export function ownershipMatchesViewer(pr, viewer) {
 }
 export function readOptout(home) {
   const file = path.join(home, 'config', 'optout.json');
-  if (!fs.existsSync(file)) return [];
+  if (!fs.existsSync(file)) return { ok: true, prs: [] };
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
     const list = Array.isArray(data) ? data : data?.prs;
-    return Array.isArray(list) ? list.map(Number).filter((n) => Number.isInteger(n) && n > 0) : [];
-  } catch { return []; }
+    if (!Array.isArray(list)) return { ok: false, reason: 'optout-invalid-shape' };
+    const prs = list.map(Number);
+    if (prs.some((n) => !Number.isInteger(n) || n <= 0)) return { ok: false, reason: 'optout-invalid-entry' };
+    return { ok: true, prs };
+  } catch (error) {
+    return { ok: false, reason: `optout-unreadable:${error.message}` };
+  }
 }
 export function hasWatchOffComment(comments, author) {
   return (comments ?? []).some((comment) => {
@@ -83,9 +88,20 @@ export function hasWatchOffComment(comments, author) {
   });
 }
 function isOptedOut({ home, number, comments, author }) {
-  if (readOptout(home).includes(Number(number))) return true;
+  const optout = readOptout(home);
+  if (!optout.ok) return { halt: true, reason: optout.reason };
+  if (optout.prs.includes(Number(number))) return true;
   if (author && hasWatchOffComment(comments, author)) return true;
   return false;
+}
+function haltExternal(paths) {
+  if (!paths?.home) return null;
+  if (lockStatus(paths.home, DEPLOY_LOCK_NAME).live) {
+    return { mode: 'deploy-lock-held', dispatch: false, prs: [], events: [] };
+  }
+  const optout = readOptout(paths.home);
+  if (!optout.ok) return { mode: 'optout-error', dispatch: false, prs: [], events: [], error: optout.reason };
+  return null;
 }
 
 function digest(value) {
@@ -183,16 +199,17 @@ export function feedbackItems({ pr, checks = [], requiredChecks = [], policy, ci
     const threadComments = Array.isArray(thread.comments) ? thread.comments : (thread.comments?.nodes ?? []);
     const external = threadComments.filter((comment) => !ownReceipt(comment, receiptActor));
     for (const comment of external) {
-      const author = comment.author?.login ?? comment.user?.login;
+      const author = comment.author ?? comment.user;
+      const authorLogin = author?.login ?? author;
       items.push(withCategory(withPublisher({
         source: isGreptileAuthor(author) ? 'greptile' : 'thread',
         actionable: thread.isResolved !== true,
         threadId: thread.id,
-        nativeId: `${thread.id}:${comment.id ?? author ?? 'comment'}`,
+        nativeId: `${thread.id}:${comment.id ?? authorLogin ?? 'comment'}`,
         revision: `${thread.isResolved === true}:${thread.isOutdated === true}:${comment.updatedAt ?? comment.updated_at ?? comment.createdAt ?? ''}`,
         sha: pr.headRefOid ?? null,
         body: comment.body ?? '',
-        contentHash: digest({ path: thread.path, resolved: thread.isResolved === true, id: comment.id, author, body: comment.body ?? '' }),
+        contentHash: digest({ path: thread.path, resolved: thread.isResolved === true, id: comment.id, author: authorLogin, body: comment.body ?? '' }),
       }, comment), { headSha: pr.headRefOid ?? null }));
     }
   }
@@ -429,45 +446,19 @@ export function dispatchParams({ pr, mapping, fresh, now, taskPath, home, messag
     ].join('\n'),
   };
   if (mapping.sessionId) params.target_session_id = mapping.sessionId;
-  else {
-    Object.assign(params, SCHEDULE_MODEL_PRIMARY);
-    params.fallback = { ...SCHEDULE_MODEL_FALLBACK };
-  }
   return params;
 }
 
-export function wrapDispatchModelFallback(dispatchFn) {
-  if (typeof dispatchFn !== 'function') return dispatchFn;
-  return (params = {}, extra) => {
-    const isCreate = !params.target_session_id;
-    const { fallback: fallbackField, ...rest } = params;
-    const primary = isCreate ? { ...rest, ...SCHEDULE_MODEL_PRIMARY } : rest;
-    const fallbackRoute = fallbackField && typeof fallbackField === 'object'
-      ? {
-        agentKind: fallbackField.agentKind ?? SCHEDULE_MODEL_FALLBACK.agentKind,
-        model: fallbackField.model ?? SCHEDULE_MODEL_FALLBACK.model,
-        providerId: fallbackField.providerId ?? SCHEDULE_MODEL_FALLBACK.providerId,
-        effort: fallbackField.effort ?? SCHEDULE_MODEL_FALLBACK.effort,
-      }
-      : SCHEDULE_MODEL_FALLBACK;
-    const tag = (receipt, error) => ({
-      ...receipt,
-      modelFallback: true,
-      modelFallbackReason: String(error?.message ?? error).slice(0, 400),
-    });
-    const retry = (error) => {
-      if (!isCreate || !isScheduleModelUnavailable(error)) throw error;
-      const receipt = dispatchFn({ ...rest, ...fallbackRoute }, extra);
-      if (receipt?.then) return receipt.then((value) => tag(value, error));
-      return tag(receipt, error);
-    };
-    try {
-      const receipt = dispatchFn(primary, extra);
-      if (receipt?.then) return receipt.catch(retry);
-      return receipt;
-    } catch (error) {
-      return retry(error);
-    }
+export function prWithHeadRepo(pr, collected) {
+  const src = collected?.pr ?? pr;
+  const ownerLogin = src?.headRepositoryOwner?.login ?? src?.headRepository?.owner?.login
+    ?? pr?.headRepositoryOwner?.login ?? pr?.headRepository?.owner?.login;
+  const name = src?.headRepository?.name ?? pr?.headRepository?.name;
+  return {
+    ...pr,
+    isCrossRepository: src?.isCrossRepository ?? pr?.isCrossRepository,
+    headRepository: src?.headRepository ?? pr?.headRepository ?? (name ? { name, owner: ownerLogin ? { login: ownerLogin } : undefined } : undefined),
+    headRepositoryOwner: src?.headRepositoryOwner ?? pr?.headRepositoryOwner ?? (ownerLogin ? { login: ownerLogin } : undefined),
   };
 }
 
@@ -481,7 +472,7 @@ export function watchGuideMessage({ home, prNumber, nodeId, dispatchId } = {}) {
   const helper = shellQuote(path.join(home, 'bin', 'cindy-repair.mjs'));
   const quotedHome = shellQuote(home);
   const dispatchFlag = dispatchId === null ? '' : (dispatchId ? ` --dispatch-id ${dispatchId}` : ' --dispatch-id <dispatchId>');
-  return `第 0 步（只做一次）：运行 \`node ${helper} --home ${quotedHome} schedule-params --pr ${prNumber} --node-id ${nodeId}\`。输出 JSON 的顶层是 primary（providerId=xd，model=openai/gpt-6-luna，Cindy 界面显示为「Cindy AI」），另有 fallback 对象。先去掉 fallback 字段，把剩余字段原样作为 cindy_scheduler 的 schedule_create 参数。若 schedule_create 或本 session 首轮 dispatch 因 NO_PROVIDER_FOR_AGENT、PROVIDER_ROUTE_UNAVAILABLE 或模型不存在失败：用 fallback 覆盖 agentKind/model/providerId/effort 再创建一次，并把 fallbackUsed=true 与 fallbackReason=<错误原文> 写入结果文件；其它错误不得换模型，直接 blocked。不要静默换其它模型。把工具返回原样存成文件后运行 \`${helper} --home ${quotedHome} bind-schedule --pr ${prNumber} --node-id ${nodeId}${dispatchFlag} --result <文件>\`。bind 若返回 busy（状态锁占用）：等 1 分钟后重跑同一 bind-schedule 命令。bind 若返回 owner-conflict（本 PR 已由他人持有）：立刻停止并回复一句说明。之后本 PR 的所有反馈只会投递到你这里（每 5 分钟由你的轮询脚本检查）。${watchScheduleConstraint()}`;
+  return `第 0 步（只做一次）：运行 \`node ${helper} --home ${quotedHome} schedule-params --pr ${prNumber} --node-id ${nodeId}\`。输出 JSON 的顶层是 primary（providerId=xd，model=openai/gpt-6-luna，Cindy 界面显示为「Cindy AI」），另有 fallback 对象。先去掉 fallback 字段，把剩余字段原样作为 cindy_scheduler 的 schedule_create 参数。若 schedule_create 因 NO_PROVIDER_FOR_AGENT、PROVIDER_ROUTE_UNAVAILABLE 或模型不存在失败：用 fallback 覆盖 agentKind/model/providerId/effort 再创建一次，并把 fallbackUsed=true 与 fallbackReason=<错误原文> 写入结果文件；其它错误不得换模型，直接 blocked。不要静默换其它模型。sessions.dispatch 不得携带 model/effort/providerId。把工具返回原样存成文件后运行 \`${helper} --home ${quotedHome} bind-schedule --pr ${prNumber} --node-id ${nodeId}${dispatchFlag} --result <文件>\`。bind 若返回 busy（状态锁占用）：等 1 分钟后重跑同一 bind-schedule 命令。bind 若返回 owner-conflict（本 PR 已由他人持有）：立刻停止并回复一句说明。之后本 PR 的所有反馈只会投递到你这里（每 5 分钟由你的轮询脚本检查）。${watchScheduleConstraint()}`;
 }
 export function watchSuccessorMessage({ prNumber, predecessorId, reason, summary }) {
   return `你是 PR #${prNumber} 的接班修复 session，前任 ${predecessorId} 已不可用（${reason}）；先读本 PR 状态摘要 ${summary ?? '…'}。若状态为 awaiting-maintainer-approval，等待维护者审批，不要改代码、不要催审。再执行第 0 步。${watchScheduleConstraint()}`;
@@ -575,6 +566,9 @@ export function normalizePollSnapshot(payload) {
   return {
     state: node.state, isDraft: node.isDraft, headRefOid: node.headRefOid, baseRefOid: node.baseRefOid,
     mergeable: node.mergeable, labels,
+    isCrossRepository: node.isCrossRepository,
+    headRepository: node.headRepository,
+    headRepositoryOwner: node.headRepositoryOwner ?? (node.headRepository?.owner ? { login: node.headRepository.owner.login } : undefined),
     checks: normalizeChecks(checks),
     commentCount: comments?.totalCount ?? comments?.length ?? node.commentCount ?? 0,
     reviewCount: reviews?.totalCount ?? reviews?.length ?? node.reviewCount ?? 0,
@@ -600,7 +594,7 @@ export function pollFingerprint(snapshot) {
   });
 }
 function* fetchPollSnapshot({ nodeId, ghFn }) {
-  const query = 'query($id:ID!){node(id:$id){... on PullRequest{state isDraft headRefOid baseRefOid mergeable labels(first:50){pageInfo{hasNextPage} nodes{name}} comments(last:1){totalCount nodes{updatedAt}} reviews(last:1){totalCount nodes{updatedAt}} reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved comments(last:1){nodes{updatedAt}}}} commits(last:1){nodes{commit{checkSuites(first:30){pageInfo{hasNextPage} nodes{checkRuns(first:40){pageInfo{hasNextPage} nodes{name status conclusion databaseId detailsUrl}}}}}}}}}}';
+  const query = 'query($id:ID!){node(id:$id){... on PullRequest{state isDraft headRefOid baseRefOid mergeable isCrossRepository headRepository{name owner{login}} labels(first:50){pageInfo{hasNextPage} nodes{name}} comments(last:1){totalCount nodes{updatedAt}} reviews(last:1){totalCount nodes{updatedAt}} reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved comments(last:1){nodes{updatedAt}}}} commits(last:1){nodes{commit{checkSuites(first:30){pageInfo{hasNextPage} nodes{checkRuns(first:40){pageInfo{hasNextPage} nodes{name status conclusion databaseId detailsUrl}}}}}}}}}}';
   const raw = yield () => ghFn(['api', 'graphql', '-f', `query=${query}`, '-F', `id=${nodeId}`]);
   return normalizePollSnapshot(JSON.parse(raw));
 }
@@ -609,16 +603,17 @@ function hasWatchOff({ home, number, comments, author, labels } = {}) {
   return isOptedOut({ home, number, comments, author });
 }
 
-function dispatchIntent({ pr, mapping, fresh, now, paths, dryRun, messagePrefix = '' }) {
-  const dispatchId = `${dryRun ? 'dry' : 'live'}-${pr.number}-${now}`;
+function dispatchIntent({ pr, mapping, fresh, now, paths, dryRun, messagePrefix = '', collected } = {}) {
+  const headPr = prWithHeadRepo(pr, collected);
+  const dispatchId = `${dryRun ? 'dry' : 'live'}-${headPr.number}-${now}`;
   const taskPath = path.join(paths.stateDir, 'tasks', `${dispatchId}.json`);
   const prefix = messagePrefix?.includes('bind-schedule')
     ? messagePrefix.replace(/--dispatch-id <dispatchId>/g, `--dispatch-id ${dispatchId}`)
     : messagePrefix;
-  const pending = { dispatchId, params: dispatchParams({ pr, mapping, fresh, now, taskPath, home: paths.home, messagePrefix: prefix }), at: now, taskPath };
+  const pending = { dispatchId, params: dispatchParams({ pr: headPr, mapping, fresh, now, taskPath, home: paths.home, messagePrefix: prefix }), at: now, taskPath };
   if (!dryRun) {
     fs.mkdirSync(path.dirname(taskPath), { recursive: true });
-    atomic(taskPath, JSON.stringify({ dispatchId, nodeId: pr.id, number: pr.number, repo: REPO, headRefOid: pr.headRefOid, headRefName: pr.headRefName, headRepo: headRepoOf(pr), headOwner: headOwnerOf(pr), feedback: fresh, repairPolicy: taskRepairPolicy({ headRefOid: pr.headRefOid, feedback: fresh }), params: pending.params, createdAt: now }));
+    atomic(taskPath, JSON.stringify({ dispatchId, nodeId: headPr.id, number: headPr.number, repo: REPO, headRefOid: headPr.headRefOid, headRefName: headPr.headRefName, headRepo: headRepoOf(headPr), headOwner: headOwnerOf(headPr), feedback: fresh, repairPolicy: taskRepairPolicy({ headRefOid: headPr.headRefOid, feedback: fresh }), params: pending.params, createdAt: now }));
   }
   return pending;
 }
@@ -683,9 +678,6 @@ export function applyDispatchReceipt({ state, pr, mapping, receipt, now, cursor,
     wasDraft: false,
     admissionVerified: true,
     admissionReason: collected?.admissionReason ?? previous.admissionReason ?? 'required-ci-green',
-    scheduleModel: receipt.modelFallback
-      ? { ...SCHEDULE_MODEL_FALLBACK, fallback: true, reason: receipt.modelFallbackReason ?? null }
-      : previous.scheduleModel ?? { ...SCHEDULE_MODEL_PRIMARY, fallback: false, reason: null },
     lastDispatch: {
       at: now,
       wakeKind: receipt.wake_kind ?? null,
@@ -860,13 +852,19 @@ export function* processPr({
     report.push({ number: pr.number, dispatch: {attempted:false,reason} });
     return;
   }
-  if (hasWatchOff({ home: paths.home, number: pr.number, comments: collected.comments, author: viewer, labels: collected.labels })) {
+  const watchOff = hasWatchOff({ home: paths.home, number: pr.number, comments: collected.comments, author: viewer, labels: collected.labels });
+  if (watchOff && watchOff.halt) {
+    report.push({ number: pr.number, nodeId: pr.id, dispatch: { attempted: false, reason: 'optout-error' }, error: watchOff.reason });
+    return;
+  }
+  if (watchOff) {
     previous = { ...base, labels: collected.labels ?? [], optOut: true };
     state.prs[key] = previous;
     persistState(state, paths);
     report.push({ number: pr.number, nodeId: pr.id, dispatch: { attempted: false, reason: 'opt-out' } });
     return;
   }
+  pr = prWithHeadRepo(pr, collected);
   const sameEpoch = !collected.pr || (previous.admissionEpoch === collected.pr.releaseEpoch && previous.wasDraft !== true);
   if (!sameEpoch) previous = {...previous, admissionVerified:false};
   const cursorBase = previous.wasDraft === true ? {} : (previous.feedbackCursor || {});
@@ -1042,7 +1040,7 @@ export function* processPr({
     dispatch = { attempted: false, bound: false, reason: 'needs-owner' };
   } else if (shouldDispatch) {
     const prefix = [reclaimNote(previous, pr.headRefName), messagePrefix].filter(Boolean).join('\n');
-    const pending = { ...dispatchIntent({ pr, mapping, fresh, now, paths, dryRun, messagePrefix: prefix }), cursor };
+    const pending = { ...dispatchIntent({ pr, mapping, fresh, now, paths, dryRun, messagePrefix: prefix, collected }), cursor };
     previous = { ...previous, pendingDispatch: pending };
     if (dryRun) {
       dispatch = { attempted: false, bound: false, reason: 'dry-run', pending };
@@ -1248,10 +1246,15 @@ export function* pollWorkflow({
     return { mode: 'poll', dispatch: false, prs: [{ number, nodeId, needsOwner: true, dispatch: { attempted: false, reason: 'needs-owner' } }] };
   }
   const viewer = String(yield () => ghFn(['api', 'user', '-q', '.login'])).trim();
+  const headRepository = normalized.headRepository ?? previous.headRepository;
+  const headRepositoryOwner = normalized.headRepositoryOwner
+    ?? (headRepository?.owner ? { login: headRepository.owner.login } : previous.headRepositoryOwner);
   const pr = {
     id: nodeId, number, headRefOid: normalized.headRefOid, baseRefOid: normalized.baseRefOid,
     headRefName: previous.headRefName, title: previous.title || `PR ${number}`, isDraft: normalized.isDraft === true,
     url: previous.url, state: normalized.state,
+    isCrossRepository: normalized.isCrossRepository ?? previous.isCrossRepository,
+    headRepository, headRepositoryOwner,
   };
   const state = { version: 2, repo: REPO, prs: { [String(nodeId)]: previous } };
   yield* processPr({
@@ -1646,10 +1649,10 @@ export function* discoverWorkflow({
 }
 
 export function scanOnce(options = {}) {
-  const dispatchFn = wrapDispatchModelFallback(options.dispatchFn);
-  const next = { ...options, dispatchFn };
-  const iterator = options.mode === 'poll' ? pollWorkflow(next)
-    : options.mode === 'discover' ? discoverWorkflow(next) : scanWorkflow(next);
+  const halted = haltExternal(options.paths);
+  if (halted) return halted;
+  const iterator = options.mode === 'poll' ? pollWorkflow(options)
+    : options.mode === 'discover' ? discoverWorkflow(options) : scanWorkflow(options);
   let step = iterator.next();
   while (!step.done) {
     let value;
@@ -1664,10 +1667,11 @@ export function scanOnce(options = {}) {
 export async function scanOnceAsync(options = {}) {
   const mode = options.mode ?? watcherMode();
   const workflow = mode === 'poll' ? pollWorkflow : mode === 'discover' ? discoverWorkflow : scanWorkflow;
+  const halted = haltExternal(options.paths);
+  if (halted) return halted;
   const iterator = workflow({
     collect: collectPrAsync,
     ...options,
-    dispatchFn: wrapDispatchModelFallback(options.dispatchFn),
   });
   let step = iterator.next();
   while (!step.done) {

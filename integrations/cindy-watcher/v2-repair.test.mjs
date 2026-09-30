@@ -295,6 +295,7 @@ test('cloneWorktree clones the PR fork and adds fetch-only upstream', (t) => {
     const worktree = watchWorktreePath(plugin, 790);
     if (args[0] === 'clone') fs.mkdirSync(worktree, { recursive: true });
     if (args.includes('--show-toplevel')) return worktree;
+    if (args.includes('get-url') && args.includes('--push') && args.includes('--all') && args.at(-1) === 'origin') return 'https://github.com/PraiseZhu/cindy-fork.git';
     if (args.includes('get-url') && args.includes('--push')) return 'DISABLED';
     if (args.includes('get-url') && args.includes('upstream')) return 'https://github.com/makecindy/cindy.git';
     if (args.includes('get-url')) return 'https://github.com/PraiseZhu/cindy-fork.git';
@@ -321,6 +322,7 @@ test('pushIfNeeded pushes HEAD:refs/heads/<headRef> to the fork, never the base'
   const gitFn = (_bin, args) => {
     calls.push(args);
     if (args.includes('--show-toplevel')) return worktree;
+    if (args.includes('get-url') && args.includes('--push') && args.includes('--all') && args.at(-1) === 'origin') return 'https://github.com/PraiseZhu/cindy-fork.git';
     if (args.includes('get-url') && args.includes('--push')) return 'DISABLED';
     if (args.includes('get-url') && args.includes('upstream')) return 'https://github.com/makecindy/cindy.git';
     if (args.includes('get-url')) return 'https://github.com/PraiseZhu/cindy-fork.git';
@@ -334,7 +336,8 @@ test('pushIfNeeded pushes HEAD:refs/heads/<headRef> to the fork, never the base'
     return '';
   };
   pushIfNeeded(worktree, task, HEAD, REMOTE, gitFn);
-  assert.ok(calls.some((args) => args.includes('push') && args.includes('origin') && args.includes('HEAD:refs/heads/fix/x')));
+  assert.ok(calls.some((args) => args.includes('push') && args.includes('https://github.com/PraiseZhu/cindy-fork.git') && args.includes('HEAD:refs/heads/fix/x')));
+  assert.equal(calls.some((args) => args.includes('push') && args.includes('origin')), false);
   assert.throws(
     () => pushIfNeeded(worktree, task, HEAD, REMOTE, gitFn, 'https://github.com/makecindy/cindy.git'),
     /refusing to push to base repo/,
@@ -358,10 +361,11 @@ test('cleanup removes only a clean worktree', (t) => {
   const calls = [];
   cleanupWatch({
     home, pr: 790,
-    ghFn: () => JSON.stringify({ state: 'CLOSED' }),
+    ghFn: () => JSON.stringify({ state: 'MERGED', headRefName: 'fix/x' }),
     gitFn: (_bin, args) => {
       calls.push(args);
       if (args.includes('--porcelain')) return '';
+      if (args.includes('rev-list')) return '';
       if (args.includes('--git-common-dir')) throw new Error('not a linked worktree');
       return '';
     },
@@ -393,6 +397,7 @@ function prepareFns(plugin, worktree) {
   const gitFn = (_bin, args) => {
     if (args[0] === 'clone') fs.mkdirSync(worktree, { recursive: true });
     if (args.includes('--show-toplevel')) return worktree;
+    if (args.includes('get-url') && args.includes('--push') && args.includes('--all') && args.at(-1) === 'origin') return 'https://github.com/PraiseZhu/cindy-fork.git';
     if (args.includes('get-url') && args.includes('--push')) return 'DISABLED';
     if (args.includes('get-url') && args.includes('upstream')) return 'https://github.com/makecindy/cindy.git';
     if (args.includes('get-url')) return 'https://github.com/PraiseZhu/cindy-fork.git';

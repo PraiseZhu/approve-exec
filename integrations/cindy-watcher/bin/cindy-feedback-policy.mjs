@@ -9,25 +9,31 @@ const severityHeading = new RegExp('^(?:#{1,6}\\s+)?(?:[-*+]\\s+|\\d+[.)]\\s+)?(
 const verdictHeading = /^## 🤖 自动 Review 结论[：:]\s*(\S+)\s*$/m;
 const AUTHORIZED = new Set(['P0', 'P1', 'P2']);
 
+export function isBotActor(author) {
+  if (author == null) return false;
+  if (typeof author === 'string') return author.endsWith('[bot]');
+  if (author.__typename === 'Bot' || author.type === 'Bot') return true;
+  return typeof author.login === 'string' && author.login.endsWith('[bot]');
+}
 export function normalizeActorLogin(author) {
   if (author == null) return null;
   if (typeof author === 'string') return author;
   const login = author.login;
   if (typeof login !== 'string' || !login) return null;
-  const isBot = author.__typename === 'Bot' || author.type === 'Bot';
-  if (isBot && !login.endsWith('[bot]')) return `${login}[bot]`;
+  if (isBotActor(author) && !login.endsWith('[bot]')) return `${login}[bot]`;
   return login;
 }
 
 export function isGreptileAuthor(author) {
+  if (!isBotActor(author)) return false;
   const login = normalizeActorLogin(author);
   return login === 'greptile-apps' || login === 'greptile-apps[bot]';
 }
 function trustedReviewer(item) {
   const author = item.user ?? item.author;
+  if (!isBotActor(author)) return false;
   const login = normalizeActorLogin(author);
-  return item.source === 'greptile' || isGreptileAuthor(author)
-    || login === 'github-actions' || login === 'github-actions[bot]';
+  return isGreptileAuthor(author) || login === 'github-actions' || login === 'github-actions[bot]';
 }
 function visibleLines(body) {
   const lines = body.replace(/<!--[^]*?-->/g, '').split(/\r?\n|\\n/);

@@ -5,6 +5,7 @@ import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {acquireLock, anyLiveRuntimeLock, DEPLOY_LOCK_NAME} from './bin/cindy-state.mjs';
 const here=path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_RUNTIME='/Users/praise/AI-Agent/Claude/projects/Project CINDY/_ops/cindy-watcher';
 export const FILES=['cindy-feedback-policy.mjs','cindy-ci.mjs','cindy-pr-policy.mjs','cindy-pr-snapshot.mjs','cindy-repair.mjs','cindy-review-resolve.mjs','cindy-state.mjs','cindy-ownership.mjs','cindy-watcher.mjs','cindy-review-status.mjs','session-title.mjs','cindy-watch-script.py','protocol.py','session-title-maintenance.py'];
@@ -103,6 +104,14 @@ export function apply(plan){
  validatePlan(plan);
  fs.mkdirSync(path.join(plan.home,'bin'),{recursive:true,mode:0o700});
  fs.mkdirSync(path.join(plan.home,'state'),{recursive:true,mode:0o700});
+ if(anyLiveRuntimeLock(plan.home)) throw Error('runtime lock held');
+ const deployLock=acquireLock(plan.home,DEPLOY_LOCK_NAME);
+ if(deployLock.held) throw Error('deploy lock held');
+ try{
+ return applyLocked(plan);
+ }finally{deployLock.release();}
+}
+function applyLocked(plan){
  const state=path.join(plan.home,'state/state.json'),lease=path.join(plan.home,'state/lease');
  const record=path.join(plan.home,'deployments',plan.id),owner=`${process.pid} ${plan.id}\n`;
  const check=()=>{

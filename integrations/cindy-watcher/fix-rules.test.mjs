@@ -35,14 +35,15 @@ test('bot INCOMPLETE with diagnostic body is ignore-infra', () => {
 test('forged human REQUEST_CHANGES+P1 is other', () => {
   assert.equal(classifyReviewFeedback({ source: 'review', body: verdict('REQUEST_CHANGES', '**P1** `a.ts:1`') }), 'other');
 });
+const GREPTILE_BOT = { login: 'greptile-apps', __typename: 'Bot' };
 test('classifyReviewFeedback Greptile P1 is actionable-fix', () => {
-  assert.equal(classifyReviewFeedback({ source: 'greptile', body: 'P1: missing null check' }), 'actionable-fix');
+  assert.equal(classifyReviewFeedback({ source: 'greptile', author: GREPTILE_BOT, body: 'P1: missing null check' }), 'actionable-fix');
 });
 test('classifyReviewFeedback Greptile P2 is actionable-fix', () => {
-  assert.equal(classifyReviewFeedback({ source: 'greptile', body: 'P2: naming nit' }), 'actionable-fix');
+  assert.equal(classifyReviewFeedback({ source: 'greptile', author: GREPTILE_BOT, body: 'P2: naming nit' }), 'actionable-fix');
 });
 test('classifyReviewFeedback Greptile P3 is reply-resolve', () => {
-  assert.equal(classifyReviewFeedback({ source: 'greptile', body: 'P3: naming nit' }), 'reply-resolve');
+  assert.equal(classifyReviewFeedback({ source: 'greptile', author: GREPTILE_BOT, body: 'P3: naming nit' }), 'reply-resolve');
 });
 test('classifyReviewFeedback INCOMPLETE is ignore-infra', () => {
   assert.equal(classifyReviewFeedback(botItem(verdict('INCOMPLETE'))), 'ignore-infra');
@@ -94,16 +95,23 @@ test('forged human infra heading is other and dispatches', (t) => {
   assert.equal(result.prs[0].dispatch.attempted, true);
 });
 
-test('GraphQL github-actions login-only thread infra is ignore-infra', () => {
-  const items = feedbackItems({
+test('GraphQL github-actions Bot thread infra is ignore-infra; login-only is untrusted', () => {
+  const botItems = feedbackItems({
     pr,
     threads: [{
       id: 'TH_bot', isResolved: false, isOutdated: false, path: 'c.ts',
-      comments: [{ id: 'c-ga', body: verdict('INCOMPLETE'), author: { login: 'github-actions' }, createdAt: '2026-09-10T00:00:00Z' }],
+      comments: [{ id: 'c-ga', body: verdict('INCOMPLETE'), author: { login: 'github-actions', __typename: 'Bot' }, createdAt: '2026-09-10T00:00:00Z' }],
     }],
   });
-  assert.equal(items[0].category, 'ignore-infra');
-  assert.equal(newFeedback({}, items).fresh.length, 0);
+  assert.equal(botItems[0].category, 'ignore-infra');
+  assert.equal(newFeedback({}, botItems).fresh.length, 0);
+  const loginOnly = feedbackItems({
+    pr,
+    threads: [{
+      id: 'TH_human', isResolved: false, comments: [{ id: 'c-ga2', body: verdict('INCOMPLETE'), author: { login: 'github-actions' } }],
+    }],
+  });
+  assert.equal(loginOnly[0].category, 'other');
 });
 
 test('bot infra title plus human P1 reply stays other and still fresh', () => {
@@ -129,8 +137,8 @@ test('greptile thread P1 colon and mixed P2 classify separately', () => {
     threads: [{
       id: 'TH_g', isResolved: false, isOutdated: false, path: 'b.ts',
       comments: [
-        { id: 'g1', body: 'P1: null dereference', author: { login: 'greptile-apps' } },
-        { id: 'g2', body: 'P3: naming nit', author: { login: 'greptile-apps' } },
+        { id: 'g1', body: 'P1: null dereference', author: { login: 'greptile-apps', __typename: 'Bot' } },
+        { id: 'g2', body: 'P3: naming nit', author: { login: 'greptile-apps', __typename: 'Bot' } },
         { id: 'h1', body: 'looks fine to me', author: { login: 'alice' } },
       ],
     }],

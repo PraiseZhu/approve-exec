@@ -74,9 +74,9 @@ test('human and stale review cannot grant bot code authority', () => {
   assert.equal(feedbackRepairPolicy({ ...item('**P1** bug'), sha: 'b'.repeat(40) }, { headSha: head }).canChangeCode, false);
 });
 test('Greptile REST/GraphQL badge and heading forms are recognized', () => {
-  for (const login of ['greptile-apps', 'greptile-apps[bot]']) {
+  for (const author of [{ login: 'greptile-apps', __typename: 'Bot' }, { login: 'greptile-apps[bot]', type: 'Bot' }]) {
     for (const body of ['![P1 Badge](https://img.shields.io/badge/P1-orange) null dereference', '### **[P1]** Null dereference', '[P1] Null dereference', 'P1: Null dereference', 'Severity: HIGH\nNull dereference']) {
-      assert.equal(feedbackRepairPolicy({ source: 'thread', user: { login }, body }).action, 'code-fix', body);
+      assert.equal(feedbackRepairPolicy({ source: 'thread', user: author, body }).action, 'code-fix', body);
     }
   }
 });

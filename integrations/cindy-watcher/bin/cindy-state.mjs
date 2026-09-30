@@ -6,6 +6,7 @@ import { createHash, randomBytes } from 'node:crypto';
 // Shared by watcher (writes it) and repair helper (refuses superseded tasks).
 export const AUTHOR_RECLAIMED = 'author-reclaimed';
 export const PR_LOCK_TOKEN_ENV = 'CINDY_PR_LOCK_TOKEN';
+export const DEPLOY_LOCK_NAME = 'deploy';
 
 export function statePaths(home) {
   const stateDir = path.join(home, 'state');
@@ -82,6 +83,22 @@ export function acquireLock(home, name, env = process.env) {
   }
 }
 
+export function lockStatus(home, name) {
+  const lockPath = path.join(statePaths(home).locksDir, `${name}.lock`);
+  if (!fs.existsSync(lockPath)) return { exists: false, live: false, pid: null };
+  const previous = fs.readFileSync(lockPath, 'utf8');
+  const pid = Number(previous.split(' ')[0]);
+  return { exists: true, live: pidAlive(pid), pid: Number.isSafeInteger(pid) ? pid : null };
+}
+export function anyLiveRuntimeLock(home) {
+  const { locksDir } = statePaths(home);
+  if (!fs.existsSync(locksDir)) return false;
+  for (const name of fs.readdirSync(locksDir).filter((item) => item.endsWith('.lock'))) {
+    if (name === `${DEPLOY_LOCK_NAME}.lock`) continue;
+    if (lockStatus(home, name.slice(0, -'.lock'.length)).live) return true;
+  }
+  return false;
+}
 export function withLock(home, name, fn) {
   const lock = acquireLock(home, name);
   if (lock.held) return { held: true };

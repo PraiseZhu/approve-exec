@@ -27,20 +27,37 @@ function addRequired(required, context, appId, source) {
   if (!item.sources.includes(source)) item.sources.push(source);
 }
 
-function* loadBranchRequired({ gh, repo, baseRefName, branchPath, isProtected, into }) {
-  const rulesPages = parse(yield () => gh(['api', `repos/${repo}/rules/branches/${encodeURIComponent(baseRefName)}?per_page=100`, '--paginate', '--slurp']));
-  assert(Array.isArray(rulesPages) && rulesPages.every(Array.isArray), 'incomplete effective rules');
-  for (const rule of rulesPages.flat()) {
+export function isGhHttp404(error) {
+  if (!error) return false;
+  if (error.status === 404) return true;
+  const text = `${error.message ?? ''}\n${error.stderr ?? ''}\n${error.stdout ?? ''}`;
+  return /\bHTTP\s*404\b/i.test(text) || /Branch not protected/i.test(text);
+}
+function flattenRules(raw) {
+  const value = parse(raw);
+  assert(Array.isArray(value), 'incomplete effective rules');
+  if (value.length === 0) return [];
+  if (value.every(Array.isArray)) return value.flat();
+  assert(value.every((rule) => rule && typeof rule.type === 'string'), 'invalid effective rule');
+  return value;
+}
+function* loadBranchRequired({ gh, repo, baseRefName, branchPath, into }) {
+  let rules;
+  try {
+    rules = flattenRules(yield () => gh(['api', `repos/${repo}/rules/branches/${encodeURIComponent(baseRefName)}`, '--paginate', '--slurp']));
+  } catch (error) {
+    throw new Error(`rules-api-failed: ${error.message}`);
+  }
+  for (const rule of rules) {
     assert(rule && typeof rule.type === 'string', 'invalid effective rule');
     if (rule.type !== 'required_status_checks') continue;
     assert(Array.isArray(rule.parameters?.required_status_checks), 'invalid ruleset required checks');
     for (const check of rule.parameters.required_status_checks) addRequired(into, check.context, check.integration_id ?? null, `ruleset:${rule.ruleset_id ?? 'effective'}`);
   }
-  if (!isProtected) return into;
   let protection;
   try { protection = parse(yield () => gh(['api', `${branchPath}/protection`])); }
   catch (error) {
-    if (error.status === 404 && error.apiMessage === 'Branch not protected') protection = { required_status_checks: null };
+    if (isGhHttp404(error)) protection = { required_status_checks: null };
     else throw error;
   }
   assert(protection && typeof protection === 'object', 'unknown classic protection');
@@ -61,10 +78,8 @@ export function* collectCindyPolicySteps({ repo, number, gh }) {
     const before = parse(yield () => gh(viewArgs));
     assert(before.id && before.number === Number(number) && sha(before.headRefOid) && sha(before.baseRefOid) && before.baseRefName, 'incomplete PR identity');
     const branchPath = `repos/${repo}/branches/${encodeURIComponent(before.baseRefName)}`;
-    const branch = parse(yield () => gh(['api', branchPath]));
-    assert(typeof branch.protected === 'boolean', 'unknown protection');
     const required = new Map();
-    const branchArgs = { gh, repo, baseRefName: before.baseRefName, branchPath, isProtected: branch.protected, into: required };
+    const branchArgs = { gh, repo, baseRefName: before.baseRefName, branchPath, into: required };
     yield* loadBranchRequired(branchArgs);
     const firstKeys = requiredKeySet(required);
     if (!required.size) return { status: 'unknown', reason: 'no-required-checks-from-rules', repo, prNodeId: before.id, number: Number(number), headSha: before.headRefOid, baseSha: before.baseRefOid, baseRefName: before.baseRefName, checkedAt };
