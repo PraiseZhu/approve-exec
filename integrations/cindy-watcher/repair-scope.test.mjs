@@ -4,8 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { apply, FILES, stateFingerprint, verify } from './deploy.mjs';
 import { finalize, recheck, repairPaths, validate, watchWorktreePath } from './bin/cindy-repair.mjs';
-import { writePr } from './bin/cindy-state.mjs';
+import { acquireLock, DEPLOY_LOCK_NAME, HELPER_LOCK_NAME, lockStatus, writePr } from './bin/cindy-state.mjs';
 
 const REPO = 'makecindy/cindy';
 const finding = (priority, key = `thread:${priority}`) => ({
@@ -216,4 +217,43 @@ test('recheck cannot certify a changed HEAD after its feedback loses repair auth
   const pushesBefore = f.pushCalls.length;
   assert.throws(() => recheck(f.options), /repair.scope|code.*authority|scope.*code|P0\/P1|P0.*P1|代码权限|无.*权限|no.change/i);
   assert.equal(f.pushCalls.length, pushesBefore);
+});
+
+test('apply during validate preflight is refused; validate still writes a receipt', (t) => {
+  const f = fixture(t);
+  fs.mkdirSync(path.join(f.options.home, 'bin'), { recursive: true });
+  for (const name of FILES) fs.writeFileSync(path.join(f.options.home, 'bin', name), 'old');
+  fs.writeFileSync(path.join(f.options.home, 'state/index.json'), '{"version":2}\n');
+  const plan = {
+    version: 1, home: f.options.home, database: path.join(f.options.home, 'metadata.db'), id: 'lock-test',
+    files: verify(f.options.home), stateSha: stateFingerprint(f.options.home), sessionIds: [],
+  };
+  let applyError;
+  const result = validate({
+    ...f.options,
+    runFn: () => {
+      try { apply(plan); } catch (error) { applyError = error; }
+      return 'preflight ok\n';
+    },
+  });
+  assert.match(String(applyError?.message ?? applyError), /runtime lock held/);
+  assert.equal(result.status, 'pass');
+  assert.ok(result.receiptPath);
+  assert.equal(fs.existsSync(result.receiptPath), true);
+  assert.equal(lockStatus(f.options.home, HELPER_LOCK_NAME).live, false);
+  assert.equal(fs.readFileSync(path.join(f.options.home, 'bin', FILES[0]), 'utf8'), 'old');
+});
+
+test('validate refuses immediately when deploy.lock is live and writes no receipt', (t) => {
+  const f = fixture(t);
+  const deploy = acquireLock(f.options.home, DEPLOY_LOCK_NAME);
+  t.after(() => deploy.release());
+  let preflightRuns = 0;
+  assert.throws(
+    () => validate({ ...f.options, runFn: () => { preflightRuns++; return 'passed'; } }),
+    /deploy lock held/,
+  );
+  assert.equal(preflightRuns, 0);
+  const dir = path.join(f.paths.validations, f.task.dispatchId);
+  assert.equal(fs.existsSync(dir), false);
 });

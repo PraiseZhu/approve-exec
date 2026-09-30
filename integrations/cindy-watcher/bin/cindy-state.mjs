@@ -7,6 +7,7 @@ import { createHash, randomBytes } from 'node:crypto';
 export const AUTHOR_RECLAIMED = 'author-reclaimed';
 export const PR_LOCK_TOKEN_ENV = 'CINDY_PR_LOCK_TOKEN';
 export const DEPLOY_LOCK_NAME = 'deploy';
+export const HELPER_LOCK_NAME = 'helper';
 
 export function statePaths(home) {
   const stateDir = path.join(home, 'state');
