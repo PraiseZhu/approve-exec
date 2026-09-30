@@ -37,12 +37,13 @@ helper 的 complete 仅表示一轮修复完成；不会合并 PR、不会开 au
 
 ## 发现器 / 每 PR 调度
 
-发现器：`workingDir` = Cindy 本地仓，cron `*/5 * * * *`，timeout 180s，command `cindy-watch-script.py --mode discover`。
+发现器：`workingDir` = Cindy 本地仓，cron `*/5 * * * *`，timeout 180s，command `cindy-watch-script.py --mode discover`。**部署时发现器调度用同一 primary**（`providerId=xd`，`model=openai/gpt-6-luna`，Cindy 界面显示为「Cindy AI」，`effort=max`）。
 
 每 PR 轮询由修复 session 用 `cindy-repair.mjs schedule-params` 生成后 `schedule_create`：
 
 - `name`: `Cindy watch #<N>`
-- `agentKind` `codex`，`model` `gpt-6-luna`，`providerId` `art-cindy`，`effort` `max`
+- primary：`agentKind` `codex`，`model` `openai/gpt-6-luna`，`providerId` `xd`（界面「Cindy AI」），`effort` `max`
+- fallback：`agentKind` `codex`，`model` `gpt-6-luna`，`providerId` `art-cindy`，`effort` `max`（仅当 schedule_create / 首轮 dispatch 报 `NO_PROVIDER_FOR_AGENT`、`PROVIDER_ROUTE_UNAVAILABLE` 或模型不存在时用一次；其它错误直接 blocked，不静默换模型）
 - `executionMode` `script`，`capabilities` `["sessions.dispatch"]`，禁止 `silentWhenIdle`
 - command 形态：
 

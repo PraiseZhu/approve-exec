@@ -14,6 +14,24 @@ import { acquireLock, AUTHOR_RECLAIMED, readPr, writePr } from './cindy-state.mj
 export const REPO = 'makecindy/cindy';
 export const DEFAULT_PLUGIN_REPO = '/Users/praise/AI-Agent/Claude/projects/Project CINDY';
 export const DEFAULT_PREFLIGHT = '/Users/praise/.claude/skills/cindy-pr-preflight/preflight.sh';
+export const SCHEDULE_MODEL_PRIMARY = Object.freeze({
+  agentKind: 'codex',
+  model: 'openai/gpt-6-luna',
+  providerId: 'xd',
+  effort: 'max',
+});
+export const SCHEDULE_MODEL_FALLBACK = Object.freeze({
+  agentKind: 'codex',
+  model: 'gpt-6-luna',
+  providerId: 'art-cindy',
+  effort: 'max',
+});
+export function isScheduleModelUnavailable(error) {
+  const text = String(error?.message ?? error?.stderr ?? error ?? '');
+  const code = String(error?.code ?? error?.errorCode ?? '');
+  return /NO_PROVIDER_FOR_AGENT|PROVIDER_ROUTE_UNAVAILABLE/i.test(`${code} ${text}`)
+    || /模型不存在|unknown model|model (?:not found|does not exist|unavailable)|no provider for agent/i.test(text);
+}
 const GH = process.env.GH_BIN ?? 'gh';
 const GIT = process.env.GIT_BIN ?? 'git';
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
@@ -656,6 +674,12 @@ export function shellQuote(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
 
+export function scheduleCreatePayload(params) {
+  if (!params || typeof params !== 'object') fail('schedule params required');
+  const { fallback, fallbackUsed, fallbackReason, ...rest } = params;
+  void fallback; void fallbackUsed; void fallbackReason;
+  return rest;
+}
 export function scheduleParams({ home, pr, nodeId, env = process.env }) {
   const root = requireAbs(home, 'home');
   const plugin = pluginRepoPath(env);
@@ -668,15 +692,35 @@ export function scheduleParams({ home, pr, nodeId, env = process.env }) {
     cronExpr: '*/5 * * * *',
     timezone: 'Asia/Shanghai',
     recurring: true,
-    agentKind: 'codex',
-    model: 'gpt-6-luna',
-    providerId: 'art-cindy',
-    effort: 'max',
+    ...SCHEDULE_MODEL_PRIMARY,
+    fallback: { ...SCHEDULE_MODEL_FALLBACK },
     kind: 'cron',
     workingDir: plugin,
     useWorktree: false,
     bindToCurrentSession: true,
     notify: { desktop: false, feishu: false },
+  };
+}
+export function scheduleModelFromResult(result = {}) {
+  const fallbackUsed = result.fallbackUsed === true
+    || (result.providerId === SCHEDULE_MODEL_FALLBACK.providerId && result.model === SCHEDULE_MODEL_FALLBACK.model);
+  const echoed = result.model || result.providerId || result.fallbackUsed === true;
+  if (echoed) {
+    const model = result.model ?? (fallbackUsed ? SCHEDULE_MODEL_FALLBACK.model : SCHEDULE_MODEL_PRIMARY.model);
+    const providerId = result.providerId ?? (fallbackUsed ? SCHEDULE_MODEL_FALLBACK.providerId : SCHEDULE_MODEL_PRIMARY.providerId);
+    const allowedModel = model === SCHEDULE_MODEL_PRIMARY.model || model === SCHEDULE_MODEL_FALLBACK.model;
+    const allowedProvider = providerId === SCHEDULE_MODEL_PRIMARY.providerId || providerId === SCHEDULE_MODEL_FALLBACK.providerId;
+    if (!allowedModel || !allowedProvider) fail('schedule model is neither primary nor fallback; refusing silent model switch');
+    if (fallbackUsed && !String(result.fallbackReason ?? '').trim()) fail('fallback schedule requires fallbackReason');
+  }
+  const route = fallbackUsed ? SCHEDULE_MODEL_FALLBACK : SCHEDULE_MODEL_PRIMARY;
+  return {
+    agentKind: result.agentKind ?? route.agentKind,
+    model: result.model ?? route.model,
+    providerId: result.providerId ?? route.providerId,
+    effort: result.effort ?? route.effort,
+    fallback: fallbackUsed,
+    reason: fallbackUsed ? String(result.fallbackReason).trim() : null,
   };
 }
 
@@ -731,10 +775,12 @@ export function bindSchedule({
         if (!awaiting && !needsHuman) fail(`owner-conflict: 本 PR 已由 ${previous.sessionId} 持有，你应停止`, 3);
       }
     }
+    const scheduleModel = scheduleModelFromResult(result);
     const entry = {
       ...previous, number: Number(pr), nodeId,
       scheduleId: result.id ?? result.scheduleId,
       sessionId: incoming, claimedAt: now, pendingDispatch: null, dispatchError: null, needsHuman: null,
+      scheduleModel,
     };
     writePr(root, nodeId, entry);
     return entry;

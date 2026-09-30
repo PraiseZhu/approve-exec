@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   bindSchedule, cleanupWatch, clearOwnerUnknown, cloneWorktree, DEFAULT_PLUGIN_REPO, prepare, pushIfNeeded,
-  repairPaths, scheduleParams, shellQuote, watchBranchName, watchWorktreePath,
+  repairPaths, scheduleCreatePayload, scheduleModelFromResult, scheduleParams, shellQuote,
+  SCHEDULE_MODEL_FALLBACK, SCHEDULE_MODEL_PRIMARY, watchBranchName, watchWorktreePath,
 } from './bin/cindy-repair.mjs';
 import { readPr, statePaths, writePr } from './bin/cindy-state.mjs';
 
@@ -33,10 +34,15 @@ test('schedule-params matches v2 fields and omits silentWhenIdle', (t) => {
   assert.equal(out.cronExpr, '*/5 * * * *');
   assert.equal(out.timezone, 'Asia/Shanghai');
   assert.equal(out.recurring, true);
-  assert.equal(out.agentKind, 'codex');
-  assert.equal(out.model, 'gpt-6-luna');
-  assert.equal(out.providerId, 'art-cindy');
+  assert.equal(out.agentKind, SCHEDULE_MODEL_PRIMARY.agentKind);
+  assert.equal(out.model, 'openai/gpt-6-luna');
+  assert.equal(out.providerId, 'xd');
   assert.equal(out.effort, 'max');
+  assert.deepEqual(out.fallback, { ...SCHEDULE_MODEL_FALLBACK });
+  assert.equal(out.fallback.model, 'gpt-6-luna');
+  assert.equal(out.fallback.providerId, 'art-cindy');
+  assert.equal(out.fallback.effort, 'max');
+  assert.equal(Object.hasOwn(scheduleCreatePayload(out), 'fallback'), false);
   assert.equal(out.kind, 'cron');
   assert.equal(out.workingDir, DEFAULT_PLUGIN_REPO);
   assert.equal(out.useWorktree, false);
@@ -62,6 +68,47 @@ function schedFile(home, extra = {}) {
 function seedPending(home, dispatchId = 'disp-1', extra = {}) {
   writePr(home, 'PR_790', { number: 790, nodeId: 'PR_790', pendingDispatch: { status: 'awaiting-claim', dispatchId }, ...extra });
 }
+
+test('bind-schedule records primary model when scheduler does not echo route', (t) => {
+  const home = homeOf(t);
+  seedPending(home);
+  const first = bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath: schedFile(home), dispatchId: 'disp-1', now: '2026-09-28T00:00:00Z' });
+  assert.deepEqual(first.scheduleModel, { ...SCHEDULE_MODEL_PRIMARY, fallback: false, reason: null });
+});
+
+test('bind-schedule records fallback reason and refuses unknown models', (t) => {
+  const home = homeOf(t);
+  seedPending(home);
+  const resultPath = schedFile(home, {
+    ...SCHEDULE_MODEL_FALLBACK, fallbackUsed: true, fallbackReason: 'NO_PROVIDER_FOR_AGENT: xd',
+  });
+  const entry = bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, dispatchId: 'disp-1', now: '2026-09-28T00:00:00Z' });
+  assert.equal(entry.scheduleModel.fallback, true);
+  assert.equal(entry.scheduleModel.providerId, 'art-cindy');
+  assert.equal(entry.scheduleModel.model, 'gpt-6-luna');
+  assert.equal(entry.scheduleModel.effort, 'max');
+  assert.equal(entry.scheduleModel.reason, 'NO_PROVIDER_FOR_AGENT: xd');
+  writePr(home, 'PR_790', { number: 790, nodeId: 'PR_790', pendingDispatch: { status: 'awaiting-claim', dispatchId: 'disp-2' } });
+  fs.writeFileSync(resultPath, JSON.stringify({
+    ok: true, id: 'sched-x', executionMode: 'script', status: 'active',
+    targetSessionId: 'sess-a', scriptConfig: { command: 'python3 x.py --mode poll --pr 790 --node-id PR_790' },
+    ...SCHEDULE_MODEL_FALLBACK, fallbackUsed: true,
+  }));
+  assert.throws(
+    () => bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, dispatchId: 'disp-2', retryMs: 0 }),
+    /fallbackReason/,
+  );
+  fs.writeFileSync(resultPath, JSON.stringify({
+    ok: true, id: 'sched-y', executionMode: 'script', status: 'active',
+    targetSessionId: 'sess-a', scriptConfig: { command: 'python3 x.py --mode poll --pr 790 --node-id PR_790' },
+    model: 'gpt-4', providerId: 'other', effort: 'max',
+  }));
+  writePr(home, 'PR_790', { number: 790, nodeId: 'PR_790', pendingDispatch: { status: 'awaiting-claim', dispatchId: 'disp-3' } });
+  assert.throws(
+    () => bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, dispatchId: 'disp-3', retryMs: 0 }),
+    /neither primary nor fallback/,
+  );
+});
 
 test('bind-schedule accepts first owner and rejects a second live owner', (t) => {
   const home = homeOf(t);

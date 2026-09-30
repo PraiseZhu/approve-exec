@@ -73,6 +73,9 @@ test('unbound admitted PR creates with schedule-params and bind-schedule', (t) =
   assert.match(spaced, /第 0 步/);
   assert.match(spaced, /busy/);
   assert.match(spaced, /owner-conflict/);
+  assert.match(spaced, /fallback/);
+  assert.match(spaced, /NO_PROVIDER_FOR_AGENT/);
+  assert.match(spaced, /openai\/gpt-6-luna/);
   assert.match(spaced, /'\/tmp\/Project CINDY\/_ops\/cindy-watcher'/);
 });
 

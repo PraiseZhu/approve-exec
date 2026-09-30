@@ -14,7 +14,10 @@ import { collectPrSnapshot, collectPrOwnership } from './cindy-pr-snapshot.mjs';
 import { acquireLock, AUTHOR_RECLAIMED, listPrs, migrateLegacy, PR_LOCK_TOKEN_ENV, readPr, statePaths as v2StatePaths, withLock as withPrLock, writePr } from './cindy-state.mjs';
 import { feedbackRepairPolicy, taskRepairPolicy, isGreptileAuthor, normalizeActorLogin } from './cindy-feedback-policy.mjs';
 import { partitionAutoClose, autoCloseThreads } from './cindy-review-resolve.mjs';
-import { autoCleanupWatch, command as gitDefaultFn, pluginRepoPath, watchBranchName, watchWorktreePath } from './cindy-repair.mjs';
+import {
+  autoCleanupWatch, command as gitDefaultFn, pluginRepoPath, watchBranchName, watchWorktreePath,
+  SCHEDULE_MODEL_FALLBACK, SCHEDULE_MODEL_PRIMARY, isScheduleModelUnavailable,
+} from './cindy-repair.mjs';
 export const REPO = 'makecindy/cindy';
 const GH = process.env.GH_BIN ?? 'gh';
 
@@ -426,7 +429,46 @@ export function dispatchParams({ pr, mapping, fresh, now, taskPath, home, messag
     ].join('\n'),
   };
   if (mapping.sessionId) params.target_session_id = mapping.sessionId;
+  else {
+    Object.assign(params, SCHEDULE_MODEL_PRIMARY);
+    params.fallback = { ...SCHEDULE_MODEL_FALLBACK };
+  }
   return params;
+}
+
+export function wrapDispatchModelFallback(dispatchFn) {
+  if (typeof dispatchFn !== 'function') return dispatchFn;
+  return (params = {}, extra) => {
+    const isCreate = !params.target_session_id;
+    const { fallback: fallbackField, ...rest } = params;
+    const primary = isCreate ? { ...rest, ...SCHEDULE_MODEL_PRIMARY } : rest;
+    const fallbackRoute = fallbackField && typeof fallbackField === 'object'
+      ? {
+        agentKind: fallbackField.agentKind ?? SCHEDULE_MODEL_FALLBACK.agentKind,
+        model: fallbackField.model ?? SCHEDULE_MODEL_FALLBACK.model,
+        providerId: fallbackField.providerId ?? SCHEDULE_MODEL_FALLBACK.providerId,
+        effort: fallbackField.effort ?? SCHEDULE_MODEL_FALLBACK.effort,
+      }
+      : SCHEDULE_MODEL_FALLBACK;
+    const tag = (receipt, error) => ({
+      ...receipt,
+      modelFallback: true,
+      modelFallbackReason: String(error?.message ?? error).slice(0, 400),
+    });
+    const retry = (error) => {
+      if (!isCreate || !isScheduleModelUnavailable(error)) throw error;
+      const receipt = dispatchFn({ ...rest, ...fallbackRoute }, extra);
+      if (receipt?.then) return receipt.then((value) => tag(value, error));
+      return tag(receipt, error);
+    };
+    try {
+      const receipt = dispatchFn(primary, extra);
+      if (receipt?.then) return receipt.catch(retry);
+      return receipt;
+    } catch (error) {
+      return retry(error);
+    }
+  };
 }
 
 function shellQuote(value) {
@@ -439,7 +481,7 @@ export function watchGuideMessage({ home, prNumber, nodeId, dispatchId } = {}) {
   const helper = shellQuote(path.join(home, 'bin', 'cindy-repair.mjs'));
   const quotedHome = shellQuote(home);
   const dispatchFlag = dispatchId === null ? '' : (dispatchId ? ` --dispatch-id ${dispatchId}` : ' --dispatch-id <dispatchId>');
-  return `第 0 步（只做一次）：运行 \`node ${helper} --home ${quotedHome} schedule-params --pr ${prNumber} --node-id ${nodeId}\`，把输出 JSON 原样作为 cindy_scheduler 的 schedule_create 参数调用；把工具返回原样存成文件后运行 \`${helper} --home ${quotedHome} bind-schedule --pr ${prNumber} --node-id ${nodeId}${dispatchFlag} --result <文件>\`。bind 若返回 busy（状态锁占用）：等 1 分钟后重跑同一 bind-schedule 命令。bind 若返回 owner-conflict（本 PR 已由他人持有）：立刻停止并回复一句说明。之后本 PR 的所有反馈只会投递到你这里（每 5 分钟由你的轮询脚本检查）。${watchScheduleConstraint()}`;
+  return `第 0 步（只做一次）：运行 \`node ${helper} --home ${quotedHome} schedule-params --pr ${prNumber} --node-id ${nodeId}\`。输出 JSON 的顶层是 primary（providerId=xd，model=openai/gpt-6-luna，Cindy 界面显示为「Cindy AI」），另有 fallback 对象。先去掉 fallback 字段，把剩余字段原样作为 cindy_scheduler 的 schedule_create 参数。若 schedule_create 或本 session 首轮 dispatch 因 NO_PROVIDER_FOR_AGENT、PROVIDER_ROUTE_UNAVAILABLE 或模型不存在失败：用 fallback 覆盖 agentKind/model/providerId/effort 再创建一次，并把 fallbackUsed=true 与 fallbackReason=<错误原文> 写入结果文件；其它错误不得换模型，直接 blocked。不要静默换其它模型。把工具返回原样存成文件后运行 \`${helper} --home ${quotedHome} bind-schedule --pr ${prNumber} --node-id ${nodeId}${dispatchFlag} --result <文件>\`。bind 若返回 busy（状态锁占用）：等 1 分钟后重跑同一 bind-schedule 命令。bind 若返回 owner-conflict（本 PR 已由他人持有）：立刻停止并回复一句说明。之后本 PR 的所有反馈只会投递到你这里（每 5 分钟由你的轮询脚本检查）。${watchScheduleConstraint()}`;
 }
 export function watchSuccessorMessage({ prNumber, predecessorId, reason, summary }) {
   return `你是 PR #${prNumber} 的接班修复 session，前任 ${predecessorId} 已不可用（${reason}）；先读本 PR 状态摘要 ${summary ?? '…'}。若状态为 awaiting-maintainer-approval，等待维护者审批，不要改代码、不要催审。再执行第 0 步。${watchScheduleConstraint()}`;
@@ -641,6 +683,9 @@ export function applyDispatchReceipt({ state, pr, mapping, receipt, now, cursor,
     wasDraft: false,
     admissionVerified: true,
     admissionReason: collected?.admissionReason ?? previous.admissionReason ?? 'required-ci-green',
+    scheduleModel: receipt.modelFallback
+      ? { ...SCHEDULE_MODEL_FALLBACK, fallback: true, reason: receipt.modelFallbackReason ?? null }
+      : previous.scheduleModel ?? { ...SCHEDULE_MODEL_PRIMARY, fallback: false, reason: null },
     lastDispatch: {
       at: now,
       wakeKind: receipt.wake_kind ?? null,
@@ -1601,8 +1646,10 @@ export function* discoverWorkflow({
 }
 
 export function scanOnce(options = {}) {
-  const iterator = options.mode === 'poll' ? pollWorkflow(options)
-    : options.mode === 'discover' ? discoverWorkflow(options) : scanWorkflow(options);
+  const dispatchFn = wrapDispatchModelFallback(options.dispatchFn);
+  const next = { ...options, dispatchFn };
+  const iterator = options.mode === 'poll' ? pollWorkflow(next)
+    : options.mode === 'discover' ? discoverWorkflow(next) : scanWorkflow(next);
   let step = iterator.next();
   while (!step.done) {
     let value;
@@ -1617,7 +1664,11 @@ export function scanOnce(options = {}) {
 export async function scanOnceAsync(options = {}) {
   const mode = options.mode ?? watcherMode();
   const workflow = mode === 'poll' ? pollWorkflow : mode === 'discover' ? discoverWorkflow : scanWorkflow;
-  const iterator = workflow({ collect: collectPrAsync, ...options });
+  const iterator = workflow({
+    collect: collectPrAsync,
+    ...options,
+    dispatchFn: wrapDispatchModelFallback(options.dispatchFn),
+  });
   let step = iterator.next();
   while (!step.done) {
     let value;
