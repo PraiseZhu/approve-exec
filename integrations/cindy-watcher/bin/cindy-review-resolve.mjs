@@ -22,36 +22,17 @@ export function isAutoCloseEligible(item) {
     && typeof item.threadId === 'string' && item.threadId.length > 0;
 }
 
-function commentLogin(item) {
-  if (typeof item?.author === 'string') return item.author;
-  if (typeof item?.user === 'string') return item.user;
-  return item?.author?.login ?? item?.user?.login ?? null;
-}
-
-function isPrAuthorComment(item, prAuthor) {
-  const login = commentLogin(item);
-  return Boolean(prAuthor && login && login === prAuthor);
-}
-
 function commentsHasNextPage(thread) {
   return thread?.commentsHasNextPage === true || thread?.comments?.pageInfo?.hasNextPage === true;
 }
 
-export function isThreadAutoCloseEligible(items = [], { commentsHasNextPage: incomplete = false, prAuthor } = {}) {
+export function isThreadAutoCloseEligible(items = [], { commentsHasNextPage: incomplete = false } = {}) {
   if (incomplete) return false;
   if (!Array.isArray(items) || items.length === 0) return false;
-  let hasTrustedP3 = false;
-  for (const item of items) {
-    const severities = item?.repairPolicy?.severities ?? [];
-    if (severities.some((s) => s === 'P0' || s === 'P1' || s === 'P2')) return false;
-    if (isAutoCloseEligible(item)) { hasTrustedP3 = true; continue; }
-    if (isPrAuthorComment(item, prAuthor)) continue;
-    return false;
-  }
-  return hasTrustedP3;
+  return items.every((item) => isAutoCloseEligible(item));
 }
 
-export function partitionAutoClose(fresh = [], { allItems = fresh, threads = [], prAuthor } = {}) {
+export function partitionAutoClose(fresh = [], { allItems = fresh, threads = [] } = {}) {
   const byThread = new Map();
   for (const item of allItems) {
     if (!item?.threadId) continue;
@@ -62,7 +43,7 @@ export function partitionAutoClose(fresh = [], { allItems = fresh, threads = [],
   const incomplete = new Set((threads ?? []).filter(commentsHasNextPage).map((thread) => thread.id));
   const closable = new Set();
   for (const [threadId, items] of byThread) {
-    if (isThreadAutoCloseEligible(items, { commentsHasNextPage: incomplete.has(threadId), prAuthor })) {
+    if (isThreadAutoCloseEligible(items, { commentsHasNextPage: incomplete.has(threadId) })) {
       closable.add(threadId);
     }
   }

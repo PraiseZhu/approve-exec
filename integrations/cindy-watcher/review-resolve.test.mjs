@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { feedbackItems } from './bin/cindy-watcher.mjs';
 import { isAutoCloseEligible, isThreadAutoCloseEligible, partitionAutoClose, autoCloseThreads, autoCloseReplyText } from './bin/cindy-review-resolve.mjs';
-import { newFeedback, scanOnce, watcherPaths } from './bin/cindy-watcher.mjs';
+import { dispatchParams, newFeedback, scanOnce, watcherPaths } from './bin/cindy-watcher.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -106,31 +106,47 @@ test('incomplete thread comment pagination is fail-closed', () => {
   assert.equal(isThreadAutoCloseEligible(items, { commentsHasNextPage: true }), false);
 });
 
-test('trusted P3 plus PR author reply is still auto-close eligible', () => {
+test('bot P3 plus author do-not-resolve comment is not auto-closed', () => {
   const thread = {
     id: 't-author', isResolved: false, comments: [
+      { id: 'c-p3', author: GREPTILE_AUTHOR, body: 'P3: naming nit', createdAt: '2026-09-10T00:00:00Z' },
+      { id: 'c-owner', author: { login: 'owner' }, body: 'P1 security bug remains; do not resolve', createdAt: '2026-09-10T00:02:00Z' },
+    ],
+  };
+  const items = feedbackItems({ pr: PR, threads: [thread] });
+  assert.equal(isThreadAutoCloseEligible(items), false);
+  const { eligible, remaining } = partitionAutoClose(items, { allItems: items, threads: [thread] });
+  assert.equal(eligible.length, 0);
+  assert.ok(remaining.length >= 1);
+  assert.equal(items.find((item) => item.nativeId.endsWith('c-owner')).repairPolicy.canChangeCode, false);
+});
+
+test('bot P3 plus author ack is not auto-closed', () => {
+  const thread = {
+    id: 't-ack', isResolved: false, comments: [
       { id: 'c-p3', author: GREPTILE_AUTHOR, body: 'P3: naming nit', createdAt: '2026-09-10T00:00:00Z' },
       { id: 'c-owner', author: { login: 'owner' }, body: 'ack, will consider later', createdAt: '2026-09-10T00:02:00Z' },
     ],
   };
   const items = feedbackItems({ pr: PR, threads: [thread] });
-  assert.equal(isThreadAutoCloseEligible(items, { prAuthor: 'owner' }), true);
-  const { eligible, remaining } = partitionAutoClose(items, { allItems: items, threads: [thread], prAuthor: 'owner' });
-  assert.equal(eligible.length, 1);
-  assert.equal(remaining.length, 0);
+  const { eligible } = partitionAutoClose(items, { allItems: items, threads: [thread] });
+  assert.equal(eligible.length, 0);
 });
 
-test('resolved thread with unrepaired P1 is not ignore-infra and stays fresh', () => {
+test('resolved outdated P1 on old head is handled and not dispatched', () => {
+  const shaA = 'c'.repeat(40);
+  const shaB = HEAD;
   const items = feedbackItems({
-    pr: PR,
-    threads: [{ id: 't-res', isResolved: true, comments: [
-      { id: 'c-p1', author: GREPTILE_AUTHOR, body: 'P1: crash on null', createdAt: '2026-09-10T00:00:00Z' },
+    pr: { headRefOid: shaB },
+    threads: [{ id: 't-old', isResolved: true, isOutdated: true, comments: [
+      { id: 'c-p1', author: GREPTILE_AUTHOR, body: 'P1: crash on null', originalCommit: { oid: shaA }, createdAt: '2026-09-10T00:00:00Z' },
+      { id: 'c-fix', author: { login: 'owner' }, body: 'Fixed in B', createdAt: '2026-09-10T00:03:00Z' },
     ] }],
   });
-  assert.equal(items[0].category, 'actionable-fix');
-  assert.notEqual(items[0].repairPolicy.action, 'ignore-infra');
-  assert.notEqual(items[0].repairPolicy.reason, 'non-actionable-or-resolved');
-  assert.equal(newFeedback({}, items).fresh.length, 1);
+  assert.equal(items[0].actionable, false);
+  assert.equal(items[0].sha, shaA);
+  assert.equal(items[0].repairPolicy.reason, 'non-actionable-or-resolved');
+  assert.equal(newFeedback({}, items).fresh.length, 0);
 });
 
 function scanHome(t) {
@@ -205,6 +221,71 @@ test('dispatch-budget-deferred then next round still repairs mixed-thread P1', (
   assert.equal(sent, 1);
   assert.equal(second.prs[0].dispatch.attempted, true);
   assert.equal(second.prs[0].autoClosed, undefined);
+});
+
+const SHA_A = 'c'.repeat(40);
+function p1Comment(extra = {}) {
+  return { id: 'c-p1', author: GREPTILE_AUTHOR, body: 'P1: crash on null', createdAt: '2026-09-10T00:00:00Z', originalCommit: { oid: SHA_A }, ...extra };
+}
+
+test('resolved flip does not create fresh; reopen of P1 does', () => {
+  const open = feedbackItems({ pr: { headRefOid: HEAD }, threads: [{ id: 't-flip', isResolved: false, isOutdated: false, comments: [p1Comment()] }] });
+  const first = newFeedback({}, open);
+  assert.equal(first.fresh.length, 1);
+  const closed = feedbackItems({ pr: { headRefOid: HEAD }, threads: [{ id: 't-flip', isResolved: true, isOutdated: false, comments: [p1Comment()] }] });
+  const afterResolve = newFeedback(first.cursor, closed);
+  assert.equal(afterResolve.fresh.length, 0);
+  const reopened = feedbackItems({ pr: { headRefOid: HEAD }, threads: [{ id: 't-flip', isResolved: false, isOutdated: false, comments: [p1Comment()] }] });
+  const afterReopen = newFeedback(afterResolve.cursor, reopened);
+  assert.equal(afterReopen.fresh.length, 1);
+  assert.equal(afterReopen.fresh[0].repairPolicy.canChangeCode, true);
+});
+
+test('scanOnce resolved outdated P1 on old commit does not dispatch', (t) => {
+  const paths = scanHome(t);
+  let sent = 0;
+  const result = scanOnce(scanOpts(paths, {
+    collect: () => ({
+      pr: { ...OWNER_PR, headRefOid: HEAD },
+      admissionVerified: true,
+      threads: [{ id: 'TH_old', isResolved: true, isOutdated: true, comments: [
+        p1Comment(),
+        { id: 'c-fix', author: { login: 'owner' }, body: 'Fixed in B', createdAt: '2026-09-10T00:03:00Z' },
+      ] }],
+      mergeReady: false,
+    }),
+    dispatchFn: () => { sent += 1; return { target_session_id: 's1' }; },
+  }));
+  assert.equal(sent, 0);
+  assert.equal(result.prs[0].dispatch.attempted, false);
+});
+
+test('outdated unresolved P1 dispatches with original sha and verify instruction', (t) => {
+  const paths = scanHome(t);
+  let payload;
+  const result = scanOnce(scanOpts(paths, {
+    collect: () => ({
+      pr: { ...OWNER_PR, headRefOid: HEAD },
+      admissionVerified: true,
+      threads: [{ id: 'TH_out', isResolved: false, isOutdated: true, comments: [p1Comment()] }],
+      mergeReady: false,
+    }),
+    dispatchFn: (params) => { payload = params; return { target_session_id: 's1' }; },
+  }));
+  assert.equal(result.prs[0].dispatch.attempted, true);
+  const text = JSON.stringify(payload);
+  assert.match(text, new RegExp(SHA_A));
+  assert.match(text, /针对旧提交/);
+  assert.match(text, /核实/);
+  assert.doesNotMatch(text, new RegExp(`"sha":"${HEAD}"`));
+  const item = feedbackItems({
+    pr: { headRefOid: HEAD },
+    threads: [{ id: 'TH_out', isResolved: false, isOutdated: true, comments: [p1Comment()] }],
+  })[0];
+  assert.equal(item.sha, SHA_A);
+  assert.equal(item.isOutdated, true);
+  const params = dispatchParams({ pr: OWNER_PR, mapping: { sessionId: 's1' }, fresh: [{ ...item, key: 'thread:x' }], now: '2026-09-10T00:00:00Z' });
+  assert.match(params.message, /针对旧提交 c{40}/);
 });
 
 test('autoCloseReplyText does not restate a specific bot original verbatim', () => {

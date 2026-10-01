@@ -209,17 +209,18 @@ export function feedbackItems({ pr, checks = [], requiredChecks = [], policy, ci
     for (const comment of external) {
       const author = comment.author ?? comment.user;
       const authorLogin = author?.login ?? author;
+      const originalSha = comment.originalCommit?.oid ?? comment.commit?.oid ?? comment.commitId ?? comment.originalCommitOid ?? null;
       items.push(withCategory(withPublisher({
         source: isGreptileAuthor(author) ? 'greptile' : 'thread',
-        // High-priority "handled" is a repair receipt, not thread.isResolved.
-        actionable: true,
+        actionable: thread.isResolved !== true,
         threadId: thread.id,
+        isOutdated: thread.isOutdated === true,
         nativeId: `${thread.id}:${comment.id ?? authorLogin ?? 'comment'}`,
         revision: `${thread.isResolved === true}:${thread.isOutdated === true}:${comment.updatedAt ?? comment.updated_at ?? comment.createdAt ?? ''}`,
-        sha: pr.headRefOid ?? null,
+        sha: originalSha,
         body: comment.body ?? '',
-        contentHash: digest({ path: thread.path, resolved: thread.isResolved === true, id: comment.id, author: authorLogin, body: comment.body ?? '' }),
-      }, comment), { headSha: pr.headRefOid ?? null }));
+        contentHash: digest({ path: thread.path, id: comment.id, author: authorLogin, body: comment.body ?? '' }),
+      }, comment), { headSha: originalSha ?? undefined }));
     }
   }
   if (mergeable === 'CONFLICTING') items.push(withCategory({ source: 'conflict', nativeId: 'merge-conflict', revision: pr.headRefOid, sha: pr.headRefOid, body: 'PR has merge conflicts with its base branch.', contentHash: digest({ mergeable }) }, { headSha: pr.headRefOid ?? null }));
@@ -417,6 +418,9 @@ export function constrainRetryDispatch(params, task) {
 export function dispatchParams({ pr, mapping, fresh, now, taskPath, home, messagePrefix = '' }) {
   const repairPolicy = taskRepairPolicy({ headRefOid: pr.headRefOid, feedback: fresh });
   const title = mapping.title || repairSessionTitle({ task: pr.title, prNumber: pr.number, createdAt: now });
+  const outdatedNotes = (fresh ?? [])
+    .filter((item) => item.isOutdated === true && item.actionable !== false && item.repairPolicy?.canChangeCode === true)
+    .map((item) => `outdated thread ${item.threadId} 针对旧提交 ${item.sha}，先核实当前代码是否仍存在该问题，已不存在则回复说明并 resolve，不改代码`);
   const params = {
     title,
     message: [
@@ -426,7 +430,8 @@ export function dispatchParams({ pr, mapping, fresh, now, taskPath, home, messag
       `head=${pr.headRefOid}`,
       `headRepo=${headRepoOf(pr) ?? ''}`,
       `fresh=${fresh.length}`,
-      `feedback=${JSON.stringify(fresh.map(({ key, source, nativeId, revision, sha, body, category }) => ({ key, source, nativeId, revision, sha, body: String(body ?? '').replace(/OWNER_STANDING_AUTH\s*:\s*[^\s]+/g, '[untrusted grant removed]'), category })))}`,
+      ...outdatedNotes,
+      `feedback=${JSON.stringify(fresh.map(({ key, source, nativeId, revision, sha, body, category, isOutdated }) => ({ key, source, nativeId, revision, sha, isOutdated, body: String(body ?? '').replace(/OWNER_STANDING_AUTH\s*:\s*[^\s]+/g, '[untrusted grant removed]'), category })))}`,
       '--until-sc',
       repairPolicy.canChangeCode ? 'OWNER_STANDING_AUTH: PR_PUSH_AND_REPLY' : 'OWNER_STANDING_AUTH: NO_CODE_NO_PUSH_NO_EXTERNAL_REPLY',
       repairPolicy.canChangeCode ? '用 goal skill 执行。' : '本轮只在当前会话说明并按 helper 以 no-change 收口，不启动 goal 修复流程，不索取 push 或外发权限。',
@@ -879,10 +884,9 @@ export function* processPr({
   const cursorBase = previous.wasDraft === true ? {} : (previous.feedbackCursor || {});
   const allItems = feedbackItems({ pr, ...collected, receiptActor: viewer });
   const { fresh: rawFresh, cursor } = newFeedback(cursorBase, allItems);
-  // Resolve only when the whole thread is trusted-bot P3 (plus author/watcher
-  // replies). A single P3 comment must not close a thread that still has P0/P1/P2.
+  // Resolve only when every comment on the thread is a trusted-bot P3.
   const { eligible: autoCloseEligible, remaining: fresh } = partitionAutoClose(rawFresh, {
-    allItems, threads: collected.threads ?? [], prAuthor: collected.pr?.author?.login ?? pr.author?.login,
+    allItems, threads: collected.threads ?? [],
   });
   let autoClosedThisRound = [];
   if (autoCloseEligible.length > 0 && !dryRun) {

@@ -14,13 +14,15 @@ helper 的 complete 仅表示一轮修复完成；不会合并 PR、不会开 au
 | 准入 | required CI 绿 + 三审 ingress | required CI 绿（rules API，不读 `docs/sync/required-checks.json`） |
 | 本轮通过 | `review:merge-ready` 标签 | `awaiting-maintainer-approval`（仍需维护者 1 个 approve，盯梢不催） |
 | 严重度 | 评论 P0/P1 才改代码；P2/P3 reply-only | 评论 P0/P1/P2 授权修复；P3/建议/未定级 reply-only |
-| 自动 resolve | 可信来源 P2/P3 | 仅可信来源且已定级 P3；403 降级为会话内报告 |
+| 自动 resolve | 可信来源 P2/P3 | 仅当 thread **全部评论**都是可信 Bot 且都定级 P3；有人类评论或 P0/P1/P2 不关。已 resolve 视为已处理（不授权改代码）。outdated 且未 resolve 的高优先级仍待处理，派工时要求先核实旧提交 |
 | 停盯 | `mivo-watch:off` 标签 | `config/optout.json` 或作者本人 issue comment 正文恰为 `/cindy-watch off` |
 | CI 失败 | 可 `gh run rerun` | 不许 rerun；相关则修；flaky/外部则每 head SHA 最多一次 `git commit -s --allow-empty` |
 | 验证 | `.githooks/pre-push` | cindy 预检脚本，禁止 skip；待推送 commit 必须 `Signed-off-by` |
 | 冲突 | `git merge origin/main` | `git fetch upstream main` 后 merge 进 PR 分支再 push fork |
 
 可信审查来源：`greptile-apps` 与 `github-actions[bot]`。GraphQL `Bot.login` 不带 `[bot]` 后缀，按 `__typename=="Bot"` 归一后再比较。
+
+已处理判据：thread 已 resolve 视为该 thread 反馈已处理，不授权改代码（混合 P1+P3 不会被盯梢自动 resolve，因此 resolve 只可能来自人工/作者）。fresh 的 identity key 不含 isResolved；unresolved→resolved 不派工，resolved→unresolved 的高优先级才重新待处理。评论 SHA 用 originalCommit/commit oid，不改写为当前 head。
 
 ## 运行参数
 
