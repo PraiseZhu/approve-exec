@@ -9,7 +9,7 @@ import { feedbackRepairPolicy } from './bin/cindy-feedback-policy.mjs';
 import { collectCindyPolicySync, isGhHttp404 } from './bin/cindy-pr-policy.mjs';
 import { evaluateCindyReview } from './bin/cindy-review-status.mjs';
 import {
-  assertOriginPushTargets, bindSchedule, command, cleanupWatch, localCommitsNotReachable,
+  assertOriginPushTargets, clearOwnerUnknown, command, cleanupWatch, localCommitsNotReachable,
   prepare, watchWorktreePath,
 } from './bin/cindy-repair.mjs';
 import { isAutoCloseEligible } from './bin/cindy-review-resolve.mjs';
@@ -302,24 +302,18 @@ test('runtime lock appearing after deploy.lock is acquired still refuses deploy'
   assert.equal(lockStatus(home, DEPLOY_LOCK_NAME).exists, false);
 });
 
-test('bind-schedule does not write ledger while deploy.lock is held', (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'bind-deploy-'));
+test('clear-owner-unknown refuses to run while deploy.lock is held', (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'clear-deploy-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
-  writePr(home, 'PR_790', { number: 790, nodeId: 'PR_790', pendingDispatch: { status: 'awaiting-claim', dispatchId: 'disp-1' } });
+  writePr(home, 'PR_790', { number: 790, nodeId: 'PR_790', needsHuman: { reason: 'owner-unknown', abandonedDispatchId: 'disp-1' } });
   const deploy = acquireLock(home, DEPLOY_LOCK_NAME);
   t.after(() => deploy.release());
-  const resultPath = path.join(home, 'sched.json');
-  fs.writeFileSync(resultPath, JSON.stringify({
-    ok: true, id: 'sched-1', executionMode: 'script', status: 'active',
-    targetSessionId: 'sess-a', scriptConfig: { command: 'python3 x.py --mode poll --pr 790 --node-id PR_790' },
-  }));
   assert.throws(
-    () => bindSchedule({ home, pr: 790, nodeId: 'PR_790', resultPath, dispatchId: 'disp-1', retryMs: 0 }),
+    () => clearOwnerUnknown({ home, pr: 790, nodeId: 'PR_790' }),
     /deploy lock held/,
   );
   const entry = readPr(home, 'PR_790');
-  assert.equal(entry.sessionId, undefined);
-  assert.equal(entry.pendingDispatch.dispatchId, 'disp-1');
+  assert.equal(entry.needsHuman.reason, 'owner-unknown');
 });
 
 test('localCommitsNotReachable is empty when every commit is on origin/main', (t) => {
@@ -342,11 +336,10 @@ test('localCommitsNotReachable is empty when every commit is on origin/main', (t
   }), []);
 });
 
-test('step 0 does not fallback the first session dispatch', () => {
-  const text = watchGuideMessage({ home: '/tmp/cindy-home', prNumber: 1, nodeId: 'PR_1' });
-  assert.doesNotMatch(text, /首轮 dispatch 因/);
-  assert.match(text, /schedule_create/);
-  assert.match(text, /认领超时/);
-  assert.match(text, /不要对 dispatch 降级/);
-  assert.match(text, /用于本 PR 轮询调度的 schedule_create/);
+test('watch guide message bans the session from touching any schedule', () => {
+  const text = watchGuideMessage({ prNumber: 1 });
+  assert.match(text, /PR #1/);
+  assert.match(text, /不要创建、恢复、修改或查询任何调度/);
+  assert.match(text, /Cindy watcher 的共享调度/);
+  assert.match(text, /轮询、合并后的清理都由 watcher 脚本完成/);
 });

@@ -3,9 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
-import { scanOnce, watcherPaths, watchGuideMessage, watchPollLostMessage, watchSuccessorMessage } from './bin/cindy-watcher.mjs';
-import { bindSchedule, clearOwnerUnknown } from './bin/cindy-repair.mjs';
+import { END_TURN_RULE, pollFingerprint, normalizePollSnapshot, scanOnce, watcherPaths, watchGuideMessage, watchSuccessorMessage } from './bin/cindy-watcher.mjs';
+import { clearOwnerUnknown } from './bin/cindy-repair.mjs';
 import { repairSessionTitle } from './bin/session-title.mjs';
 import { acquireLock, readPr, statePaths, writePr } from './bin/cindy-state.mjs';
 
@@ -33,14 +32,35 @@ function collectFail() {
   };
 }
 
-function discover(paths, { now = '2026-09-28T00:00:00Z', prs = [listed], collect, dispatchFn, maxPrs, clock, budgetMs, perPrBudgetMs, ghExtra } = {}) {
+const CPR = { id: nodeId, number: 790, state: 'OPEN', isDraft: false, sameRepository: false, isCrossRepository: true, author: { login: 'owner' }, headRepositoryOwner: { login: 'owner' }, headRepository: { name: 'cindy-fork' }, headRefOid: HEAD, baseRefOid: BASE, releaseEpoch: 'e' };
+
+// One-query poll snapshot a bound PR gets inside discover.
+function graphqlNode(extra = {}) {
+  return {
+    state: 'OPEN', isDraft: false, headRefOid: HEAD, baseRefOid: BASE, mergeable: 'MERGEABLE',
+    labels: { nodes: [] }, comments: { totalCount: 0, nodes: [] }, reviews: { totalCount: 0, nodes: [] },
+    reviewThreads: { nodes: [] }, commits: { nodes: [] }, ...extra,
+  };
+}
+const SNAP_FINGERPRINT = pollFingerprint(normalizePollSnapshot({ data: { node: graphqlNode() } }));
+
+function discover(paths, { now = '2026-09-28T00:00:00Z', prs = [listed], collect, dispatchFn, maxPrs, clock, budgetMs, perPrBudgetMs, ghExtra, node = graphqlNode(), git } = {}) {
   let collected = 0;
+  // Closedown runs git cleanup; never let a test reach the real Cindy repo.
+  const plugin = fs.mkdtempSync(path.join(os.tmpdir(), 'v2-discover-plugin-'));
+  const gitCalls = [];
   const result = scanOnce({
     mode: 'discover', enabled: true, allowDispatch: true, paths, now,
+    gitFn: git ?? ((_bin, args) => { gitCalls.push(args); return ''; }),
+    env: { CINDY_WATCHER_REPO: plugin },
     ghFn: (args) => {
       if (args[0] === 'api' && args[1] === 'user') return 'owner';
       if (args[0] === 'pr' && args[1] === 'list') return JSON.stringify(prs);
-      if (typeof ghExtra === 'function') return ghExtra(args);
+      if (typeof ghExtra === 'function') {
+        const extra = ghExtra(args);
+        if (extra !== undefined) return extra;
+      }
+      if (args[0] === 'api' && args[1] === 'graphql') return JSON.stringify({ data: { node } });
       return '[]';
     },
     collect: (...args) => {
@@ -53,91 +73,34 @@ function discover(paths, { now = '2026-09-28T00:00:00Z', prs = [listed], collect
       return { pr: { state: 'OPEN', isDraft: false, sameRepository: false, isCrossRepository: true, author: { login: 'owner' }, headRepositoryOwner: { login: 'owner' }, headRepository: { name: 'cindy-fork' }, headRefOid: HEAD, baseRefOid: BASE, releaseEpoch: 'e' } };
     },
   });
-  return { result, collected, entry: readPr(paths.home, nodeId) };
+  fs.rmSync(plugin, { recursive: true, force: true });
+  return { result, collected, gitCalls, entry: readPr(paths.home, nodeId) };
 }
 
-test('unbound admitted PR creates with schedule-params and bind-schedule', (t) => {
+function seedBound(paths, extra = {}) {
+  writePr(paths.home, nodeId, {
+    number: 790, nodeId, sessionId: 'sess-790', claimedAt: '2026-09-27T00:00:00Z',
+    eligibilityInitialized: true, eligibility: 'active', admissionVerified: true, admissionEpoch: 'e',
+    activeTask: { status: 'complete' }, headRefName: 'fix/x', title: 'fix', ...extra,
+  });
+}
+
+test('unbound admitted PR creates a session without any schedule step', (t) => {
   const { paths } = homeOf(t);
   let params;
-  const { result, collected } = discover(paths, {
+  const { result, collected, entry } = discover(paths, {
     collect: collectFail,
     dispatchFn: (p) => { params = p; return { target_session_id: 'sess-new' }; },
   });
   assert.equal(collected, 1);
   assert.equal(result.prs[0].dispatch.attempted, true);
   assert.equal(params.target_session_id, undefined);
-  assert.match(params.message, /schedule-params/);
-  assert.match(params.message, /bind-schedule/);
-  assert.match(params.message, /--dispatch-id live-790-/);
-  const spaced = watchGuideMessage({ home: '/tmp/Project CINDY/_ops/cindy-watcher', prNumber: 790, nodeId });
-  assert.match(spaced, /第 0 步/);
-  assert.match(spaced, /busy/);
-  assert.match(spaced, /owner-conflict/);
-  assert.match(spaced, /fallback/);
-  assert.match(spaced, /NO_PROVIDER_FOR_AGENT/);
-  assert.match(spaced, /openai\/gpt-6-luna/);
-  assert.match(spaced, /'\/tmp\/Project CINDY\/_ops\/cindy-watcher'/);
-});
-
-test('bind during dispatch keeps scheduleId and claimedAt after receipt', (t) => {
-  const { paths, home } = homeOf(t);
-  discover(paths, {
-    collect: collectFail,
-    dispatchFn: (params) => {
-      const dispatchId = /--dispatch-id ([^\s`]+)/.exec(params.message)[1];
-      const resultPath = path.join(home, 'sched.json');
-      fs.writeFileSync(resultPath, JSON.stringify({
-        ok: true, id: 'sched-bind', executionMode: 'script', status: 'active',
-        targetSessionId: 'sess-new', scriptConfig: { command: `python3 x.py --mode poll --pr 790 --node-id ${nodeId}` },
-      }));
-      bindSchedule({ home, pr: 790, nodeId, resultPath, dispatchId, retryMs: 0 });
-      return { target_session_id: 'sess-new', dispatch_id: dispatchId };
-    },
-  });
-  const entry = readPr(home, nodeId);
+  assert.doesNotMatch(params.message, /schedule-params|bind-schedule|schedule_create|继续轮询/);
+  assert.match(params.message, /watcher 脚本每 5 分钟检查本 PR/);
+  assert.ok(params.message.includes(END_TURN_RULE));
   assert.equal(entry.sessionId, 'sess-new');
-  assert.equal(entry.scheduleId, 'sched-bind');
-  assert.ok(entry.claimedAt);
+  assert.equal(entry.claimedAt, '2026-09-28T00:00:00Z');
   assert.equal(entry.pendingDispatch, null);
-});
-
-test('LOCK_HELD after bind leaves disk bytes unchanged and next round recovers', (t) => {
-  const { paths, home } = homeOf(t);
-  const prFile = path.join(statePaths(home).prsDir, `${nodeId}.json`);
-  let held;
-  let bytesBefore;
-  const first = discover(paths, {
-    now: '2026-09-28T08:40:00.000Z',
-    collect: collectFail,
-    dispatchFn: (params) => {
-      const dispatchId = /--dispatch-id ([^\s`]+)/.exec(params.message)[1];
-      const resultPath = path.join(home, 'sched.json');
-      fs.writeFileSync(resultPath, JSON.stringify({
-        ok: true, id: 'sched-lock', executionMode: 'script', status: 'active',
-        targetSessionId: 'sess-bound-lock',
-        scriptConfig: { command: `python3 x.py --mode poll --pr 790 --node-id ${nodeId}` },
-      }));
-      bindSchedule({ home, pr: 790, nodeId, resultPath, dispatchId, retryMs: 0 });
-      bytesBefore = fs.readFileSync(prFile);
-      held = acquireLock(home, `pr-${nodeId}`);
-      return { target_session_id: 'sess-bound-lock', dispatch_id: dispatchId };
-    },
-  });
-  t.after(() => held?.release?.());
-  assert.equal(first.result.prs[0].dispatch.reason, 'dispatch-lock-retry');
-  assert.equal(createHash('sha256').update(fs.readFileSync(prFile)).digest('hex'), createHash('sha256').update(bytesBefore).digest('hex'));
-  const bound = readPr(home, nodeId);
-  assert.equal(bound.sessionId, 'sess-bound-lock');
-  assert.equal(bound.scheduleId, 'sched-lock');
-  assert.ok(bound.claimedAt);
-  held.release();
-  const second = discover(paths, {
-    now: '2026-09-28T08:41:00.000Z',
-    collect: collectFail,
-    dispatchFn: () => { throw new Error('should not create'); },
-  });
-  assert.notEqual(second.result.prs[0].dispatch.reason, 'pending-dispatch-unknown');
-  assert.equal(readPr(home, nodeId).sessionId, 'sess-bound-lock');
 });
 
 test('relock failure after dispatch does not overwrite PR state', (t) => {
@@ -201,41 +164,39 @@ test('create receipt timeout recreates once then needsHuman', (t) => {
   assert.equal(after.entry.needsHuman, null);
 });
 
-test('bound stale heartbeat reminds at most once per 30 minutes', (t) => {
+test('bound PR with unchanged fingerprint costs one query: no collect, no dispatch', (t) => {
   const { paths } = homeOf(t);
-  writePr(paths.home, nodeId, {
-    number: 790, nodeId, sessionId: 'sess-790', heartbeatAt: '2026-09-28T00:00:00Z',
-  });
-  const calls = [];
-  const first = discover(paths, {
+  seedBound(paths, { pollFingerprint: SNAP_FINGERPRINT });
+  const { result, collected } = discover(paths, {
     now: '2026-09-28T00:16:00Z',
-    dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-790' }; },
+    dispatchFn: () => { throw new Error('should not dispatch'); },
   });
-  assert.equal(first.collected, 0);
-  assert.equal(calls.length, 1);
-  assert.match(calls[0].message, /轮询调度失联/);
-  assert.match(calls[0].message, /schedule-params/);
-  assert.match(calls[0].message, /bind-schedule/);
-  assert.doesNotMatch(calls[0].message, /schedule_resume/);
-  assert.equal(calls[0].target_session_id, 'sess-790');
-  const second = discover(paths, {
-    now: '2026-09-28T00:40:00Z',
-    dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-790' }; },
-  });
-  assert.equal(second.collected, 0);
-  assert.equal(calls.length, 1);
+  assert.equal(collected, 0);
+  assert.equal(result.prs[0].dispatch.reason, 'fingerprint-unchanged');
+  assert.equal(readPr(paths.home, nodeId).heartbeatAt, '2026-09-28T00:16:00Z');
 });
 
-test('ARCHIVED lost delivery starts successor and records predecessors', (t) => {
+test('bound PR with changed fingerprint collects and dispatches to the bound session', (t) => {
   const { paths } = homeOf(t);
-  writePr(paths.home, nodeId, {
-    number: 790, nodeId, sessionId: 'sess-old', heartbeatAt: '2026-09-28T00:00:00Z',
-    eligibilityInitialized: true, eligibility: 'active', admissionVerified: true, admissionEpoch: 'e',
-    activeTask: { status: 'complete' },
+  seedBound(paths, { pollFingerprint: 'old' });
+  const calls = [];
+  const { result, collected, entry } = discover(paths, {
+    collect: collectFail,
+    dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-790' }; },
   });
+  assert.equal(collected, 1);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].target_session_id, 'sess-790');
+  assert.doesNotMatch(calls[0].message, /schedule-params|bind-schedule/);
+  assert.equal(result.prs[0].dispatch.attempted, true);
+  assert.equal(entry.pollFingerprint, SNAP_FINGERPRINT);
+});
+
+test('ARCHIVED delivery starts successor and records predecessors', (t) => {
+  const { paths } = homeOf(t);
+  seedBound(paths, { sessionId: 'sess-old' });
   const calls = [];
   const { collected, entry } = discover(paths, {
-    now: '2026-09-28T00:16:00Z',
     collect: collectFail,
     dispatchFn: (p) => {
       calls.push(p);
@@ -243,97 +204,50 @@ test('ARCHIVED lost delivery starts successor and records predecessors', (t) => 
       return { target_session_id: 'sess-next' };
     },
   });
-  assert.equal(collected, 1);
+  // Once for the bound delivery, once more on the successor's behalf.
+  assert.equal(collected, 2);
   assert.equal(calls[0].target_session_id, 'sess-old');
   assert.equal(calls[1].target_session_id, undefined);
   assert.match(calls[1].message, /接班修复 session/);
   assert.match(calls[1].message, /sess-old/);
+  assert.doesNotMatch(calls[1].message, /schedule-params|bind-schedule/);
   assert.equal(entry.predecessors[0].sessionId, 'sess-old');
   assert.equal(entry.sessionId, 'sess-next');
 });
 
-test('successor create ignores inFlight and empty fresh', (t) => {
+test('bound PR with nothing to deliver never probes the session', (t) => {
   const { paths } = homeOf(t);
-  writePr(paths.home, nodeId, {
-    number: 790, nodeId, sessionId: 'sess-old', heartbeatAt: '2026-09-28T00:00:00Z',
-    eligibilityInitialized: true, eligibility: 'active', admissionVerified: true, admissionEpoch: 'e',
+  seedBound(paths, {
     lastDispatch: { dispatchId: 'old-dispatch' },
     activeTask: { status: 'running', dispatchId: 'old-dispatch' },
     feedbackCursor: { 'comment:1': 't1' },
   });
   const calls = [];
   const { entry } = discover(paths, {
-    now: '2026-09-28T00:16:00Z',
     collect: () => ({
-      pr: { id: nodeId, number: 790, state: 'OPEN', isDraft: false, sameRepository: false, isCrossRepository: true, author: { login: 'owner' }, headRepositoryOwner: { login: 'owner' }, headRepository: { name: 'cindy-fork' }, headRefOid: HEAD, baseRefOid: BASE, releaseEpoch: 'e' },
-      admissionVerified: true, checks: [], comments: [], reviews: [], threads: [], labels: [], mergeReady: false,
+      pr: CPR, admissionVerified: true, checks: [], comments: [], reviews: [], threads: [], labels: [], mergeReady: false,
       ci: { status: 'green', required: [] }, policy: { status: 'verified', required: [] },
     }),
-    dispatchFn: (p) => {
-      calls.push(p);
-      if (p.target_session_id) throw new Error('ARCHIVED');
-      return { target_session_id: 'sess-next' };
-    },
+    dispatchFn: (p) => { calls.push(p); throw new Error('ARCHIVED'); },
   });
-  assert.equal(calls.length, 2);
-  assert.equal(calls[1].target_session_id, undefined);
-  assert.match(calls[1].message, /old-dispatch/);
-  assert.equal(entry.predecessors[0].activeTask.status, 'running');
+  assert.equal(calls.length, 0);
+  assert.equal(entry.sessionId, 'sess-790');
   assert.equal(entry.feedbackCursor['comment:1'], 't1');
-  assert.equal(entry.sessionId, 'sess-next');
 });
 
-test('ARCHIVED plus merge-ready still creates successor', (t) => {
+test('merge-ready bound PR is not woken even if its session is gone', (t) => {
   const { paths } = homeOf(t);
-  writePr(paths.home, nodeId, {
-    number: 790, nodeId, sessionId: 'sess-old', heartbeatAt: '2026-09-28T00:00:00Z',
-    eligibilityInitialized: true, eligibility: 'active', admissionVerified: true, admissionEpoch: 'e',
-    activeTask: { status: 'complete' },
-  });
+  seedBound(paths, { sessionId: 'sess-old' });
   const calls = [];
   const { entry } = discover(paths, {
-    now: '2026-09-28T00:16:00Z',
     collect: () => ({
-      pr: { id: nodeId, number: 790, state: 'OPEN', isDraft: false, sameRepository: false, isCrossRepository: true, author: { login: 'owner' }, headRepositoryOwner: { login: 'owner' }, headRepository: { name: 'cindy-fork' }, headRefOid: HEAD, baseRefOid: BASE, releaseEpoch: 'e' },
-      admissionVerified: true, checks: [], comments: [], reviews: [], threads: [], labels: ['review:merge-ready'], mergeReady: true,
+      pr: CPR, admissionVerified: true, checks: [], comments: [], reviews: [], threads: [], labels: [], mergeReady: true,
       ci: { status: 'green', required: [] }, policy: { status: 'verified', required: [] },
     }),
-    dispatchFn: (p) => {
-      calls.push(p);
-      if (p.target_session_id) throw new Error('ARCHIVED');
-      return { target_session_id: 'sess-next' };
-    },
+    dispatchFn: (p) => { calls.push(p); throw new Error('ARCHIVED'); },
   });
-  assert.equal(calls.length, 2);
-  assert.equal(calls[1].target_session_id, undefined);
-  assert.match(calls[1].message, /awaiting-maintainer-approval/);
-  assert.equal(entry.sessionId, 'sess-next');
-});
-
-test('bound PR with fresh heartbeat skips collect', (t) => {
-  const { paths } = homeOf(t);
-  writePr(paths.home, nodeId, {
-    number: 790, nodeId, sessionId: 'sess-790', heartbeatAt: '2026-09-28T00:00:00Z',
-  });
-  const { result, collected } = discover(paths, {
-    now: '2026-09-28T00:05:00Z',
-    dispatchFn: () => { throw new Error('should not dispatch'); },
-  });
-  assert.equal(collected, 0);
-  assert.equal(result.prs[0].dispatch.reason, 'bound-heartbeat-ok');
-});
-
-test('poll-lost reminder without persisted title falls back to repairSessionTitle', (t) => {
-  const { paths } = homeOf(t);
-  writePr(paths.home, nodeId, {
-    number: 790, nodeId, sessionId: 'sess-790', heartbeatAt: '2026-09-27T00:00:00Z',
-  });
-  const calls = [];
-  discover(paths, {
-    dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-790' }; },
-  });
-  // discoverWorkflow's main loop has the live `pr` (title 'fix') in scope, unlike the poll-mode call site.
-  assert.equal(calls[0].title, repairSessionTitle({ task: listed.title, prNumber: 790, createdAt: '2026-09-28T00:00:00Z' }));
+  assert.equal(calls.length, 0);
+  assert.equal(entry.sessionId, 'sess-old');
 });
 
 test('discover skips a PR whose pr lock is held', (t) => {
@@ -378,7 +292,7 @@ test('discover summary lists closedownManual items', (t) => {
   assert.equal(result.closedownManual[0].nodeId, 'PR_closed');
 });
 
-test('dispatch receipt conflict keeps bind owner, alerts once, does not set needsHuman', (t) => {
+test('dispatch receipt conflict keeps the first owner, alerts once, does not set needsHuman', (t) => {
   const { paths, home } = homeOf(t);
   const calls = [];
   const first = discover(paths, {
@@ -386,26 +300,18 @@ test('dispatch receipt conflict keeps bind owner, alerts once, does not set need
     dispatchFn: (params) => {
       calls.push(params);
       if (params.target_session_id === 'sess-bound') return { target_session_id: 'sess-bound' };
-      const dispatchId = /--dispatch-id ([^\s`]+)/.exec(params.message)[1];
-      const resultPath = path.join(home, 'sched.json');
-      fs.writeFileSync(resultPath, JSON.stringify({
-        ok: true, id: 'sched-conflict', executionMode: 'script', status: 'active',
-        targetSessionId: 'sess-bound',
-        scriptConfig: { command: `python3 x.py --mode poll --pr 790 --node-id ${nodeId}` },
-      }));
-      bindSchedule({ home, pr: 790, nodeId, resultPath, dispatchId, retryMs: 0 });
-      return { target_session_id: 'sess-receipt', dispatch_id: dispatchId };
+      // Another writer claimed the PR while this create dispatch was in flight.
+      writePr(home, nodeId, { ...readPr(home, nodeId), sessionId: 'sess-bound', claimedAt: '2026-09-28T00:00:00Z' });
+      return { target_session_id: 'sess-receipt' };
     },
   });
   const entry = readPr(home, nodeId);
   assert.equal(entry.sessionId, 'sess-bound');
-  assert.equal(entry.needsHuman, null);
+  assert.ok(!entry.needsHuman);
   assert.equal(entry.dispatchConflict.bindSession, 'sess-bound');
   assert.equal(entry.dispatchConflict.receiptSession, 'sess-receipt');
-  assert.ok(entry.dispatchConflict.dispatchId);
   assert.equal(first.result.prs[0].dispatch.conflict, true);
   assert.equal(calls.filter((p) => /回执冲突/.test(p.message)).length, 1);
-  assert.equal(entry.dispatchConflict.notifiedAt, '2026-09-28T00:00:00Z');
   const later = discover(paths, {
     now: '2026-09-28T00:10:00Z',
     collect: collectFail,
@@ -415,7 +321,6 @@ test('dispatch receipt conflict keeps bind owner, alerts once, does not set need
       return { target_session_id: 'sess-bound' };
     },
   });
-  assert.equal(later.collected, 0);
   assert.notEqual(later.result.prs[0].dispatch.reason, 'needs-human');
 });
 
@@ -515,62 +420,32 @@ test('discover defers later PRs after the first dispatch exhausts global remaini
   assert.equal(result.prs[1].dispatch.reason, 'dispatch-budget-deferred');
 });
 
-const BAN = /禁止恢复、修改或新建任何其它调度，尤其是名为 Cindy watcher 的共享调度/;
+const BAN = /不要创建、恢复、修改或查询任何调度（包括名为 Cindy watcher 的共享调度）/;
 
-test('lost reminder with null scheduleId embeds step 0 and does not resume', () => {
-  const home = '/tmp/Project CINDY/_ops/cindy-watcher';
-  const text = watchPollLostMessage({
-    prNumber: 790, heartbeatAt: '2026-09-28T00:00:00Z', scheduleId: null, home, nodeId,
-  });
-  assert.match(text, /schedule-params/);
-  assert.match(text, /bind-schedule/);
-  assert.match(text, /--pr 790 --node-id PR_790 --result/);
-  assert.doesNotMatch(text, /--dispatch-id/);
-  assert.doesNotMatch(text, /schedule_resume/);
-  assert.doesNotMatch(text, /schedule_get/);
-  assert.match(text, BAN);
+test('guide and successor messages forbid every schedule operation', () => {
+  const guide = watchGuideMessage({ prNumber: 790 });
+  assert.match(guide, BAN);
+  assert.doesNotMatch(guide, /schedule-params|bind-schedule|第 0 步/);
+  const successor = watchSuccessorMessage({ prNumber: 790, predecessorId: 'old', reason: 'ARCHIVED' });
+  assert.match(successor, BAN);
+  assert.doesNotMatch(successor, /第 0 步/);
 });
 
-test('lost reminder with scheduleId only resumes that id', () => {
-  const home = '/tmp/Project CINDY/_ops/cindy-watcher';
-  const text = watchPollLostMessage({
-    prNumber: 790, heartbeatAt: '2026-09-28T00:00:00Z', scheduleId: 'sched-790', home, nodeId,
-  });
-  assert.match(text, /schedule_get sched-790/);
-  assert.match(text, /只对该 scheduleId 调用 schedule_resume/);
-  assert.doesNotMatch(text, /schedule_get (?!sched-790)/);
-  assert.match(text, BAN);
-});
-
-test('guide, lost, and successor messages all ban shared watcher schedules', () => {
-  const home = '/tmp/Project CINDY/_ops/cindy-watcher';
-  assert.match(watchGuideMessage({ home, prNumber: 790, nodeId }), BAN);
-  assert.match(watchPollLostMessage({ prNumber: 790, heartbeatAt: 't', scheduleId: 's', home, nodeId }), BAN);
-  assert.match(watchSuccessorMessage({ prNumber: 790, predecessorId: 'old', reason: 'ARCHIVED' }), BAN);
-});
-
-test('discover closedown for ledger PR missing from open list', (t) => {
+test('discover closedown for ledger PR missing from open list is done by the script', (t) => {
   const { paths } = homeOf(t);
-  writePr(paths.home, nodeId, {
-    number: 790, nodeId, sessionId: 'sess-790', scheduleId: 'sched-790', closedHandled: false,
-  });
+  writePr(paths.home, nodeId, { number: 790, nodeId, sessionId: 'sess-790', closedHandled: false });
   const calls = [];
-  const { result, collected, entry } = discover(paths, {
+  const { result, collected, entry, gitCalls } = discover(paths, {
     prs: [],
     dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-790' }; },
-    ghExtra: (args) => {
-      if (args[0] === 'pr' && args[1] === 'view') {
-        return JSON.stringify({ state: 'MERGED', id: nodeId });
-      }
-      return '[]';
-    },
+    ghExtra: (args) => (args[0] === 'pr' && args[1] === 'view' ? JSON.stringify({ state: 'MERGED', id: nodeId }) : undefined),
   });
   assert.equal(collected, 0);
-  assert.equal(calls.length, 1);
-  assert.match(calls[0].message, /已合并/);
-  assert.equal(calls[0].target_session_id, 'sess-790');
+  assert.equal(calls.length, 0);
   assert.equal(entry.closedHandled, true);
-  assert.equal(result.prs.find((item) => item.nodeId === nodeId).dispatch.reason, 'closedown');
+  assert.equal(entry.autoCleanup.removed, true);
+  assert.ok(gitCalls.some((args) => args.includes('watch/pr-790')));
+  assert.equal(result.prs.find((item) => item.nodeId === nodeId).dispatch.reason, 'closedown-script');
 });
 
 test('discover closedown without session just marks closedHandled', (t) => {
@@ -581,7 +456,7 @@ test('discover closedown without session just marks closedHandled', (t) => {
     dispatchFn: () => { throw new Error('should not dispatch'); },
     ghExtra: (args) => {
       if (args[0] === 'pr' && args[1] === 'view') return JSON.stringify({ state: 'CLOSED', id: nodeId });
-      return '[]';
+      return undefined;
     },
   });
   assert.equal(collected, 0);
@@ -598,7 +473,7 @@ test('discover does not closedown still-open PR missing from list', (t) => {
     dispatchFn: () => { throw new Error('should not dispatch'); },
     ghExtra: (args) => {
       if (args[0] === 'pr' && args[1] === 'view') return JSON.stringify({ state: 'OPEN', id: nodeId });
-      return '[]';
+      return undefined;
     },
   });
   assert.equal(collected, 0);
@@ -653,23 +528,6 @@ test('claim-retry-wakeup without cached params falls back to repairSessionTitle'
   assert.equal(calls.length, 1);
   assert.equal(result.prs[0].dispatch.reason, 'claim-retry-wakeup');
   assert.equal(calls[0].title, repairSessionTitle({ task: listed.title, prNumber: 790, createdAt: '2026-09-28T01:01:00Z' }));
-});
-
-test('abandoned dispatch-id cannot bind after recreate', (t) => {
-  const { paths, home } = homeOf(t);
-  const boom = () => { throw new Error('Cindy dispatch receipt timed out; pending dispatch retained'); };
-  const first = discover(paths, { now: '2026-09-28T00:00:00Z', collect: collectFail, dispatchFn: boom });
-  const oldId = first.entry.pendingDispatch.dispatchId;
-  discover(paths, { now: '2026-09-28T01:01:00Z', collect: collectFail, dispatchFn: boom });
-  const resultPath = path.join(home, 'sched.json');
-  fs.writeFileSync(resultPath, JSON.stringify({
-    ok: true, id: 'sched-old', executionMode: 'script', status: 'active',
-    targetSessionId: 'sess-old', scriptConfig: { command: `python3 x.py --mode poll --pr 790 --node-id ${nodeId}` },
-  }));
-  assert.throws(
-    () => bindSchedule({ home, pr: 790, nodeId, resultPath, dispatchId: oldId, retryMs: 0 }),
-    /dispatch-id 已作废/,
-  );
 });
 
 test('bound Draft PR with stale heartbeat is left to the author, not woken', (t) => {

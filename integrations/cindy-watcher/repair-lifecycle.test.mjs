@@ -8,7 +8,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { scanOnce, watcherPaths } from './bin/cindy-watcher.mjs';
 import { evaluateCindyReview } from './bin/cindy-review-status.mjs';
-import { bindSchedule, prepare, validate, finalize, recheck, cleanupWatch } from './bin/cindy-repair.mjs';
+import { prepare, validate, finalize, recheck, cleanupWatch } from './bin/cindy-repair.mjs';
 import { readPr } from './bin/cindy-state.mjs';
 
 const REPO = 'makecindy/cindy', ID = 'PR_lifecycle', NUMBER = 790, SESSION = 'lifecycle-owner';
@@ -78,10 +78,9 @@ test('discover → bind → prepare → failing preflight → repair → DCO →
   const taskPath = path.join(home, 'state/tasks', dispatchId + '.json');
   const task = JSON.parse(fs.readFileSync(taskPath));
   assert.equal(task.headRepo, 'owner/cindy-fork');
-  const scheduleResult = path.join(root, 'schedule-result.json');
-  fs.writeFileSync(scheduleResult, JSON.stringify({ ok: true, id: 'fixture-schedule', executionMode: 'script', status: 'active',
-    targetSessionId: SESSION, scriptConfig: { command: `fixture --mode poll --pr ${NUMBER} --node-id ${ID}` } }));
-  bindSchedule({ home, pr: NUMBER, nodeId: ID, dispatchId, resultPath: scheduleResult, retryMs: 0 });
+  // sessionId is bound straight off the first dispatch receipt (applyDispatchReceipt),
+  // there is no separate schedule-claim step to run here anymore.
+  assert.equal(entry.sessionId, SESSION);
   const gitFn = (_binary, args) => {
     if (args.includes('push')) {
       assert.equal(args.at(-2), 'origin');
@@ -133,11 +132,16 @@ test('discover → bind → prepare → failing preflight → repair → DCO →
   assert.equal(pushes, 1);
   state = 'MERGED'; snapshot.state = state;
   let closeInstructions = 0;
-  scanOnce({ ...common, mode: 'poll', nodeId: ID, prNumber: NUMBER, snapshotFn: () => snapshot,
-    dispatchFn: p => { assert.equal(p.target_session_id, SESSION); assert.match(p.message, /schedule_delete fixture-schedule/); closeInstructions++; return { target_session_id: SESSION }; } });
-  assert.equal(closeInstructions, 1);
-  const cleanup = cleanupWatch({ home, pr: NUMBER, ghFn, gitFn, env: { ...env, CINDY_WATCHER_REPO: plugin } });
-  assert.equal(fs.existsSync(worktree), false);
+  const closedown = scanOnce({ ...common, mode: 'poll', nodeId: ID, prNumber: NUMBER, snapshotFn: () => snapshot, gitFn,
+    dispatchFn: () => { closeInstructions++; return { target_session_id: SESSION }; } });
+  // Closedown is now entirely script-driven: no session is woken, autoCleanupWatch
+  // runs inline inside the poll and removes the worktree itself.
+  assert.equal(closeInstructions, 0, 'MERGED/CLOSED closedown must not dispatch to a session');
+  assert.equal(closedown.prs[0].dispatch.attempted, false);
+  assert.equal(closedown.prs[0].dispatch.reason, 'closedown-script');
+  assert.equal(fs.existsSync(worktree), false, 'autoCleanupWatch removes the worktree during the MERGED poll itself');
   assert.equal(remoteHead(), head, 'cleanup must preserve the remote branch');
+  const cleanup = cleanupWatch({ home, pr: NUMBER, ghFn, gitFn, env: { ...env, CINDY_WATCHER_REPO: plugin } });
+  assert.deepEqual(cleanup, { removed: false, reason: 'missing', worktree, branch: cleanup.branch });
   assert.ok(discover.prs.length && cleanup);
 });
