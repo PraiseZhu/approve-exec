@@ -17,7 +17,7 @@ function fixture(t){
  return {home,plan,state};
 }
 test('full source deploy preserves state and verifies all artifact hashes',t=>{
- const f=fixture(t),r=apply(f.plan);assert.equal(r.status,'installed');assert.equal(r.stateChanged,false);assert.equal(verify(f.home).filter(v=>v.source===v.runtime).length,FILES.length);assert.deepEqual(fs.readFileSync(path.join(f.home,'state/state.json')),f.state);
+ const f=fixture(t),r=apply(f.plan);assert.equal(r.status,'installed');assert.equal(r.stateChanged,false);assert.deepEqual(r.orphanGuards,[]);assert.equal(verify(f.home).filter(v=>v.source===v.runtime).length,FILES.length);assert.deepEqual(fs.readFileSync(path.join(f.home,'state/state.json')),f.state);
  assert.ok(FILES.includes('cindy-feedback-policy.mjs'));
  assert.ok(FILES.includes('cindy-state.mjs'));
  assert.ok(FILES.includes('cindy-ownership.mjs'));

@@ -9,7 +9,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { collectCindyCiSync } from './cindy-ci.mjs';
 import { taskRepairPolicy } from './cindy-feedback-policy.mjs';
-import { acquireLock, AUTHOR_RECLAIMED, DEPLOY_LOCK_NAME, helperLockName, lockStatus, readPr, writePr } from './cindy-state.mjs';
+import { acquireLock, AUTHOR_RECLAIMED, clearOrphanGuard, DEPLOY_LOCK_NAME, helperLockName, inspectLocks, lockStatus, readPr, writePr } from './cindy-state.mjs';
 
 export const REPO = 'makecindy/cindy';
 export const DEFAULT_PLUGIN_REPO = '/Users/praise/AI-Agent/Claude/projects/Project CINDY';
@@ -204,7 +204,11 @@ function peekTaskNumber(taskPath) {
 function withHelperOp(home, pr, fn) {
   const root = requireAbs(home, 'home');
   const lock = acquireLock(root, helperLockName(pr));
-  if (lock.held) fail('busy: helper 运行锁占用，请稍后重试', 2);
+  if (lock.held) {
+    const why = typeof lock.reason === 'string' && lock.reason.startsWith('reclaim-guard-orphan:')
+      ? lock.reason : 'helper 运行锁占用，请稍后重试';
+    fail(`busy: ${why}`, 2);
+  }
   try {
     refuseDeployLock(root);
     return fn();
@@ -991,9 +995,16 @@ export function autoCleanupWatch({
   }
 }
 
+export function lockDoctor({ home } = {}) {
+  return inspectLocks(requireAbs(home, 'home'));
+}
+export function lockDoctorClearGuard({ home, lockName, now } = {}) {
+  return clearOrphanGuard(requireAbs(home, 'home'), lockName, now);
+}
+
 function cli(argv) {
   const args = [...argv];
-  const modes = new Set(['prepare', 'validate', 'finalize', 'recheck', 'blocked', 'schedule-params', 'bind-schedule', 'cleanup', 'clear-owner-unknown']);
+  const modes = new Set(['prepare', 'validate', 'finalize', 'recheck', 'blocked', 'schedule-params', 'bind-schedule', 'cleanup', 'clear-owner-unknown', 'lock-doctor']);
   const modeIndex = args.findIndex((item) => modes.has(item));
   const mode = modeIndex >= 0 ? args.splice(modeIndex, 1)[0] : undefined;
   const value = (name, required = true) => {
@@ -1009,6 +1020,10 @@ function cli(argv) {
   else if (mode === 'bind-schedule') result = bindSchedule({ home, pr: value('--pr'), nodeId: value('--node-id'), resultPath: value('--result'), dispatchId: value('--dispatch-id', false) });
   else if (mode === 'cleanup') result = cleanupWatch({ home, pr: value('--pr') });
   else if (mode === 'clear-owner-unknown') result = clearOwnerUnknown({ home, pr: value('--pr'), nodeId: value('--node-id') });
+  else if (mode === 'lock-doctor') {
+    const lockName = value('--clear-guard', false);
+    result = lockName ? lockDoctorClearGuard({ home, lockName }) : lockDoctor({ home });
+  }
   else {
     const task = value('--task');
     if (mode === 'prepare') result = prepare({ home, taskPath: task });
@@ -1016,7 +1031,7 @@ function cli(argv) {
     else if (mode === 'finalize') result = finalize({ home, taskPath: task, scReport: value('--sc-report'), validatedHead: value('--validated-head'), validationReceipt: value('--validation-receipt', false) });
     else if (mode === 'recheck') result = recheck({ home, taskPath: task, validatedHead: value('--validated-head', false) });
     else if (mode === 'blocked') result = blocked({ home, taskPath: task, reason: value('--reason') });
-    else fail('mode must be prepare, validate, finalize, recheck, blocked, schedule-params, bind-schedule, cleanup, or clear-owner-unknown');
+    else fail('mode must be prepare, validate, finalize, recheck, blocked, schedule-params, bind-schedule, cleanup, clear-owner-unknown, or lock-doctor');
   }
   process.stdout.write(`${JSON.stringify(result)}\n`);
   if (mode === 'validate' && result.status === 'fail') process.exitCode = 1;

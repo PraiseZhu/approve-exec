@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  bindSchedule, cleanupWatch, clearOwnerUnknown, cloneWorktree, DEFAULT_PLUGIN_REPO, prepare, pushIfNeeded,
+  bindSchedule, cleanupWatch, clearOwnerUnknown, cloneWorktree, DEFAULT_PLUGIN_REPO, lockDoctor, lockDoctorClearGuard, prepare, pushIfNeeded,
   repairPaths, scheduleCreatePayload, scheduleModelFromResult, scheduleParams, shellQuote,
   SCHEDULE_MODEL_FALLBACK, SCHEDULE_MODEL_PRIMARY, watchBranchName, watchWorktreePath,
 } from './bin/cindy-repair.mjs';
@@ -509,4 +509,22 @@ test('PR A long preflight does not block PR B prepare; same PR returns busy', (t
   const preparedA = prepare({ home, taskPath: a.taskPath, ghFn, gitFn });
   assert.equal(preparedA.status, 'prepared');
   assert.equal(preparedA.number, 790);
+});
+
+test('lock-doctor lists locks and refuses to clear a live guard', (t) => {
+  const home = homeOf(t);
+  const { locksDir } = statePaths(home);
+  fs.mkdirSync(locksDir, { recursive: true });
+  const guardPath = path.join(locksDir, 'discover.lock.reclaim');
+  fs.mkdirSync(guardPath);
+  fs.writeFileSync(path.join(guardPath, 'owner'), `${JSON.stringify({
+    pid: process.pid, token: 'live', createdAt: new Date().toISOString(),
+  })}\n`);
+  const listed = lockDoctor({ home });
+  assert.equal(listed.guards.length, 1);
+  assert.equal(listed.guards[0].live, true);
+  assert.equal(listed.orphanGuards.length, 0);
+  const refused = lockDoctorClearGuard({ home, lockName: 'discover' });
+  assert.equal(refused.cleared, false);
+  assert.equal(refused.reason, 'owner-alive');
 });

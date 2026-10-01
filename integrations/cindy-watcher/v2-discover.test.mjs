@@ -686,3 +686,18 @@ test('bound Draft PR with stale heartbeat is left to the author, not woken', (t)
   assert.equal(result.prs[0].dispatch.reason, 'draft-author-owned');
   assert.equal(entry.lastLostReminderAt, undefined);
 });
+
+test('discover reports orphanGuards count and a human hint', (t) => {
+  const { home, paths } = homeOf(t);
+  const { locksDir } = statePaths(home);
+  fs.mkdirSync(locksDir, { recursive: true });
+  const guardPath = path.join(locksDir, 'discover.lock.reclaim');
+  fs.mkdirSync(guardPath);
+  fs.writeFileSync(path.join(guardPath, 'owner'), `${JSON.stringify({
+    pid: 999999, token: 'g', createdAt: '2020-01-01T00:00:00.000Z',
+  })}\n`);
+  const { result } = discover(paths, { prs: [] });
+  assert.equal(result.orphanGuards, 1);
+  assert.match(result.detail, /孤立接管守卫/);
+  assert.match(result.detail, /lock-doctor/);
+});

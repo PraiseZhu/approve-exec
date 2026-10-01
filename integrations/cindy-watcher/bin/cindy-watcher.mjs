@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { planSessionTitle, repairSessionTitle } from './session-title.mjs';
 import { collectCindyReview } from './cindy-review-status.mjs';
 import { collectPrSnapshot, collectPrOwnership } from './cindy-pr-snapshot.mjs';
-import { acquireLock, AUTHOR_RECLAIMED, DEPLOY_LOCK_NAME, listPrs, lockStatus, migrateLegacy, PR_LOCK_TOKEN_ENV, readPr, statePaths as v2StatePaths, withLock as withPrLock, writePr } from './cindy-state.mjs';
+import { acquireLock, AUTHOR_RECLAIMED, DEPLOY_LOCK_NAME, inspectLocks, listPrs, lockStatus, migrateLegacy, PR_LOCK_TOKEN_ENV, readPr, statePaths as v2StatePaths, withLock as withPrLock, writePr } from './cindy-state.mjs';
 import { feedbackRepairPolicy, taskRepairPolicy, isGreptileAuthor, normalizeActorLogin } from './cindy-feedback-policy.mjs';
 import { partitionAutoClose, autoCloseThreads } from './cindy-review-resolve.mjs';
 import {
@@ -93,6 +93,14 @@ function isOptedOut({ home, number, comments, author }) {
   if (optout.prs.includes(Number(number))) return true;
   if (author && hasWatchOffComment(comments, author)) return true;
   return false;
+}
+function orphanGuardFields(home) {
+  const orphanGuards = inspectLocks(home).orphanGuards;
+  const extra = { orphanGuards: orphanGuards.length };
+  if (orphanGuards.length) {
+    extra.detail = `有 ${orphanGuards.length} 个孤立接管守卫（${orphanGuards.map((item) => item.name).join(', ')}），只挡该锁的过期接管。用 cindy-repair.mjs lock-doctor --home <home> 查看；确认 owner 已死且超过 10 分钟后用 --clear-guard <name> 清理。`;
+  }
+  return extra;
 }
 function haltExternal(paths) {
   if (!paths?.home) return null;
@@ -1645,7 +1653,7 @@ export function* discoverWorkflow({
   const closedownManual = listPrs(paths.home)
     .filter((entry) => entry?.closedownManual)
     .map((entry) => ({ number: entry.number, nodeId: entry.nodeId, ...entry.closedownManual }));
-  return { mode: 'discover', dispatch: !dryRun, viewer, repo: REPO, prs: report, events, closedownManual, scan: { cursor: index.cursor ?? 0, listed: listed.length } };
+  return { mode: 'discover', dispatch: !dryRun, viewer, repo: REPO, prs: report, events, closedownManual, scan: { cursor: index.cursor ?? 0, listed: listed.length }, ...orphanGuardFields(paths.home) };
 }
 
 export function scanOnce(options = {}) {

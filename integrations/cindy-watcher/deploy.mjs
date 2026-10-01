@@ -5,7 +5,10 @@ import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {acquireDeployExclusive} from './bin/cindy-state.mjs';
+import {acquireDeployExclusive,inspectLocks} from './bin/cindy-state.mjs';
+function orphanGuardsOf(home){
+ return inspectLocks(home).orphanGuards.map(g=>({name:g.name,pid:g.ownerPid,mtimeMs:g.mtimeMs}));
+}
 const here=path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_RUNTIME='/Users/praise/AI-Agent/Claude/projects/Project CINDY/_ops/cindy-watcher';
 export const FILES=['cindy-feedback-policy.mjs','cindy-ci.mjs','cindy-pr-policy.mjs','cindy-pr-snapshot.mjs','cindy-repair.mjs','cindy-review-resolve.mjs','cindy-state.mjs','cindy-ownership.mjs','cindy-watcher.mjs','cindy-review-status.mjs','session-title.mjs','cindy-watch-script.py','protocol.py','session-title-maintenance.py'];
@@ -136,7 +139,7 @@ function applyLocked(plan){
   }
   requireValue(stateFingerprint(plan.home)===plan.stateSha,'state changed during install');idle(plan.database,plan.sessionIds);
   requireValue(verify(plan.home).every(v=>v.source===v.runtime),'installed hash mismatch');
-  const receipt={status:'installed',at:new Date().toISOString(),files:plan.files,stateChanged:false,sessionIds:plan.sessionIds,schedulerChanged:false,databaseChanged:false};
+  const receipt={status:'installed',at:new Date().toISOString(),files:plan.files,stateChanged:false,sessionIds:plan.sessionIds,schedulerChanged:false,databaseChanged:false,orphanGuards:orphanGuardsOf(plan.home)};
   fs.writeFileSync(path.join(record,'receipt.json'),JSON.stringify(receipt,null,2),{mode:0o600});return receipt;
  }catch(error){
   for(const item of installed.reverse()){
@@ -156,7 +159,7 @@ if(process.argv[1]&&fs.realpathSync(process.argv[1])===fileURLToPath(import.meta
    if(!match)process.exitCode=1;
   }else{
    const runtime=get('--home');requireValue(path.isAbsolute(runtime),'--home required');
-   const files=verify(runtime);console.log(JSON.stringify({files,match:files.every(v=>v.source&&v.source===v.runtime)}));
+   const files=verify(runtime);console.log(JSON.stringify({files,match:files.every(v=>v.source&&v.source===v.runtime),orphanGuards:orphanGuardsOf(runtime)}));
    if(!files.every(v=>v.source&&v.source===v.runtime))process.exitCode=1;
   }
  }else if(mode==='bootstrap'){
@@ -167,7 +170,7 @@ if(process.argv[1]&&fs.realpathSync(process.argv[1])===fileURLToPath(import.meta
   requireValue(['--home','--database','--id','--plan'].every(k=>args.includes(k))&&path.isAbsolute(file),'explicit home/database/id/absolute plan required');
   if(!fs.existsSync(path.join(home,'state'))) bootstrap(home);
   const plan={version:1,home,database,id,files:verify(home),stateSha:stateFingerprint(home),sessionIds:identities(home)};
-  validatePlan(plan);idle(database,plan.sessionIds);fs.writeFileSync(file,JSON.stringify(plan,null,2),{flag:'wx',mode:0o600});console.log(JSON.stringify({mode:'preview',plan:file,files:plan.files.length}));
+  validatePlan(plan);idle(database,plan.sessionIds);fs.writeFileSync(file,JSON.stringify(plan,null,2),{flag:'wx',mode:0o600});console.log(JSON.stringify({mode:'preview',plan:file,files:plan.files.length,orphanGuards:orphanGuardsOf(home)}));
  }else if(mode==='apply'){
   requireValue(args.includes('--plan'),'--plan required');console.log(JSON.stringify(apply(JSON.parse(fs.readFileSync(get('--plan'))))));
  }else throw Error(`use verify [--home], bootstrap --home, preview --home --database --id --plan, or apply --plan (example runtime ${DEFAULT_RUNTIME})`);

@@ -7,8 +7,8 @@ import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  acquireDeployExclusive, acquireLock, listPrs, lockAcquireHooks,
-  LOCK_RECLAIM_GUARD_STALE_MS, LOCK_STALE_GRACE_MS,
+  acquireDeployExclusive, acquireLock, clearOrphanGuard, inspectLocks, listPrs, lockAcquireHooks,
+  LOCK_DOCTOR_CLEAR_GUARD_MS, LOCK_STALE_GRACE_MS,
   migrateLegacy, PR_LOCK_TOKEN_ENV, readPr, statePaths, withLock, writePr,
 } from './bin/cindy-state.mjs';
 
@@ -329,7 +329,7 @@ test('occupied reclaim guard returns busy and leaves the lock unchanged', (t) =>
   assert.throws(() => acquireDeployExclusive(home), /runtime lock held/);
 });
 
-test('stale reclaim guard is swept after 30s; same call stays busy', (t) => {
+test('orphan reclaim guard with stale lock returns reclaim-guard-orphan and does not change the lock', (t) => {
   const home = homeOf(t);
   const { locksDir } = statePaths(home);
   fs.mkdirSync(locksDir, { recursive: true });
@@ -341,14 +341,121 @@ test('stale reclaim guard is swept after 30s; same call stays busy', (t) => {
   fs.writeFileSync(path.join(guardPath, 'owner'), `${JSON.stringify({
     pid: 999999, token: 'g', createdAt: '2020-01-01T00:00:00.000Z',
   })}\n`);
-  const past = (Date.now() - LOCK_RECLAIM_GUARD_STALE_MS - 1000) / 1000;
-  fs.utimesSync(guardPath, past, past);
   const first = acquireLock(home, 'discover');
   assert.equal(first.held, true);
+  assert.equal(first.reason, 'reclaim-guard-orphan:discover');
   assert.equal(fs.readFileSync(lockPath, 'utf8'), stale);
-  assert.equal(fs.existsSync(guardPath), false);
-  const second = withLock(home, 'discover', () => 'ok');
-  assert.equal(second, 'ok');
+  assert.equal(fs.existsSync(guardPath), true);
+  const deploy = acquireDeployExclusive(home);
+  t.after(() => deploy.release());
+  assert.equal(inspectLocks(home).orphanGuards.length, 1);
+});
+
+test('orphan guard without canonical lock does not block acquire or deploy', (t) => {
+  const home = homeOf(t);
+  const { locksDir } = statePaths(home);
+  fs.mkdirSync(locksDir, { recursive: true });
+  const guardPath = path.join(locksDir, 'discover.lock.reclaim');
+  fs.mkdirSync(guardPath);
+  fs.writeFileSync(path.join(guardPath, 'owner'), `${JSON.stringify({
+    pid: 999999, token: 'g', createdAt: '2020-01-01T00:00:00.000Z',
+  })}\n`);
+  const taken = acquireLock(home, 'discover');
+  t.after(() => taken.release());
+  assert.equal(taken.held, false);
+  taken.release();
+  const deploy = acquireDeployExclusive(home);
+  t.after(() => deploy.release());
+  assert.equal(inspectLocks(home).orphanGuards.length, 1);
+  assert.equal(inspectLocks(home).orphanGuards[0].name, 'discover');
+});
+
+test('A/B/C orphan-guard interleaving never double-holds', (t) => {
+  const home = homeOf(t);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lock-abc-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  t.after(() => { lockAcquireHooks.afterGuardExists = null; });
+  const { locksDir } = statePaths(home);
+  fs.mkdirSync(locksDir, { recursive: true });
+  const lockPath = path.join(locksDir, 'discover.lock');
+  const guardPath = `${lockPath}.reclaim`;
+  const stale = lockJson(999999, 'dead');
+  fs.writeFileSync(lockPath, stale);
+  fs.mkdirSync(guardPath);
+  fs.writeFileSync(path.join(guardPath, 'owner'), `${JSON.stringify({
+    pid: 999999, token: 'old', createdAt: '2020-01-01T00:00:00.000Z',
+  })}\n`);
+  const modulePath = fileURLToPath(new URL('./bin/cindy-state.mjs', import.meta.url));
+  const pause = path.join(dir, 'a.pause');
+  const resume = path.join(dir, 'a.resume');
+  const result = path.join(dir, 'a.result');
+  const script = `
+    import fs from 'node:fs';
+    import { acquireLock, lockAcquireHooks } from ${JSON.stringify(modulePath)};
+    const [home, pause, resume, result] = process.argv.slice(1);
+    lockAcquireHooks.afterGuardExists = () => {
+      fs.writeFileSync(pause, '1');
+      while (!fs.existsSync(resume)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15);
+    };
+    const r = acquireLock(home, 'discover');
+    fs.writeFileSync(result, JSON.stringify({ held: r.held === true, reason: r.reason ?? null }));
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script, home, pause, resume, result], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, [PR_LOCK_TOKEN_ENV]: '' },
+  });
+  t.after(() => { try { child.kill('SIGKILL'); } catch {} });
+  waitForFile(pause, 8000, 'a.pause');
+  const b = acquireLock(home, 'discover');
+  const c = acquireLock(home, 'discover');
+  assert.equal(b.held, true);
+  assert.equal(c.held, true);
+  assert.equal(b.reason, 'reclaim-guard-orphan:discover');
+  assert.equal(fs.readFileSync(lockPath, 'utf8'), stale);
+  assert.equal(fs.existsSync(guardPath), true);
+  fs.writeFileSync(resume, '1');
+  waitForFile(result, 8000, 'a.result');
+  const report = JSON.parse(fs.readFileSync(result, 'utf8'));
+  assert.equal(report.held, true);
+  assert.equal(report.reason, 'reclaim-guard-orphan:discover');
+  assert.equal(fs.readFileSync(lockPath, 'utf8'), stale);
+  assert.equal(fs.existsSync(guardPath), true);
+  const holders = [b, c].filter((item) => item.held === false);
+  assert.equal(holders.length, 0);
+});
+
+test('lock-doctor --clear-guard refuses live owner or fresh orphan, deletes dead timed-out guard', (t) => {
+  const home = homeOf(t);
+  const { locksDir } = statePaths(home);
+  fs.mkdirSync(locksDir, { recursive: true });
+  const livePath = path.join(locksDir, 'helper.lock.reclaim');
+  fs.mkdirSync(livePath);
+  fs.writeFileSync(path.join(livePath, 'owner'), `${JSON.stringify({
+    pid: process.pid, token: 'live', createdAt: new Date().toISOString(),
+  })}\n`);
+  const livePast = (Date.now() - LOCK_DOCTOR_CLEAR_GUARD_MS - 1000) / 1000;
+  fs.utimesSync(livePath, livePast, livePast);
+  const live = clearOrphanGuard(home, 'helper');
+  assert.equal(live.cleared, false);
+  assert.equal(live.reason, 'owner-alive');
+  assert.equal(fs.existsSync(livePath), true);
+
+  const freshPath = path.join(locksDir, 'discover.lock.reclaim');
+  fs.mkdirSync(freshPath);
+  fs.writeFileSync(path.join(freshPath, 'owner'), `${JSON.stringify({
+    pid: 999999, token: 'g', createdAt: '2020-01-01T00:00:00.000Z',
+  })}\n`);
+  const fresh = clearOrphanGuard(home, 'discover');
+  assert.equal(fresh.cleared, false);
+  assert.equal(fresh.reason, 'too-fresh');
+  assert.equal(fs.existsSync(freshPath), true);
+
+  const old = (Date.now() - LOCK_DOCTOR_CLEAR_GUARD_MS - 1000) / 1000;
+  fs.utimesSync(freshPath, old, old);
+  const cleared = clearOrphanGuard(home, 'discover');
+  assert.equal(cleared.cleared, true);
+  assert.equal(cleared.name, 'discover');
+  assert.equal(fs.existsSync(freshPath), false);
 });
 
 test('legacy live lock with old mtime is not reclaimed and old token reenters', (t) => {

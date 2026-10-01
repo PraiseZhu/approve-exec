@@ -9,8 +9,8 @@ export const PR_LOCK_TOKEN_ENV = 'CINDY_PR_LOCK_TOKEN';
 export const DEPLOY_LOCK_NAME = 'deploy';
 export const HELPER_LOCK_NAME = 'helper';
 export const LOCK_STALE_GRACE_MS = 60_000;
-export const LOCK_RECLAIM_GUARD_STALE_MS = 30_000;
-export const lockAcquireHooks = { afterStaleDetected: null };
+export const LOCK_DOCTOR_CLEAR_GUARD_MS = 10 * 60 * 1000;
+export const lockAcquireHooks = { afterStaleDetected: null, afterGuardExists: null };
 
 export function helperLockName(pr) {
   const number = Number(pr);
@@ -105,7 +105,7 @@ function encodeLock(token) {
   return `${JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() })}\n`;
 }
 
-function busy() { return { held: true, release: () => {} }; }
+function busy(reason) { return { held: true, reason, release: () => {} }; }
 
 function makeRelease(lockPath, token) {
   return () => {
@@ -123,9 +123,9 @@ function confirmOwnLock(lockPath, token) {
   return payload?.token === token && payload?.pid === process.pid;
 }
 
-function invokeAfterStaleDetected(options) {
-  const hook = options?.afterStaleDetected ?? lockAcquireHooks.afterStaleDetected;
-  if (typeof hook === 'function') hook();
+function invokeHook(options, key, payload) {
+  const hook = options?.[key] ?? lockAcquireHooks[key];
+  if (typeof hook === 'function') hook(payload);
 }
 
 function tryCreate(lockPath, token) {
@@ -144,25 +144,6 @@ function readGuardOwner(guardPath) {
   } catch { return null; }
 }
 
-// A crashed reclaimer leaves `${lock}.reclaim` behind. Only sweep it when the
-// owner pid is dead AND the directory mtime is older than 30s, then return busy
-// without reclaiming in the same call. The delay avoids racing a still-running
-// unlink+wx; the extra round is cheaper than deleting a live lock.
-function sweepStaleGuard(guardPath) {
-  try {
-    const stat = fs.statSync(guardPath);
-    if (!stat.isDirectory()) return false;
-    const owner = readGuardOwner(guardPath);
-    const ownerDead = !owner || !pidAlive(owner.pid);
-    if (!ownerDead || Date.now() - stat.mtimeMs <= LOCK_RECLAIM_GUARD_STALE_MS) return false;
-    fs.rmSync(guardPath, { recursive: true, force: true });
-    return true;
-  } catch (error) {
-    if (error.code === 'ENOENT') return false;
-    throw error;
-  }
-}
-
 function removeOwnGuard(guardPath, token, created) {
   if (!created) return;
   try {
@@ -172,8 +153,8 @@ function removeOwnGuard(guardPath, token, created) {
   } catch {}
 }
 
-function reclaimStale(lockPath, token, options, expectedPrevious) {
-  invokeAfterStaleDetected(options);
+function reclaimStale(lockPath, token, options, expectedPrevious, name) {
+  invokeHook(options, 'afterStaleDetected');
   const guardPath = reclaimGuardPath(lockPath);
   let created = false;
   try {
@@ -181,7 +162,9 @@ function reclaimStale(lockPath, token, options, expectedPrevious) {
     created = true;
   } catch (error) {
     if (error.code !== 'EEXIST') throw error;
-    sweepStaleGuard(guardPath);
+    invokeHook(options, 'afterGuardExists', { name, guardPath });
+    const owner = readGuardOwner(guardPath);
+    if (!owner || !pidAlive(owner.pid)) return busy(`reclaim-guard-orphan:${name}`);
     return busy();
   }
   try {
@@ -224,7 +207,7 @@ export function acquireLock(home, name, env = process.env, options = {}) {
     }
     const payload = parseLockPayload(previous);
     if (!isStaleLock(lockPath, payload)) return busy();
-    return reclaimStale(lockPath, token, options, previous);
+    return reclaimStale(lockPath, token, options, previous, name);
   }
 }
 
@@ -235,19 +218,59 @@ export function lockStatus(home, name) {
   if (!payload) return { exists: true, live: !isStaleLock(lockPath, null), pid: null };
   return { exists: true, live: pidAlive(payload.pid), pid: payload.pid };
 }
-export function anyLiveRuntimeLock(home) {
+export function inspectLocks(home) {
   const { locksDir } = statePaths(home);
-  if (!fs.existsSync(locksDir)) return false;
+  const locks = [];
+  const guards = [];
+  if (!fs.existsSync(locksDir)) return { locks, guards, orphanGuards: [] };
   for (const item of fs.readdirSync(locksDir)) {
+    const full = path.join(locksDir, item);
     if (item.endsWith('.lock.reclaim')) {
-      try {
-        if (fs.statSync(path.join(locksDir, item)).isDirectory()) return true;
-      } catch { continue; }
+      let stat;
+      try { stat = fs.statSync(full); } catch { continue; }
+      if (!stat.isDirectory()) continue;
+      const name = item.slice(0, -'.lock.reclaim'.length);
+      const owner = readGuardOwner(full);
+      const live = Boolean(owner && pidAlive(owner.pid));
+      guards.push({
+        name, path: full, ownerPid: owner?.pid ?? null, live, orphan: !live, mtimeMs: stat.mtimeMs,
+      });
+      continue;
     }
-    if (!item.endsWith('.lock') || item === `${DEPLOY_LOCK_NAME}.lock`) continue;
-    if (lockStatus(home, item.slice(0, -'.lock'.length)).live) return true;
+    if (!item.endsWith('.lock')) continue;
+    const name = item.slice(0, -'.lock'.length);
+    locks.push({ name, ...lockStatus(home, name) });
   }
-  return false;
+  return { locks, guards, orphanGuards: guards.filter((item) => item.orphan) };
+}
+
+export function clearOrphanGuard(home, lockName, now = Date.now()) {
+  if (typeof lockName !== 'string' || !/^[A-Za-z0-9._-]+$/.test(lockName)) {
+    const error = new Error('lockName is invalid');
+    error.exitCode = 1;
+    throw error;
+  }
+  const { locksDir } = statePaths(home);
+  const guardPath = path.join(locksDir, `${lockName}.lock.reclaim`);
+  if (!fs.existsSync(guardPath) || !fs.statSync(guardPath).isDirectory()) {
+    return { cleared: false, reason: 'missing', name: lockName, path: guardPath };
+  }
+  const owner = readGuardOwner(guardPath);
+  if (owner && pidAlive(owner.pid)) {
+    return { cleared: false, reason: 'owner-alive', name: lockName, path: guardPath, ownerPid: owner.pid };
+  }
+  const ageMs = now - fs.statSync(guardPath).mtimeMs;
+  if (ageMs < LOCK_DOCTOR_CLEAR_GUARD_MS) {
+    return { cleared: false, reason: 'too-fresh', name: lockName, path: guardPath, ageMs, ownerPid: owner?.pid ?? null };
+  }
+  fs.rmSync(guardPath, { recursive: true, force: true });
+  return { cleared: true, name: lockName, path: guardPath, ownerPid: owner?.pid ?? null };
+}
+
+export function anyLiveRuntimeLock(home) {
+  const { locks, guards } = inspectLocks(home);
+  if (guards.some((item) => item.live)) return true;
+  return locks.some((item) => item.name !== DEPLOY_LOCK_NAME && item.live);
 }
 export function acquireDeployExclusive(home, afterLock) {
   const deployLock = acquireLock(home, DEPLOY_LOCK_NAME);
