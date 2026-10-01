@@ -6,7 +6,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { apply, FILES, stateFingerprint, verify } from './deploy.mjs';
 import { finalize, recheck, repairPaths, validate, watchWorktreePath } from './bin/cindy-repair.mjs';
-import { acquireLock, DEPLOY_LOCK_NAME, HELPER_LOCK_NAME, lockStatus, writePr } from './bin/cindy-state.mjs';
+import { acquireLock, DEPLOY_LOCK_NAME, helperLockName, HELPER_LOCK_NAME, lockStatus, writePr } from './bin/cindy-state.mjs';
 
 const REPO = 'makecindy/cindy';
 const finding = (priority, key = `thread:${priority}`) => ({
@@ -241,6 +241,7 @@ test('apply during validate preflight is refused; validate still writes a receip
   assert.ok(result.receiptPath);
   assert.equal(fs.existsSync(result.receiptPath), true);
   assert.equal(lockStatus(f.options.home, HELPER_LOCK_NAME).live, false);
+  assert.equal(lockStatus(f.options.home, helperLockName(790)).live, false);
   assert.equal(fs.readFileSync(path.join(f.options.home, 'bin', FILES[0]), 'utf8'), 'old');
 });
 

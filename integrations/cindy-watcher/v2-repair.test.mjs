@@ -8,7 +8,7 @@ import {
   repairPaths, scheduleCreatePayload, scheduleModelFromResult, scheduleParams, shellQuote,
   SCHEDULE_MODEL_FALLBACK, SCHEDULE_MODEL_PRIMARY, watchBranchName, watchWorktreePath,
 } from './bin/cindy-repair.mjs';
-import { readPr, statePaths, writePr } from './bin/cindy-state.mjs';
+import { acquireDeployExclusive, acquireLock, helperLockName, readPr, statePaths, writePr } from './bin/cindy-state.mjs';
 
 const HEAD = 'a'.repeat(40);
 const REMOTE = 'b'.repeat(40);
@@ -381,7 +381,7 @@ function writeTask(home, extra = {}) {
     sessionId: 'sess-a', headRefOid: HEAD, headRefName: 'fix/x',
     headRepo: 'PraiseZhu/cindy-fork', headOwner: 'PraiseZhu', ...extra,
   };
-  const taskPath = path.join(paths.tasks, 'live-790.json');
+  const taskPath = path.join(paths.tasks, `${task.dispatchId}.json`);
   fs.writeFileSync(taskPath, JSON.stringify(task));
   return { paths, taskPath, task };
 }
@@ -454,4 +454,59 @@ test('prepare refuses a task superseded by the author reclaiming the PR', (t) =>
     activeTask: { dispatchId: 'live-790', status: 'blocked', blockedKind: 'author-reclaimed' } });
   const { ghFn, gitFn } = prepareFns(plugin, watchWorktreePath(plugin, 790));
   assert.throws(() => prepare({ home, taskPath, ghFn, gitFn }), /task superseded: the author reclaimed this PR/);
+});
+
+test('PR A long preflight does not block PR B prepare; same PR returns busy', (t) => {
+  const home = homeOf(t);
+  const plugin = fs.mkdtempSync(path.join(os.tmpdir(), 'plugin-'));
+  t.after(() => fs.rmSync(plugin, { recursive: true, force: true }));
+  const a = writeTask(home, { dispatchId: 'live-790', nodeId: 'PR_790', number: 790, sessionId: 'sess-a' });
+  const b = writeTask(home, { dispatchId: 'live-791', nodeId: 'PR_791', number: 791, sessionId: 'sess-b' });
+  writePr(home, 'PR_790', { number: 790, nodeId: 'PR_790', sessionId: 'sess-a', activeTask: { dispatchId: 'live-790' } });
+  writePr(home, 'PR_791', { number: 791, nodeId: 'PR_791', sessionId: 'sess-b', activeTask: { dispatchId: 'live-791' } });
+  const original = process.env.CINDY_WATCHER_REPO;
+  process.env.CINDY_WATCHER_REPO = plugin;
+  t.after(() => { if (original === undefined) delete process.env.CINDY_WATCHER_REPO; else process.env.CINDY_WATCHER_REPO = original; });
+  const ghFn = (_bin, args) => {
+    if (Array.isArray(args) && args[0] === 'api' && args[1] === 'user') return 'PraiseZhu';
+    return JSON.stringify({
+      state: 'OPEN', isDraft: false, headRefOid: HEAD, headRefName: 'fix/x', baseRefOid: REMOTE,
+    });
+  };
+  const gitFn = (_bin, args) => {
+    const cIndex = args.indexOf('-C');
+    const worktree = cIndex >= 0 ? args[cIndex + 1] : args[0] === 'clone' ? args.at(-1) : null;
+    const number = String(worktree ?? '').match(/pr-(\d+)/)?.[1];
+    if (args[0] === 'clone') fs.mkdirSync(worktree, { recursive: true });
+    if (args.includes('--show-toplevel')) return worktree;
+    if (args.includes('get-url') && args.includes('--push') && args.includes('--all') && args.at(-1) === 'origin') {
+      return 'https://github.com/PraiseZhu/cindy-fork.git';
+    }
+    if (args.includes('get-url') && args.includes('--push')) return 'DISABLED';
+    if (args.includes('get-url') && args.includes('upstream')) return 'https://github.com/makecindy/cindy.git';
+    if (args.includes('get-url')) return 'https://github.com/PraiseZhu/cindy-fork.git';
+    if (args.includes('symbolic-ref')) return `watch/pr-${number ?? '790'}`;
+    if (args.includes('@{u}')) return 'origin/fix/x';
+    if (args.includes('--porcelain')) return '';
+    if (args.includes('rev-parse') && args.includes('HEAD')) return HEAD;
+    return '';
+  };
+  const preflight = acquireLock(home, helperLockName(790));
+  t.after(() => preflight.release());
+  assert.equal(preflight.held, false);
+  const preparedB = prepare({ home, taskPath: b.taskPath, ghFn, gitFn });
+  assert.equal(preparedB.status, 'prepared');
+  assert.equal(preparedB.number, 791);
+  try {
+    prepare({ home, taskPath: a.taskPath, ghFn, gitFn });
+    assert.fail('expected busy');
+  } catch (error) {
+    assert.match(error.message, /^busy:/);
+    assert.equal(error.exitCode, 2);
+  }
+  assert.throws(() => acquireDeployExclusive(home), /runtime lock held/);
+  preflight.release();
+  const preparedA = prepare({ home, taskPath: a.taskPath, ghFn, gitFn });
+  assert.equal(preparedA.status, 'prepared');
+  assert.equal(preparedA.number, 790);
 });

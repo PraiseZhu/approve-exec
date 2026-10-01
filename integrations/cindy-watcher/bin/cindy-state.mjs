@@ -8,6 +8,14 @@ export const AUTHOR_RECLAIMED = 'author-reclaimed';
 export const PR_LOCK_TOKEN_ENV = 'CINDY_PR_LOCK_TOKEN';
 export const DEPLOY_LOCK_NAME = 'deploy';
 export const HELPER_LOCK_NAME = 'helper';
+export const LOCK_STALE_GRACE_MS = 60_000;
+export const lockAcquireHooks = { afterStaleDetected: null };
+
+export function helperLockName(pr) {
+  const number = Number(pr);
+  if (Number.isInteger(number) && number >= 1) return `helper-pr-${number}`;
+  return HELPER_LOCK_NAME;
+}
 
 export function statePaths(home) {
   const stateDir = path.join(home, 'state');
@@ -54,42 +62,124 @@ function pidAlive(pid) {
   catch (error) { return error.code !== 'ESRCH'; }
 }
 
-export function acquireLock(home, name, env = process.env) {
+function parseLockPayload(text) {
+  try {
+    const data = JSON.parse(String(text));
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+    if (!Number.isSafeInteger(data.pid) || data.pid <= 0) return null;
+    if (typeof data.token !== 'string' || !data.token.trim()) return null;
+    if (typeof data.createdAt !== 'string' || !data.createdAt) return null;
+    return { pid: data.pid, token: data.token, createdAt: data.createdAt };
+  } catch {
+    return null;
+  }
+}
+
+function readLock(lockPath) {
+  try { return fs.readFileSync(lockPath, 'utf8'); }
+  catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function lockAgeMs(lockPath) {
+  try { return Date.now() - fs.statSync(lockPath).mtimeMs; }
+  catch { return 0; }
+}
+
+function isStaleLock(lockPath, payload) {
+  if (payload) return !pidAlive(payload.pid);
+  return lockAgeMs(lockPath) > LOCK_STALE_GRACE_MS;
+}
+
+function encodeLock(token) {
+  return `${JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() })}\n`;
+}
+
+function makeRelease(lockPath, token) {
+  return () => {
+    try {
+      const current = readLock(lockPath);
+      if (current == null) return;
+      if (parseLockPayload(current)?.token !== token) return;
+      fs.unlinkSync(lockPath);
+    } catch {}
+  };
+}
+
+function confirmOwnLock(lockPath, token) {
+  const payload = parseLockPayload(readLock(lockPath) ?? '');
+  return payload?.token === token && payload?.pid === process.pid;
+}
+
+function invokeAfterStaleDetected(options) {
+  const hook = options?.afterStaleDetected ?? lockAcquireHooks.afterStaleDetected;
+  if (typeof hook === 'function') hook();
+}
+
+function tryCreate(lockPath, token) {
+  fs.writeFileSync(lockPath, encodeLock(token), { mode: 0o600, flag: 'wx' });
+  if (!confirmOwnLock(lockPath, token)) return { held: true, release: () => {} };
+  return { held: false, reentrant: false, token, release: makeRelease(lockPath, token) };
+}
+
+function reclaimStale(lockPath, token, options, retryAcquire, expectedPrevious) {
+  invokeAfterStaleDetected(options);
+  const tombstone = `${lockPath}.tomb-${process.pid}-${randomBytes(8).toString('hex')}`;
+  try { fs.renameSync(lockPath, tombstone); }
+  catch (error) {
+    if (error.code === 'ENOENT') return retryAcquire();
+    return { held: true, release: () => {} };
+  }
+  const moved = readLock(tombstone);
+  if (moved !== expectedPrevious) {
+    try { fs.renameSync(tombstone, lockPath); } catch {}
+    return { held: true, release: () => {} };
+  }
+  try { fs.unlinkSync(tombstone); } catch {}
+  try { return tryCreate(lockPath, token); }
+  catch (error) {
+    if (error.code === 'EEXIST') return { held: true, release: () => {} };
+    throw error;
+  }
+}
+
+export function acquireLock(home, name, env = process.env, options = {}) {
   const { locksDir } = statePaths(home);
   fs.mkdirSync(locksDir, { recursive: true, mode: 0o700 });
   const lockPath = path.join(locksDir, `${name}.lock`);
   const token = randomBytes(12).toString('hex');
-  const payload = `${process.pid} ${new Date().toISOString()} ${token}\n`;
-  const acquire = () => fs.writeFileSync(lockPath, payload, { mode: 0o600, flag: 'wx' });
-  const release = () => { try { fs.unlinkSync(lockPath); } catch {} };
   const inherited = env[PR_LOCK_TOKEN_ENV];
-  if (inherited && fs.existsSync(lockPath)) {
-    const current = fs.readFileSync(lockPath, 'utf8');
-    const parts = current.trim().split(/\s+/);
-    if (parts[2] === inherited) return { held: false, reentrant: true, token: inherited, release: () => {} };
-  }
-  try { acquire(); return { held: false, reentrant: false, token, release }; }
-  catch (error) {
-    if (error.code !== 'EEXIST') throw error;
-    const previous = fs.existsSync(lockPath) ? fs.readFileSync(lockPath, 'utf8') : '';
-    const pid = Number(previous.split(' ')[0]);
-    if (pidAlive(pid)) return { held: true, release: () => {} };
-    if (!(fs.existsSync(lockPath) && fs.readFileSync(lockPath, 'utf8') === previous)) return { held: true, release: () => {} };
-    try { fs.unlinkSync(lockPath); } catch { return { held: true, release: () => {} }; }
-    try { acquire(); return { held: false, reentrant: false, token, release }; }
-    catch (retry) {
-      if (retry.code === 'EEXIST') return { held: true, release: () => {} };
-      throw retry;
+  const attempt = (allowReclaim) => {
+    if (inherited) {
+      const current = readLock(lockPath);
+      if (current != null && parseLockPayload(current)?.token === inherited) {
+        return { held: false, reentrant: true, token: inherited, release: () => {} };
+      }
     }
-  }
+    try { return tryCreate(lockPath, token); }
+    catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      const previous = readLock(lockPath);
+      if (previous == null) return allowReclaim ? attempt(false) : { held: true, release: () => {} };
+      if (inherited && parseLockPayload(previous)?.token === inherited) {
+        return { held: false, reentrant: true, token: inherited, release: () => {} };
+      }
+      const payload = parseLockPayload(previous);
+      if (!isStaleLock(lockPath, payload) || !allowReclaim) return { held: true, release: () => {} };
+      return reclaimStale(lockPath, token, options, () => attempt(false), previous);
+    }
+  };
+  return attempt(true);
 }
 
 export function lockStatus(home, name) {
   const lockPath = path.join(statePaths(home).locksDir, `${name}.lock`);
   if (!fs.existsSync(lockPath)) return { exists: false, live: false, pid: null };
-  const previous = fs.readFileSync(lockPath, 'utf8');
-  const pid = Number(previous.split(' ')[0]);
-  return { exists: true, live: pidAlive(pid), pid: Number.isSafeInteger(pid) ? pid : null };
+  const payload = parseLockPayload(readLock(lockPath) ?? '');
+  if (!payload) return { exists: true, live: !isStaleLock(lockPath, null), pid: null };
+  return { exists: true, live: pidAlive(payload.pid), pid: payload.pid };
 }
 export function anyLiveRuntimeLock(home) {
   const { locksDir } = statePaths(home);

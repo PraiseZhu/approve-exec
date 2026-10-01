@@ -9,7 +9,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { collectCindyCiSync } from './cindy-ci.mjs';
 import { taskRepairPolicy } from './cindy-feedback-policy.mjs';
-import { acquireLock, AUTHOR_RECLAIMED, DEPLOY_LOCK_NAME, HELPER_LOCK_NAME, lockStatus, readPr, writePr } from './cindy-state.mjs';
+import { acquireLock, AUTHOR_RECLAIMED, DEPLOY_LOCK_NAME, helperLockName, lockStatus, readPr, writePr } from './cindy-state.mjs';
 
 export const REPO = 'makecindy/cindy';
 export const DEFAULT_PLUGIN_REPO = '/Users/praise/AI-Agent/Claude/projects/Project CINDY';
@@ -192,10 +192,19 @@ function gitOutput(args, gitFn = command) { return String(gitFn(GIT, args)); }
 function refuseDeployLock(home) {
   if (lockStatus(home, DEPLOY_LOCK_NAME).live) fail('deploy lock held');
 }
-function withHelperOp(home, fn) {
+function peekTaskNumber(taskPath) {
+  if (typeof taskPath !== 'string') return undefined;
+  try {
+    const number = Number(JSON.parse(fs.readFileSync(taskPath, 'utf8'))?.number);
+    return Number.isInteger(number) && number >= 1 ? number : undefined;
+  } catch {
+    return undefined;
+  }
+}
+function withHelperOp(home, pr, fn) {
   const root = requireAbs(home, 'home');
-  const lock = acquireLock(root, HELPER_LOCK_NAME);
-  if (lock.held) fail('helper 运行锁占用');
+  const lock = acquireLock(root, helperLockName(pr));
+  if (lock.held) fail('busy: helper 运行锁占用，请稍后重试', 2);
   try {
     refuseDeployLock(root);
     return fn();
@@ -360,7 +369,7 @@ export function assertTaskRepairScope(task, head) {
 }
 
 export function prepare({ home, taskPath, ghFn = command, gitFn = command, cloneUrl, originUrl, viewer } = {}) {
-  return withHelperOp(home, () => {
+  return withHelperOp(home, peekTaskNumber(taskPath), () => {
   const { paths, task } = taskFrom(home, taskPath);
   const { sessionId } = boundSession(paths, task);
   const headRepo = resolveHeadRepo(task);
@@ -480,7 +489,7 @@ function validationException(paths, task, sessionId, head, worktree, gitFn) {
 }
 
 export function validate({ home, taskPath, validatedHead, gitFn = command, runFn = command, env = process.env, originUrl } = {}) {
-  return withHelperOp(home, () => {
+  return withHelperOp(home, peekTaskNumber(taskPath), () => {
   rejectSkip(env);
   const { paths, task } = taskFrom(home, taskPath);
   const { sessionId } = boundSession(paths, task);
@@ -644,7 +653,7 @@ export function pushIfNeeded(worktree, task, validatedHead, remoteHead, gitFn, o
 }
 
 export function finalize({ home, taskPath, scReport, validatedHead, validationReceipt, ghFn = command, gitFn = command, env = process.env, originUrl } = {}) {
-  return withHelperOp(home, () => {
+  return withHelperOp(home, peekTaskNumber(taskPath), () => {
   rejectSkip(env);
   const { paths, task } = taskFrom(home, taskPath);
   const { sessionId } = boundSession(paths, task);
@@ -680,7 +689,7 @@ export function finalize({ home, taskPath, scReport, validatedHead, validationRe
 }
 
 export function recheck({ home, taskPath, validatedHead, ghFn = command, gitFn = command, originUrl, env = process.env } = {}) {
-  return withHelperOp(home, () => {
+  return withHelperOp(home, peekTaskNumber(taskPath), () => {
   const { paths, task } = taskFrom(home, taskPath);
   originUrl = originUrl ?? githubRepoUrl(resolveHeadRepo(task));
   const { sessionId } = boundSession(paths, task);
@@ -721,7 +730,7 @@ export function recheck({ home, taskPath, validatedHead, ghFn = command, gitFn =
 }
 
 export function blocked({ home, taskPath, reason, ghFn = command } = {}) {
-  return withHelperOp(home, () => {
+  return withHelperOp(home, peekTaskNumber(taskPath), () => {
   const { paths, task } = taskFrom(home, taskPath);
   const { sessionId } = boundSession(paths, task);
   if (typeof reason !== 'string' || !reason.trim()) fail('blocked reason is required');
@@ -787,7 +796,7 @@ export function bindSchedule({
   home, pr, nodeId, resultPath, dispatchId, now = new Date().toISOString(),
   retryMs = 180000, retryDelayMs = 5000, sleepFn = null,
 } = {}) {
-  return withHelperOp(home, () => {
+  return withHelperOp(home, pr, () => {
   const root = requireAbs(home, 'home');
   const result = readJson(requireAbs(resultPath, 'result'), 'schedule_create result');
   const command = result.scriptConfig?.command ?? result.command ?? '';
@@ -850,7 +859,7 @@ export function bindSchedule({
 }
 
 export function clearOwnerUnknown({ home, pr, nodeId, now = new Date().toISOString() }) {
-  return withHelperOp(home, () => {
+  return withHelperOp(home, pr, () => {
   const root = requireAbs(home, 'home');
   const lock = acquireLock(root, `pr-${nodeId}`);
   if (lock.held) fail('PR 状态锁占用，请稍后重试');
@@ -903,7 +912,7 @@ export function localCommitsNotReachable({ worktree, gitFn, branch, headRefName 
   return String(out).split(/\n/).map((item) => item.trim()).filter(Boolean);
 }
 export function cleanupWatch({ home, pr, ghFn = command, gitFn = command, env = process.env, now = new Date().toISOString() }) {
-  return withHelperOp(home, () => {
+  return withHelperOp(home, pr, () => {
   const plugin = pluginRepoPath(env);
   const number = Number(pr);
   const view = ghJson(['pr', 'view', String(number), '--repo', REPO, '--json', 'state,headRefName'], ghFn);
