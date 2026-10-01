@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { feedbackItems } from './bin/cindy-watcher.mjs';
-import { isAutoCloseEligible, partitionAutoClose, autoCloseThreads, autoCloseReplyText } from './bin/cindy-review-resolve.mjs';
+import { isAutoCloseEligible, isThreadAutoCloseEligible, partitionAutoClose, autoCloseThreads, autoCloseReplyText } from './bin/cindy-review-resolve.mjs';
+import { newFeedback, scanOnce, watcherPaths } from './bin/cindy-watcher.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const HEAD = 'a'.repeat(40);
 const PR = { headRefOid: HEAD };
@@ -64,6 +68,143 @@ test('partitionAutoClose splits eligible P3 threads from everything else', () =>
   assert.equal(eligible[0].threadId, 't-p3');
   assert.equal(remaining.length, 1);
   assert.equal(remaining[0].threadId, 't-p0');
+});
+
+function mixedThread({ threadId = 't-mix', isResolved = false, commentsHasNextPage = false } = {}) {
+  return {
+    id: threadId, isResolved, isOutdated: false, path: 'src/a.ts', commentsHasNextPage,
+    comments: [
+      { id: 'c-p1', author: GREPTILE_AUTHOR, body: 'P1: crash on null', createdAt: '2026-09-10T00:00:00Z' },
+      { id: 'c-p3', author: GREPTILE_AUTHOR, body: 'P3: naming nit', createdAt: '2026-09-10T00:01:00Z' },
+    ],
+  };
+}
+
+test('same thread mixed P1+P3 is not auto-closed and P1 stays in remaining', () => {
+  const items = feedbackItems({ pr: PR, threads: [mixedThread()] });
+  const { eligible, remaining } = partitionAutoClose(items, { allItems: items, threads: [mixedThread()] });
+  assert.equal(eligible.length, 0);
+  assert.equal(isThreadAutoCloseEligible(items, {}), false);
+  assert.equal(remaining.some((item) => item.repairPolicy?.severities?.includes('P1')), true);
+  assert.equal(remaining.some((item) => item.repairPolicy?.severities?.includes('P3')), true);
+});
+
+test('old P1 plus new P3 on the same thread is not auto-closed', () => {
+  const allItems = feedbackItems({ pr: PR, threads: [mixedThread()] });
+  const p3 = allItems.filter((item) => item.repairPolicy?.severities?.includes('P3'));
+  const { eligible, remaining } = partitionAutoClose(p3, { allItems, threads: [mixedThread()] });
+  assert.equal(eligible.length, 0);
+  assert.equal(remaining.length, p3.length);
+});
+
+test('incomplete thread comment pagination is fail-closed', () => {
+  const thread = mixedThread({ commentsHasNextPage: true });
+  thread.comments = [{ id: 'c-p3', author: GREPTILE_AUTHOR, body: 'P3: naming nit', createdAt: '2026-09-10T00:00:00Z' }];
+  const items = feedbackItems({ pr: PR, threads: [thread] });
+  const { eligible } = partitionAutoClose(items, { allItems: items, threads: [thread] });
+  assert.equal(eligible.length, 0);
+  assert.equal(isThreadAutoCloseEligible(items, { commentsHasNextPage: true }), false);
+});
+
+test('trusted P3 plus PR author reply is still auto-close eligible', () => {
+  const thread = {
+    id: 't-author', isResolved: false, comments: [
+      { id: 'c-p3', author: GREPTILE_AUTHOR, body: 'P3: naming nit', createdAt: '2026-09-10T00:00:00Z' },
+      { id: 'c-owner', author: { login: 'owner' }, body: 'ack, will consider later', createdAt: '2026-09-10T00:02:00Z' },
+    ],
+  };
+  const items = feedbackItems({ pr: PR, threads: [thread] });
+  assert.equal(isThreadAutoCloseEligible(items, { prAuthor: 'owner' }), true);
+  const { eligible, remaining } = partitionAutoClose(items, { allItems: items, threads: [thread], prAuthor: 'owner' });
+  assert.equal(eligible.length, 1);
+  assert.equal(remaining.length, 0);
+});
+
+test('resolved thread with unrepaired P1 is not ignore-infra and stays fresh', () => {
+  const items = feedbackItems({
+    pr: PR,
+    threads: [{ id: 't-res', isResolved: true, comments: [
+      { id: 'c-p1', author: GREPTILE_AUTHOR, body: 'P1: crash on null', createdAt: '2026-09-10T00:00:00Z' },
+    ] }],
+  });
+  assert.equal(items[0].category, 'actionable-fix');
+  assert.notEqual(items[0].repairPolicy.action, 'ignore-infra');
+  assert.notEqual(items[0].repairPolicy.reason, 'non-actionable-or-resolved');
+  assert.equal(newFeedback({}, items).fresh.length, 1);
+});
+
+function scanHome(t) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-close-scan-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const paths = watcherPaths(home);
+  fs.mkdirSync(paths.stateDir, { recursive: true });
+  fs.writeFileSync(paths.statePath, JSON.stringify({
+    version: 2, repo: 'makecindy/cindy', prs: {
+      PR_1: {
+        number: 1, nodeId: 'PR_1', sessionId: 's1', eligibilityInitialized: true, eligibility: 'active',
+        admissionVerified: true, admissionEpoch: 'e', activeTask: { status: 'complete' },
+      },
+    },
+  }));
+  return paths;
+}
+
+const listed = { number: 1, id: 'PR_1', headRefOid: HEAD, headRefName: 'fix/x', title: 't', isDraft: false, labels: [] };
+const OWNER_PR = {
+  id: 'PR_1', number: 1, state: 'OPEN', isDraft: false, sameRepository: false, isCrossRepository: true,
+  author: { login: 'owner' }, headRepositoryOwner: { login: 'owner' }, headRepository: { name: 'cindy-fork' },
+  headRefOid: HEAD, baseRefOid: 'b'.repeat(40), releaseEpoch: 'e',
+};
+function mixedCollect() {
+  return {
+    pr: OWNER_PR, admissionVerified: true,
+    threads: [mixedThread({ threadId: 'TH_mix' })],
+    mergeReady: false,
+  };
+}
+function scanOpts(paths, extra = {}) {
+  return {
+    enabled: true, allowDispatch: true, paths, now: '2026-09-10T00:00:00Z',
+    ghFn: (args) => args[0] === 'api' ? 'owner' : JSON.stringify([listed]),
+    ownershipSnapshot: function* () { return { pr: OWNER_PR }; },
+    ...extra,
+  };
+}
+
+test('scanOnce mixed P1+P3 thread does not auto-close and dispatches P1', (t) => {
+  const paths = scanHome(t);
+  let sent = 0;
+  let payload;
+  const result = scanOnce(scanOpts(paths, {
+    collect: mixedCollect,
+    dispatchFn: (params) => { sent += 1; payload = params; return { target_session_id: 's1' }; },
+  }));
+  assert.equal(sent, 1);
+  assert.equal(result.prs[0].dispatch.attempted, true);
+  assert.equal(result.prs[0].autoClosed, undefined);
+  assert.match(JSON.stringify(payload), /P1/);
+});
+
+test('dispatch-budget-deferred then next round still repairs mixed-thread P1', (t) => {
+  const paths = scanHome(t);
+  let clock = 0;
+  let sent = 0;
+  const first = scanOnce(scanOpts(paths, {
+    budgetMs: 84000, perPrBudgetMs: 75000, clock: () => clock,
+    collect: () => { clock += 20000; return mixedCollect(); },
+    dispatchFn: () => { sent += 1; return { target_session_id: 's1' }; },
+  }));
+  assert.equal(sent, 0);
+  assert.equal(first.prs[0].dispatch.reason, 'dispatch-budget-deferred');
+  clock = 0;
+  const second = scanOnce(scanOpts(paths, {
+    budgetMs: 120000, clock: () => clock,
+    collect: mixedCollect,
+    dispatchFn: () => { sent += 1; return { target_session_id: 's1' }; },
+  }));
+  assert.equal(sent, 1);
+  assert.equal(second.prs[0].dispatch.attempted, true);
+  assert.equal(second.prs[0].autoClosed, undefined);
 });
 
 test('autoCloseReplyText does not restate a specific bot original verbatim', () => {

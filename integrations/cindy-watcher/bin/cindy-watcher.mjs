@@ -211,7 +211,8 @@ export function feedbackItems({ pr, checks = [], requiredChecks = [], policy, ci
       const authorLogin = author?.login ?? author;
       items.push(withCategory(withPublisher({
         source: isGreptileAuthor(author) ? 'greptile' : 'thread',
-        actionable: thread.isResolved !== true,
+        // High-priority "handled" is a repair receipt, not thread.isResolved.
+        actionable: true,
         threadId: thread.id,
         nativeId: `${thread.id}:${comment.id ?? authorLogin ?? 'comment'}`,
         revision: `${thread.isResolved === true}:${thread.isOutdated === true}:${comment.updatedAt ?? comment.updated_at ?? comment.createdAt ?? ''}`,
@@ -876,11 +877,13 @@ export function* processPr({
   const sameEpoch = !collected.pr || (previous.admissionEpoch === collected.pr.releaseEpoch && previous.wasDraft !== true);
   if (!sameEpoch) previous = {...previous, admissionVerified:false};
   const cursorBase = previous.wasDraft === true ? {} : (previous.feedbackCursor || {});
-  const { fresh: rawFresh, cursor } = newFeedback(cursorBase, feedbackItems({ pr, ...collected, receiptActor: viewer }));
-  // Autonomous P2/P3 review-thread closure happens here, before any dispatch
-  // accounting below sees these items — closed items never reach a session,
-  // never need a human, and are never counted as pending feedback.
-  const { eligible: autoCloseEligible, remaining: fresh } = partitionAutoClose(rawFresh);
+  const allItems = feedbackItems({ pr, ...collected, receiptActor: viewer });
+  const { fresh: rawFresh, cursor } = newFeedback(cursorBase, allItems);
+  // Resolve only when the whole thread is trusted-bot P3 (plus author/watcher
+  // replies). A single P3 comment must not close a thread that still has P0/P1/P2.
+  const { eligible: autoCloseEligible, remaining: fresh } = partitionAutoClose(rawFresh, {
+    allItems, threads: collected.threads ?? [], prAuthor: collected.pr?.author?.login ?? pr.author?.login,
+  });
   let autoClosedThisRound = [];
   if (autoCloseEligible.length > 0 && !dryRun) {
     const outcome = yield* autoCloseThreads({ eligible: autoCloseEligible, previous, ghFn, now });
