@@ -1,6 +1,6 @@
 # Cindy PR 盯梢修复工具
 
-此目录是 Mini 盯梢消费者的 Cindy 仓副本。独立复制自 `integrations/mivo-watcher/`（v2：发现器 + 每 PR 轮询 + 每 PR 专属修复 session），**不得改 mivo-watcher 源码**。扫描当前登录用户在 `makecindy/cindy` 的 open PR；head 在 fork 上时由独立 session 修审查反馈与 CI，直到 `awaiting-maintainer-approval`，并继续轮询到 MERGED/CLOSED。
+此目录是 Mini 盯梢消费者的 Cindy 仓副本。独立复制自 `integrations/mivo-watcher/`（v2：发现器内联轮询 + 每 PR 专属修复 session），**不得改 mivo-watcher 源码**。扫描当前登录用户在 `makecindy/cindy` 的 open PR；head 在 fork 上时由独立 session 修审查反馈与 CI，直到 `awaiting-maintainer-approval`，并继续轮询到 MERGED/CLOSED。
 
 helper 的 complete 仅表示一轮修复完成；不会合并 PR、不会开 auto-merge、不会删远端分支、不会改 CI、不会请求或代替维护者审批。
 
@@ -37,22 +37,17 @@ helper 的 complete 仅表示一轮修复完成；不会合并 PR、不会开 au
 
 运行时必须显式设置 `CINDY_WATCHER_HOME`。不得在本目录执行 live watcher 或存放 state、worktree、DB、日志、凭证。
 
-## 发现器 / 每 PR 调度
+## 发现器（唯一调度）
 
-发现器：`workingDir` = Cindy 本地仓，cron `*/5 * * * *`，timeout 180s，command `cindy-watch-script.py --mode discover`。**部署时发现器调度用同一 primary**（`providerId=xd`，`model=openai/gpt-6-luna`，Cindy 界面显示为「Cindy AI」，`effort=max`）。
+发现器：`workingDir` = Cindy 本地仓，cron `*/5 * * * *`，timeout 180s，command `cindy-watch-script.py --mode discover`，`executionMode` `script`，`capabilities` `["sessions.dispatch"]`。修复 session 的模型继承发现器调度（`providerId=xd`，`model=openai/gpt-6-luna`，界面「Cindy AI」，`effort=max`）；sessions.dispatch 不带 model/effort/providerId。
 
-每 PR 轮询由修复 session 用 `cindy-repair.mjs schedule-params` 生成后 `schedule_create`：
+- 已绑定 PR：发现器每轮做一次 GraphQL 指纹比对，不变即跳过；变化才全量采集、投递给该 PR 的 session。投递失败且 session 已归档/不存在时建接班 session。
+- **没有每 PR 调度**：修复 session 不建、不绑、不删任何调度；首次投递回执即认领（`claimedAt`）。
+- PR 合并后由脚本清理 watch clone（合并前确认干净，未并入 main 的提交先打 bundle 备份）；关闭未合并、工作树不干净或旧调度遗留时写入 `closedownManual`，等人处理。
+- 省 token：全部反馈都是 P3 reply-only 或基础设施时脚本直接记 no-change，不派 session；Greptile 5/5 总结不算发现项；派工提示词要求收口后立即结束回合、不自行等待维护者审批，反馈正文去标记限长，PR 快照写入 task 文件 `prSnapshot`。
+- watch clone 用 `git clone --reference-if-able <Cindy 本地仓>` 复用本地对象，clone 超时 15 分钟。
 
-- `name`: `Cindy watch #<N>`
-- primary：`agentKind` `codex`，`model` `openai/gpt-6-luna`，`providerId` `xd`（界面「Cindy AI」），`effort` `max`
-- fallback：`agentKind` `codex`，`model` `gpt-6-luna`，`providerId` `art-cindy`，`effort` `max`（**只**用于每 PR 轮询调度的 `schedule_create`：仅当它报 `NO_PROVIDER_FOR_AGENT`、`PROVIDER_ROUTE_UNAVAILABLE` 或模型不存在时重建一次；其它错误直接 blocked，不静默换模型）
-- 首个修复 session 的模型继承发现器调度（primary）。sessions.dispatch 不带 model/effort/providerId；若因 provider 失败未认领，走既有认领超时（叫醒或重建一次，其后 owner-unknown），不对 dispatch 做模型降级
-- `executionMode` `script`，`capabilities` `["sessions.dispatch"]`，禁止 `silentWhenIdle`
-- command 形态：
-
-```
-/usr/bin/env CINDY_WATCHER_LIVE=1 "CINDY_WATCHER_HOME=<home>" CINDY_NODE_BIN=/opt/homebrew/bin/node GH_BIN=/opt/homebrew/bin/gh PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin /usr/bin/python3 "<home>/bin/cindy-watch-script.py" --mode poll --pr <N> --node-id <id>
-```
+`--mode poll --pr <N> --node-id <id>` 仍可手动单跑一个 PR（排障用），不再由调度触发。
 
 ## 停盯
 

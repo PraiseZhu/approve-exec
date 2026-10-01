@@ -7,9 +7,7 @@ import { feedbackRepairPolicy, normalizeActorLogin } from './bin/cindy-feedback-
 import { evaluateCindyReview } from './bin/cindy-review-status.mjs';
 import { collectCindyPolicySync } from './bin/cindy-pr-policy.mjs';
 import {
-  commitsMissingDco, isBaseGithubUrl, isScheduleModelUnavailable, normalizeGithubUrl,
-  scheduleCreatePayload, scheduleModelFromResult, scheduleParams,
-  SCHEDULE_MODEL_FALLBACK, SCHEDULE_MODEL_PRIMARY,
+  commitsMissingDco, isBaseGithubUrl, normalizeGithubUrl,
 } from './bin/cindy-repair.mjs';
 import {
   DISPATCH_PARAM_KEYS, dispatchParams, hasWatchOffComment, headOwnerOf, ownershipMatchesViewer, readOptout, scanOnce, watcherPaths,
@@ -106,52 +104,29 @@ test('DCO helper reports commits missing Signed-off-by', () => {
   assert.deepEqual(missing, ['c'.repeat(40)]);
 });
 
-test('schedule-params uses Cindy watch name, fork-safe env, and omits silentWhenIdle', () => {
-  const home = '/Users/praise/AI-Agent/Claude/projects/Project CINDY/_ops/cindy-watcher';
-  const out = scheduleParams({ home, pr: 5307, nodeId: 'PR_5307' });
-  assert.equal(out.name, 'Cindy watch #5307');
-  assert.equal(out.agentKind, 'codex');
-  assert.equal(out.model, 'openai/gpt-6-luna');
-  assert.equal(out.providerId, 'xd');
-  assert.equal(out.effort, 'max');
-  assert.deepEqual(out.fallback, SCHEDULE_MODEL_FALLBACK);
-  assert.equal(out.fallback.model, 'gpt-6-luna');
-  assert.equal(out.fallback.providerId, 'art-cindy');
-  assert.equal(out.fallback.effort, 'max');
-  assert.equal(scheduleCreatePayload(out).providerId, 'xd');
-  assert.equal(Object.hasOwn(scheduleCreatePayload(out), 'fallback'), false);
-  assert.equal(out.cronExpr, '*/5 * * * *');
-  assert.deepEqual(out.scriptConfig.capabilities, ['sessions.dispatch']);
-  assert.equal(Object.hasOwn(out, 'silentWhenIdle'), false);
-  assert.match(out.scriptConfig.command, /CINDY_WATCHER_LIVE=1/);
-  assert.match(out.scriptConfig.command, /CINDY_NODE_BIN=\/opt\/homebrew\/bin\/node/);
-  assert.match(out.scriptConfig.command, /cindy-watch-script\.py/);
-});
-
-test('poll MERGED delivers closedown and does not treat awaiting-maintainer as merge', (t) => {
+test('poll MERGED runs script-driven closedown and never wakes a session', (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-merged-'));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const plugin = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-merged-plugin-'));
+  t.after(() => {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(plugin, { recursive: true, force: true });
+  });
   const paths = watcherPaths(home);
   fs.mkdirSync(paths.stateDir, { recursive: true });
   writePr(home, 'PR_1', { number: 1, nodeId: 'PR_1', sessionId: 'sess-1', scheduleId: 'sched-1' });
+  let dispatches = 0;
+  // autoCleanupWatch is fully faked here: gitFn never shells out, and
+  // CINDY_WATCHER_REPO points at an empty tmp dir, so this can never touch
+  // the real plugin repo even on the "worktree missing" fallback path.
   const result = scanOnce({
     mode: 'poll', enabled: true, allowDispatch: true, paths, now: '2026-09-29T00:00:00Z',
-    nodeId: 'PR_1', prNumber: 1,
+    nodeId: 'PR_1', prNumber: 1, gitFn: () => '', env: { CINDY_WATCHER_REPO: plugin },
     snapshotFn: () => ({ state: 'MERGED', isDraft: false, headRefOid: HEAD, baseRefOid: BASE, mergeable: 'MERGEABLE', labels: [] }),
-    dispatchFn: (params) => {
-      assert.match(params.message, /已合并/);
-      return { target_session_id: 'sess-1' };
-    },
+    dispatchFn: () => { dispatches++; return { target_session_id: 'sess-1' }; },
   });
-  assert.equal(result.prs[0].dispatch.reason, 'closedown');
-});
-
-test('model-unavailable classifier only matches provider/model route errors', () => {
-  assert.equal(isScheduleModelUnavailable({ message: 'NO_PROVIDER_FOR_AGENT: xd' }), true);
-  assert.equal(isScheduleModelUnavailable({ code: 'PROVIDER_ROUTE_UNAVAILABLE', message: 'xd' }), true);
-  assert.equal(isScheduleModelUnavailable(new Error('模型不存在')), true);
-  assert.equal(isScheduleModelUnavailable(new Error('busy: PR 状态锁占用')), false);
-  assert.equal(isScheduleModelUnavailable(new Error('ARCHIVED')), false);
+  assert.equal(dispatches, 0, 'MERGED closedown must not dispatch to a session');
+  assert.equal(result.prs[0].dispatch.attempted, false);
+  assert.equal(result.prs[0].dispatch.reason, 'closedown-script');
 });
 
 test('dispatchParams only emits Cindy broker-legal keys', () => {
@@ -165,10 +140,6 @@ test('dispatchParams only emits Cindy broker-legal keys', () => {
   assert.equal(Object.hasOwn(params, 'providerId'), false);
   assert.equal(Object.hasOwn(params, 'agentKind'), false);
   assert.equal(Object.hasOwn(params, 'fallback'), false);
-});
-
-test('scheduleModelFromResult defaults to primary when route is omitted', () => {
-  assert.deepEqual(scheduleModelFromResult({}), { ...SCHEDULE_MODEL_PRIMARY, fallback: false, reason: null });
 });
 
 test('awaiting-maintainer-approval is ready but not a merge instruction', () => {

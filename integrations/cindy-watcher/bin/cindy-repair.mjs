@@ -14,28 +14,13 @@ import { acquireLock, AUTHOR_RECLAIMED, clearOrphanGuard, DEPLOY_LOCK_NAME, help
 export const REPO = 'makecindy/cindy';
 export const DEFAULT_PLUGIN_REPO = '/Users/praise/AI-Agent/Claude/projects/Project CINDY';
 export const DEFAULT_PREFLIGHT = '/Users/praise/.claude/skills/cindy-pr-preflight/preflight.sh';
-export const SCHEDULE_MODEL_PRIMARY = Object.freeze({
-  agentKind: 'codex',
-  model: 'openai/gpt-6-luna',
-  providerId: 'xd',
-  effort: 'max',
-});
-export const SCHEDULE_MODEL_FALLBACK = Object.freeze({
-  agentKind: 'codex',
-  model: 'gpt-6-luna',
-  providerId: 'art-cindy',
-  effort: 'max',
-});
-export function isScheduleModelUnavailable(error) {
-  const text = String(error?.message ?? error?.stderr ?? error ?? '');
-  const code = String(error?.code ?? error?.errorCode ?? '');
-  return /NO_PROVIDER_FOR_AGENT|PROVIDER_ROUTE_UNAVAILABLE/i.test(`${code} ${text}`)
-    || /模型不存在|unknown model|model (?:not found|does not exist|unavailable)|no provider for agent/i.test(text);
-}
 const GH = process.env.GH_BIN ?? 'gh';
 const GIT = process.env.GIT_BIN ?? 'git';
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const GIT_PUSH_TIMEOUT_MS = 60 * 60 * 1000;
+// A fork clone borrows objects from the local Cindy repo, but the first fetch of a
+// new fork branch can still exceed the default helper timeout.
+const GIT_CLONE_TIMEOUT_MS = 15 * 60 * 1000;
 
 function fail(message, exitCode = 1) {
   const error = new Error(message);
@@ -164,8 +149,8 @@ function saveResultLocked(paths, task, sessionId, payload) {
 }
 
 export function command(binary, args, options = {}, runner = execFileSync) {
-  const timeout = options.timeout ?? (binary === GIT && args.includes('push')
-    ? GIT_PUSH_TIMEOUT_MS : DEFAULT_COMMAND_TIMEOUT_MS);
+  const timeout = options.timeout ?? (binary === GIT && args.includes('push') ? GIT_PUSH_TIMEOUT_MS
+    : binary === GIT && args[0] === 'clone' ? GIT_CLONE_TIMEOUT_MS : DEFAULT_COMMAND_TIMEOUT_MS);
   return runner(binary, args, {
     encoding: 'utf8', timeout, maxBuffer: 8 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'pipe'], ...options,
@@ -351,7 +336,11 @@ export function cloneWorktree(paths, task, gitFn, cloneUrl, expectedUrl, remoteH
   if (existing) return { worktree, head: existing.head, created: false };
   fs.mkdirSync(path.dirname(worktree), { recursive: true, mode: 0o700 });
   if (fs.existsSync(worktree)) fail('worktree path is unknown; refusing to remove it');
-  gitOutput(['clone', '--origin', 'origin', '--branch', task.headRefName, '--single-branch', originUrl, worktree], gitFn);
+  // --reference-if-able reuses the local repo's objects (both remotes are already
+  // fetched there), so only the PR's new commits cross the network; --dissociate
+  // then copies the borrowed objects in, so a later gc of the local repo cannot
+  // break a long-lived watch clone.
+  gitOutput(['clone', '--reference-if-able', plugin, '--dissociate', '--origin', 'origin', '--branch', task.headRefName, '--single-branch', originUrl, worktree], gitFn);
   gitOutput(['-C', worktree, 'checkout', '-B', branch], gitFn);
   gitOutput(['-C', worktree, 'branch', '--set-upstream-to', `origin/${task.headRefName}`], gitFn);
   gitOutput(['-C', worktree, 'remote', 'add', 'upstream', githubRepoUrl(REPO)], gitFn);
@@ -752,116 +741,6 @@ export function scheduleCreatePayload(params) {
   void fallback; void fallbackUsed; void fallbackReason;
   return rest;
 }
-export function scheduleParams({ home, pr, nodeId, env = process.env }) {
-  const root = requireAbs(home, 'home');
-  const plugin = pluginRepoPath(env);
-  const script = path.join(root, 'bin', 'cindy-watch-script.py');
-  const commandLine = `/usr/bin/env CINDY_WATCHER_LIVE=1 "CINDY_WATCHER_HOME=${root}" CINDY_NODE_BIN=/opt/homebrew/bin/node GH_BIN=/opt/homebrew/bin/gh PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin /usr/bin/python3 "${script}" --mode poll --pr ${pr} --node-id ${nodeId}`;
-  return {
-    name: `Cindy watch #${pr}`,
-    executionMode: 'script',
-    scriptConfig: { command: commandLine, capabilities: ['sessions.dispatch'], timeoutMs: 180000 },
-    cronExpr: '*/5 * * * *',
-    timezone: 'Asia/Shanghai',
-    recurring: true,
-    ...SCHEDULE_MODEL_PRIMARY,
-    fallback: { ...SCHEDULE_MODEL_FALLBACK },
-    kind: 'cron',
-    workingDir: plugin,
-    useWorktree: false,
-    bindToCurrentSession: true,
-    notify: { desktop: false, feishu: false },
-  };
-}
-export function scheduleModelFromResult(result = {}) {
-  const fallbackUsed = result.fallbackUsed === true
-    || (result.providerId === SCHEDULE_MODEL_FALLBACK.providerId && result.model === SCHEDULE_MODEL_FALLBACK.model);
-  const echoed = result.model || result.providerId || result.fallbackUsed === true;
-  if (echoed) {
-    const model = result.model ?? (fallbackUsed ? SCHEDULE_MODEL_FALLBACK.model : SCHEDULE_MODEL_PRIMARY.model);
-    const providerId = result.providerId ?? (fallbackUsed ? SCHEDULE_MODEL_FALLBACK.providerId : SCHEDULE_MODEL_PRIMARY.providerId);
-    const allowedModel = model === SCHEDULE_MODEL_PRIMARY.model || model === SCHEDULE_MODEL_FALLBACK.model;
-    const allowedProvider = providerId === SCHEDULE_MODEL_PRIMARY.providerId || providerId === SCHEDULE_MODEL_FALLBACK.providerId;
-    if (!allowedModel || !allowedProvider) fail('schedule model is neither primary nor fallback; refusing silent model switch');
-    if (fallbackUsed && !String(result.fallbackReason ?? '').trim()) fail('fallback schedule requires fallbackReason');
-  }
-  const route = fallbackUsed ? SCHEDULE_MODEL_FALLBACK : SCHEDULE_MODEL_PRIMARY;
-  return {
-    agentKind: result.agentKind ?? route.agentKind,
-    model: result.model ?? route.model,
-    providerId: result.providerId ?? route.providerId,
-    effort: result.effort ?? route.effort,
-    fallback: fallbackUsed,
-    reason: fallbackUsed ? String(result.fallbackReason).trim() : null,
-  };
-}
-
-export function bindSchedule({
-  home, pr, nodeId, resultPath, dispatchId, now = new Date().toISOString(),
-  retryMs = 180000, retryDelayMs = 5000, sleepFn = null,
-} = {}) {
-  return withHelperOp(home, pr, () => {
-  const root = requireAbs(home, 'home');
-  const result = readJson(requireAbs(resultPath, 'result'), 'schedule_create result');
-  const command = result.scriptConfig?.command ?? result.command ?? '';
-  if (result.ok !== true) fail('schedule_create result is not ok');
-  if (result.executionMode !== 'script') fail('schedule_create executionMode must be script');
-  if (result.status !== 'active') fail('schedule_create status must be active');
-  if (typeof result.targetSessionId !== 'string' || !result.targetSessionId) fail('schedule_create targetSessionId is required');
-  if (!String(command).includes(`--pr ${pr}`)) fail('schedule command does not target this PR');
-  const sleep = sleepFn ?? ((ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); });
-  const deadline = Date.now() + retryMs;
-  let lock = acquireLock(root, `pr-${nodeId}`);
-  while (lock.held && Date.now() < deadline) {
-    sleep(retryDelayMs);
-    lock = acquireLock(root, `pr-${nodeId}`);
-  }
-  if (lock.held) fail('busy: PR 状态锁占用，请等 1 分钟后重试 bind-schedule', 2);
-  try {
-    refuseDeployLock(root);
-    const previous = readPr(root, nodeId) || {};
-    const incoming = result.targetSessionId;
-    const pendingId = previous.pendingDispatch?.dispatchId;
-    const lateUnknown = previous.needsHuman?.abandonedDispatchId;
-    const currentOwner = Boolean(previous.sessionId && previous.sessionId === incoming);
-    if (!dispatchId) {
-      if (!currentOwner || pendingId || previous.needsHuman?.reason === 'owner-unknown') {
-        fail('owner-conflict: bind-schedule 需要 --dispatch-id', 3);
-      }
-      const incomingSchedule = result.id ?? result.scheduleId;
-      if (previous.scheduleId) {
-        if (previous.scheduleId === incomingSchedule) return previous;
-        fail(`owner-conflict: 本 PR 已有轮询调度 ${previous.scheduleId}，先 schedule_get 该 id；不要新建第二条`, 3);
-      }
-    } else {
-      const abandoned = previous.abandonedDispatches ?? [];
-      if (abandoned.includes(dispatchId)) fail('owner-conflict: dispatch-id 已作废', 3);
-      if (pendingId && pendingId !== dispatchId) fail('owner-conflict: dispatch-id 与当前 pending 不一致', 3);
-      if (!pendingId && previous.needsHuman?.reason === 'owner-unknown' && dispatchId !== lateUnknown) {
-        fail('owner-conflict: dispatch-id 与 owner-unknown 记录不一致', 3);
-      }
-      if (!pendingId && !previous.sessionId && previous.needsHuman?.reason !== 'owner-unknown') {
-        fail('owner-conflict: 无 pending 的未知 dispatch-id', 3);
-      }
-      if (previous.sessionId && previous.sessionId !== incoming) {
-        const awaiting = previous.pendingDispatch?.status === 'awaiting-claim';
-        const needsHuman = previous.needsHuman?.reason === 'owner-unknown';
-        if (!awaiting && !needsHuman) fail(`owner-conflict: 本 PR 已由 ${previous.sessionId} 持有，你应停止`, 3);
-      }
-    }
-    const scheduleModel = scheduleModelFromResult(result);
-    const entry = {
-      ...previous, number: Number(pr), nodeId,
-      scheduleId: result.id ?? result.scheduleId,
-      sessionId: incoming, claimedAt: now, pendingDispatch: null, dispatchError: null, needsHuman: null,
-      scheduleModel,
-    };
-    writePr(root, nodeId, entry);
-    return entry;
-  } finally { lock.release(); }
-  });
-}
-
 export function clearOwnerUnknown({ home, pr, nodeId, now = new Date().toISOString() }) {
   return withHelperOp(home, pr, () => {
   const root = requireAbs(home, 'home');
@@ -1004,7 +883,7 @@ export function lockDoctorClearGuard({ home, lockName, now } = {}) {
 
 function cli(argv) {
   const args = [...argv];
-  const modes = new Set(['prepare', 'validate', 'finalize', 'recheck', 'blocked', 'schedule-params', 'bind-schedule', 'cleanup', 'clear-owner-unknown', 'lock-doctor']);
+  const modes = new Set(['prepare', 'validate', 'finalize', 'recheck', 'blocked', 'cleanup', 'clear-owner-unknown', 'lock-doctor']);
   const modeIndex = args.findIndex((item) => modes.has(item));
   const mode = modeIndex >= 0 ? args.splice(modeIndex, 1)[0] : undefined;
   const value = (name, required = true) => {
@@ -1016,9 +895,7 @@ function cli(argv) {
   };
   const home = value('--home');
   let result;
-  if (mode === 'schedule-params') result = scheduleParams({ home, pr: value('--pr'), nodeId: value('--node-id') });
-  else if (mode === 'bind-schedule') result = bindSchedule({ home, pr: value('--pr'), nodeId: value('--node-id'), resultPath: value('--result'), dispatchId: value('--dispatch-id', false) });
-  else if (mode === 'cleanup') result = cleanupWatch({ home, pr: value('--pr') });
+  if (mode === 'cleanup') result = cleanupWatch({ home, pr: value('--pr') });
   else if (mode === 'clear-owner-unknown') result = clearOwnerUnknown({ home, pr: value('--pr'), nodeId: value('--node-id') });
   else if (mode === 'lock-doctor') {
     const lockName = value('--clear-guard', false);
@@ -1031,7 +908,7 @@ function cli(argv) {
     else if (mode === 'finalize') result = finalize({ home, taskPath: task, scReport: value('--sc-report'), validatedHead: value('--validated-head'), validationReceipt: value('--validation-receipt', false) });
     else if (mode === 'recheck') result = recheck({ home, taskPath: task, validatedHead: value('--validated-head', false) });
     else if (mode === 'blocked') result = blocked({ home, taskPath: task, reason: value('--reason') });
-    else fail('mode must be prepare, validate, finalize, recheck, blocked, schedule-params, bind-schedule, cleanup, clear-owner-unknown, or lock-doctor');
+    else fail('mode must be prepare, validate, finalize, recheck, blocked, cleanup, clear-owner-unknown, or lock-doctor');
   }
   process.stdout.write(`${JSON.stringify(result)}\n`);
   if (mode === 'validate' && result.status === 'fail') process.exitCode = 1;

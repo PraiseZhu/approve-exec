@@ -521,14 +521,28 @@ test('REST Greptile bot source and required CI evidence are preserved in collect
   assert.equal(rows.find(i=>i.source==='ci').repairPolicy.action,'required-ci-fix');
   assert.equal(rows.find(i=>i.source==='ci').requiredFailure.headSha,HEAD);
 });
-test('scan persists frozen task and per-item low-severity authority', t=>{
+test('P3-only feedback is closed by the script: no session turn, no task, cursor advances', t=>{
   const {paths,listed}=scanHome(t);
-  runScan(paths,listed,()=>({comments:[{id:92,user:BOT_USER,body:'**P3** nit',updatedAt:'t92'}],mergeReady:false}),()=>({target_session_id:'s1'}));
+  let sent=0;
+  const collect=()=>({comments:[{id:92,user:BOT_USER,body:'**P3** nit',updatedAt:'t92'}],mergeReady:false});
+  const result=runScan(paths,listed,collect,()=>{sent++;return {target_session_id:'s1'};});
+  assert.equal(sent,0);
+  assert.equal(result.prs[0].dispatch.reason,'script-no-change');
+  assert.equal(result.prs[0].dispatch.items[0].action,'reply-only');
+  assert.equal(fs.existsSync(path.join(paths.stateDir,'tasks')),false);
+  const again=runScan(paths,listed,collect,()=>{sent++;return {target_session_id:'s1'};},'2026-09-10T00:05:00Z');
+  assert.equal(sent,0);
+  assert.equal(again.prs[0].dispatch.reason,'no-new-feedback');
+});
+test('P2 next to P3 still dispatches and persists the frozen per-item authority', t=>{
+  const {paths,listed}=scanHome(t);
+  runScan(paths,listed,()=>({comments:[{id:92,user:BOT_USER,body:'**P3** nit',updatedAt:'t92'},{id:93,user:BOT_USER,body:'**P2** bug',updatedAt:'t93'}],mergeReady:false}),()=>({target_session_id:'s1'}));
   const taskFiles=fs.readdirSync(path.join(paths.stateDir,'tasks')).filter(n=>n.endsWith('.json'));
   assert.equal(taskFiles.length,1);
   const task=JSON.parse(fs.readFileSync(path.join(paths.stateDir,'tasks',taskFiles[0]),'utf8'));
-  assert.equal(task.repairPolicy.canChangeCode,false);
-  assert.equal(task.feedback[0].repairPolicy.action,'reply-only');
+  assert.equal(task.repairPolicy.canChangeCode,true);
+  assert.deepEqual(task.feedback.map(i=>i.repairPolicy.action).sort(),['code-fix','reply-only']);
+  assert.ok(task.prSnapshot && 'unresolvedThreads' in task.prSnapshot);
 });
 
 

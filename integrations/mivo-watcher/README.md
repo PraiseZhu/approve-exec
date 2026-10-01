@@ -12,7 +12,7 @@ PR 审查反馈只有明确的 P0/P1 才授权自动改动并提交；P2/P3、�
 
 旧治理根的运行文件软链只供源码引用，不作旧CLI兼容保证；执行watcher/repair使用这里或Mini runtime的真实路径。只有旧`deploy-watcher.mjs`入口明确支持软链调用，参数改为下述verify/preview/apply。
 
-`bin/` 现为 v2：发现器 + 每 PR 轮询脚本 + 每 PR 状态文件（`state/prs/<nodeId>.json`）。旧单文件 `state/state.json` 只做一次性迁移，不改写。发现器每 5 分钟列本人 open PR，给未绑定且准入的 PR 建专属 session；已绑定 PR 只看心跳。每 PR 轮询脚本由该 session 自己 `schedule_create`（script 模式，禁止 `silentWhenIdle`），5 分钟只扫这一个 PR。工作树落在插件仓 `<P>/.worktrees/watch/pr-<N>`。原治理目录父级源码与旧部署脚本不再是维护入口；历史 release/备份仅供取证和回滚。
+`bin/` 现为 v2：发现器 + 每 PR 状态文件（`state/prs/<nodeId>.json`）。旧单文件 `state/state.json` 只做一次性迁移，不改写。发现器每 5 分钟列本人 open PR：未绑定且准入的 PR 建专属 session；已绑定的 PR 由发现器直接做一次 GraphQL 指纹比对，变化才全量采集并投递给该 session。**没有每 PR 调度**，修复 session 不建、不绑、不删任何调度；PR 合并/关闭后由脚本清理 watch worktree（不安全或旧调度遗留写入 `closedownManual`）。省 token 规则：全部反馈都是 P2/P3 reply-only 或基础设施时脚本直接记 no-change，不派 session；Greptile 5/5 总结不算发现项；`chore/changelog-*` 机器人 PR 由 bug-doctor 主轮代合，不进盯梢；派工提示词要求收口后立即结束回合，反馈正文去标记限长，PR 快照写入 task 文件 `prSnapshot`。工作树落在插件仓 `<P>/.worktrees/watch/pr-<N>`。原治理目录父级源码与旧部署脚本不再是维护入口；历史 release/备份仅供取证和回滚。
 
 验证：
 
@@ -21,7 +21,7 @@ node --test integrations/mivo-watcher/*.test.mjs
 node scripts/run-tests.mjs
 ```
 
-源码与运行态分开。不得在本目录执行 live watcher 或存放 state、worktree、DB、日志、凭证、实际部署计划和原始备份。默认 runtime 示例：`/Users/praise/AI-Agent/Claude/projects/Project Mivo Canvas-Plugin/_ops/mivo-watcher`（即插件仓根 `P` 下 `_ops/mivo-watcher`）。运行时必须显式设置 `MIVO_WATCHER_HOME`。发现器调度：`workingDir=P`，command `... mivo-watch-script.py --mode discover`，cron `*/5`，timeout 180s。每 PR 轮询由修复 session 用 `mivo-repair.mjs schedule-params` 生成参数后 `schedule_create`。
+源码与运行态分开。不得在本目录执行 live watcher 或存放 state、worktree、DB、日志、凭证、实际部署计划和原始备份。默认 runtime 示例：`/Users/praise/AI-Agent/Claude/projects/Project Mivo Canvas-Plugin/_ops/mivo-watcher`（即插件仓根 `P` 下 `_ops/mivo-watcher`）。运行时必须显式设置 `MIVO_WATCHER_HOME`。发现器调度：`workingDir=P`，command `... mivo-watch-script.py --mode discover`，cron `*/5`，timeout 180s。这是唯一的调度；`--mode poll --pr <N> --node-id <id>` 仍可手动单跑一个 PR（排障用），不再由调度触发。
 
 唯一新部署入口 `deploy.mjs`：先保存显式目标的 preview，审核后 apply；使用源/目标/状态 hash CAS、session idle 只读核对、租约、唯一备份、失败原子回滚。不会写 Host 数据库或调度。持锁时等待 watcher 正常释放，不强抢；unknown/stale lease 由既有 watcher 处理。
 
