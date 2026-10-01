@@ -65,7 +65,10 @@ function stripBadge(line) {
 export function feedbackRepairPolicy(item = {}, { headSha } = {}) {
   if (!item || typeof item !== 'object') return result('needs-triage', [], 'invalid-feedback');
   if (item.actionable === false) return result('ignore-infra', [], 'non-actionable-or-resolved');
-  if (headSha && item.sha && item.sha !== headSha && item.isOutdated !== true) return result('needs-triage', [], 'stale-head');
+  // An unresolved review thread in the current snapshot stays live across later pushes: its
+  // comment SHA is provenance (the commit it was written against), not a freshness bound.
+  const liveThread = typeof item.threadId === 'string' && item.threadId.length > 0;
+  if (headSha && item.sha && item.sha !== headSha && item.isOutdated !== true && !liveThread) return result('needs-triage', [], 'stale-head');
   if (item.source === 'ci' || item.source === 'conflict') {
     if (!headSha || item.sha !== headSha) return result('needs-triage', [], 'unbound-head');
     if (item.source === 'conflict') return result('conflict-fix', [], 'current-merge-conflict');

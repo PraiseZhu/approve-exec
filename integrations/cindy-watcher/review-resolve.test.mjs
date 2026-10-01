@@ -354,3 +354,32 @@ test('403 on reply degrades instead of throwing', () => {
   assert.equal(result.closed[0].reason, 'permission-denied');
   assert.equal(result.previous.autoClosedThreads?.['t-p3'], undefined);
 });
+
+test('live unresolved thread from an older head keeps code authority through task and helper', async (t) => {
+  const { taskRepairPolicy, feedbackRepairPolicy } = await import('./bin/cindy-feedback-policy.mjs');
+  const { validateScs, assertTaskRepairScope } = await import('./bin/cindy-repair.mjs');
+  const paths = scanHome(t);
+  let payload;
+  const threads = [{ id: 'TH_live', isResolved: false, isOutdated: false, comments: [p1Comment()] }];
+  const result = scanOnce(scanOpts(paths, {
+    collect: () => ({ pr: { ...OWNER_PR, headRefOid: HEAD }, admissionVerified: true, threads, mergeReady: false }),
+    dispatchFn: (params) => { payload = params; return { target_session_id: 's1' }; },
+  }));
+  assert.equal(result.prs[0].dispatch.attempted, true);
+  assert.doesNotMatch(payload.message, /NO_CODE_NO_PUSH_NO_EXTERNAL_REPLY/);
+  assert.match(payload.message, new RegExp(`thread TH_live 针对旧提交 ${SHA_A}，先核实`));
+
+  const [item] = feedbackItems({ pr: { headRefOid: HEAD }, threads });
+  assert.equal(item.sha, SHA_A);
+  const task = { headRefOid: HEAD, feedback: [{ ...item, key: 'thread:TH_live' }] };
+  const policy = taskRepairPolicy(task);
+  assert.equal(policy.canChangeCode, true);
+  assert.deepEqual(policy.allowedFeedbackKeys, ['thread:TH_live']);
+  assert.doesNotThrow(() => validateScs({ scs: [{ id: 'SC-1', status: 'pass', evidence: ['fixed null crash'], feedbackKeys: ['thread:TH_live'] }] }, task));
+  if (typeof assertTaskRepairScope === 'function') assert.doesNotThrow(() => assertTaskRepairScope(task, HEAD));
+
+  // Non-thread review on an older commit keeps the stale-head guard.
+  const staleReview = feedbackRepairPolicy({ source: 'greptile', nativeId: 'r1', sha: SHA_A, body: 'P1: crash', author: GREPTILE_AUTHOR, __typename: 'Bot' }, { headSha: HEAD });
+  assert.equal(staleReview.reason, 'stale-head');
+  assert.equal(staleReview.canChangeCode, false);
+});

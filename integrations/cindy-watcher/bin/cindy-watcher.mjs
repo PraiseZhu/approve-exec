@@ -419,8 +419,9 @@ export function dispatchParams({ pr, mapping, fresh, now, taskPath, home, messag
   const repairPolicy = taskRepairPolicy({ headRefOid: pr.headRefOid, feedback: fresh });
   const title = mapping.title || repairSessionTitle({ task: pr.title, prNumber: pr.number, createdAt: now });
   const outdatedNotes = (fresh ?? [])
-    .filter((item) => item.isOutdated === true && item.actionable !== false && item.repairPolicy?.canChangeCode === true)
-    .map((item) => `outdated thread ${item.threadId} 针对旧提交 ${item.sha}，先核实当前代码是否仍存在该问题，已不存在则回复说明并 resolve，不改代码`);
+    .filter((item) => item.threadId && item.actionable !== false && item.sha && item.sha !== pr.headRefOid
+      && (item.isOutdated === true || repairPolicy.allowedFeedbackKeys.includes(item.key)))
+    .map((item) => `${item.isOutdated === true ? 'outdated ' : ''}thread ${item.threadId} 针对旧提交 ${item.sha}，先核实当前代码是否仍存在该问题，已不存在则回复说明并 resolve，不改代码`);
   const params = {
     title,
     message: [
