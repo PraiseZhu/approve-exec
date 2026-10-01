@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { normalizePollSnapshot, pollFingerprint, scanOnce, watcherPaths, watchClosedownMessage, watchDispatchConflictMessage } from './bin/mivo-watcher.mjs';
+import { normalizePollSnapshot, pollFingerprint, scanOnce, watcherPaths, watchDispatchConflictMessage } from './bin/mivo-watcher.mjs';
 import { planSessionTitle, repairSessionTitle } from './bin/session-title.mjs';
 import { readPr, writePr as writePrState } from './bin/mivo-state.mjs';
 
@@ -36,7 +36,16 @@ function seed(paths, extra = {}) {
   });
 }
 
-function poll(paths, { snapshot, collect, dispatchFn, enabled = true, recheckFn } = {}) {
+// Closedown runs git cleanup; tests must never touch the real plugin repo.
+function fakeGit(t, { status = '' } = {}) {
+  const plugin = fs.mkdtempSync(path.join(os.tmpdir(), 'v2-poll-plugin-'));
+  t.after(() => fs.rmSync(plugin, { recursive: true, force: true }));
+  const calls = [];
+  const gitFn = (_bin, args) => { calls.push(args); if (args.includes('status')) return status; return ''; };
+  return { plugin, calls, gitFn, env: { MIVO_PLUGIN_REPO: plugin } };
+}
+
+function poll(paths, { snapshot, collect, dispatchFn, enabled = true, recheckFn, git } = {}) {
   let collected = 0;
   const result = scanOnce({
     mode: 'poll', enabled, allowDispatch: true, paths, now, nodeId, prNumber: 790,
@@ -48,6 +57,7 @@ function poll(paths, { snapshot, collect, dispatchFn, enabled = true, recheckFn 
       throw new Error('collect should not run');
     },
     dispatchFn, recheckFn,
+    ...(git ? { gitFn: git.gitFn, env: git.env } : {}),
     ownershipSnapshot: function* () {
       return { pr: { state: 'OPEN', isDraft: false, sameRepository: true, author: { login: 'owner' }, headRefOid: HEAD, baseRefOid: BASE, releaseEpoch: 'e' } };
     },
@@ -225,67 +235,45 @@ test('fingerprint change dispatches to bound session', (t) => {
   assert.equal(result.prs[0].dispatch.attempted, true);
 });
 
-test('MERGED delivers closedown once', (t) => {
+test('MERGED is cleaned up by the script once, without waking the session', (t) => {
   const { paths } = homeOf(t);
-  seed(paths, { scheduleId: 'sched-1' });
+  seed(paths, { scheduleId: 'sched-legacy' });
+  const git = fakeGit(t);
   const calls = [];
-  const first = poll(paths, {
-    snapshot: snap({ state: 'MERGED' }),
-    dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-790' }; },
-  });
-  assert.equal(calls.length, 1);
-  assert.match(calls[0].message, /已合并/);
-  assert.match(calls[0].message, /schedule_delete/);
-  assert.equal(calls[0].target_session_id, 'sess-790');
+  const first = poll(paths, { snapshot: snap({ state: 'MERGED' }), dispatchFn: (p) => { calls.push(p); return {}; }, git });
+  assert.equal(calls.length, 0);
+  assert.equal(first.result.prs[0].dispatch.reason, 'closedown-script');
   assert.equal(first.entry.closedHandled, true);
-  const second = poll(paths, {
-    snapshot: snap({ state: 'MERGED' }),
-    dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-790' }; },
-  });
-  assert.equal(calls.length, 1);
+  assert.equal(first.entry.autoCleanup.removed, true);
+  assert.ok(git.calls.some((args) => args.includes('branch') && args.includes('watch/pr-790')));
+  // A legacy per-PR schedule cannot be deleted by a script, so it is listed for a human.
+  assert.equal(first.entry.closedownManual.scheduleId, 'sched-legacy');
+  const second = poll(paths, { snapshot: snap({ state: 'MERGED' }), dispatchFn: (p) => { calls.push(p); return {}; }, git });
+  assert.equal(calls.length, 0);
   assert.equal(second.result.prs[0].dispatch.reason, 'closed-handled');
-  assert.match(watchClosedownMessage({ prNumber: 790, state: 'MERGED', scheduleId: 'sched-1', home: paths.home }), /cleanup --pr 790/);
 });
 
-test('MERGED unknown receipt retries closedown', (t) => {
+test('MERGED with a dirty watch worktree keeps it and records it for a human', (t) => {
   const { paths } = homeOf(t);
-  seed(paths, { scheduleId: 'sched-1' });
-  const first = poll(paths, {
-    snapshot: snap({ state: 'MERGED' }),
-    dispatchFn: () => { throw new Error('Cindy dispatch receipt timed out'); },
-  });
-  assert.equal(first.entry.closedHandled, false);
-  assert.equal(first.result.prs[0].dispatch.reason, 'closedown-unconfirmed');
-  const second = poll(paths, {
-    snapshot: snap({ state: 'MERGED' }),
-    dispatchFn: () => ({ target_session_id: 'sess-790' }),
-  });
-  assert.equal(second.entry.closedHandled, true);
-  assert.equal(second.result.prs[0].dispatch.reason, 'closedown');
-});
-
-test('MERGED ARCHIVED marks closedHandled for manual schedule cleanup', (t) => {
-  const { paths } = homeOf(t);
-  seed(paths, { scheduleId: 'sched-gone' });
-  const { entry, result } = poll(paths, {
-    snapshot: snap({ state: 'CLOSED' }),
-    dispatchFn: () => { throw new Error('target NOT_FOUND'); },
-  });
+  seed(paths);
+  const git = fakeGit(t, { status: ' M src/a.ts' });
+  fs.mkdirSync(path.join(git.plugin, '.worktrees', 'watch', 'pr-790'), { recursive: true });
+  const { entry } = poll(paths, { snapshot: snap({ state: 'MERGED' }), dispatchFn: () => { throw new Error('must not dispatch'); }, git });
   assert.equal(entry.closedHandled, true);
-  assert.equal(result.prs[0].dispatch.reason, 'closedown-session-gone');
-  assert.equal(entry.closedownManual.scheduleId, 'sched-gone');
+  assert.equal(entry.autoCleanup.removed, false);
+  assert.equal(entry.closedownManual.reason, 'dirty');
+  assert.ok(!git.calls.some((args) => args.includes('remove')));
 });
 
-test('MERGED closedown without persisted title falls back to repairSessionTitle', (t) => {
+test('CLOSED without merge keeps the worktree and runs no git', (t) => {
   const { paths } = homeOf(t);
-  seed(paths, { title: undefined, scheduleId: 'sched-1' });
-  const calls = [];
-  poll(paths, {
-    snapshot: snap({ state: 'MERGED' }),
-    dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-790' }; },
-  });
-  // deliverClosedown never has a pr object (only prNumber) in scope, so task stays unset.
-  assert.equal(calls[0].title, repairSessionTitle({ prNumber: 790, createdAt: now }));
+  seed(paths);
+  const git = fakeGit(t);
+  const { entry, result } = poll(paths, { snapshot: snap({ state: 'CLOSED' }), dispatchFn: () => { throw new Error('must not dispatch'); }, git });
+  assert.equal(result.prs[0].dispatch.reason, 'closedown-script');
+  assert.equal(entry.closedHandled, true);
+  assert.equal(entry.closedownManual.reason, 'closed-unmerged-kept');
+  assert.equal(git.calls.length, 0);
 });
 
 test('mivo-watch:off does not dispatch', (t) => {

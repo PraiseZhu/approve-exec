@@ -99,6 +99,11 @@ export function feedbackRepairPolicy(item = {}, { headSha } = {}) {
   if (summaryHigh && !high) return result('needs-triage', severities, 'high-summary-without-finding');
   if (high) return result('code-fix', severities, 'explicit-p0-p1-finding');
   if (low) return result('reply-only', severities, 'p2-p3-no-code-authority');
+  // A Greptile overview scored 5/5 with no severity finding is a clean bill, not
+  // a finding; its inline findings arrive as separate, graded items.
+  if (/<!--\s*greptile_summary\s*-->/i.test(body) && /Confidence Score:\s*5\s*\/\s*5/i.test(body)) {
+    return result('ignore-infra', [], 'greptile-summary-clean');
+  }
   return result('needs-triage', [], 'severity-unconfirmed');
 }
 

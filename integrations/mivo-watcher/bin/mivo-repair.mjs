@@ -560,91 +560,6 @@ export function shellQuote(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
 
-export function scheduleParams({ home, pr, nodeId, env = process.env }) {
-  const root = requireAbs(home, 'home');
-  const plugin = pluginRepoPath(env);
-  const script = path.join(root, 'bin', 'mivo-watch-script.py');
-  const commandLine = `/usr/bin/env MIVO_WATCHER_LIVE=1 MIVO_WATCHER_HOME=${shellQuote(root)} PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin /usr/bin/python3 ${shellQuote(script)} --mode poll --pr ${pr} --node-id ${nodeId}`;
-  return {
-    name: `Mivo watch #${pr}`,
-    executionMode: 'script',
-    scriptConfig: { command: commandLine, capabilities: ['sessions.dispatch'], timeoutMs: 180000 },
-    cronExpr: '*/5 * * * *',
-    timezone: 'Asia/Shanghai',
-    recurring: true,
-    agentKind: 'codex',
-    model: 'gpt-6-luna',
-    providerId: 'art-cindy',
-    effort: 'max',
-    kind: 'cron',
-    workingDir: plugin,
-    useWorktree: false,
-    bindToCurrentSession: true,
-    notify: { desktop: false, feishu: false },
-  };
-}
-
-export function bindSchedule({
-  home, pr, nodeId, resultPath, dispatchId, now = new Date().toISOString(),
-  retryMs = 180000, retryDelayMs = 5000, sleepFn = null,
-} = {}) {
-  const root = requireAbs(home, 'home');
-  const result = readJson(requireAbs(resultPath, 'result'), 'schedule_create result');
-  const command = result.scriptConfig?.command ?? result.command ?? '';
-  if (result.ok !== true) fail('schedule_create result is not ok');
-  if (result.executionMode !== 'script') fail('schedule_create executionMode must be script');
-  if (result.status !== 'active') fail('schedule_create status must be active');
-  if (typeof result.targetSessionId !== 'string' || !result.targetSessionId) fail('schedule_create targetSessionId is required');
-  if (!String(command).includes(`--pr ${pr}`)) fail('schedule command does not target this PR');
-  const sleep = sleepFn ?? ((ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); });
-  const deadline = Date.now() + retryMs;
-  let lock = acquireLock(root, `pr-${nodeId}`);
-  while (lock.held && Date.now() < deadline) {
-    sleep(retryDelayMs);
-    lock = acquireLock(root, `pr-${nodeId}`);
-  }
-  if (lock.held) fail('busy: PR 状态锁占用，请等 1 分钟后重试 bind-schedule', 2);
-  try {
-    const previous = readPr(root, nodeId) || {};
-    const incoming = result.targetSessionId;
-    const pendingId = previous.pendingDispatch?.dispatchId;
-    const lateUnknown = previous.needsHuman?.abandonedDispatchId;
-    const currentOwner = Boolean(previous.sessionId && previous.sessionId === incoming);
-    if (!dispatchId) {
-      if (!currentOwner || pendingId || previous.needsHuman?.reason === 'owner-unknown') {
-        fail('owner-conflict: bind-schedule 需要 --dispatch-id', 3);
-      }
-      const incomingSchedule = result.id ?? result.scheduleId;
-      if (previous.scheduleId) {
-        if (previous.scheduleId === incomingSchedule) return previous;
-        fail(`owner-conflict: 本 PR 已有轮询调度 ${previous.scheduleId}，先 schedule_get 该 id；不要新建第二条`, 3);
-      }
-    } else {
-      const abandoned = previous.abandonedDispatches ?? [];
-      if (abandoned.includes(dispatchId)) fail('owner-conflict: dispatch-id 已作废', 3);
-      if (pendingId && pendingId !== dispatchId) fail('owner-conflict: dispatch-id 与当前 pending 不一致', 3);
-      if (!pendingId && previous.needsHuman?.reason === 'owner-unknown' && dispatchId !== lateUnknown) {
-        fail('owner-conflict: dispatch-id 与 owner-unknown 记录不一致', 3);
-      }
-      if (!pendingId && !previous.sessionId && previous.needsHuman?.reason !== 'owner-unknown') {
-        fail('owner-conflict: 无 pending 的未知 dispatch-id', 3);
-      }
-      if (previous.sessionId && previous.sessionId !== incoming) {
-        const awaiting = previous.pendingDispatch?.status === 'awaiting-claim';
-        const needsHuman = previous.needsHuman?.reason === 'owner-unknown';
-        if (!awaiting && !needsHuman) fail(`owner-conflict: 本 PR 已由 ${previous.sessionId} 持有，你应停止`, 3);
-      }
-    }
-    const entry = {
-      ...previous, number: Number(pr), nodeId,
-      scheduleId: result.id ?? result.scheduleId,
-      sessionId: incoming, claimedAt: now, pendingDispatch: null, dispatchError: null, needsHuman: null,
-    };
-    writePr(root, nodeId, entry);
-    return entry;
-  } finally { lock.release(); }
-}
-
 export function clearOwnerUnknown({ home, pr, nodeId, now = new Date().toISOString() }) {
   const root = requireAbs(home, 'home');
   const lock = acquireLock(root, `pr-${nodeId}`);
@@ -741,7 +656,7 @@ export function autoCleanupWatch({
 
 function cli(argv) {
   const args = [...argv];
-  const modes = new Set(['prepare', 'validate', 'finalize', 'recheck', 'blocked', 'schedule-params', 'bind-schedule', 'cleanup', 'clear-owner-unknown']);
+  const modes = new Set(['prepare', 'validate', 'finalize', 'recheck', 'blocked', 'cleanup', 'clear-owner-unknown']);
   const modeIndex = args.findIndex((item) => modes.has(item));
   const mode = modeIndex >= 0 ? args.splice(modeIndex, 1)[0] : undefined;
   const value = (name, required = true) => {
@@ -753,9 +668,7 @@ function cli(argv) {
   };
   const home = value('--home');
   let result;
-  if (mode === 'schedule-params') result = scheduleParams({ home, pr: value('--pr'), nodeId: value('--node-id') });
-  else if (mode === 'bind-schedule') result = bindSchedule({ home, pr: value('--pr'), nodeId: value('--node-id'), resultPath: value('--result'), dispatchId: value('--dispatch-id', false) });
-  else if (mode === 'cleanup') result = cleanupWatch({ home, pr: value('--pr') });
+  if (mode === 'cleanup') result = cleanupWatch({ home, pr: value('--pr') });
   else if (mode === 'clear-owner-unknown') result = clearOwnerUnknown({ home, pr: value('--pr'), nodeId: value('--node-id') });
   else {
     const task = value('--task');
@@ -764,7 +677,7 @@ function cli(argv) {
     else if (mode === 'finalize') result = finalize({ home, taskPath: task, scReport: value('--sc-report'), validatedHead: value('--validated-head'), validationReceipt: value('--validation-receipt', false) });
     else if (mode === 'recheck') result = recheck({ home, taskPath: task, validatedHead: value('--validated-head', false) });
     else if (mode === 'blocked') result = blocked({ home, taskPath: task, reason: value('--reason') });
-    else fail('mode must be prepare, validate, finalize, recheck, blocked, schedule-params, bind-schedule, cleanup, or clear-owner-unknown');
+    else fail('mode must be prepare, validate, finalize, recheck, blocked, cleanup, or clear-owner-unknown');
   }
   process.stdout.write(`${JSON.stringify(result)}\n`);
   if (mode === 'validate' && result.status === 'fail') process.exitCode = 1;
