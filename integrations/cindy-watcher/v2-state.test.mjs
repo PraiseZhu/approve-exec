@@ -8,7 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   acquireDeployExclusive, acquireLock, clearOrphanGuard, inspectLocks, listPrs, lockAcquireHooks,
-  LOCK_DOCTOR_CLEAR_GUARD_MS, LOCK_STALE_GRACE_MS,
+  LOCK_DOCTOR_CLEAR_GUARD_MS, LOCK_STALE_GRACE_MS, MAINTENANCE_LOCK_NAME,
   migrateLegacy, PR_LOCK_TOKEN_ENV, readPr, statePaths, withLock, writePr,
 } from './bin/cindy-state.mjs';
 
@@ -456,6 +456,74 @@ test('lock-doctor --clear-guard refuses live owner or fresh orphan, deletes dead
   assert.equal(cleared.cleared, true);
   assert.equal(cleared.name, 'discover');
   assert.equal(fs.existsSync(freshPath), false);
+  assert.equal(fs.existsSync(path.join(locksDir, `${MAINTENANCE_LOCK_NAME}.lock`)), false);
+});
+
+test('overlapping clear-guard refuses the second caller', (t) => {
+  const home = homeOf(t);
+  t.after(() => { lockAcquireHooks.afterMaintenanceLock = null; });
+  const { locksDir } = statePaths(home);
+  fs.mkdirSync(locksDir, { recursive: true });
+  const guardPath = path.join(locksDir, 'discover.lock.reclaim');
+  fs.mkdirSync(guardPath);
+  fs.writeFileSync(path.join(guardPath, 'owner'), `${JSON.stringify({
+    pid: 999999, token: 'g', createdAt: '2020-01-01T00:00:00.000Z',
+  })}\n`);
+  const old = (Date.now() - LOCK_DOCTOR_CLEAR_GUARD_MS - 1000) / 1000;
+  fs.utimesSync(guardPath, old, old);
+  let second;
+  lockAcquireHooks.afterMaintenanceLock = () => {
+    second = clearOrphanGuard(home, 'discover');
+  };
+  const first = clearOrphanGuard(home, 'discover');
+  assert.equal(first.cleared, true);
+  assert.equal(second.cleared, false);
+  assert.equal(second.reason, 'maintenance-lock-held');
+  assert.match(second.hint, /maintenance\.lock/);
+  assert.equal(fs.existsSync(guardPath), false);
+  assert.equal(fs.existsSync(path.join(locksDir, `${MAINTENANCE_LOCK_NAME}.lock`)), false);
+});
+
+test('clear-guard A/B/C replay does not double-hold', (t) => {
+  const home = homeOf(t);
+  t.after(() => { lockAcquireHooks.beforeClearGuardDelete = null; });
+  const { locksDir } = statePaths(home);
+  fs.mkdirSync(locksDir, { recursive: true });
+  const lockPath = path.join(locksDir, 'discover.lock');
+  const guardPath = `${lockPath}.reclaim`;
+  const stale = lockJson(999999, 'dead');
+  fs.writeFileSync(lockPath, stale);
+  fs.mkdirSync(guardPath);
+  fs.writeFileSync(path.join(guardPath, 'owner'), `${JSON.stringify({
+    pid: 999999, token: 'g', createdAt: '2020-01-01T00:00:00.000Z',
+  })}\n`);
+  const old = (Date.now() - LOCK_DOCTOR_CLEAR_GUARD_MS - 1000) / 1000;
+  fs.utimesSync(guardPath, old, old);
+  let second;
+  let reclaim;
+  lockAcquireHooks.beforeClearGuardDelete = () => {
+    second = clearOrphanGuard(home, 'discover');
+    reclaim = acquireLock(home, 'discover');
+  };
+  const first = clearOrphanGuard(home, 'discover');
+  assert.equal(first.cleared, true);
+  assert.equal(second.cleared, false);
+  assert.equal(second.reason, 'maintenance-lock-held');
+  assert.equal(reclaim.held, true);
+  assert.equal(reclaim.reason, 'reclaim-guard-orphan:discover');
+  assert.equal(fs.existsSync(guardPath), false);
+  const after = acquireLock(home, 'discover');
+  t.after(() => after.release());
+  assert.equal(after.held, false);
+  after.release();
+});
+
+test('maintenance.lock existence refuses deploy even if owner pid is dead', (t) => {
+  const home = homeOf(t);
+  const { locksDir } = statePaths(home);
+  fs.mkdirSync(locksDir, { recursive: true });
+  fs.writeFileSync(path.join(locksDir, `${MAINTENANCE_LOCK_NAME}.lock`), lockJson(999999, 'dead-maint'));
+  assert.throws(() => acquireDeployExclusive(home), /runtime lock held/);
 });
 
 test('legacy live lock with old mtime is not reclaimed and old token reenters', (t) => {

@@ -83,6 +83,10 @@ def _summary(scan: dict) -> dict:
         "events": scan.get("events", []),
         "statePath": scan.get("statePath"),
     })
+    if "orphanGuards" in scan:
+        complete["orphanGuards"] = scan["orphanGuards"]
+    if scan.get("detail"):
+        complete["detail"] = scan["detail"]
     encoded = json.dumps(complete, ensure_ascii=False, separators=(",", ":"))
     if len(encoded.encode("utf-8")) > 7800:
         # Preserve protocol evidence while bounding arbitrary PR metadata.

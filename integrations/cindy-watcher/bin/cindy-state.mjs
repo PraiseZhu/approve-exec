@@ -8,9 +8,13 @@ export const AUTHOR_RECLAIMED = 'author-reclaimed';
 export const PR_LOCK_TOKEN_ENV = 'CINDY_PR_LOCK_TOKEN';
 export const DEPLOY_LOCK_NAME = 'deploy';
 export const HELPER_LOCK_NAME = 'helper';
+export const MAINTENANCE_LOCK_NAME = 'maintenance';
 export const LOCK_STALE_GRACE_MS = 60_000;
 export const LOCK_DOCTOR_CLEAR_GUARD_MS = 10 * 60 * 1000;
-export const lockAcquireHooks = { afterStaleDetected: null, afterGuardExists: null };
+export const lockAcquireHooks = {
+  afterStaleDetected: null, afterGuardExists: null,
+  afterMaintenanceLock: null, beforeClearGuardDelete: null,
+};
 
 export function helperLockName(pr) {
   const number = Number(pr);
@@ -244,7 +248,20 @@ export function inspectLocks(home) {
   return { locks, guards, orphanGuards: guards.filter((item) => item.orphan) };
 }
 
-export function clearOrphanGuard(home, lockName, now = Date.now()) {
+function acquireMaintenanceLock(home) {
+  const { locksDir } = statePaths(home);
+  fs.mkdirSync(locksDir, { recursive: true, mode: 0o700 });
+  const lockPath = path.join(locksDir, `${MAINTENANCE_LOCK_NAME}.lock`);
+  const token = randomBytes(12).toString('hex');
+  try { return tryCreate(lockPath, token); }
+  catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    const previous = readLock(lockPath);
+    return { held: true, holder: parseLockPayload(previous ?? '') ?? { raw: previous }, release: () => {} };
+  }
+}
+
+export function clearOrphanGuard(home, lockName, now = Date.now(), options = {}) {
   if (typeof lockName !== 'string' || !/^[A-Za-z0-9._-]+$/.test(lockName)) {
     const error = new Error('lockName is invalid');
     error.exitCode = 1;
@@ -252,25 +269,40 @@ export function clearOrphanGuard(home, lockName, now = Date.now()) {
   }
   const { locksDir } = statePaths(home);
   const guardPath = path.join(locksDir, `${lockName}.lock.reclaim`);
-  if (!fs.existsSync(guardPath) || !fs.statSync(guardPath).isDirectory()) {
-    return { cleared: false, reason: 'missing', name: lockName, path: guardPath };
+  const maintenance = acquireMaintenanceLock(home);
+  if (maintenance.held) {
+    return {
+      cleared: false, reason: 'maintenance-lock-held', name: lockName, path: guardPath,
+      holder: maintenance.holder,
+      hint: '确认没有 lock-doctor --clear-guard 在跑后，手工删除 state/locks/maintenance.lock',
+    };
   }
-  const owner = readGuardOwner(guardPath);
-  if (owner && pidAlive(owner.pid)) {
-    return { cleared: false, reason: 'owner-alive', name: lockName, path: guardPath, ownerPid: owner.pid };
+  try {
+    invokeHook(options, 'afterMaintenanceLock', { name: lockName });
+    if (!fs.existsSync(guardPath) || !fs.statSync(guardPath).isDirectory()) {
+      return { cleared: false, reason: 'missing', name: lockName, path: guardPath };
+    }
+    const owner = readGuardOwner(guardPath);
+    if (owner && pidAlive(owner.pid)) {
+      return { cleared: false, reason: 'owner-alive', name: lockName, path: guardPath, ownerPid: owner.pid };
+    }
+    const ageMs = now - fs.statSync(guardPath).mtimeMs;
+    if (ageMs < LOCK_DOCTOR_CLEAR_GUARD_MS) {
+      return { cleared: false, reason: 'too-fresh', name: lockName, path: guardPath, ageMs, ownerPid: owner?.pid ?? null };
+    }
+    invokeHook(options, 'beforeClearGuardDelete', { name: lockName, guardPath });
+    fs.rmSync(guardPath, { recursive: true, force: true });
+    return { cleared: true, name: lockName, path: guardPath, ownerPid: owner?.pid ?? null };
+  } finally {
+    maintenance.release();
   }
-  const ageMs = now - fs.statSync(guardPath).mtimeMs;
-  if (ageMs < LOCK_DOCTOR_CLEAR_GUARD_MS) {
-    return { cleared: false, reason: 'too-fresh', name: lockName, path: guardPath, ageMs, ownerPid: owner?.pid ?? null };
-  }
-  fs.rmSync(guardPath, { recursive: true, force: true });
-  return { cleared: true, name: lockName, path: guardPath, ownerPid: owner?.pid ?? null };
 }
 
 export function anyLiveRuntimeLock(home) {
   const { locks, guards } = inspectLocks(home);
+  if (locks.some((item) => item.name === MAINTENANCE_LOCK_NAME && item.exists)) return true;
   if (guards.some((item) => item.live)) return true;
-  return locks.some((item) => item.name !== DEPLOY_LOCK_NAME && item.live);
+  return locks.some((item) => item.name !== DEPLOY_LOCK_NAME && item.name !== MAINTENANCE_LOCK_NAME && item.live);
 }
 export function acquireDeployExclusive(home, afterLock) {
   const deployLock = acquireLock(home, DEPLOY_LOCK_NAME);

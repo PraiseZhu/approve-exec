@@ -98,7 +98,7 @@ node integrations/cindy-watcher/bin/cindy-repair.mjs lock-doctor --home "$CINDY_
 node integrations/cindy-watcher/bin/cindy-repair.mjs lock-doctor --home "$CINDY_WATCHER_HOME" --clear-guard discover
 ```
 
-`--clear-guard` 仅当守卫 owner pid 已死且 mtime 超过 10 分钟才删，并打印删了什么。
+`--clear-guard` 先 `wx` 独占 `state/locks/maintenance.lock`（JSON `{pid, token, createdAt}`，**不做 stale 回收**）。已存在则拒绝并打印持有者，提示确认没有清理在跑后手工删除该文件。持锁期间才检查+删除守卫，finally 只在 token 匹配时释放。因此重叠 `--clear-guard` 不可能同时删守卫。`maintenance.lock` 只要文件存在，部署扫描就拒绝。`--clear-guard` 仍仅当守卫 owner pid 已死且 mtime 超过 10 分钟才删。
 
 ## 归属查询
 
