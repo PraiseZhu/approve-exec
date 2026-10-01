@@ -81,6 +81,14 @@ node scripts/run-tests.mjs
 node integrations/cindy-watcher/deploy.mjs verify
 ```
 
+## 运行锁
+
+`state/locks/<name>.lock` 始终在 canonical 路径上（PR 状态锁、`helper-pr-<N>`、全局 helper、`deploy.lock` 共用同一套实现）。内容是 JSON `{pid, token, createdAt}`；旧格式 `pid timestamp token`（空格分隔）仍按 pid 存活判断，同 token 可重入/释放。两种格式都解析失败时才用 mtime 宽限（60s）。
+
+过期接管不用 rename/墓碑：先 `mkdirSync(<name>.lock.reclaim)` 拿守卫（EEXIST 即 busy，不重试抢），重读锁文件确认仍是同一份 stale 字节后才 `unlink` 再 `wx`。锁文件不会被搬走，部署扫描始终看得到。存在 `.lock.reclaim` 目录视为有锁活动，部署拒绝。
+
+守卫进程若崩溃：owner pid 已死且守卫 mtime 超过 30s 才允许 `rmSync` 守卫，且**本轮只返回 busy、不级联接管**。30s 窗口避免和仍在跑的 unlink+wx 打架；多一轮重试比误删活锁便宜。
+
 ## 归属查询
 
 ```sh

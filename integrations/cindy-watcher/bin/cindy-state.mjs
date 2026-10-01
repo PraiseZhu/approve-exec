@@ -9,6 +9,7 @@ export const PR_LOCK_TOKEN_ENV = 'CINDY_PR_LOCK_TOKEN';
 export const DEPLOY_LOCK_NAME = 'deploy';
 export const HELPER_LOCK_NAME = 'helper';
 export const LOCK_STALE_GRACE_MS = 60_000;
+export const LOCK_RECLAIM_GUARD_STALE_MS = 30_000;
 export const lockAcquireHooks = { afterStaleDetected: null };
 
 export function helperLockName(pr) {
@@ -63,14 +64,21 @@ function pidAlive(pid) {
 }
 
 function parseLockPayload(text) {
+  const raw = String(text);
   try {
-    const data = JSON.parse(String(text));
-    if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
-    if (!Number.isSafeInteger(data.pid) || data.pid <= 0) return null;
-    if (typeof data.token !== 'string' || !data.token.trim()) return null;
-    if (typeof data.createdAt !== 'string' || !data.createdAt) return null;
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('shape');
+    if (!Number.isSafeInteger(data.pid) || data.pid <= 0) throw new Error('pid');
+    if (typeof data.token !== 'string' || !data.token.trim()) throw new Error('token');
+    if (typeof data.createdAt !== 'string' || !data.createdAt) throw new Error('createdAt');
     return { pid: data.pid, token: data.token, createdAt: data.createdAt };
   } catch {
+    const parts = raw.trim().split(/\s+/);
+    if (parts.length >= 3) {
+      const pid = Number(parts[0]);
+      const token = parts[2];
+      if (Number.isSafeInteger(pid) && pid > 0 && token) return { pid, token, createdAt: parts[1] };
+    }
     return null;
   }
 }
@@ -97,6 +105,8 @@ function encodeLock(token) {
   return `${JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() })}\n`;
 }
 
+function busy() { return { held: true, release: () => {} }; }
+
 function makeRelease(lockPath, token) {
   return () => {
     try {
@@ -120,28 +130,75 @@ function invokeAfterStaleDetected(options) {
 
 function tryCreate(lockPath, token) {
   fs.writeFileSync(lockPath, encodeLock(token), { mode: 0o600, flag: 'wx' });
-  if (!confirmOwnLock(lockPath, token)) return { held: true, release: () => {} };
+  if (!confirmOwnLock(lockPath, token)) return busy();
   return { held: false, reentrant: false, token, release: makeRelease(lockPath, token) };
 }
 
-function reclaimStale(lockPath, token, options, retryAcquire, expectedPrevious) {
-  invokeAfterStaleDetected(options);
-  const tombstone = `${lockPath}.tomb-${process.pid}-${randomBytes(8).toString('hex')}`;
-  try { fs.renameSync(lockPath, tombstone); }
-  catch (error) {
-    if (error.code === 'ENOENT') return retryAcquire();
-    return { held: true, release: () => {} };
-  }
-  const moved = readLock(tombstone);
-  if (moved !== expectedPrevious) {
-    try { fs.renameSync(tombstone, lockPath); } catch {}
-    return { held: true, release: () => {} };
-  }
-  try { fs.unlinkSync(tombstone); } catch {}
-  try { return tryCreate(lockPath, token); }
-  catch (error) {
-    if (error.code === 'EEXIST') return { held: true, release: () => {} };
+function reclaimGuardPath(lockPath) { return `${lockPath}.reclaim`; }
+
+function readGuardOwner(guardPath) {
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(guardPath, 'owner'), 'utf8'));
+    if (!Number.isSafeInteger(data?.pid) || data.pid <= 0) return null;
+    return data;
+  } catch { return null; }
+}
+
+// A crashed reclaimer leaves `${lock}.reclaim` behind. Only sweep it when the
+// owner pid is dead AND the directory mtime is older than 30s, then return busy
+// without reclaiming in the same call. The delay avoids racing a still-running
+// unlink+wx; the extra round is cheaper than deleting a live lock.
+function sweepStaleGuard(guardPath) {
+  try {
+    const stat = fs.statSync(guardPath);
+    if (!stat.isDirectory()) return false;
+    const owner = readGuardOwner(guardPath);
+    const ownerDead = !owner || !pidAlive(owner.pid);
+    if (!ownerDead || Date.now() - stat.mtimeMs <= LOCK_RECLAIM_GUARD_STALE_MS) return false;
+    fs.rmSync(guardPath, { recursive: true, force: true });
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
     throw error;
+  }
+}
+
+function removeOwnGuard(guardPath, token, created) {
+  if (!created) return;
+  try {
+    const owner = readGuardOwner(guardPath);
+    if (owner && (owner.pid !== process.pid || (owner.token && owner.token !== token))) return;
+    fs.rmSync(guardPath, { recursive: true, force: true });
+  } catch {}
+}
+
+function reclaimStale(lockPath, token, options, expectedPrevious) {
+  invokeAfterStaleDetected(options);
+  const guardPath = reclaimGuardPath(lockPath);
+  let created = false;
+  try {
+    fs.mkdirSync(guardPath);
+    created = true;
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    sweepStaleGuard(guardPath);
+    return busy();
+  }
+  try {
+    fs.writeFileSync(path.join(guardPath, 'owner'), `${JSON.stringify({
+      pid: process.pid, token, createdAt: new Date().toISOString(),
+    })}\n`, { mode: 0o600 });
+    const again = readLock(lockPath);
+    if (again == null || again !== expectedPrevious) return busy();
+    if (!isStaleLock(lockPath, parseLockPayload(again))) return busy();
+    fs.unlinkSync(lockPath);
+    try { return tryCreate(lockPath, token); }
+    catch (error) {
+      if (error.code === 'EEXIST') return busy();
+      throw error;
+    }
+  } finally {
+    removeOwnGuard(guardPath, token, created);
   }
 }
 
@@ -151,27 +208,24 @@ export function acquireLock(home, name, env = process.env, options = {}) {
   const lockPath = path.join(locksDir, `${name}.lock`);
   const token = randomBytes(12).toString('hex');
   const inherited = env[PR_LOCK_TOKEN_ENV];
-  const attempt = (allowReclaim) => {
-    if (inherited) {
-      const current = readLock(lockPath);
-      if (current != null && parseLockPayload(current)?.token === inherited) {
-        return { held: false, reentrant: true, token: inherited, release: () => {} };
+  try { return tryCreate(lockPath, token); }
+  catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    const previous = readLock(lockPath);
+    if (previous == null) {
+      try { return tryCreate(lockPath, token); }
+      catch (retry) {
+        if (retry.code === 'EEXIST') return busy();
+        throw retry;
       }
     }
-    try { return tryCreate(lockPath, token); }
-    catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      const previous = readLock(lockPath);
-      if (previous == null) return allowReclaim ? attempt(false) : { held: true, release: () => {} };
-      if (inherited && parseLockPayload(previous)?.token === inherited) {
-        return { held: false, reentrant: true, token: inherited, release: () => {} };
-      }
-      const payload = parseLockPayload(previous);
-      if (!isStaleLock(lockPath, payload) || !allowReclaim) return { held: true, release: () => {} };
-      return reclaimStale(lockPath, token, options, () => attempt(false), previous);
+    if (inherited && parseLockPayload(previous)?.token === inherited) {
+      return { held: false, reentrant: true, token: inherited, release: () => {} };
     }
-  };
-  return attempt(true);
+    const payload = parseLockPayload(previous);
+    if (!isStaleLock(lockPath, payload)) return busy();
+    return reclaimStale(lockPath, token, options, previous);
+  }
 }
 
 export function lockStatus(home, name) {
@@ -184,9 +238,14 @@ export function lockStatus(home, name) {
 export function anyLiveRuntimeLock(home) {
   const { locksDir } = statePaths(home);
   if (!fs.existsSync(locksDir)) return false;
-  for (const name of fs.readdirSync(locksDir).filter((item) => item.endsWith('.lock'))) {
-    if (name === `${DEPLOY_LOCK_NAME}.lock`) continue;
-    if (lockStatus(home, name.slice(0, -'.lock'.length)).live) return true;
+  for (const item of fs.readdirSync(locksDir)) {
+    if (item.endsWith('.lock.reclaim')) {
+      try {
+        if (fs.statSync(path.join(locksDir, item)).isDirectory()) return true;
+      } catch { continue; }
+    }
+    if (!item.endsWith('.lock') || item === `${DEPLOY_LOCK_NAME}.lock`) continue;
+    if (lockStatus(home, item.slice(0, -'.lock'.length)).live) return true;
   }
   return false;
 }
