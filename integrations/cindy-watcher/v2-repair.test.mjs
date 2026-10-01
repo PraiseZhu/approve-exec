@@ -60,6 +60,7 @@ test('cloneWorktree clones the PR fork and adds fetch-only upstream', (t) => {
   // Objects come from the local Cindy repo; only the PR's new commits cross the network.
   const clone = calls.find((args) => args[0] === 'clone');
   assert.equal(clone[clone.indexOf('--reference-if-able') + 1], plugin);
+  assert.ok(clone.includes('--dissociate'), 'borrowed objects must be copied in');
   assert.ok(calls.some((args) => args.includes('remote') && args.includes('add') && args.includes('upstream')));
   assert.ok(calls.some((args) => args.includes('set-url') && args.includes('--push') && args.includes('DISABLED')));
   assert.equal(calls.some((args) => args.includes('push') && String(args).includes('makecindy/cindy')), false);

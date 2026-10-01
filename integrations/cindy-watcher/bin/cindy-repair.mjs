@@ -337,8 +337,10 @@ export function cloneWorktree(paths, task, gitFn, cloneUrl, expectedUrl, remoteH
   fs.mkdirSync(path.dirname(worktree), { recursive: true, mode: 0o700 });
   if (fs.existsSync(worktree)) fail('worktree path is unknown; refusing to remove it');
   // --reference-if-able reuses the local repo's objects (both remotes are already
-  // fetched there), so only the PR's new commits cross the network.
-  gitOutput(['clone', '--reference-if-able', plugin, '--origin', 'origin', '--branch', task.headRefName, '--single-branch', originUrl, worktree], gitFn);
+  // fetched there), so only the PR's new commits cross the network; --dissociate
+  // then copies the borrowed objects in, so a later gc of the local repo cannot
+  // break a long-lived watch clone.
+  gitOutput(['clone', '--reference-if-able', plugin, '--dissociate', '--origin', 'origin', '--branch', task.headRefName, '--single-branch', originUrl, worktree], gitFn);
   gitOutput(['-C', worktree, 'checkout', '-B', branch], gitFn);
   gitOutput(['-C', worktree, 'branch', '--set-upstream-to', `origin/${task.headRefName}`], gitFn);
   gitOutput(['-C', worktree, 'remote', 'add', 'upstream', githubRepoUrl(REPO)], gitFn);

@@ -1290,10 +1290,15 @@ export function* pollWorkflow({
   snapshotFn = null,
   gitFn = gitDefaultFn,
   env = process.env,
+  // Set when discover polls a bound PR inline: collection is capped per PR,
+  // dispatch may use the rest of the round, and the PR lock is released while
+  // the dispatch RPC is in flight (same rules as the create path).
+  perPrBudgetMs = null, unlockForDispatch = null, relockForDispatch = null,
 } = {}) {
   const started = clock();
   const deadline = started + Math.min(120000, Math.max(1, budgetMs));
-  const remaining = () => Math.max(0, deadline - clock());
+  let prDeadline = perPrBudgetMs ? Math.min(deadline, started + perPrBudgetMs) : deadline;
+  const remaining = () => Math.max(0, Math.min(deadline, prDeadline) - clock());
   const dryRun = !(enabled && allowDispatch && typeof dispatchFn === 'function');
   const number = Number(prNumber);
   let previous = readPr(paths.home, nodeId) || { nodeId, number };
@@ -1361,9 +1366,12 @@ export function* pollWorkflow({
   const state = { version: 2, repo: REPO, prs: { [String(nodeId)]: previous } };
   yield* processPr({
     pr, previous, state, paths, now, events, report, viewer, dryRun, dispatchFn, collect, ghFn,
-    recheckFn, ownershipSnapshot, remaining, deadline, clock, allowCreate: false, resetPrDeadline: () => {},
+    recheckFn, ownershipSnapshot, remaining, deadline, clock, allowCreate: false,
+    resetPrDeadline: () => { prDeadline = deadline; }, unlockForDispatch, relockForDispatch,
   });
   const latest = state.prs[String(nodeId)] || previous;
+  // Another writer took the PR lock while the dispatch was in flight; its state wins.
+  if (state._persistBlocked) return { mode: 'poll', dispatch: !dryRun, prs: report, events };
   const collectFailed = report.some((item) => item.dispatch?.reason === 'collection-failed');
   const recheckFailed = latest.lastRecheckError?.at === now;
   if (collectFailed || recheckFailed) {
@@ -1469,7 +1477,7 @@ export function* discoverWorkflow({
     const relockForDispatch = () => { prLock = acquireLock(paths.home, `pr-${key}`); return prLock; };
     try {
     let previous = readPr(paths.home, key) || { nodeId: key, number: pr.number };
-    const guide = watchGuideMessage({ home: paths.home, prNumber: pr.number, nodeId: key });
+    const guide = watchGuideMessage({ prNumber: pr.number });
     if (previous.closedHandled === true) {
       previous = { ...previous, closedHandled: false, reopenedAt: now };
       writePr(paths.home, key, previous);
@@ -1493,7 +1501,8 @@ export function* discoverWorkflow({
       if (deadline - clock() < 1000) break;
       const polled = yield* pollWorkflow({
         now, enabled, allowDispatch, ghFn, collect, dispatchFn, paths, recheckFn, ownershipSnapshot,
-        clock, budgetMs: Math.max(1, deadline - clock()), nodeId: key, prNumber: pr.number, gitFn, env,
+        clock, budgetMs: Math.max(1, deadline - clock()), perPrBudgetMs, nodeId: key, prNumber: pr.number, gitFn, env,
+        unlockForDispatch, relockForDispatch,
       });
       const item = polled.prs?.[0] ?? { number: pr.number, nodeId: key, dispatch: { attempted: false, reason: 'poll-empty' } };
       const text = String(item.dispatch?.error ?? '');

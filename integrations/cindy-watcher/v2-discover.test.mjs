@@ -250,6 +250,37 @@ test('merge-ready bound PR is not woken even if its session is gone', (t) => {
   assert.equal(entry.sessionId, 'sess-old');
 });
 
+test('discover releases pr lock while dispatching to a bound session', (t) => {
+  const { paths, home } = homeOf(t);
+  seedBound(paths, { pollFingerprint: 'old' });
+  let heldDuringDispatch;
+  const { entry } = discover(paths, {
+    collect: collectFail,
+    dispatchFn: () => {
+      const lock = acquireLock(home, `pr-${nodeId}`);
+      heldDuringDispatch = lock.held;
+      if (!lock.held) lock.release();
+      return { target_session_id: 'sess-790' };
+    },
+  });
+  assert.equal(heldDuringDispatch, false);
+  assert.equal(entry.sessionId, 'sess-790');
+});
+
+test('bound PR: 20s collection under the per-PR cap still dispatches with the round budget', (t) => {
+  const { paths } = homeOf(t);
+  seedBound(paths, { pollFingerprint: 'old' });
+  let clock = 0;
+  const calls = [];
+  const { result } = discover(paths, {
+    budgetMs: 120000, perPrBudgetMs: 75000, clock: () => clock,
+    collect: (...args) => { clock += 20000; return collectFail(...args); },
+    dispatchFn: (p) => { calls.push(p); return { target_session_id: 'sess-790' }; },
+  });
+  assert.equal(calls.length, 1);
+  assert.notEqual(result.prs[0].dispatch.reason, 'dispatch-budget-deferred');
+});
+
 test('discover skips a PR whose pr lock is held', (t) => {
   const { paths, home } = homeOf(t);
   const { locksDir } = statePaths(home);
