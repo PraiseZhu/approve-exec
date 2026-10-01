@@ -750,6 +750,23 @@ function consumeResult(previous, result, now) {
   };
 }
 
+// GitHub's fingerprint cannot observe helper receipts written on this machine.
+// Keep their identity in the fast-path decision; processPr owns validation and
+// exception reporting, including invalid receipts that must never look idle.
+function hasUnconsumedResult(previous, paths) {
+  try {
+    const result = resultFor(previous, paths);
+    return Boolean(result && (result.receiptId ?? digest(result)) !== previous.activeTask?.receiptId);
+  } catch {
+    return true;
+  }
+}
+
+function needsCiRecheck(active) {
+  return active?.status === 'waiting-ci'
+    || (active?.status === 'blocked' && ['required-ci', 'optional-ci', 'ci-transport'].includes(active.blockedKind));
+}
+
 function recheckResult({ paths, previous, timeoutMs = 30000 }) {
   const helper = path.join(path.dirname(fileURLToPath(import.meta.url)), 'cindy-repair.mjs');
   return JSON.parse(execFileSync(process.execPath, [
@@ -908,8 +925,7 @@ export function* processPr({
     eligibilityInitialized: true, wasDraft: false,
   };
   const active = previous.activeTask;
-  const waiting = active?.status === 'waiting-ci'
-    || (active?.status === 'blocked' && ['required-ci', 'optional-ci', 'ci-transport'].includes(active.blockedKind));
+  const waiting = needsCiRecheck(active);
   if (waiting && active.evidenceVersion === 2 && !dryRun && !resultError) {
     try {
       if (remaining()<1000) throw Error('scan-budget-exhausted');
@@ -920,6 +936,21 @@ export function* processPr({
       previous = { ...previous, lastRecheckError: { at: now, message: String(error.message).slice(0, 400) } };
       if (deadline-clock()<1000) state.scan={...state.scan,cursor:resumeCursor,deferredNumber:pr.number};
     }
+  }
+  // CI/threads can be ready while a trusted bot still has an unhandled finding
+  // in an issue comment or COMMENTED review. Only fresh, authorized feedback
+  // overrides readiness. An acknowledged dispatch consumes its cursor before
+  // the owner finishes, so its authorized task must also keep readiness false
+  // until completion (and allow bounded missing-result recovery).
+  const activeRepairPending = previous.activeTask
+    && !['complete', 'legacy-complete'].includes(previous.activeTask.status)
+    && previous.activeTask.blockedKind !== AUTHOR_RECLAIMED
+    && taskRepairPolicy(readDispatchTask(paths, previous.activeTask.dispatchId)).canChangeCode;
+  if (collected.mergeReady && (activeRepairPending
+    || taskRepairPolicy({ headRefOid: pr.headRefOid, feedback: fresh }).canChangeCode)) {
+    collected = { ...collected, mergeReady: false, reviewReason: 'pending-authorized-feedback',
+      reviewEvidence: { ready: false, reason: 'pending-authorized-feedback', terminal: null } };
+    previous = { ...previous, mergeReady: false, reviewReason: collected.reviewReason, reviewEvidence: collected.reviewEvidence };
   }
   if (!resultError && !['blocked', 'complete', 'legacy-complete', 'waiting-ci'].includes(previous.activeTask?.status)
     && Number(previous.lastDispatch?.recoveryCount ?? 0) >= MAX_RECOVERIES
@@ -1253,7 +1284,9 @@ export function* pollWorkflow({
   });
   const pendingRetry = previous.pendingDispatch?.status === 'retryable';
   const recoveryDue = Boolean(readTaskForRecovery(previous, paths, now));
-  if (previous.pollFingerprint === fingerprint && !pendingRetry && !recoveryDue && !previous.collectRetry && !normalized.overflow) {
+  const localResultPending = hasUnconsumedResult(previous, paths);
+  if (previous.pollFingerprint === fingerprint && !pendingRetry && !recoveryDue && !previous.collectRetry
+    && !localResultPending && !needsCiRecheck(previous.activeTask) && !normalized.overflow) {
     save(previous);
     return { mode: 'poll', dispatch: false, prs: [{ number, nodeId, dispatch: { attempted: false, reason: 'fingerprint-unchanged' } }] };
   }

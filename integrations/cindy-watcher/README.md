@@ -83,6 +83,14 @@ node scripts/run-tests.mjs
 node integrations/cindy-watcher/deploy.mjs verify
 ```
 
+## 回执推进与反馈验收
+
+每 PR 轮询的快速跳过条件同时检查 GitHub 指纹与本地结果回执。新回执、损坏/归属不符的回执，以及尚待 CI 重查的任务不能因 GitHub 无变化而被跳过；已消费的完成回执仍可走空闲快速路径。
+
+待维护者审批之前，必须没有尚未处理的授权反馈：普通 issue comment 和 `COMMENTED` review 正文中的可信 P0/P1/P2 与行内讨论一样会派修。游标已消费但 owner 尚未交回结果时仍算在途，保留有界恢复；完成回执消费后不重复派。P3、未知来源、已解决讨论的权限边界不变。
+
+`poll-progress.test.mjs` 覆盖这些推进/权限/去重场景。`repair-lifecycle.test.mjs` 贯通发现、绑定、准备、预检失败、代码修复、DCO、推送、等待 CI、复查、回执消费与清理；Git/脚本/文件操作是真实执行的临时本地仓操作，GitHub API 与 Host dispatch/scheduler 为受控 fixture，不能冒充真实云端或模型执行验收。
+
 ## 运行锁
 
 `state/locks/<name>.lock` 始终在 canonical 路径上（PR 状态锁、`helper-pr-<N>`、全局 helper、`deploy.lock` 共用同一套实现）。内容是 JSON `{pid, token, createdAt}`；旧格式 `pid timestamp token`（空格分隔）仍按 pid 存活判断，同 token 可重入/释放。两种格式都解析失败时才用 mtime 宽限（60s）。
