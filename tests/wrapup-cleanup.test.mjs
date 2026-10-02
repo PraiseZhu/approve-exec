@@ -706,6 +706,9 @@ test('watcher 持有且 PR 开 → precheck 禁止归档', async () => {
 });
 
 test('watcher 持有但 PR 已关闭 → precheck 放行', async () => {
+  // 显式传 repo，不依赖动态加载 mivo-ownership 模块取 WATCHED_REPO——
+  // 本仓已不内嵌 watcher 副本，CI 机上也没有本机才有的 Mivo runtime 部署，
+  // 这里只测 assertNotWatchOwner 自身的 closed-PR 校验逻辑。
   const ghFn = (args) => {
     assert.deepEqual(args, ['pr', 'view', '790', '--repo', 'xindong/mivo-canvas-plugin', '--json', 'state']);
     return JSON.stringify({ state: 'MERGED' });
@@ -713,13 +716,14 @@ test('watcher 持有但 PR 已关闭 → precheck 放行', async () => {
   await assert.doesNotReject(assertNotWatchOwner({
     sessionId: 'sess-closed',
     lookup: () => ({ owned: true, pr: 790, closed: true }),
+    repo: 'xindong/mivo-canvas-plugin',
     ghFn,
   }));
   const originalOut = process.stdout.write;
   let stdout = '';
   process.stdout.write = (chunk) => { stdout += chunk; return true; };
   try {
-    const code = await runArchiveCli(['--precheck', '--session-id', 'sess-closed'], {
+    const code = await runArchiveCli(['--precheck', '--session-id', 'sess-closed', '--repo', 'xindong/mivo-canvas-plugin'], {
       lookup: () => ({ owned: true, pr: 790, closed: true }),
       ghFn,
     });

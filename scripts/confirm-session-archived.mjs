@@ -165,14 +165,16 @@ export async function assertNotWatchOwner({
   }
   let watchedRepo = repo;
   let query = lookup;
-  if (!watchedRepo || !query) {
+  // 只在真正需要时才动态加载模块：query 缺失才需要用它查台账；
+  // repo 缺失则只在后面真的要校验「已关闭」分支时才去取 WATCHED_REPO。
+  // 不要为了可能用不到的 repo 而无条件预加载——会让只传 lookup 的调用方
+  // （包括测试里的假 lookup）在没有本机 Mivo runtime 时也被迫 fail-closed。
+  if (!query) {
     const mod = await loadMivoOwnershipModule(env);
     if (!watchedRepo) watchedRepo = mod.WATCHED_REPO;
-    if (!query) {
-      query = (id) => mod.lookupWatchOwner({
-        home, repo: watchedRepo, sessionId: id, env,
-      });
-    }
+    query = (id) => mod.lookupWatchOwner({
+      home, repo: watchedRepo, sessionId: id, env,
+    });
   }
   let result;
   try {
@@ -190,6 +192,10 @@ export async function assertNotWatchOwner({
     );
   }
   if (result.owned === true && result.closed === true) {
+    if (!watchedRepo) {
+      const mod = await loadMivoOwnershipModule(env);
+      watchedRepo = mod.WATCHED_REPO;
+    }
     verifyClosedPrState({
       pr: result.pr, repo: watchedRepo, sessionId, ghFn: ghFn ?? defaultGh,
     });
@@ -201,22 +207,14 @@ export async function runCli(argv, options = {}) {
   try {
     const flags = parseArchiveArgs(argv);
     const sessionId = flags['session-id'];
-    let lookup = options.lookup;
-    let watchedRepo = flags.repo;
-    if (!lookup || !watchedRepo) {
-      const mod = await loadMivoOwnershipModule(options.env);
-      if (!watchedRepo) watchedRepo = mod.WATCHED_REPO;
-      if (!lookup) {
-        lookup = (id) => mod.lookupWatchOwner({
-          home: flags.home,
-          repo: watchedRepo,
-          sessionId: id,
-          env: options.env,
-        });
-      }
-    }
+    // 是否需要动态加载模块、何时加载，统一交给 assertNotWatchOwner 的惰性逻辑决定；
+    // 这里只传调用方给的 lookup/repo（可能为空），不重复预加载。
+    const lookup = options.lookup;
+    const watchedRepo = flags.repo;
     if (flags.precheck === true || flags.result !== undefined) {
-      await assertNotWatchOwner({ sessionId, lookup, repo: watchedRepo, ghFn: options.ghFn });
+      await assertNotWatchOwner({
+        sessionId, lookup, repo: watchedRepo, home: flags.home, env: options.env, ghFn: options.ghFn,
+      });
     }
     if (flags.precheck === true && flags.result === undefined) {
       process.stdout.write(`${JSON.stringify({ ok: true, precheck: true, session_id: sessionId })}\n`);
