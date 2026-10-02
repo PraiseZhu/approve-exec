@@ -1,12 +1,41 @@
 #!/usr/bin/env node
 // confirm-session-archived.mjs — 核 PI session 已 archived，产出台账回执。
+// mivo-watcher 源码已迁至独立仓 Vigil（PraiseZhu/vigil），本仓不再内嵌副本。
+// 运行时从 watcher 的运行目录动态加载 mivo-ownership.mjs：加载失败或文件不存在时
+// fail-closed 抛 PRECONDITION，禁止归档（与原「watcher 台账不可读」语义一致）。
 import { realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { LedgerError, parseTimestamp, ARCHIVE_RECEIPT_KEYS } from './run-ledger.mjs';
-import { lookupWatchOwner, WATCHED_REPO } from '../integrations/mivo-watcher/bin/mivo-ownership.mjs';
 
 const GH = process.env.GH_BIN ?? 'gh';
+
+const DEFAULT_MIVO_WATCHER_HOME = '/Users/praise/AI-Agent/Claude/projects/Project Mivo Canvas-Plugin/_ops/mivo-watcher';
+
+const mivoOwnershipModulePromises = new Map();
+
+/**
+ * 从 watcher 运行目录动态加载 mivo-ownership.mjs。
+ * home 取 process.env.MIVO_WATCHER_HOME，未设则用 Mivo runtime 默认路径。
+ * 加载失败或文件不存在时抛 PRECONDITION（fail-closed，禁止归档）。
+ * 按 home 分别缓存，避免测试/多 runtime 场景下互相串缓存。
+ */
+function loadMivoOwnershipModule(env = process.env) {
+  const home = env.MIVO_WATCHER_HOME || DEFAULT_MIVO_WATCHER_HOME;
+  if (!mivoOwnershipModulePromises.has(home)) {
+    const modulePath = path.join(home, 'bin', 'mivo-ownership.mjs');
+    const promise = import(pathToFileURL(modulePath).href).catch((error) => {
+      mivoOwnershipModulePromises.delete(home);
+      throw new LedgerError(
+        'PRECONDITION',
+        `watcher 台账不可读，禁止归档（mivo-ownership 模块加载失败，home=${home}：${error.message}）`,
+      );
+    });
+    mivoOwnershipModulePromises.set(home, promise);
+  }
+  return mivoOwnershipModulePromises.get(home);
+}
 
 function defaultGh(args) {
   return execFileSync(GH, args, {
@@ -128,16 +157,23 @@ export function confirmSessionArchived({
   return receipt;
 }
 
-export function assertNotWatchOwner({
+export async function assertNotWatchOwner({
   sessionId, lookup, home, repo, env, ghFn,
 } = {}) {
   if (typeof sessionId !== 'string' || sessionId.length === 0) {
     throw new LedgerError('ARGS', 'session-id 必须是非空字符串');
   }
-  const watchedRepo = repo || WATCHED_REPO;
-  const query = lookup ?? ((id) => lookupWatchOwner({
-    home, repo: watchedRepo, sessionId: id, env,
-  }));
+  let watchedRepo = repo;
+  let query = lookup;
+  if (!watchedRepo || !query) {
+    const mod = await loadMivoOwnershipModule(env);
+    if (!watchedRepo) watchedRepo = mod.WATCHED_REPO;
+    if (!query) {
+      query = (id) => mod.lookupWatchOwner({
+        home, repo: watchedRepo, sessionId: id, env,
+      });
+    }
+  }
   let result;
   try {
     result = typeof query === 'function' ? query(sessionId) : query;
@@ -161,18 +197,26 @@ export function assertNotWatchOwner({
   return result;
 }
 
-export function runCli(argv, options = {}) {
+export async function runCli(argv, options = {}) {
   try {
     const flags = parseArchiveArgs(argv);
     const sessionId = flags['session-id'];
-    const lookup = options.lookup ?? ((id) => lookupWatchOwner({
-      home: flags.home,
-      repo: flags.repo || WATCHED_REPO,
-      sessionId: id,
-      env: options.env,
-    }));
+    let lookup = options.lookup;
+    let watchedRepo = flags.repo;
+    if (!lookup || !watchedRepo) {
+      const mod = await loadMivoOwnershipModule(options.env);
+      if (!watchedRepo) watchedRepo = mod.WATCHED_REPO;
+      if (!lookup) {
+        lookup = (id) => mod.lookupWatchOwner({
+          home: flags.home,
+          repo: watchedRepo,
+          sessionId: id,
+          env: options.env,
+        });
+      }
+    }
     if (flags.precheck === true || flags.result !== undefined) {
-      assertNotWatchOwner({ sessionId, lookup, ghFn: options.ghFn });
+      await assertNotWatchOwner({ sessionId, lookup, repo: watchedRepo, ghFn: options.ghFn });
     }
     if (flags.precheck === true && flags.result === undefined) {
       process.stdout.write(`${JSON.stringify({ ok: true, precheck: true, session_id: sessionId })}\n`);
@@ -207,6 +251,8 @@ if (process.argv[1] !== undefined) {
     process.exit(2);
   }
   if (import.meta.url === pathToFileURL(entryReal).href) {
-    process.exitCode = runCli(process.argv.slice(2));
+    runCli(process.argv.slice(2)).then((code) => {
+      process.exitCode = code;
+    });
   }
 }

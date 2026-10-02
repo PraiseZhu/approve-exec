@@ -1,6 +1,6 @@
 # approve-exec — Graph loop 编排 skill
 
-Mini 常驻盯梢消费者的版本化源码见 [integrations/mivo-watcher](integrations/mivo-watcher/README.md)。它独立扫描本人 PR，不要求 PR 由本 skill 创建；该目录不包含运行态，也不修改服务器审查机。
+Mini 常驻盯梢消费者的版本化源码已迁至独立仓 [Vigil](https://github.com/PraiseZhu/vigil)。它独立扫描本人 PR，不要求 PR 由本 skill 创建；该仓不包含运行态，也不修改服务器审查机。
 
 把 task-priority 产出的 `task-manifest.json` 拆成 **每 GitHub PR 一个 owner session**。owner 拿到完整 handoff 立即开工，自主做到机器可证明的 **PR Ready**。candidate 只是检查点。lead 只拆 PR、写开工包、派 session、读证据、裁决 `DECISION_REQUIRED`。
 

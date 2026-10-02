@@ -33,9 +33,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: watcher tests
-        run: node --test integrations/mivo-watcher/*.test.mjs integrations/cindy-watcher/*.test.mjs
-
       - name: python continuation tests
         run: python3 -B -m unittest discover -s tests -p 'test_*continuation.py'
 
