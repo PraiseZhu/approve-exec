@@ -682,9 +682,9 @@ test('confirm-session-archived 只吃 archive_sessions 工具结果', () => {
   }, 'target-not-in-changed'), LedgerError);
 });
 
-test('watcher 持有且 PR 开 → precheck 禁止归档', () => {
+test('watcher 持有且 PR 开 → precheck 禁止归档', async () => {
   try {
-    assertNotWatchOwner({
+    await assertNotWatchOwner({
       sessionId: 'sess-open',
       lookup: () => ({ owned: true, pr: 790, closed: false }),
     });
@@ -697,7 +697,7 @@ test('watcher 持有且 PR 开 → precheck 禁止归档', () => {
   const originalErr = console.error;
   console.error = (...args) => { captured.push(args.join(' ')); };
   try {
-    const code = runArchiveCli(['--precheck', '--session-id', 'sess-open'], {
+    const code = await runArchiveCli(['--precheck', '--session-id', 'sess-open'], {
       lookup: () => ({ owned: true, pr: 790, closed: false }),
     });
     assert.notEqual(code, 0);
@@ -705,21 +705,25 @@ test('watcher 持有且 PR 开 → precheck 禁止归档', () => {
   } finally { console.error = originalErr; }
 });
 
-test('watcher 持有但 PR 已关闭 → precheck 放行', () => {
+test('watcher 持有但 PR 已关闭 → precheck 放行', async () => {
+  // 显式传 repo，不依赖动态加载 mivo-ownership 模块取 WATCHED_REPO——
+  // 本仓已不内嵌 watcher 副本，CI 机上也没有本机才有的 Mivo runtime 部署，
+  // 这里只测 assertNotWatchOwner 自身的 closed-PR 校验逻辑。
   const ghFn = (args) => {
     assert.deepEqual(args, ['pr', 'view', '790', '--repo', 'xindong/mivo-canvas-plugin', '--json', 'state']);
     return JSON.stringify({ state: 'MERGED' });
   };
-  assert.doesNotThrow(() => assertNotWatchOwner({
+  await assert.doesNotReject(assertNotWatchOwner({
     sessionId: 'sess-closed',
     lookup: () => ({ owned: true, pr: 790, closed: true }),
+    repo: 'xindong/mivo-canvas-plugin',
     ghFn,
   }));
   const originalOut = process.stdout.write;
   let stdout = '';
   process.stdout.write = (chunk) => { stdout += chunk; return true; };
   try {
-    const code = runArchiveCli(['--precheck', '--session-id', 'sess-closed'], {
+    const code = await runArchiveCli(['--precheck', '--session-id', 'sess-closed', '--repo', 'xindong/mivo-canvas-plugin'], {
       lookup: () => ({ owned: true, pr: 790, closed: true }),
       ghFn,
     });
@@ -728,9 +732,9 @@ test('watcher 持有但 PR 已关闭 → precheck 放行', () => {
   } finally { process.stdout.write = originalOut; }
 });
 
-test('precheck closed:true 但 gh 返回 OPEN → 拒绝', () => {
+test('precheck closed:true 但 gh 返回 OPEN → 拒绝', async () => {
   try {
-    assertNotWatchOwner({
+    await assertNotWatchOwner({
       sessionId: 'sess-reopen',
       lookup: () => ({ owned: true, pr: 790, closed: true }),
       ghFn: () => JSON.stringify({ state: 'OPEN' }),
@@ -742,9 +746,9 @@ test('precheck closed:true 但 gh 返回 OPEN → 拒绝', () => {
   }
 });
 
-test('precheck closed:true 且 gh 失败 → 拒绝', () => {
+test('precheck closed:true 且 gh 失败 → 拒绝', async () => {
   try {
-    assertNotWatchOwner({
+    await assertNotWatchOwner({
       sessionId: 'sess-gh-fail',
       lookup: () => ({ owned: true, pr: 790, closed: true }),
       ghFn: () => { throw new Error('gh timed out'); },
@@ -756,16 +760,16 @@ test('precheck closed:true 且 gh 失败 → 拒绝', () => {
   }
 });
 
-test('watcher 未命中 → precheck 放行', () => {
-  assert.doesNotThrow(() => assertNotWatchOwner({
+test('watcher 未命中 → precheck 放行', async () => {
+  await assert.doesNotReject(assertNotWatchOwner({
     sessionId: 'sess-free',
     lookup: () => ({ owned: false, reason: 'not-found' }),
   }));
 });
 
-test('watcher 台账不可读 → precheck 拒绝', () => {
+test('watcher 台账不可读 → precheck 拒绝', async () => {
   try {
-    assertNotWatchOwner({
+    await assertNotWatchOwner({
       sessionId: 'sess-bad',
       lookup: () => ({ owned: false, reason: 'state-unreadable', error: 'EACCES' }),
     });
@@ -797,6 +801,49 @@ test('confirm-session-archived CLI --precheck 读真实台账：开着拒绝、�
   });
   assert.notEqual(unread.status, 0, unread.stdout);
   assert.match(unread.stderr, /台账不可读|禁止归档/);
+});
+
+test('confirm-session-archived 动态加载 mivo-ownership：假 runtime 能加载 → 行为不变', async (t) => {
+  // mivo-watcher 源码已迁至独立仓 Vigil，本仓不再内嵌副本；
+  // 这里造一个假 runtime（bin/mivo-ownership.mjs 桩）验证运行时动态加载路径本身是对的，
+  // 不依赖本机真实部署的 Mivo watcher。
+  const fakeHome = realpathSync(mkdtempSync(join(tmpdir(), 'fake-mivo-runtime-')));
+  t.after(() => rmSync(fakeHome, { recursive: true, force: true }));
+  mkdirSync(join(fakeHome, 'bin'), { recursive: true });
+  writeFileSync(join(fakeHome, 'bin/mivo-ownership.mjs'), `
+export const WATCHED_REPO = 'fake-owner/fake-repo';
+export function lookupWatchOwner({ sessionId }) {
+  if (sessionId === 'fake-open') return { owned: true, pr: 1, closed: false };
+  return { owned: false, reason: 'not-found' };
+}
+`);
+  const env = { ...process.env, MIVO_WATCHER_HOME: fakeHome };
+  // 假 runtime 持有且 PR 开 → 仍然 fail-closed 禁止归档，且 watchedRepo 取自假模块
+  try {
+    await assertNotWatchOwner({ sessionId: 'fake-open', env });
+    assert.fail('expected LedgerError');
+  } catch (err) {
+    assert.equal(err instanceof LedgerError, true);
+    assert.match(err.message, /禁止归档/);
+  }
+  // 假 runtime 未命中 → 行为不变，放行
+  await assert.doesNotReject(assertNotWatchOwner({ sessionId: 'fake-free', env }));
+  // CLI 入口同样走假 runtime（通过 options.env 传入，不经过 --home）
+  const code = await runArchiveCli(['--precheck', '--session-id', 'fake-free'], { env });
+  assert.equal(code, 0);
+});
+
+test('confirm-session-archived 动态加载 mivo-ownership：runtime 缺失 → fail-closed 禁止归档', async (t) => {
+  const missingHome = join(tmpdir(), `missing-mivo-runtime-${process.pid}-${Date.now()}`);
+  t.after(() => rmSync(missingHome, { recursive: true, force: true }));
+  const env = { ...process.env, MIVO_WATCHER_HOME: missingHome };
+  try {
+    await assertNotWatchOwner({ sessionId: 'sess-whatever', env });
+    assert.fail('expected LedgerError');
+  } catch (err) {
+    assert.equal(err instanceof LedgerError, true);
+    assert.match(err.message, /台账不可读|禁止归档/);
+  }
 });
 
 test('confirm-watch-registered CLI 拒 --stdout，state-dir 必须钉 Mini 名册', () => {

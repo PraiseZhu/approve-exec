@@ -1,8 +1,0 @@
-state/
-worktrees/
-deployments/
-config/
-*.db
-*.sqlite*
-*.log
-__pycache__/
