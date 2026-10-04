@@ -31,7 +31,7 @@ prepare 使用台账路径旁固定的 .owners 目录。持久 claim 的作用�
 - 先核自己的 runtime 与 ledger.session_id、worktree、branch、base；确认 Art、完整包身份无误。绑定或 dispatched 登记尚未到达时，读台账等待，保留该 owner；不要写代码或重复派窗。
 - 真实读取自己的 goal skill；新版先执行文末 owner-gate.mjs baseline，通过后再执行随包给出的 owner-gate.mjs goal 命令，旧版不补造 baseline。脚本重算文件 hash、检查干净基线、CAS 入账 gate_goal 并推进 executing。不得补造已有改动之前的开工证据，不用 jump 等逐步放行。
 - 自主完成本 PR 的 SC。可以开只读 sub 获取信息，也可提前派 tester 验证。提前验证不能替代最终当前提交的全量 SC/e2e。本地禁止派 reviewer。
-- 判断按开工包第 8 段的决策三层走（SKILL.md 第⑲段）：事实用命令查；不越界的选择先问 Jev（Pi 走 `cindy_mcp_call_tool` 网关，`typesafe-jev` / `evaluate`），每次调用追加到台账目录 `jev/` 下本组留痕；只有越界才发 DECISION_REQUIRED，并附 Jev 选项排序。Jev 不可用时可撤回的选择按默认规则自决，连带文件改动必须有 Jev 结论。
+- 判断按开工包第 8 段的决策三层走（SKILL.md 第⑲段）：事实用命令查；不越界的选择先问 Jev（Pi 走 `cindy_mcp_call_tool` 网关，`keel` / `jev`），每次调用追加到台账目录 `jev/` 下本组留痕；只有越界才发 DECISION_REQUIRED，并附 Jev 选项排序。Jev 不可用时可撤回的选择按默认规则自决，连带文件改动必须有 Jev 结论。
 - pr_ready 不是终点：随后重新执行 confirm-pr-open（PR 仍 OPEN、非 draft、必需 CI 全绿，五分钟内），用 `run-ledger.mjs note-event <台账> --event goal_report --detail '{group_id, head_sha, receipt, goals:[{id, verdict, evidence}], summary}'` 逐条回报设计/功能目标，未达成如实写 partial／not_achieved。lead 读报告写 `final_acceptance`（accepted／rejected + reason），accepted 前清场与归档一律被拒。
 - 停在 decision／blocked 必须用 `owner-checkpoint.py --phase decision|blocked --decision-id --decision-evidence <绝对路径>` 写；它同步入账台账 `decision_required`（同一决策重复写不重复入账），续跑调度据此叫醒 lead。入账失败脚本会报错，不得只留 checkpoint 就结束本轮。
 - `allowed_paths` 外的文件只能按第 5 段连带策略（`config/collateral.json`）改，交卷 `collateral_used` 逐条申报；别组写域的文件永远不是连带文件。

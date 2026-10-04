@@ -359,7 +359,7 @@ Lead 按四类选，不自由发挥：
 **决策三层**（由 `render-pr-handoff.mjs` 渲染进第 8 段；owner 多为 Pi、不读 `~/.claude/rules`，必须内联）：
 
 - D0 事实题：用命令查清（哪个 job 红、文件在不在写域或连带清单、size-gate、base 上是否同样红），不问 Jev 也不问 lead。
-- D1 域内判断（可自决）：不改 SC、接口兼容、授权、跨 PR 依赖、base 的选择先问 Jev 再执行。固定时点：CI 红且不像基础设施故障、域外测试红（旧行为断言还是真回归）、等价实现二选一、连续 2 轮零增量换策略、record-delivery 前核 SC 证据。Pi 走 `cindy_mcp_call_tool` 网关，Claude/Codex 走 `mcp__cindy__ghost_call`；`ghost_id=typesafe-jev`、`tool=evaluate`。confidence 达到 `config/collateral.json` 的 `jev.act_confidence`（起步 0.75）才直接执行，否则补一条事实重问，仍低取改动最小、可撤回的一项。选项只列域内动作，不给 Jev「上报 lead」选项。
+- D1 域内判断（可自决）：不改 SC、接口兼容、授权、跨 PR 依赖、base 的选择先问 Jev 再执行。固定时点：CI 红且不像基础设施故障、域外测试红（旧行为断言还是真回归）、等价实现二选一、连续 2 轮零增量换策略、record-delivery 前核 SC 证据。Pi 走 `cindy_mcp_call_tool` 网关，Claude/Codex 走 `mcp__cindy__ghost_call`；`ghost_id=keel`、`tool=jev`。confidence 达到 `config/collateral.json` 的 `jev.act_confidence`（起步 0.75）才直接执行，否则补一条事实重问，仍低取改动最小、可撤回的一项。选项只列域内动作，不给 Jev「上报 lead」选项。
 - D2 必须停：第⑧段五类停 + `allowed_paths` 不够且不符合连带策略 + base 本身红。只发一条 decision_required，附 Jev 选项排序与留痕行号。
 - 留痕：每次调用追加一行 JSON 到台账目录下 `jev/<sha256(组)>.jsonl`（不进 worktree）。ready-check 只在 `legacy_test` 连带时读它，其余留痕供 lead 验收参考。
 - Jev 不可用：记 `JEV_UNAVAILABLE`；可撤回的 D1 按「改动最小 > 可撤回 > 跟随仓内既有写法 > 不扩写域」自决，不回问 lead；连带文件改动没有 Jev 结论就按 D2 停。owner 自己派的只读 sub 没有网关，其 `JEV_DECISION_REQUEST` 回给 owner 代调，不上交 lead。这是 2026-09-23 用户批准的例外，已同步写进 `~/.pi/agent/AGENTS.md` 与 `~/.claude/CLAUDE.md` 的 JEV 段。
