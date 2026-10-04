@@ -112,7 +112,7 @@ test('第⑲段：owner 自主推进——Jev 决策三层与连带文件', () =
   const start = skillDoc.indexOf('## ⑲ owner 自主推进');
   assert.ok(start > skillDoc.indexOf('## ⑱ 偏航补救与自进化'), '⑲段应在⑱段之后');
   const s19 = skillDoc.slice(start, skillDoc.indexOf('## 历史 Mini 运维前置', start));
-  for (const needle of ['D0 事实题', 'D1 域内判断', 'D2 必须停', 'typesafe-jev', 'cindy_mcp_call_tool', 'mcp__cindy__ghost_call',
+  for (const needle of ['D0 事实题', 'D1 域内判断', 'D2 必须停', 'keel', 'cindy_mcp_call_tool', 'mcp__cindy__ghost_call',
     'JEV_UNAVAILABLE', 'config/collateral.json', 'generated', 'legacy_test', 'max_files', 'max_lines', 'waiting-ci', 'T1 纪律级']) {
     assert.ok(s19.includes(needle), `⑲段缺: ${needle}`);
   }

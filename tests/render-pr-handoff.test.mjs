@@ -91,7 +91,7 @@ test('render-pr-handoff: 决策三层 + Jev 约定 + 连带策略 + 来源标注
   assert.match(s1, /任务来源=task-priority final manifest/);
   assert.match(s5, /连带文件（包内预授权，逐条申报；上限 10 个文件、200 行/);
   assert.match(s5, /cindyplugin\/design-inventory\.md/);
-  for (const needle of ['D0 事实题', 'D1 域内判断（可自决）', 'D2 必须停', 'typesafe-jev', 'tool=evaluate', 'cindy_mcp_call_tool', 'mcp__cindy__ghost_call', 'confidence ≥ 0.75', 'JEV_UNAVAILABLE', 'JEV_DECISION_REQUEST', 'waiting-ci', 'gh pr checks', 'gh run rerun']) {
+  for (const needle of ['D0 事实题', 'D1 域内判断（可自决）', 'D2 必须停', 'keel', 'tool=jev', 'cindy_mcp_call_tool', 'mcp__cindy__ghost_call', 'confidence ≥ 0.75', 'JEV_UNAVAILABLE', 'JEV_DECISION_REQUEST', 'waiting-ci', 'gh pr checks', 'gh run rerun']) {
     assert.ok(s8.includes(needle), `第 8 段缺: ${needle}`);
   }
   assert.ok(s8.includes(journal), '第 8 段必须给 Jev 留痕绝对路径');
