@@ -363,7 +363,9 @@ Lead 按四类选，不自由发挥：
 - D2 必须停：第⑧段五类停 + `allowed_paths` 不够且不符合连带策略 + base 本身红。只发一条 decision_required，附 Jev 选项排序与留痕行号。
 - 留痕：每次调用追加一行 JSON 到台账目录下 `jev/<sha256(组)>.jsonl`（不进 worktree）。ready-check 只在 `legacy_test` 连带时读它，其余留痕供 lead 验收参考。
 - Jev 不可用：记 `JEV_UNAVAILABLE`；可撤回的 D1 按「改动最小 > 可撤回 > 跟随仓内既有写法 > 不扩写域」自决，不回问 lead；连带文件改动没有 Jev 结论就按 D2 停。owner 自己派的只读 sub 没有网关，其 `JEV_DECISION_REQUEST` 回给 owner 代调，不上交 lead。这是 2026-09-23 用户批准的例外，已同步写进 `~/.pi/agent/AGENTS.md` 与 `~/.claude/CLAUDE.md` 的 JEV 段。
-- CI 等待不收工：启用 continuation v2 时写 `waiting-ci` checkpoint 后结束本轮，由零 token 脚本唤醒；未启用时本轮内 `gh pr checks --watch` 轮询。CI 红先按确定性规则判基础设施故障并重跑一次，不命中再按 D1 问 Jev。
+- CI 等待不收工：启用 continuation v2 时写 `waiting-ci` checkpoint 后结束本轮，由零 token 脚本唤醒；未启用时本轮内用 KEEL `pr_wait` 轮询（KEEL 不可用才降级 `gh pr checks --watch`）。CI 红先按确定性规则判基础设施故障并重跑一次，不命中再按 D1 问 Jev。
+
+- PR 推进用 KEEL（与 Jev 同一个插件，2026-10-06）：owner 用 `pr_status` / `pr_wait` / `pr_threads` 看状态、等 CI、分诊评审；转 Ready、写 pr_ready 或 goal_report 前先调 `pr_status`，`nextAction` 不是 `report_mergeable` / `handoff` / `mark_ready` 就继续；`verify_current_head` 由已派的 e2e worker 在当前 head 验证并写验证状态。本 skill 的入账脚本照旧，owner 不另跑 `pstack_start`；KEEL 不可用记 `KEEL_UNAVAILABLE` 后按原 gh 步骤继续。
 
 **连带文件**（`config/collateral.json`，`scripts/lib/collateral.mjs` 单一实现，开工包第 5 段与 ready-check 同源）：
 

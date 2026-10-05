@@ -107,6 +107,17 @@ test('render-pr-handoff: 决策三层 + Jev 约定 + 连带策略 + 来源标注
   assert.throws(() => renderPrHandoff(baseArgs({ jevJournal: 'rel/jev.jsonl' })), LedgerError);
 });
 
+test('render-pr-handoff: PR 推进用 KEEL，收尾前以 pr_status 为准，gh 只做降级', () => {
+  const out = renderPrHandoff(baseArgs());
+  const s8 = out.split('## 8. 做完之后（自动，不要问 lead）\n')[1].split('\n## 9. 禁做')[0];
+  for (const needle of ['pr_status', 'pr_wait', 'pr_threads', 'verify_current_head', 'KEEL_UNAVAILABLE', 'record-delivery', 'confirm-pr-open']) {
+    assert.ok(s8.includes(needle), `第 8 段缺: ${needle}`);
+  }
+  assert.match(s8, /nextAction 不是 report_mergeable \/ handoff \/ mark_ready 就照 nextAction 继续，不得收尾/);
+  assert.match(s8, /用 KEEL 的 pr_wait 轮询[^。]*KEEL 不可用时降级为 gh pr checks <PR> --watch --interval 60/);
+  assert.doesNotMatch(s8, /pstack_start\(/);
+});
+
 test('render-pr-handoff: 缺摘录或第 4 段复制第 2 段拒', () => {
   assert.throws(() => renderPrHandoff(baseArgs({ excerpts: [] })), LedgerError);
   assert.throws(() => renderPrHandoff(baseArgs({ excerpts: ['（本包未附摘录：子 session 仍须按 allowed_paths 开工，禁止 Grep 整模块。）'] })), LedgerError);
