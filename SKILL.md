@@ -365,7 +365,7 @@ Lead 按四类选，不自由发挥：
 - Jev 不可用：记 `JEV_UNAVAILABLE`；可撤回的 D1 按「改动最小 > 可撤回 > 跟随仓内既有写法 > 不扩写域」自决，不回问 lead；连带文件改动没有 Jev 结论就按 D2 停。owner 自己派的只读 sub 没有网关，其 `JEV_DECISION_REQUEST` 回给 owner 代调，不上交 lead。这是 2026-09-23 用户批准的例外，已同步写进 `~/.pi/agent/AGENTS.md` 与 `~/.claude/CLAUDE.md` 的 JEV 段。
 - CI 等待不收工：启用 continuation v2 时写 `waiting-ci` checkpoint 后结束本轮，由零 token 脚本唤醒；未启用时本轮内用 KEEL `pr_wait` 轮询（KEEL 不可用才降级 `gh pr checks --watch`）。CI 红先按确定性规则判基础设施故障并重跑一次，不命中再按 D1 问 Jev。
 
-- PR 推进用 KEEL（与 Jev 同一个插件，2026-10-06）：owner 用 `pr_status` / `pr_wait` / `pr_threads` 看状态、等 CI、分诊评审；转 Ready、写 pr_ready 或 goal_report 前先调 `pr_status`，`nextAction` 不是 `report_mergeable` / `handoff` / `mark_ready` 就继续；`verify_current_head` 由已派的 e2e worker 在当前 head 验证并写验证状态。本 skill 的入账脚本照旧，owner 不另跑 `pstack_start`；KEEL 不可用记 `KEEL_UNAVAILABLE` 后按原 gh 步骤继续。
+- PR 状态用 KEEL 查（与 Jev 同一个插件，2026-10-06）：owner 用 `pr_status` 看状态，未启用 continuation v2 时用 `pr_wait` 等 CI。KEEL 的 `nextAction` 只作参考，不构成新停点：转 Ready、pr_ready、confirm-pr-open、goal_report 仍按本包规则与五类停判断，评审线程照旧归 Mini。仓库要求 `agent-verify` 时由已派的 e2e worker 验证当前 head 后写状态。本 skill 的入账脚本照旧，owner 不另跑 `pstack_start`；KEEL 不可用记 `KEEL_UNAVAILABLE` 后按原 gh 步骤继续。
 
 **连带文件**（`config/collateral.json`，`scripts/lib/collateral.mjs` 单一实现，开工包第 5 段与 ready-check 同源）：
 
