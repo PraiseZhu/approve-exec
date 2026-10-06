@@ -107,6 +107,22 @@ test('render-pr-handoff: 决策三层 + Jev 约定 + 连带策略 + 来源标注
   assert.throws(() => renderPrHandoff(baseArgs({ jevJournal: 'rel/jev.jsonl' })), LedgerError);
 });
 
+test('render-pr-handoff: PR 状态用 KEEL 查，nextAction 只作参考、不加停点', () => {
+  for (const out of [renderPrHandoff(baseArgs()), renderPrHandoff(baseArgs({ continuation: { command: 'python3 owner-checkpoint.py --phase x' } }))]) {
+    const s8 = out.split('## 8. 做完之后（自动，不要问 lead）\n')[1].split('\n## 9. 禁做')[0];
+    for (const needle of ['pr_status', 'pr_wait', 'KEEL_UNAVAILABLE', 'record-delivery', 'confirm-pr-open', 'agent-verify']) {
+      assert.ok(s8.includes(needle), `第 8 段缺: ${needle}`);
+    }
+    // 评审线程归 Mini、Ready 后不追反馈：KEEL 的 nextAction 不得成为五类停之外的停点。
+    assert.match(s8, /KEEL 的 nextAction 只作参考，不构成新停点：转 Ready、pr_ready、confirm-pr-open、goal_report 仍按本包原有规则与五类停判断，评审线程照旧归 Mini/);
+    assert.doesNotMatch(s8, /不得转 Ready|不得收尾|pr_threads/);
+    // 等 CI 不另立规则，沿用 continuation v1/v2 的 CI 等待规则。
+    assert.match(s8, /等 CI 按上面的 CI 等待规则（未启用 continuation v2 时用 pr_wait）/);
+    assert.doesNotMatch(s8, /pstack_start\(/);
+  }
+  assert.match(renderPrHandoff(baseArgs()), /用 KEEL 的 pr_wait 轮询[^。]*KEEL 不可用时降级为 gh pr checks <PR> --watch --interval 60/);
+});
+
 test('render-pr-handoff: 缺摘录或第 4 段复制第 2 段拒', () => {
   assert.throws(() => renderPrHandoff(baseArgs({ excerpts: [] })), LedgerError);
   assert.throws(() => renderPrHandoff(baseArgs({ excerpts: ['（本包未附摘录：子 session 仍须按 allowed_paths 开工，禁止 Grep 整模块。）'] })), LedgerError);
