@@ -122,14 +122,18 @@ function deliveryCi(pr, gh) {
   check(ci.status === 'green', 'required CI is not green');
   const failed = item => ['failure', 'error', 'timed_out', 'cancelled', 'action_required'].includes(String(item.conclusion ?? item.state).toLowerCase());
   for (const item of ci.checks.filter(failed)) {
-    // A failing review check is a review result, not product CI: jobs of the old code-review.yml, or the
-    // review-pr check that review-pr.yml writes through the API as GitHub Actions (details_url is the run).
-    const match = String(item.details_url ?? '').match(/github\.com\/xindong\/mivo-canvas-plugin\/actions\/runs\/(\d+)(\/job\/\d+)?/);
-    check(match, 'non-required product check failed');
-    const run = parse(gh(['api', `repos/${pr.repo}/actions/runs/${match[1]}`]));
-    const legacyReview = Boolean(match[2]) && run.path === '.github/workflows/code-review.yml';
-    const dispatchReview = item.name === 'review-pr' && item.app?.id === GITHUB_ACTIONS_APP_ID && run.path === DISPATCH_WORKFLOW;
-    check(run.id === Number(match[1]) && run.repository?.full_name === pr.repo && (legacyReview || dispatchReview), 'non-required product CI failed');
+    // A failing review check is a review result, not product CI: jobs of the old code-review.yml (details_url is
+    // the job), or the review-pr check that review-pr.yml writes through the API as GitHub Actions. GitHub rewrites
+    // details_url of API-created Actions checks to the check page, so review-pr.yml records its run in external_id.
+    const legacy = String(item.details_url ?? '').match(/github\.com\/xindong\/mivo-canvas-plugin\/actions\/runs\/(\d+)\/job\/\d+/);
+    const dispatch = item.name === 'review-pr'
+      ? String(item.external_id ?? '').match(/^https:\/\/github\.com\/xindong\/mivo-canvas-plugin\/actions\/runs\/(\d+)\/?$/) : null;
+    const runId = (dispatch ?? legacy)?.[1];
+    check(runId, 'non-required product check failed');
+    const run = parse(gh(['api', `repos/${pr.repo}/actions/runs/${runId}`]));
+    const legacyReview = !dispatch && Boolean(legacy) && run.path === '.github/workflows/code-review.yml';
+    const dispatchReview = Boolean(dispatch) && item.app?.id === GITHUB_ACTIONS_APP_ID && run.path === DISPATCH_WORKFLOW;
+    check(run.id === Number(runId) && run.repository?.full_name === pr.repo && (legacyReview || dispatchReview), 'non-required product CI failed');
   }
   check(!ci.statuses.some(failed), 'commit status failure blocks local delivery');
   return ci;

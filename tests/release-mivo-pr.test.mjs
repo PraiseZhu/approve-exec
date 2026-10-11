@@ -234,12 +234,19 @@ test('dispatch-review-v1 trust lists only the review workflow', t => {
   assert.throws(f.prepare, /only the review workflow/); assert.equal(f.mutations(), 0);
 });
 test('a failed review-pr check from review-pr.yml is a review result, not product CI', t => {
-  const failedReview = (appId, head) => ({ id: 9, name: 'review-pr', head_sha: head, status: 'completed', conclusion: 'failure', started_at: at,
-    app: { id: appId, slug: 'github-actions' }, details_url: 'https://github.com/xindong/mivo-canvas-plugin/actions/runs/77' });
+  // Real GitHub shape: details_url is rewritten to the check page; the producing run is in external_id.
+  const failedReview = (appId, head, extra = {}) => ({ id: 9, name: 'review-pr', head_sha: head, status: 'completed', conclusion: 'failure', started_at: at,
+    app: { id: appId, slug: 'github-actions' }, external_id: 'https://github.com/xindong/mivo-canvas-plugin/actions/runs/77',
+    details_url: 'https://github.com/xindong/mivo-canvas-plugin/runs/9', ...extra });
   const f = fixture(t, 'dispatch'); f.extraChecks.push(failedReview(15368, f.head)); f.runs[77] = '.github/workflows/review-pr.yml';
   f.prepare(); assert.equal(f.mutations(), 0);
   const g = fixture(t, 'dispatch'); g.extraChecks.push(failedReview(999, g.head)); g.runs[77] = '.github/workflows/review-pr.yml';
   assert.throws(g.prepare, /non-required product CI failed/);
   const h = fixture(t, 'dispatch'); h.extraChecks.push(failedReview(15368, h.head)); h.runs[77] = '.github/workflows/ci.yml';
   assert.throws(h.prepare, /non-required product CI failed/);
+  // A run URL only in details_url (not where GitHub keeps it) does not bind the producer.
+  const k = fixture(t, 'dispatch');
+  k.extraChecks.push(failedReview(15368, k.head, { external_id: null, details_url: 'https://github.com/xindong/mivo-canvas-plugin/actions/runs/77' }));
+  k.runs[77] = '.github/workflows/review-pr.yml';
+  assert.throws(k.prepare, /non-required product check failed/);
 });
