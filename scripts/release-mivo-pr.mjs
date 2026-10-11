@@ -51,7 +51,38 @@ function sameCandidate(pr, candidate) {
   check(pr.id === candidate.prNodeId && pr.number === candidate.number && pr.headRefName === candidate.branch
     && pr.headRefOid === candidate.deliveryHeadSha && pr.baseRefOid === candidate.baseSha, 'candidate head/base/identity drift');
 }
+const DISPATCH_WORKFLOW = '.github/workflows/review-pr.yml';
+const GITHUB_ACTIONS_APP_ID = 15368;
+// dispatch-review-v1: the Mini coordinator dispatches review-pr.yml; the review code is Review-PR pinned
+// by the MIVO_REVIEW_SKILL_SHA variable, so BASE carries only the dispatch workflow as a control file.
+function dispatchPrerequisites(pr, gh, trust) {
+  check(trust.repo === pr.repo && sha(trust.codeSha) && sha(trust.skillSha) && trust.workflowPath === DISPATCH_WORKFLOW
+    && Number.isSafeInteger(trust.workflowId), 'review trust configuration required');
+  check(JSON.stringify(Object.keys(trust.sourceManifest ?? {})) === JSON.stringify([DISPATCH_WORKFLOW]), 'dispatch trust manifest must list only the review workflow');
+  const control = verifyControlSourceSync({ repo: pr.repo, sha: pr.baseRefOid, gh, manifest: trust.sourceManifest, controlFiles: [DISPATCH_WORKFLOW] });
+  const rules = parse(gh(['api', `repos/${pr.repo}/contents/agent-use/docs/pr-rules.json?ref=${pr.baseRefOid}`]));
+  check(rules.type === 'file' && rules.encoding === 'base64', 'BASE review rules unavailable');
+  const ruleBytes = Buffer.from(rules.content, 'base64');
+  check(parse(ruleBytes) && typeof parse(ruleBytes) === 'object', 'BASE review rules invalid');
+  const wf = parse(gh(['api', `repos/${pr.repo}/actions/workflows/review-pr.yml`]));
+  check(wf.id === trust.workflowId && wf.path === DISPATCH_WORKFLOW && wf.state === 'active', 'review workflow unavailable');
+  const source = parse(gh(['api', `repos/${pr.repo}/contents/${DISPATCH_WORKFLOW}?ref=${pr.baseRefOid}`]));
+  check(source.type === 'file' && source.encoding === 'base64' && typeof source.content === 'string', 'review workflow source unavailable');
+  const bytes = Buffer.from(source.content, 'base64');
+  const text = bytes.toString();
+  // Dispatch-only: any event trigger would let PR content start the reviewer outside the coordinator.
+  const triggers = text.replace(/^[ \t]*#.*$/gm, '').match(/^on:\n((?:[ \t]+.*\n|\n)*)/m)?.[1] ?? '';
+  check(bytes.length > 0 && bytes.length < 1024 * 1024 && /^  workflow_dispatch:/m.test(triggers)
+    && !/^  (?!workflow_dispatch:)[a-z_]+:/m.test(triggers), 'review workflow must be dispatch-only');
+  for (const [name, expected] of [['MIVO_REVIEW_SKILL_SHA', trust.skillSha], ['MIVO_REVIEW_MODE', 'live']]) {
+    const variable = parse(gh(['api', `repos/${pr.repo}/actions/variables/${name}`]));
+    check(variable.name === name && variable.value === expected, `review variable ${name} mismatch`);
+  }
+  check(hash(bytes) === trust.workflowSha256 && trust.sourceManifest[wf.path] === trust.workflowSha256, 'workflow does not match trusted manifest');
+  return { workflowId: wf.id, workflowPath: wf.path, baseSha: pr.baseRefOid, workflowSha256: hash(bytes), control, rulesSha256: hash(ruleBytes), trust };
+}
 function prerequisites(pr, gh, trust) {
+  if (trust?.protocol === 'dispatch-review-v1') return dispatchPrerequisites(pr, gh, trust);
   const native = trust?.protocol === 'current-review-v1';
   check(trust?.repo === pr.repo && sha(trust.codeSha) && trust.workflowPath === '.github/workflows/code-review.yml'
     && (native || trust.protocol == null && trust.dispatchCompatible === true), 'review trust configuration required');
@@ -91,11 +122,14 @@ function deliveryCi(pr, gh) {
   check(ci.status === 'green', 'required CI is not green');
   const failed = item => ['failure', 'error', 'timed_out', 'cancelled', 'action_required'].includes(String(item.conclusion ?? item.state).toLowerCase());
   for (const item of ci.checks.filter(failed)) {
-    const runId = String(item.details_url ?? '').match(/github\.com\/xindong\/mivo-canvas-plugin\/actions\/runs\/(\d+)\/job\/\d+/)?.[1];
-    check(runId, 'non-required product check failed');
-    const run = parse(gh(['api', `repos/${pr.repo}/actions/runs/${runId}`]));
-    check(run.id === Number(runId) && run.repository?.full_name === pr.repo
-      && run.path === '.github/workflows/code-review.yml', 'non-required product CI failed');
+    // A failing review check is a review result, not product CI: jobs of the old code-review.yml, or the
+    // review-pr check that review-pr.yml writes through the API as GitHub Actions (details_url is the run).
+    const match = String(item.details_url ?? '').match(/github\.com\/xindong\/mivo-canvas-plugin\/actions\/runs\/(\d+)(\/job\/\d+)?/);
+    check(match, 'non-required product check failed');
+    const run = parse(gh(['api', `repos/${pr.repo}/actions/runs/${match[1]}`]));
+    const legacyReview = Boolean(match[2]) && run.path === '.github/workflows/code-review.yml';
+    const dispatchReview = item.name === 'review-pr' && item.app?.id === GITHUB_ACTIONS_APP_ID && run.path === DISPATCH_WORKFLOW;
+    check(run.id === Number(match[1]) && run.repository?.full_name === pr.repo && (legacyReview || dispatchReview), 'non-required product CI failed');
   }
   check(!ci.statuses.some(failed), 'commit status failure blocks local delivery');
   return ci;

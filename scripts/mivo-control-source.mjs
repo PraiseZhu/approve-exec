@@ -12,15 +12,19 @@ export function controlManifestDigest(manifest) {
   return hash(Buffer.from(JSON.stringify(entries)));
 }
 
-export function* verifyControlSourceSteps({ repo, sha, gh, manifest }) {
+// controlFiles: an exact control file list for protocols whose review code lives outside BASE
+// (dispatch-review-v1 pins Review-PR by SHA, so only its dispatch workflow is a BASE control file).
+export function* verifyControlSourceSteps({ repo, sha, gh, manifest, controlFiles = null }) {
   check(/^[\w.-]+\/[\w.-]+$/.test(repo) && /^[a-f0-9]{40}$/.test(sha), 'invalid source identity');
+  check(controlFiles == null || (Array.isArray(controlFiles) && controlFiles.length > 0
+    && controlFiles.every(name => typeof name === 'string' && name.startsWith('.github/'))), 'invalid control file list');
   const manifestDigest = controlManifestDigest(manifest);
-  const key = `${repo.toLowerCase()}:${sha}:${manifestDigest}`;
+  const key = `${repo.toLowerCase()}:${sha}:${manifestDigest}:${controlFiles ? [...controlFiles].sort().join(',') : 'default'}`;
   if (cache.has(key)) return { verified: true, sha, manifestDigest, cached: true };
   const rawTree = yield () => gh(['api', `repos/${repo}/git/trees/${sha}?recursive=1`]);
   const tree = typeof rawTree === 'string' || Buffer.isBuffer(rawTree) ? JSON.parse(String(rawTree)) : rawTree;
   check(tree?.truncated === false && Array.isArray(tree.tree), 'complete control tree required');
-  const controlPath = name => {
+  const controlPath = controlFiles ? name => controlFiles.includes(name) : name => {
     if (['.github/workflows/code-review.yml', '.github/workflows/review-readiness.yml'].includes(name)) return true;
     if (!name.startsWith('.github/scripts/') && !name.startsWith('.github/actions/')) return false;
     return !name.split('/').some(part => ['tests', 'node_modules', '__pycache__'].includes(part)) && !name.endsWith('.pyc');

@@ -35,8 +35,20 @@ function fixture(t, native = false) {
   }
   const reviewTrust = { repo: MIVO_REPO, codeSha: base, workflowId: 100, workflowPath: '.github/workflows/code-review.yml', dispatchCompatible: true,
     workflowSha256: digest(controls['.github/workflows/code-review.yml']), sourceManifest: Object.fromEntries(Object.entries(controls).map(([k,v]) => [k,digest(v)])) };
-  if (native) { reviewTrust.protocol = 'current-review-v1'; delete reviewTrust.dispatchCompatible; reviewTrust.native = { sourceSha: 'a'.repeat(40) }; }
-  const variables = { REVIEW_PR_CONTROL_SHA: 'a'.repeat(40), NATIVE_EVIDENCE_TRUST_JSON: JSON.stringify({ sourceManifest: reviewTrust.sourceManifest }) };
+  if (native === true) { reviewTrust.protocol = 'current-review-v1'; delete reviewTrust.dispatchCompatible; reviewTrust.native = { sourceSha: 'a'.repeat(40) }; }
+  // dispatch: BASE still carries the retired review files; only review-pr.yml is a control file.
+  const legacyFiles = native === 'dispatch' ? Object.keys(controls) : [];
+  if (native === 'dispatch') {
+    for (const name of Object.keys(controls)) delete controls[name];
+    controls['.github/workflows/review-pr.yml'] = 'name: review-pr\non:\n  workflow_dispatch:\n    inputs:\n      pr:\n        required: true\npermissions:\n  contents: read\n';
+    for (const name of Object.keys(reviewTrust)) delete reviewTrust[name];
+    Object.assign(reviewTrust, { protocol: 'dispatch-review-v1', repo: MIVO_REPO, codeSha: base, skillSha: 'c'.repeat(40), workflowId: 200,
+      workflowPath: '.github/workflows/review-pr.yml', workflowSha256: digest(controls['.github/workflows/review-pr.yml']),
+      sourceManifest: { '.github/workflows/review-pr.yml': digest(controls['.github/workflows/review-pr.yml']) } });
+  }
+  const variables = { REVIEW_PR_CONTROL_SHA: 'a'.repeat(40), NATIVE_EVIDENCE_TRUST_JSON: JSON.stringify({ sourceManifest: reviewTrust.sourceManifest }),
+    MIVO_REVIEW_SKILL_SHA: 'c'.repeat(40), MIVO_REVIEW_MODE: 'live' };
+  const extraChecks = [], runs = {};
   const gh = args => {
     const key = args[1];
     if (key === 'view') return { ...live };
@@ -52,16 +64,18 @@ function fixture(t, native = false) {
       if (query.includes('timelineItems')) return { data: { node: { timelineItems: { nodes: [...events], pageInfo: { hasNextPage: false, endCursor: null } } } } };
       return { data: { node: { id: 'READY_EVENT', createdAt: released, actor: { login: 'owner' } } } };
     }
-    if (key.includes('/git/trees/')) return { truncated: false, tree: Object.keys(controls).map(path => ({ path, type: 'blob', mode: '100644' })) };
+    if (key.includes('/git/trees/')) return { truncated: false, tree: [...new Set([...Object.keys(controls), ...legacyFiles])].map(path => ({ path, type: 'blob', mode: '100644' })) };
     if (key.includes('/contents/agent-use/docs/pr-rules.json')) return { type: 'file', encoding: 'base64', content: Buffer.from('{}').toString('base64') };
     if (key.includes('/rules/branches/')) return [[]];
     if (key.includes('/branches/')) return { protected: false, commit: { sha: live.baseRefOid } };
     if (key.includes('/contents/docs/sync/required-checks.json')) return { type: 'file', encoding: 'base64', content: Buffer.from(JSON.stringify({ on_main: ['unit'], pr_only: [] })).toString('base64') };
-    if (key.includes('/check-runs?')) return [{ check_runs: [{ id: 1, name: 'unit', head_sha: live.headRefOid, status: 'completed', conclusion: ciState, started_at: at, app: { id: 2, slug: 'fixture' } }] }];
+    if (key.includes('/check-runs?')) return [{ check_runs: [{ id: 1, name: 'unit', head_sha: live.headRefOid, status: 'completed', conclusion: ciState, started_at: at, app: { id: 2, slug: 'fixture' } }, ...extraChecks] }];
+    if (key.includes('/actions/runs/')) { const id = Number(key.split('/').at(-1)); return { id, repository: { full_name: MIVO_REPO }, path: runs[id] }; }
     if (key.includes('/statuses?')) return [[]];
     if (key.includes('/actions/variables/')) { const name = key.split('/').at(-1); return { name, value: variables[name] }; }
+    if (key.includes('/actions/workflows/review-pr.yml')) return { id: 200, path: '.github/workflows/review-pr.yml', state: 'active' };
     if (key.includes('/actions/workflows/')) return { id: 100, path: '.github/workflows/code-review.yml', state: 'active' };
-    if (key.includes('/contents/.github/workflows/')) return { type: 'file', encoding: 'base64', content: Buffer.from(controls['.github/workflows/code-review.yml']).toString('base64') };
+    if (key.includes('/contents/.github/workflows/')) { const file = key.slice(key.indexOf('.github/'), key.indexOf('?')); return { type: 'file', encoding: 'base64', content: Buffer.from(controls[file]).toString('base64') }; }
     throw new Error(`unexpected mock ${args}`);
   };
   const report = { schemaVersion: 1, kind: 'mivo-local-validation', repo: MIVO_REPO, number: 563, head,
@@ -70,7 +84,7 @@ function fixture(t, native = false) {
   fs.writeFileSync(validationReport, JSON.stringify(report));
   const prepare = () => prepareMivoPr({ repo: MIVO_REPO, pr: 563, head, validationReport, reviewTrust, out: candidate, now: at, gh });
   const releasePr = () => releaseMivoPr({ candidateReceipt: candidate, out: release, now: released, gh });
-  return { variables, controls, root, repo, bare, wt, head, branch, git, live, gh, events, prepare, releasePr, candidate, release, report, validationReport, reviewTrust,
+  return { variables, controls, extraChecks, runs, root, repo, bare, wt, head, branch, git, live, gh, events, prepare, releasePr, candidate, release, report, validationReport, reviewTrust,
     mutations: () => mutations, lose: () => { lost = true; }, nondeliver: () => { deliver = false; }, red: () => { ciState = 'failure'; } };
 }
 test('Draft A release then Mini B permits v2 confirm and local-only cleanup despite B red CI', t => {
@@ -195,4 +209,37 @@ test('current-review-v1 rejects missing native helper and hosted attestation', t
   g.reviewTrust.workflowSha256 = createHash('sha256').update(g.controls['.github/workflows/code-review.yml']).digest('hex');
   g.reviewTrust.sourceManifest['.github/workflows/code-review.yml'] = g.reviewTrust.workflowSha256;
   assert.throws(g.prepare, /native entry\/attestation/); assert.equal(g.mutations(), 0);
+});
+
+test('dispatch-review-v1 releases on the dispatch-only workflow while retired review files stay in BASE', t => {
+  const f = fixture(t, 'dispatch'); f.prepare(); f.releasePr(); assert.equal(f.mutations(), 1);
+  assert.equal(JSON.parse(fs.readFileSync(f.candidate, 'utf8')).review.workflowPath, '.github/workflows/review-pr.yml');
+});
+test('dispatch-review-v1 rejects event triggers, including one hidden after a column-0 comment', t => {
+  for (const extra of ['  pull_request_target:\n    types: [ready_for_review]\n', '# keep dispatch first\n  pull_request:\n']) {
+    const f = fixture(t, 'dispatch'); const file = '.github/workflows/review-pr.yml';
+    f.controls[file] = f.controls[file].replace('permissions:', `${extra}permissions:`);
+    f.reviewTrust.workflowSha256 = f.reviewTrust.sourceManifest[file] = createHash('sha256').update(f.controls[file]).digest('hex');
+    assert.throws(f.prepare, /dispatch-only/); assert.equal(f.mutations(), 0);
+  }
+});
+test('dispatch-review-v1 requires live mode and the pinned Review-PR SHA', t => {
+  const f = fixture(t, 'dispatch'); f.variables.MIVO_REVIEW_MODE = 'sandbox';
+  assert.throws(f.prepare, /MIVO_REVIEW_MODE mismatch/); assert.equal(f.mutations(), 0);
+  const g = fixture(t, 'dispatch'); g.variables.MIVO_REVIEW_SKILL_SHA = 'd'.repeat(40);
+  assert.throws(g.prepare, /MIVO_REVIEW_SKILL_SHA mismatch/); assert.equal(g.mutations(), 0);
+});
+test('dispatch-review-v1 trust lists only the review workflow', t => {
+  const f = fixture(t, 'dispatch'); f.reviewTrust.sourceManifest['.github/scripts/build_control_manifest.mjs'] = 'e'.repeat(64);
+  assert.throws(f.prepare, /only the review workflow/); assert.equal(f.mutations(), 0);
+});
+test('a failed review-pr check from review-pr.yml is a review result, not product CI', t => {
+  const failedReview = (appId, head) => ({ id: 9, name: 'review-pr', head_sha: head, status: 'completed', conclusion: 'failure', started_at: at,
+    app: { id: appId, slug: 'github-actions' }, details_url: 'https://github.com/xindong/mivo-canvas-plugin/actions/runs/77' });
+  const f = fixture(t, 'dispatch'); f.extraChecks.push(failedReview(15368, f.head)); f.runs[77] = '.github/workflows/review-pr.yml';
+  f.prepare(); assert.equal(f.mutations(), 0);
+  const g = fixture(t, 'dispatch'); g.extraChecks.push(failedReview(999, g.head)); g.runs[77] = '.github/workflows/review-pr.yml';
+  assert.throws(g.prepare, /non-required product CI failed/);
+  const h = fixture(t, 'dispatch'); h.extraChecks.push(failedReview(15368, h.head)); h.runs[77] = '.github/workflows/ci.yml';
+  assert.throws(h.prepare, /non-required product CI failed/);
 });
