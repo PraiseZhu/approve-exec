@@ -112,3 +112,13 @@ test('sync and async collectors share policy and classified error semantics', as
   assert.equal((await collectMivoPolicy({ repo: 'owner/repo', number: 1, gh: async (args) => classified(args) })).status, 'verified');
   assert.equal(collectMivoPolicySync({ repo: 'owner/repo', number: 1, ...fixture({ fail: true }) }).status, 'unknown');
 });
+test('review-pr verdict check is not product CI even when branch protection requires it', async () => {
+  const { gh } = fixture({ protectedBranch: true });
+  const result = await collectMivoPolicy({ repo: 'owner/repo', number: 1, gh: (args) => {
+    if (args[1]?.endsWith('/protection')) return { required_status_checks: { contexts: ['classic', 'review-pr'],
+      checks: [{ context: 'classic', app_id: 7 }, { context: 'review-pr', app_id: 15368 }] } };
+    return gh(args);
+  } });
+  assert.equal(result.status, 'verified');
+  assert.deepEqual([...new Set(result.required.map((item) => item.context))].sort(), ['classic', 'size', 'verify']);
+});
