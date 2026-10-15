@@ -22,8 +22,12 @@ function epochTime(epoch, nodeId) {
   check(split > 0, 'release epoch event missing');
   const time = tail.slice(split + 1); timestamp(time); return time;
 }
-export function deliveryGh(args, runner = spawnSync) {
-  const value = runner(process.env.GH_BIN ?? 'gh', args, { encoding: 'utf8', timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
+// 第二个参数两种形态：调用方注入的 runner 函数（测试、confirm/wrapup 包装），或
+// verifyControlSourceSync 传来的 { maxBytes }（树与 blob 可能超过默认 8MB 缓冲区）。
+export function deliveryGh(args, runnerOrOptions = spawnSync) {
+  const runner = typeof runnerOrOptions === 'function' ? runnerOrOptions : spawnSync;
+  const maxBuffer = Math.max(8 * 1024 * 1024, Number(runnerOrOptions?.maxBytes) || 0);
+  const value = runner(process.env.GH_BIN ?? 'gh', args, { encoding: 'utf8', timeout: 30000, maxBuffer });
   if (value.status !== 0) throw new Error(`GitHub query failed: ${String(value.stderr ?? '').slice(0, 300)}`);
   return parse(value.stdout);
 }

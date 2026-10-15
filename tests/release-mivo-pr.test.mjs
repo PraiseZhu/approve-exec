@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { prepareMivoPr, releaseMivoPr, confirmMivoRelease, MIVO_REPO, validateMivoV2 } from '../scripts/release-mivo-pr.mjs';
+import { prepareMivoPr, releaseMivoPr, confirmMivoRelease, MIVO_REPO, validateMivoV2, deliveryGh } from '../scripts/release-mivo-pr.mjs';
 import { readPrOpenReceipt } from '../scripts/run-ledger.mjs';
 import { wrapupCleanup } from '../scripts/wrapup-cleanup.mjs';
 const at = '2026-09-09T10:00:00Z', released = '2026-09-09T10:01:00Z';
@@ -249,4 +249,25 @@ test('a failed review-pr check from review-pr.yml is a review result, not produc
   k.extraChecks.push(failedReview(15368, k.head, { external_id: null, details_url: 'https://github.com/xindong/mivo-canvas-plugin/actions/runs/77' }));
   k.runs[77] = '.github/workflows/review-pr.yml';
   assert.throws(k.prepare, /non-required product check failed/);
+});
+
+// verifyControlSourceSync 调 gh 时会传第二个参数 { maxBytes }；prepare/release 默认直接用 deliveryGh，
+// 以前它把这个对象当 runner 调用，必报 runner is not a function。测试用的 runner 函数照旧能注入。
+test('deliveryGh accepts the { maxBytes } options from verifyControlSourceSync and still accepts an injected runner', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'delivery-gh-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const bin = path.join(dir, 'fake-gh');
+  fs.writeFileSync(bin, `#!/bin/sh
+if [ "$1" = big ]; then printf '{"pad":"'; head -c 9000000 /dev/zero | tr '\\0' a; printf '"}'; else printf '{"args":"%s"}' "$*"; fi
+`, { mode: 0o755 });
+  const saved = process.env.GH_BIN;
+  process.env.GH_BIN = bin;
+  t.after(() => { if (saved === undefined) delete process.env.GH_BIN; else process.env.GH_BIN = saved; });
+  assert.deepEqual(deliveryGh(['api', 'repos/x/contents'], { maxBytes: 16 * 1024 * 1024 }), { args: 'api repos/x/contents' });
+  assert.equal(deliveryGh(['big'], { maxBytes: 16 * 1024 * 1024 }).pad.length, 9000000, 'maxBytes 放大缓冲区');
+  assert.throws(() => deliveryGh(['big']), /GitHub query failed/, '不给 maxBytes 时仍是 8MB 上限');
+  const seen = [];
+  const runner = (binary, argv, options) => { seen.push({ binary, argv, maxBuffer: options.maxBuffer }); return { status: 0, stdout: '{"ok":true}' }; };
+  assert.deepEqual(deliveryGh(['api', 'user'], runner), { ok: true });
+  assert.deepEqual(seen, [{ binary: bin, argv: ['api', 'user'], maxBuffer: 8 * 1024 * 1024 }]);
 });
