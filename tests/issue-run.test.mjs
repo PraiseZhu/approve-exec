@@ -7,7 +7,8 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { buildPlan, readRoot } from '../scripts/issue-plan.mjs';
-import { init, next, prepare, bind, release, checkpoint, verdict, unblock, cleanup, archived, runStatus, status, sessionTitle, projectName, sessionIdFrom, activeClaims, REQUEST_KEYS, RunError } from '../scripts/issue-run.mjs';
+import { init, next, prepare, bind, release, checkpoint, verdict, unblock, freeWorktree, cleanup, archived, runStatus, status, sessionTitle, projectName, sessionIdFrom, activeClaims, REQUEST_KEYS, RunError } from '../scripts/issue-run.mjs';
+import { hashObject } from '../scripts/lib/common.mjs';
 import { REPO, LOGIN, commentsKey, parentFixture, writeFixture, ghFrom } from './fixtures/issues/build.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -294,12 +295,39 @@ test('verdict --pass：要同一 PR、同一 head、ok 的 accept-check；交接
   assert.match(res.owner_message, /pr_ready，authorization_source 填「批准执行 acme\/app#10」/);
 });
 
-test('verdict --pass：personal 车道让 owner 直接写 ready', () => {
+test('#77 SC5 verdict --pass：三种车道都让 owner 调 pr_ready 再写 ready，不再说「PR 已经是 Ready」', () => {
+  for (const lane of ['personal', 'gated-handoff', 'draft-gated-handoff']) {
+    const s = dispatched();
+    awaiting(s, { lane });
+    const res = verdict({ ledger: s.ledger, ref: A, pass: true, check: okCheck(), now: NOW });
+    assert.match(res.owner_message, /现在调 KEEL 的 pr_ready，authorization_source 填「批准执行 acme\/app#10」；成功后写 checkpoint --state ready --pr 5 --head a{40}，再把 done 门答 wait/, lane);
+    assert.doesNotMatch(res.owner_message, /已经是 Ready/, lane);
+  }
+});
+
+test('#77 SC4 needs_lead：要 --reason；记下原状态；unblock 放回；只能从 dispatched / revising 写', () => {
   const s = dispatched();
-  awaiting(s, { lane: 'personal' });
-  const res = verdict({ ledger: s.ledger, ref: A, pass: true, check: okCheck(), now: NOW });
-  assert.match(res.owner_message, /PR 已经是 Ready，直接写 checkpoint --state ready/);
-  assert.doesNotMatch(res.owner_message, /pr_ready/);
+  writeFileSync(s.ledgerPath, JSON.stringify(s.ledger));
+  const cli = spawnSync(process.execPath, [CLI, 'checkpoint', '--ledger', s.ledgerPath, '--item', A, '--state', 'needs_lead', '--now', NOW], { encoding: 'utf8' });
+  assert.equal(cli.status, 2, '不带 --reason 时 CLI 退出码 2');
+  assert.match(cli.stderr, /needs_lead 需要 --reason/);
+  assert.throws(() => checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'needs_lead', reason: ' ', now: NOW }), /needs_lead 需要 --reason/);
+  checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'needs_lead', reason: '要改 docs/sync.md 才能补 SC2 的说明', now: NOW });
+  const it = s.ledger.items[A];
+  assert.equal(it.state, 'needs_lead');
+  assert.equal(it.blocked.reason, '要改 docs/sync.md 才能补 SC2 的说明');
+  assert.equal(it.blocked.prev_state, 'dispatched');
+  assert.equal(runStatus(s.ledger), 'running', 'needs_lead 算在途，不算等用户');
+  assert.throws(() => awaiting(s), /checkpoint awaiting_acceptance 只接受/, '等 lead 定之前 owner 不能自己回到验收点');
+  assert.throws(() => unblock({ ledger: s.ledger, ref: A, note: '', now: NOW }), /写明 lead 怎么定的/);
+  const back = unblock({ ledger: s.ledger, ref: A, note: 'lead 2026-10-30：不改范围，换成在 src/sync 里写注释', now: NOW });
+  assert.equal(back.state, 'dispatched');
+  assert.equal(back.target_session_id, 'owner-1');
+  awaiting(s);
+  verdict({ ledger: s.ledger, ref: A, revise: '补证据', now: NOW });
+  checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'needs_lead', reason: '要改 SC2', now: NOW });
+  assert.equal(s.ledger.items[A].blocked.prev_state, 'revising');
+  assert.equal(unblock({ ledger: s.ledger, ref: A, note: '定了', now: NOW }).state, 'revising');
 });
 
 test('SC5 第 3 次判「要改」→ blocked_user，给出总 issue 评论正文，不再发回 owner', () => {
@@ -441,9 +469,81 @@ test('反例（review-pr72）：status 和 next 对同一台账给出同一个 r
   assert.equal(status({ ledger: s.ledger, gh: s.gh }).run_status, 'running');
 });
 
-test('「要改」回复写明 KEEL run 结束后用 keel_run 传 pr=<号> 在同一 PR 上继续（#69 待定问题结论）', () => {
+test('「要改」回复写明先跑 free-worktree，再用 keel_run 传 pr=<号> 在同一 PR 上继续（#69 待定问题结论、#77 SC6）', () => {
   const s = dispatched();
   awaiting(s, { lane: 'personal' });
   const res = verdict({ ledger: s.ledger, ref: A, revise: '补证据', now: NOW });
-  assert.match(res.owner_message, /用 keel_run 传 pr=5 在同一 PR 上接着做/);
+  assert.match(res.owner_message, /先跑开工包第 3 节的 free-worktree，释放上一个 KEEL run 占着分支的 worktree，再用 keel_run 传 pr=5 在同一 PR 上接着做/);
+});
+
+/** 判了一次「要改」、PR #5 分支 feat/x 的 head 是 head 的台账，计划里的主目录指向 repoDir。 */
+function revisingWith(head, repoDir) {
+  const fixture = parentFixture();
+  fixture[`api repos/${REPO}/pulls/5`] = { head: { ref: 'feat/x', sha: head }, state: 'open', draft: true };
+  const s = dispatched({ fixture });
+  s.plan.items.find((i) => i.ref === A).keel_run.repo_dir = repoDir;
+  awaiting(s, { head });
+  verdict({ ledger: s.ledger, ref: A, revise: '补证据', now: NOW });
+  return s;
+}
+
+test('#77 SC6 free-worktree：干净且 HEAD 等于 PR head 时删掉旧 KEEL worktree、保留本地分支；脏或不一致时拒绝、什么都不删', () => {
+  let r = gitRepoWithWorktree();
+  let s = revisingWith(r.head, r.repo);
+  writeFileSync(join(r.wt, 'dirty.txt'), 'x');
+  assert.throws(() => freeWorktree({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, now: NOW }), /有未提交改动，不释放/);
+  assert.equal(existsSync(r.wt), true);
+
+  r = gitRepoWithWorktree();
+  s = revisingWith('c'.repeat(40), r.repo);
+  assert.throws(() => freeWorktree({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, now: NOW }), /与 PR head .* 不一致.*不释放/);
+  assert.equal(existsSync(r.wt), true);
+
+  r = gitRepoWithWorktree();
+  r.g('worktree', 'remove', r.wt);
+  r.g('checkout', '-q', 'feat/x');
+  s = revisingWith(r.head, r.repo);
+  assert.throws(() => freeWorktree({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, now: NOW }), /在主目录 .* 检出，不释放/);
+
+  r = gitRepoWithWorktree();
+  s = revisingWith(r.head, r.repo);
+  const res = freeWorktree({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, now: NOW });
+  assert.equal(res.freed, true);
+  assert.equal(res.worktree, join(realpathSync(r.repo), '.worktrees', 'keel-1'));
+  assert.equal(existsSync(r.wt), false);
+  assert.equal(r.g('rev-parse', 'feat/x'), r.head, '本地分支保留，keel_run 传 pr 时检出它');
+  assert.equal(s.ledger.items[A].state, 'revising', '台账状态不变');
+  assert.deepEqual(freeWorktree({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, now: NOW }), { ok: true, freed: false, ref: A, branch: 'feat/x' }, '没有占用时什么都不做');
+
+  const fresh = dispatched();
+  assert.throws(() => freeWorktree({ ledger: fresh.ledger, plan: fresh.plan, ref: A, gh: fresh.gh, now: NOW }), /台账里没有 PR 号/);
+});
+
+test('#77 SC6 反例（review-pr80 P2）：不是 KEEL 建的 worktree（不在 <主目录>/.worktrees/keel-* 下）不删，里面被 gitignore 的文件也还在', () => {
+  const r = gitRepoWithWorktree();
+  r.g('worktree', 'remove', r.wt);
+  const manual = join(r.repo, 'manual-wt');
+  r.g('worktree', 'add', '-q', manual, 'feat/x');
+  writeFileSync(join(r.repo, '.gitignore'), 'local.env\n');
+  writeFileSync(join(manual, '.gitignore'), 'local.env\n');
+  r.g('-C', manual, 'add', '.gitignore');
+  r.g('-C', manual, '-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'ignore');
+  writeFileSync(join(manual, 'local.env'), 'x');
+  const head = r.g('rev-parse', 'feat/x');
+  const s = revisingWith(head, r.repo);
+  assert.throws(() => freeWorktree({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, now: NOW }), /不是 KEEL 建的.*不释放/);
+  assert.equal(existsSync(join(manual, 'local.env')), true, '手工 worktree 和里面的本地文件都还在');
+});
+
+test('#77 SC6 free-worktree CLI：删掉占用后台账落盘、退出码 0', () => {
+  const r = gitRepoWithWorktree();
+  const s = revisingWith(r.head, r.repo);
+  writeFileSync(s.planPath, JSON.stringify(s.plan));
+  s.ledger.plan.sha256 = hashObject(s.plan);
+  writeFileSync(s.ledgerPath, JSON.stringify(s.ledger));
+  writeFileSync(s.ghPath, JSON.stringify(s.fixture));
+  const res = spawnSync(process.execPath, [CLI, 'free-worktree', '--ledger', s.ledgerPath, '--item', A, '--now', NOW, '--gh-fixture', s.ghPath], { encoding: 'utf8' });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(JSON.parse(res.stdout).freed, true);
+  assert.equal(existsSync(r.wt), false);
 });

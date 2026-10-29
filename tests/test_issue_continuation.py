@@ -1,4 +1,4 @@
-"""issue-watch.py：零 token 续跑脚本（PraiseZhu/approve-exec#69 SC1、SC2、SC3、SC8）。"""
+"""issue-watch.py：零 token 续跑脚本（PraiseZhu/approve-exec#69 SC1、SC2、SC3、SC8，#77 SC4）。"""
 
 from __future__ import annotations
 
@@ -143,6 +143,17 @@ class BlockedAndTerminalTests(Base):
         res = self.run_once(client, FakeGitHub())
         self.assertEqual(res["signals"], [f"blocked:o/r#11:2:{ISO_NOW}"])
         self.assertIn("[需要用户] o/r#11：需要管理员建规则集", client.calls[0]["message"])
+
+    def test_77_sc4_needs_lead_wakes_lead_exactly_once(self):
+        self.ledger(item("o/r#11", "needs_lead", blocked={"seq": 3, "at": ISO_NOW, "reason": "要改 docs/sync.md 才能补 SC2"}))
+        client = FakeClient()
+        res = self.run_once(client, FakeGitHub())
+        self.assertEqual(res["signals"], [f"lead:o/r#11:3:{ISO_NOW}"])
+        self.assertIn("[需要 lead] o/r#11：要改 docs/sync.md 才能补 SC2。", client.calls[0]["message"])
+        self.assertIn("issue-run unblock --note", client.calls[0]["message"])
+        self.assertEqual(self.run_once(client, FakeGitHub(), now=NOW + 300)["status"], "monitoring")
+        self.assertEqual(self.run_once(client, FakeGitHub(), now=NOW + 4000)["status"], "monitoring", "等 lead 定不算停滞")
+        self.assertEqual(len(client.calls), 1, "同一次 needs_lead 不重复唤醒")
 
     def test_complete_run_never_wakes(self):
         self.ledger(item("o/r#11", "archived"), item("o/r#12", "closed"))

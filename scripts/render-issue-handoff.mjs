@@ -11,8 +11,13 @@ import { isMain, parseArgs } from './lib/common.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-export const KEEL_DONE =
-  '`pr_status` 的 `nextAction` 是 `report_mergeable`；或交接车道 `pr_ready` 成功后变为 `stopped_after_handoff`；或报出具体阻塞（缺权限、缺环境、预算用完）。看到 `handoff` 表示该调 `pr_ready` 交接，不是结束';
+/** owner 的验收点：KEEL 只差把 Draft 转正式（PraiseZhu/approve-exec#77）。 */
+// PR 是 Draft、CI 干净时 KEEL 对三种车道都给 `mark_ready`（Project Keel src/shared/lanes.ts `allowedActions`），
+// done 门因此停在 wait / stop，缺项只剩这一条；交接车道的 `pr_ready` 收口只在 PR 已不是 Draft 时出现。
+export const ACCEPTANCE_POINT =
+  'KEEL 只差转 Ready：done 门（`next.kind` 是 `decide`、`gate_id` 是 `done`）的缺项只剩一条 `pr_status 是 mark_ready`。三种车道都一样，这时 PR 还是 Draft、CI 全绿、非作者审查已通过';
+/** owner 结束本轮只有这四种情况；别的时候一直照 `next` 做。 */
+export const END_TURN_STATES = Object.freeze(['awaiting_acceptance', 'ready', 'needs_lead', 'blocked_user']);
 
 function mergeOrderLine(item) {
   if (item.merge_after.length === 0 && item.hard_deps.length === 0) return '无先后要求';
@@ -22,14 +27,15 @@ function mergeOrderLine(item) {
   return parts.join('；');
 }
 
-/** owner 写 checkpoint 的命令；台账路径在 prepare 时填入，dry-run 时用占位。 */
-function checkpointCmd({ scriptsDir, ledgerPath, ref }, tail) {
-  return `node ${JSON.stringify(`${scriptsDir}/issue-run.mjs`)} checkpoint --ledger ${JSON.stringify(ledgerPath)} --item ${ref} ${tail}`;
+/** owner 跑的台账命令；台账路径在 prepare 时填入，dry-run 时用占位。 */
+function runCmd({ scriptsDir, ledgerPath, ref }, sub, tail = '') {
+  return `node ${JSON.stringify(`${scriptsDir}/issue-run.mjs`)} ${sub} --ledger ${JSON.stringify(ledgerPath)} --item ${ref}${tail ? ` ${tail}` : ''}`;
 }
 
 export function renderIssueHandoff({ plan, item, leadSessionId, ledgerPath = '<台账路径，派发时填入>', scriptsDir = HERE }) {
   if (!leadSessionId) throw new Error('renderIssueHandoff 需要 lead 会话 id');
-  const cmd = (tail) => checkpointCmd({ scriptsDir, ledgerPath, ref: item.ref }, tail);
+  const cmd = (tail) => runCmd({ scriptsDir, ledgerPath, ref: item.ref }, 'checkpoint', tail);
+  const auth = plan.authorization_source;
   const scTable = JSON.stringify([
     ...item.keel_run.sc.map((s) => ({ id: s.id, status: 'pass' })),
     ...item.manual_scs.map((s) => ({ id: s.id, status: 'manual' })),
@@ -67,8 +73,13 @@ export function renderIssueHandoff({ plan, item, leadSessionId, ledgerPath = '<�
     JSON.stringify(item.keel_run, null, 2),
     '```',
     '',
-    `2. 之后只照 KEEL 返回的 \`next\` 推进，到第 3 节的验收点就停。KEEL 的完成标准供参考：${KEEL_DONE}。`,
-    '3. 下面的待定问题，以及执行中遇到的方案选择，先问 KEEL 的 `jev`；把结论写回子 issue（「已定 YYYY-MM-DD：结论」），不回来问 lead 或用户：',
+    '2. 之后只照 KEEL 返回的 `next` 推进，一直做到第 3 节的验收点。你是无人值守的 owner：KEEL 手册里让你停下的地方按下面做，自己处理，不找 lead，也不找用户。',
+    `   - \`next\` 让你调 \`pr_open\`：加 \`draft: true\`，\`authorization_source\` 填「${auth}」。任何车道都先开 Draft。`,
+    '   - `next` 是等待（`keel_wait` 等）：等完照新的 `next` 接着做。在等 CI 不是结束本轮的理由。',
+    '   - `next.kind` 是 `decide`：自己答。done 门缺项只剩 `pr_status 是 mark_ready` 就是验收点，不答这个门，按第 3 节写 checkpoint；缺项是在等 CI（如 `pr_status 是 wait_for_ci`）答 `wait`；缺 SC 证据选 `revise`；验证没过选 `retry_verify`；不选 `waive`：豁免要用户原话，你没有。其他门拿不准先问 KEEL 的 `jev`；低于执行线时取改动最小、可撤回的选项（KEEL 手册第 9 条）。',
+    '   - PR 已经不是 Draft（例如 `next` 让你调 `pr_ready`）：不调。`pr_status` 显示已交接（`stopped_after_handoff`）就不要动这个 PR，写 `blocked_user`；没交接过的，先 `gh pr ready <PR 号> --undo` 转回 Draft，再接着做。',
+    '   - `next.kind` 是 `stop`：分支被别的 worktree 占着就跑第 3 节的 `free-worktree`，再调一次；别的原因写 `blocked_user`。',
+    '3. 下面的待定问题，以及执行中遇到的方案选择，先问 KEEL 的 `jev`；把结论写回子 issue（「已定 YYYY-MM-DD：结论」）：',
     pending,
     `4. 开 PR 前跑 \`check-pr-issue.sh ${item.ref}\`；正文按任务 issue 范式写，第一行「任务 issue：${item.ref}」，目标仓允许时再写「Closes ${item.ref}」。`,
     '5. 下面这些验收项合并前拿不到证据，没有传给 `keel_run`；在 PR 正文「验收对照」里标「未执行」并写明验证层：',
@@ -76,9 +87,7 @@ export function renderIssueHandoff({ plan, item, leadSessionId, ledgerPath = '<�
     '',
     '## 3. 收口：到验收点就停下，等 lead 裁决',
     '',
-    '验收点按车道（看 KEEL `pr_status` 返回的车道与下一步）：',
-    '- 交接车道（draft-gated-handoff、gated-handoff，下一步是 `handoff`）：CI 全绿、非作者审查通过、PR 还是 Draft 时就是验收点。**lead 判通过之前不调 `pr_ready`**：交接之后 KEEL 不再允许你推送。',
-    '- personal 车道：`pr_status` 的 `nextAction` 是 `report_mergeable` 时就是验收点。',
+    `验收点：${ACCEPTANCE_POINT}。**lead 判通过之前，任何车道都不调 \`pr_ready\`**：转正式之后 KEEL 不再允许你推送。`,
     '',
     '到验收点后写 checkpoint，然后结束本轮；不用 `send_to_session` 回报，续跑脚本会叫醒 lead：',
     '',
@@ -89,21 +98,31 @@ export function renderIssueHandoff({ plan, item, leadSessionId, ledgerPath = '<�
     '`--sc` 每条 SC 一行：KEEL 判通过的写 `pass`，上面第 5 条的黑盒验收项写 `manual`；还有没通过的就没到验收点。',
     '',
     `lead 会用 \`send_to_session\` 回你一条裁决：`,
-    `- 「通过」：交接车道调 KEEL 的 \`pr_ready\`，\`authorization_source\` 填「${plan.authorization_source}」；成功后写 \`--state ready --pr <PR 号> --head <同一 sha>\`。personal 车道直接写 \`--state ready\`。写完结束。`,
-    '- 「要改」：按列出的条目改，回到验收点重新写 `--state awaiting_acceptance`。上一个 KEEL run 已经结束（例如 personal 车道已到 `report_mergeable`）时，用 `keel_run` 传 `pr=<PR 号>` 在同一 PR 上接着做。',
+    `- 「通过」：调 KEEL 的 \`pr_ready\`，\`authorization_source\` 填「${auth}」；成功后写 \`--state ready --pr <PR 号> --head <同一 sha>\`，再把 done 门答 \`wait\`，KEEL 看到已交接或可合并就收工。写完结束。`,
+    '- 「要改」：先释放上一个 KEEL run 占着 PR 分支的 worktree，再用 `keel_run` 传 `pr=<PR 号>`（`scope` 同上）在同一 PR 上接着做；改完回到验收点，重新写 `--state awaiting_acceptance`：',
     '',
-    '只有用户能做的事（外部审批、规则集或权限、发布、缺凭据）：',
+    '```sh',
+    runCmd({ scriptsDir, ledgerPath, ref: item.ref }, 'free-worktree'),
+    '```',
+    '',
+    '范围或验收标准必须改才能做完（先问过 `jev`，确认在范围内换做法也不行）：',
+    '',
+    '```sh',
+    cmd('--state needs_lead --reason "<要加哪些文件或改哪条 SC，为什么>"'),
+    '```',
+    '',
+    '只有用户能做的事（外部审批、规则集或权限、发布、缺凭据），或 `stop` 解决不了：',
     '',
     '```sh',
     cmd('--state blocked_user --reason "<要用户做什么>"'),
     '```',
     '',
-    '写完结束本轮。别的时候不回报。',
+    `结束本轮只有四种情况：写完 ${END_TURN_STATES.map((s) => `\`${s}\``).join(' / ')} 之一。别的时候一直照 \`next\` 做，不回报进度。`,
     '',
     '## 4. 不许做',
     '',
     '- 不合并 PR，不开 auto-merge，不 force push，不直推默认分支。',
-    '- 不改 issue 的范围和验收标准；确实要改时先回报 lead。',
+    '- 不改 issue 的范围和验收标准；必须改时写 `needs_lead`。',
     '- 不改范围以外的文件；KEEL 报 `SCOPE_VIOLATION` 时按它的提示收回越界改动。',
     '',
   ];

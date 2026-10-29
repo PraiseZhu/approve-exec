@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """issue-watch.py — 批准执行 issue 入口的零 token 续跑脚本（cindy-script/1，PraiseZhu/approve-exec#69）。
 
-每轮只读台账与 GitHub，发现下面四种情况时用 sessions.dispatch 叫醒 lead；同一情况只叫一次：
+每轮只读台账与 GitHub，发现下面五种情况时用 sessions.dispatch 叫醒 lead；同一情况只叫一次：
 - accept：owner 写了 awaiting_acceptance checkpoint（按 checkpoint 序号去重）
+- lead：owner 写了 needs_lead，范围或验收标准要 lead 定（按停下的那一次去重，#77）
 - blocked：子 issue 停在 blocked_user（按停下的那一次去重）
 - unlock：pending 子 issue 的依赖都已关闭（completed），可以派了
 - stalled：在途子 issue 的台账活动和 PR head 都超过 stalled_after_sec 没变，且 PR 不在等 CI
@@ -32,9 +33,10 @@ from cindy_script import DuplexClient  # noqa: E402
 SCHEMA = "issue-watch-v1"
 IN_PROGRESS = {"dispatched", "revising", "accepted"}
 DONE = {"archived", "closed"}
-LABELS = {"accept": "待验收", "blocked": "需要用户", "unlock": "可派", "stalled": "停滞"}
+LABELS = {"accept": "待验收", "lead": "需要 lead", "blocked": "需要用户", "unlock": "可派", "stalled": "停滞"}
 NEXT_STEP = {
     "accept": "跑 accept-check --stage acceptance，再 issue-run verdict，把 owner_message 发回 owner 会话",
+    "lead": "按原因定：能在范围内换做法就 issue-run unblock --note 写明结论，再用 send_to_session 发给 owner 会话；确实要改范围或验收标准就告诉用户（台账锁定了计划）",
     "blocked": "把原因汇总告诉用户；用户处理完后 issue-run unblock，再通知 owner 会话",
     "unlock": "跑 issue-run next，对可派的子 issue 走 prepare → send_to_session → bind",
     "stalled": "查 owner 会话还在不在、卡在哪；需要时 send_to_session 催一次，或按 SKILL.md 改判",
@@ -151,9 +153,10 @@ def collect(ledger: dict[str, Any], gh: Any, now: float, stalled_after: int, hea
         if state == "awaiting_acceptance":
             signals.append({"key": f"accept:{ref}:{item.get('checkpoint_seq')}", "kind": "accept", "ref": ref,
                             "detail": f"PR #{cp.get('pr')} head {cp.get('head')}"})
-        elif state == "blocked_user":
+        elif state in ("blocked_user", "needs_lead"):
             blocked = item.get("blocked") or {}
-            signals.append({"key": f"blocked:{ref}:{blocked.get('seq')}:{blocked.get('at')}", "kind": "blocked", "ref": ref,
+            kind = "blocked" if state == "blocked_user" else "lead"
+            signals.append({"key": f"{kind}:{ref}:{blocked.get('seq')}:{blocked.get('at')}", "kind": kind, "ref": ref,
                             "detail": blocked.get("reason") or "原因未写"})
         elif state == "pending":
             deps = item.get("hard_deps") or []

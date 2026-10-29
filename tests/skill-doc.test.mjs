@@ -66,7 +66,7 @@ test('owner 收口：开工包第 3 节 + references/issue-owner-protocol.md；�
 
 test('lead 验收：accept-check 后判通过或要改，第 3 次要改停下等用户', () => {
   const s = section('## ⓪ issue 入口');
-  for (const must of ['**被叫醒后按信号处理**', 'scripts/accept-check.mjs', 'verdict --item <ref> --pass', '第 3 次判「要改」', 'blocked_user']) {
+  for (const must of ['**被叫醒后按信号处理**', 'scripts/accept-check.mjs', 'verdict --item <ref> --pass', '第 3 次判「要改」', 'blocked_user', '**需要 lead**', '`needs_lead`']) {
     assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
   }
 });
