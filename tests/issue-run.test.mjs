@@ -395,3 +395,10 @@ test('SC7 archived 只认 archive_sessions 回执；全部收工 run 才 complet
   s.ledger.items[C].state = 'closed';
   assert.equal(runStatus(s.ledger), 'complete');
 });
+
+test('「要改」回复写明 KEEL run 结束后用 keel_run 传 pr=<号> 在同一 PR 上继续（#69 待定问题结论）', () => {
+  const s = dispatched();
+  awaiting(s, { lane: 'personal' });
+  const res = verdict({ ledger: s.ledger, ref: A, revise: '补证据', now: NOW });
+  assert.match(res.owner_message, /用 keel_run 传 pr=5 在同一 PR 上接着做/);
+});

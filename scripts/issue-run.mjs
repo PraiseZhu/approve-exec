@@ -456,7 +456,7 @@ export function verdict({ ledger, ref, pass, revise, check, now }) {
   move(item, 'revising', now, { verdict: 'revise', round: item.revise_count });
   return {
     ok: true, state: item.state, ref, target_session_id: item.session_id,
-    owner_message: `批准执行验收：${date} ${ref} 要改（第 ${item.revise_count} 次，最多 ${MAX_REVISE_ROUNDS} 次）。要改的条目：${items}。改完回到验收点，重新写 checkpoint --state awaiting_acceptance。`,
+    owner_message: `批准执行验收：${date} ${ref} 要改（第 ${item.revise_count} 次，最多 ${MAX_REVISE_ROUNDS} 次）。要改的条目：${items}。上一个 KEEL run 已结束时用 keel_run 传 pr=${cp.pr} 在同一 PR 上接着做；改完回到验收点，重新写 checkpoint --state awaiting_acceptance。`,
   };
 }
 

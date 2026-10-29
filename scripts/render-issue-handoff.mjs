@@ -90,7 +90,7 @@ export function renderIssueHandoff({ plan, item, leadSessionId, ledgerPath = '<�
     '',
     `lead 会用 \`send_to_session\` 回你一条裁决：`,
     `- 「通过」：交接车道调 KEEL 的 \`pr_ready\`，\`authorization_source\` 填「${plan.authorization_source}」；成功后写 \`--state ready --pr <PR 号> --head <同一 sha>\`。personal 车道直接写 \`--state ready\`。写完结束。`,
-    '- 「要改」：按列出的条目改，回到验收点重新写 `--state awaiting_acceptance`。',
+    '- 「要改」：按列出的条目改，回到验收点重新写 `--state awaiting_acceptance`。上一个 KEEL run 已经结束（例如 personal 车道已到 `report_mergeable`）时，用 `keel_run` 传 `pr=<PR 号>` 在同一 PR 上接着做。',
     '',
     '只有用户能做的事（外部审批、规则集或权限、发布、缺凭据）：',
     '',
