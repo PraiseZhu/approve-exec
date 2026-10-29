@@ -138,7 +138,8 @@ function splitHead(line) {
   return [null, line];
 }
 
-const noSpace = (t) => t && !/\s/.test(t);
+// 文件格里的反引号内容照收（Git 路径可以带空格）；说明文字里才用 isPathLike 过滤。
+const nonEmpty = (t) => t.length > 0;
 // 整行只有反引号路径、顿号逗号和「（新）」这类标注时，算作「只列了文件」。
 const onlyTicks = (s) => s.replace(/`[^`]+`/g, '').replace(/[\s、,，（）()新改删]/g, '') === '';
 
@@ -159,9 +160,9 @@ export function toScope(text, ref) {
     const body = line.replace(/^\s*[-*]\s+/, '');
     const [head, rest] = splitHead(body);
     let tokens;
-    if (head !== null && ticks(head).some(noSpace)) tokens = [...ticks(head).filter(noSpace), ...ticks(rest).filter(isPathLike)];
-    else if (head !== null) tokens = ticks(rest).filter(noSpace);
-    else if (onlyTicks(body)) tokens = ticks(body).filter(noSpace);
+    if (head !== null && ticks(head).some(nonEmpty)) tokens = [...ticks(head).filter(nonEmpty), ...ticks(rest).filter(isPathLike)];
+    else if (head !== null) tokens = ticks(rest).filter(nonEmpty);
+    else if (onlyTicks(body)) tokens = ticks(body).filter(nonEmpty);
     else tokens = ticks(body).filter(isPathLike);
     if (tokens.length === 0) {
       reject(`${ref} 「范围」这一行没有反引号包住的文件路径或 glob（按模板写成「- \`<文件或 glob>\`：<改什么>」，例如测试写 \`tests/**/*.test.mjs\`）：${line.trim()}`);

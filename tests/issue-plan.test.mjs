@@ -222,3 +222,8 @@ test('SC3 文件格：冒号前没有反引号时，冒号后的反引号内容�
   assert.deepEqual(toScope('- 修改：`SKILL.md`（只留 issue 入口）、`README.md`、`config/defaults.json`', 'x#70'), ['SKILL.md', 'README.md', 'config/defaults.json']);
   assert.deepEqual(toScope('- `scripts/issue-watch.py`（新）：续跑脚本（`sessions.dispatch` 唤醒 lead）', 'x#69'), ['scripts/issue-watch.py'], '能力名不进 scope');
 });
+
+test('SC3 反例（review-pr71 第 6 轮）：文件格里的路径带空格也照收，冒号后的标识符不收', () => {
+  assert.deepEqual(toScope('- `docs/Design Spec.md`: update `TEST_FILES`', 'acme/app#20'), ['docs/Design Spec.md']);
+  assert.deepEqual(toScope('- 修改：`docs/Design Spec.md`、`README.md`', 'acme/app#20'), ['docs/Design Spec.md', 'README.md']);
+});
