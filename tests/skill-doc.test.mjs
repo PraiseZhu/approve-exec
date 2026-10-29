@@ -81,7 +81,7 @@ test('Ready 后收尾与收工标准：清本地、归档会话，run_status com
 test('#70 SC4 合并红线：任何 agent 不合并、不开 auto-merge，只有用户对指定 PR 的当次授权才合并', () => {
   const s = section('## 合并红线（最高优先级）');
   assert.ok(s.includes('都不得合并'), '合并红线应写明不得合并');
-  assert.ok(s.includes('auto-merge'), '合并红线应写明不开 auto-merge');
+  assert.ok(s.includes('都不得合并、自动合并、启用 auto-merge、点击合并或调用 gh pr merge'), '合并红线应写明不得合并、不开 auto-merge、不调 gh pr merge');
   assert.ok(s.includes('只有用户本人对指定 PR 的明确、当次授权才允许合并'), '合并红线应写明只有用户当次授权才合并');
   assert.ok(section('## ⓪ issue 入口').includes('不合并任何 PR'), '⓪ 段边界应写明 lead 不合并');
 });
