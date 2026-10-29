@@ -28,7 +28,7 @@ owner 是无人值守的：KEEL 手册里让主控停下问人的地方，owner 
 - `next` 让调 `pr_open`：加 `draft: true`。任何车道都先开 Draft；KEEL 的 personal 车道允许请求 Draft（Project Keel `src/shared/lanes.ts` `draftFor`）。
 - `next` 是等待：等完照新的 `next` 接着做，不因为在等 CI 结束本轮。
 - `next.kind` 是 `decide`：自己答。done 门缺项只剩 `pr_status 是 mark_ready` 是验收点（见下节）；缺项是在等 CI 答 `wait`；缺 SC 证据选 `revise`；验证没过选 `retry_verify`；不选 `waive`（要用户原话）。其他门拿不准先问 KEEL 的 `jev`；低于执行线取改动最小、可撤回的选项（KEEL 手册第 9 条）。
-- PR 已经不是 Draft：不调 `pr_ready`，先 `gh pr ready <PR 号> --undo` 转回 Draft。
+- PR 已经不是 Draft：不调 `pr_ready`。`pr_status` 显示已交接（`stopped_after_handoff`）就不要动它，写 `blocked_user`：交接车道有完成的交接记录时，转回 Draft 也解不开 `LANE_HANDED_OFF`（Project Keel `src/main/handoff.ts`），而且会让盯梢作废手上那一轮。没交接过的，先 `gh pr ready <PR 号> --undo` 转回 Draft。
 - `next.kind` 是 `stop`：分支被别的 worktree 占着就跑 `free-worktree` 再调一次；别的原因写 `blocked_user`。
 - 待定问题和方案选择：问 `jev`，结论写回子 issue。
 

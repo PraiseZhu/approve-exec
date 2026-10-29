@@ -77,7 +77,7 @@ export function renderIssueHandoff({ plan, item, leadSessionId, ledgerPath = '<�
     `   - \`next\` 让你调 \`pr_open\`：加 \`draft: true\`，\`authorization_source\` 填「${auth}」。任何车道都先开 Draft。`,
     '   - `next` 是等待（`keel_wait` 等）：等完照新的 `next` 接着做。在等 CI 不是结束本轮的理由。',
     '   - `next.kind` 是 `decide`：自己答。done 门缺项只剩 `pr_status 是 mark_ready` 就是验收点，不答这个门，按第 3 节写 checkpoint；缺项是在等 CI（如 `pr_status 是 wait_for_ci`）答 `wait`；缺 SC 证据选 `revise`；验证没过选 `retry_verify`；不选 `waive`：豁免要用户原话，你没有。其他门拿不准先问 KEEL 的 `jev`；低于执行线时取改动最小、可撤回的选项（KEEL 手册第 9 条）。',
-    '   - PR 已经不是 Draft（例如 `next` 让你调 `pr_ready`）：不调，先 `gh pr ready <PR 号> --undo` 转回 Draft，再接着做。',
+    '   - PR 已经不是 Draft（例如 `next` 让你调 `pr_ready`）：不调。`pr_status` 显示已交接（`stopped_after_handoff`）就不要动这个 PR，写 `blocked_user`；没交接过的，先 `gh pr ready <PR 号> --undo` 转回 Draft，再接着做。',
     '   - `next.kind` 是 `stop`：分支被别的 worktree 占着就跑第 3 节的 `free-worktree`，再调一次；别的原因写 `blocked_user`。',
     '3. 下面的待定问题，以及执行中遇到的方案选择，先问 KEEL 的 `jev`；把结论写回子 issue（「已定 YYYY-MM-DD：结论」）：',
     pending,

@@ -82,7 +82,8 @@ test('#77 SC1 任何车道都先开 Draft，验收点是「KEEL 只差转 Ready�
   // review-pr80 P1：PR 是 Draft、CI 干净时 KEEL 对三种车道都给 mark_ready，交接车道不会出现 pr_ready 的 next。
   assert.ok(ACCEPTANCE_POINT.includes('done 门（`next.kind` 是 `decide`、`gate_id` 是 `done`）的缺项只剩一条 `pr_status 是 mark_ready`。三种车道都一样'));
   assert.doesNotMatch(ACCEPTANCE_POINT, /交接车道是 `next` 让你调 `pr_ready`/);
-  assert.ok(text.includes('PR 已经不是 Draft（例如 `next` 让你调 `pr_ready`）：不调，先 `gh pr ready <PR 号> --undo` 转回 Draft，再接着做。'));
+  // review-pr80 第 2 轮：已交接的 PR 转回 Draft 也解不开 LANE_HANDED_OFF，还会让盯梢作废手上那一轮，只能交给用户。
+  assert.ok(text.includes('PR 已经不是 Draft（例如 `next` 让你调 `pr_ready`）：不调。`pr_status` 显示已交接（`stopped_after_handoff`）就不要动这个 PR，写 `blocked_user`；没交接过的，先 `gh pr ready <PR 号> --undo` 转回 Draft，再接着做。'));
   assert.ok(text.includes('**lead 判通过之前，任何车道都不调 `pr_ready`**'));
   assert.ok(text.includes('- 「通过」：调 KEEL 的 `pr_ready`，`authorization_source` 填「用户 2026-10-29：批准执行 acme/app#10」；成功后写 `--state ready --pr <PR 号> --head <同一 sha>`，再把 done 门答 `wait`，KEEL 看到已交接或可合并就收工。'), '通过后所有车道都由 owner 转正式，再答 done 门收工');
   assert.ok(text.includes('不用 `send_to_session` 回报，续跑脚本会叫醒 lead'));
