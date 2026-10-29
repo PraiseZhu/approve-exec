@@ -1,10 +1,34 @@
 ---
 name: approve-exec
-description: 批准执行——吃 task-priority final manifest，或把对话里已批准的方案经 context-intake 转成同形 manifest；lead 拆 PR、写开工包、派独立 PI owner session、裁决例外；E 由 owner session 走 goal 场景 C 并自主推到 PR Ready（域内判断先问 Jev，连带文件按策略自改，只有越界才回 lead）；T 由 owner 现读 routing.json 派 e2e worker；本地不再派 GPT/Claude 单审；lead 不改产品代码、不代执行。触发词：批准执行。
+description: 批准执行——接在「开 issue」之后：吃总 issue（或独立 issue / 单个子 issue），lead 按总 issue 的并行/串行原则给每个子 issue 开一个独立会话（1 子 issue = 1 PR = 1 会话），派会话不带模型参数；owner 会话用 KEEL 的 keel_run 推进 PR；lead 不写产品代码、不合并。旧的 task-priority manifest / 上下文 brief 入口只供已在跑的旧台账。触发词：批准执行。
 trigger: 批准执行
 ---
 
 # approve-exec — lead 编排守则
+
+## ⓪ issue 入口（2026-10-29 起的主入口）
+
+用法：`批准执行 owner/repo#号`。号可以是总 issue（标题以 `[总]` 开头、挂了子 issue）、独立 issue，或单个子 issue。可以带一句「授权：…」；没带时用入口消息原文作授权原话。本段与下文第①–⑲段冲突时以本段为准。下文第①–⑲段是旧入口（task-priority manifest / 上下文 brief），只供已经在跑的旧台账使用，由 PraiseZhu/approve-exec#70 删除；新任务一律走本段。
+
+lead 的执行框架只能是 claude-code 或 codex：KEEL 不接受 Pi 当主控。owner 会话继承 lead 的执行框架与模型，各环节用什么模型由 KEEL 的主控方案决定；本 skill 不写任何模型、档位或派工路由。
+
+1. **出计划。** `node scripts/issue-plan.mjs --issue <ref> --lead-agent <claude-code|codex> --repo-dir <owner/repo>=<目标仓主目录绝对路径>（每个涉及的仓一条） --entry "<用户原话>" [--authorization "<授权原话>"] --out ~/.claude/.goal/<slug>/plan.json`。exit 2 时把 stderr 原文告诉用户，指路「开 issue」补齐对应子 issue；不手改计划，不替用户补 issue。
+2. **建台账。** `node scripts/issue-run.mjs init --plan <plan.json> --ledger <同目录>/ledger.json`。同一份计划重复 init 不新建。
+3. **列可派。** `node scripts/issue-run.mjs next --ledger <ledger.json>`。只派 `dispatchable` 里的子 issue；`waiting` 里的要等依赖 issue 关闭（对应 PR 合入）后再派；依赖被关成「不做」时交给用户决定。
+4. **派会话，每个子 issue 一次。**
+   - `node scripts/issue-run.mjs prepare --ledger <f> --item <ref> --lead-session <当前会话 id>`，拿到 `request`。返回 `claimed:false` 表示已派过，不再派。
+   - 用 cindy_helper 的 `send_to_session` 新建会话，参数只传 `request` 里的四个键：`title`、`message`、`working_dir`、`use_worktree`。不传 agent_kind、model、effort、provider_id。
+   - 把工具回执原样存成文件，`node scripts/issue-run.mjs bind --ledger <f> --item <ref> --claim <claim_id> --result <回执文件>`。回执不是明确成功时状态停在 `dispatch_unknown`：先核对会话列表，确认没有建出会话，才 `release --evidence "<依据>"` 放回，不盲目重派。
+   - bind 成功后，把输出里的 `root_comment` 用 `gh issue comment` 发到总 issue（独立 issue 发到它自己）。
+5. **等回执。** owner 会话按开工包自己用 `keel_run` 推进，完成或遇到只有用户能做的事才回报。收到回执后核实 PR 状态与 CI，回到第 3 步派下一批；需要用户做的事汇总告诉用户。
+
+`批准执行 --dry-run <ref>`：只做第 1 步，并用 `node scripts/render-issue-handoff.mjs --plan <plan.json> --item <ref> --lead-session <id>` 打印每个子 issue 的开工包，不建台账、不派会话。
+
+边界：lead 不写产品代码、不代 owner 推进、不合并任何 PR（合并红线见下文）。由脚本起的 lead 会话（看板推进）走同一入口，出计划时传 `--source script`，授权原话随入口消息传入。
+
+---
+
+以下为旧入口。
 
 **lead 按本文编排**：把输入 manifest（task-priority final，或上下文入口 context-intake 的同形产物，见第②段）拆成每 PR 一个独立 owner session。本机 owner 完成实现、全部 priority/SC、本地 e2e 和普通 push；Mivo PR 先保持 Draft，只有当前提交 required CI 全绿且审查workflow静态入口前提可用后才转为 Ready for review，再写 pr_ready。lead 验收后立即派 sub 清本地并归档该 owner。云端审查反馈、冲突与复审由 Mini 常驻 Cindy 按 PR 唯一 session 接管，本机不再注册盯梢。candidate 是检查点；不得自行 merge。本地不再派 GPT/Claude 单审。
 
