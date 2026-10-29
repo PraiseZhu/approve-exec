@@ -19,6 +19,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // ae-tests-enum：若新增 tests/prewalk-delivery.test.mjs 必须同步写入本数组字母序；
 // 裸增文件会被方向 B 拦成 exit 2。本轮未新增独立测试文件（用例落在既有 run-ledger/ready-check）。
 export const TEST_FILES = [
+  'accept-check.test.mjs',
   'collateral.test.mjs',
   'config.test.mjs',
   'context-intake.test.mjs',

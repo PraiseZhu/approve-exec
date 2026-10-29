@@ -1,12 +1,13 @@
 // issue-run.mjs：一次性认领、派会话请求、会话回执（PraiseZhu/approve-exec#68 SC5、SC6、SC8）。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdtempSync, mkdirSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 import { buildPlan, readRoot } from '../scripts/issue-plan.mjs';
-import { init, next, prepare, bind, release, sessionTitle, projectName, sessionIdFrom, activeClaims, REQUEST_KEYS, RunError } from '../scripts/issue-run.mjs';
+import { init, next, prepare, bind, release, checkpoint, verdict, unblock, cleanup, archived, runStatus, status, sessionTitle, projectName, sessionIdFrom, activeClaims, REQUEST_KEYS, RunError } from '../scripts/issue-run.mjs';
 import { REPO, LOGIN, commentsKey, parentFixture, writeFixture, ghFrom } from './fixtures/issues/build.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -244,4 +245,203 @@ test('会话标题：已知仓用固定前缀，其余仓名去掉 project- 后�
   assert.equal(projectName('PraiseZhu/approve-exec'), 'ApproveExec');
   assert.equal(sessionTitle({ title: 'Fix sync', number: 7, repo: 'a/b' }, NOW), 'B-任务7丨 1029');
   assert.equal(sessionTitle({ title: '[子2/4] 批准执行收口：owner 停在验收点', number: 69, repo: 'PraiseZhu/approve-exec' }, '2026-10-29T17:00:00.000Z'), 'ApproveExec-批准执行收口丨 1030');
+});
+
+// owner 收口、lead 验收与收尾（PraiseZhu/approve-exec#69 SC5、SC7、SC8）
+
+const HEAD = 'a'.repeat(40);
+const SC_OK = [{ id: 'SC1', status: 'pass' }, { id: 'SC2', status: 'pass' }, { id: 'SC3', status: 'manual' }, { id: 'SC4', status: 'pass' }];
+
+function dispatched(opts) {
+  const s = setup(opts);
+  const { claim_id } = prepare({ ledger: s.ledger, ledgerPath: s.ledgerPath, plan: s.plan, ref: A, leadSessionId: 'lead-1', gh: s.gh, now: NOW });
+  bind({ ledger: s.ledger, ref: A, claimId: claim_id, result: { target_session_id: 'owner-1' }, gh: s.gh, now: NOW });
+  return s;
+}
+
+function awaiting(s, { lane = 'draft-gated-handoff', head = HEAD } = {}) {
+  return checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'awaiting_acceptance', pr: '5', head, sc: SC_OK, keelRun: 'keel-1', lane, now: NOW });
+}
+
+const RUN_META = { keelRun: 'keel-1', lane: 'draft-gated-handoff' };
+const okCheck = (over = {}) => ({ ok: true, stage: 'acceptance', ref: A, pr: 5, head: HEAD, checked_at: NOW, ...over });
+
+test('checkpoint awaiting_acceptance：SC 表要覆盖子 issue 全部 SC，KEEL 管的必须 pass，黑盒项只能 manual / not_run', () => {
+  const s = dispatched();
+  assert.throws(() => checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'awaiting_acceptance', pr: '5', head: HEAD, sc: SC_OK.slice(1), ...RUN_META, now: NOW }), /缺: SC1/);
+  assert.throws(() => checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'awaiting_acceptance', pr: '5', head: HEAD, sc: [{ id: 'SC1', status: 'fail' }, ...SC_OK.slice(1)], ...RUN_META, now: NOW }), /SC1 还没有通过/);
+  assert.throws(() => checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'awaiting_acceptance', pr: '5', head: HEAD, sc: SC_OK.map((x) => (x.id === 'SC3' ? { ...x, status: 'pass' } : x)), ...RUN_META, now: NOW }), /SC3 是合并前拿不到证据/);
+  assert.throws(() => checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'awaiting_acceptance', pr: '5', head: 'abc', sc: SC_OK, now: NOW }), /--head 必须是 40 位/);
+  assert.throws(() => checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'awaiting_acceptance', pr: '5', head: HEAD, sc: SC_OK, lane: 'personal', now: NOW }), /缺 --keel-run/, 'SC1 要求 checkpoint 带 KEEL run_id');
+  assert.throws(() => checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'awaiting_acceptance', pr: '5', head: HEAD, sc: SC_OK, keelRun: 'keel-1', now: NOW }), /--lane 只能是/);
+  assert.throws(() => checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'awaiting_acceptance', pr: '5', head: HEAD, sc: SC_OK, keelRun: 'keel-1', lane: 'handoff', now: NOW }), /--lane 只能是/);
+  const res = awaiting(s);
+  assert.equal(res.state, 'awaiting_acceptance');
+  assert.equal(s.ledger.items[A].checkpoint.pr, 5);
+  assert.equal(s.ledger.items[A].checkpoint_seq, 1);
+});
+
+test('verdict --pass：要同一 PR、同一 head、ok 的 accept-check；交接车道让 owner 调 pr_ready 并用台账里的授权原话', () => {
+  const s = dispatched();
+  awaiting(s);
+  assert.throws(() => verdict({ ledger: s.ledger, ref: A, pass: true, check: okCheck({ head: 'b'.repeat(40) }), now: NOW }), /同一 PR、同一 head/);
+  assert.throws(() => verdict({ ledger: s.ledger, ref: A, pass: true, check: okCheck({ ok: false }), now: NOW }), /ok=true/);
+  const res = verdict({ ledger: s.ledger, ref: A, pass: true, check: okCheck(), now: NOW });
+  assert.equal(res.state, 'accepted');
+  assert.equal(res.target_session_id, 'owner-1');
+  assert.match(res.owner_message, /pr_ready，authorization_source 填「批准执行 acme\/app#10」/);
+});
+
+test('verdict --pass：personal 车道让 owner 直接写 ready', () => {
+  const s = dispatched();
+  awaiting(s, { lane: 'personal' });
+  const res = verdict({ ledger: s.ledger, ref: A, pass: true, check: okCheck(), now: NOW });
+  assert.match(res.owner_message, /PR 已经是 Ready，直接写 checkpoint --state ready/);
+  assert.doesNotMatch(res.owner_message, /pr_ready/);
+});
+
+test('SC5 第 3 次判「要改」→ blocked_user，给出总 issue 评论正文，不再发回 owner', () => {
+  const s = dispatched();
+  awaiting(s);
+  let res = verdict({ ledger: s.ledger, ref: A, revise: '补 SC2 的验收对照', now: NOW });
+  assert.equal(res.state, 'revising');
+  assert.match(res.owner_message, /第 1 次，最多 2 次/);
+  awaiting(s);
+  res = verdict({ ledger: s.ledger, ref: A, revise: '范围外改了 README', now: NOW });
+  assert.equal(res.state, 'revising');
+  awaiting(s);
+  res = verdict({ ledger: s.ledger, ref: A, revise: '还是缺证据', now: NOW });
+  assert.equal(res.state, 'blocked_user');
+  assert.equal(Object.hasOwn(res, 'owner_message'), false, '第 3 次不发回 owner');
+  assert.match(res.root_comment, /^批准执行停下等用户：2026-10-29 acme\/app#11（PR #5）已判「要改」3 次仍未通过.*第 1 次：补 SC2 的验收对照；第 2 次：范围外改了 README；第 3 次：还是缺证据/);
+  assert.equal(s.ledger.items[A].blocked.by, 'lead');
+  assert.throws(() => awaiting(s), /owner 不能直接回到验收点/, '反例（review-pr72）：lead 叫停后 owner 不能自己写回待验收');
+  const back = unblock({ ledger: s.ledger, ref: A, note: '用户 2026-10-29：同意再改一轮', now: NOW });
+  assert.equal(back.state, 'revising');
+  assert.equal(s.ledger.items[A].revise_count, 0);
+});
+
+test('SC8 owner 写 blocked_user：台账记原因；unblock 回到原状态；没有原因就拒绝', () => {
+  const s = dispatched();
+  assert.throws(() => checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'blocked_user', now: NOW }), /需要 --reason/);
+  checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'blocked_user', reason: '需要管理员在仓库设置里建 integration/* 规则集', now: NOW });
+  const it = s.ledger.items[A];
+  assert.equal(it.state, 'blocked_user');
+  assert.equal(it.blocked.reason, '需要管理员在仓库设置里建 integration/* 规则集');
+  assert.equal(it.blocked.prev_state, 'dispatched');
+  assert.equal(unblock({ ledger: s.ledger, ref: A, note: '已建', now: NOW }).state, 'dispatched');
+});
+
+test('checkpoint ready：PR 与 head 必须和验收通过时一致', () => {
+  const s = dispatched();
+  awaiting(s);
+  verdict({ ledger: s.ledger, ref: A, pass: true, check: okCheck(), now: NOW });
+  assert.throws(() => checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'ready', pr: '5', head: 'b'.repeat(40), now: NOW }), /和验收通过时不一致/);
+  assert.equal(checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'ready', pr: '5', head: HEAD, now: NOW }).state, 'ready');
+});
+
+function gitRepoWithWorktree() {
+  const dir = mkdtempSync(join(tmpdir(), 'issue-cleanup-'));
+  const repo = join(dir, 'repo');
+  const g = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1' } }).trim();
+  mkdirSync(repo);
+  g('init', '-q', '-b', 'main');
+  g('-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'init');
+  g('worktree', 'add', '-q', '-b', 'feat/x', join(repo, '.worktrees', 'keel-1'));
+  const head = g('rev-parse', 'feat/x');
+  return { repo, wt: join(repo, '.worktrees', 'keel-1'), head, g };
+}
+
+function readyWith(head, repoDir) {
+  const fixture = parentFixture();
+  fixture[`api repos/${REPO}/pulls/5`] = { head: { ref: 'feat/x', sha: head }, state: 'open', draft: false };
+  fixture[`pr checks 5 --repo ${REPO} --required --json name,bucket`] = [{ name: 'test', bucket: 'pass' }];
+  const s = dispatched({ fixture });
+  s.plan.items.find((i) => i.ref === A).keel_run.repo_dir = repoDir;
+  awaiting(s, { head });
+  verdict({ ledger: s.ledger, ref: A, pass: true, check: okCheck({ head }), now: NOW });
+  checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'ready', pr: '5', head, now: NOW });
+  return s;
+}
+
+test('SC7 cleanup：删本地 KEEL worktree 与本地分支，不碰远端；有未提交改动或本地比 PR 新时拒绝', () => {
+  let r = gitRepoWithWorktree();
+  let s = readyWith(r.head, r.repo);
+  writeFileSync(join(r.wt, 'dirty.txt'), 'x');
+  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW }), /有未提交改动，不清理/);
+
+  r = gitRepoWithWorktree();
+  s = readyWith('c'.repeat(40), r.repo);
+  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW }), /与 PR head .* 不一致/);
+
+  // 反例（review-pr72）：Ready 之后又变了的 PR 不清理。
+  r = gitRepoWithWorktree();
+  s = readyWith(r.head, r.repo);
+  s.fixture[`api repos/${REPO}/pulls/5`].draft = true;
+  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW }), /还不是正式 Ready/);
+  s.fixture[`api repos/${REPO}/pulls/5`] = { head: { ref: 'feat/x', sha: 'd'.repeat(40) }, state: 'open', draft: false };
+  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW }), /新提交没验收过/);
+  assert.equal(existsSync(r.wt), true);
+
+  // 反例（review-pr72 第 2 轮）：同一 head 的 CI 后来变成 pending / 失败时不清理（SC7：当前 head 必需 CI 全绿）。
+  r = gitRepoWithWorktree();
+  s = readyWith(r.head, r.repo);
+  s.fixture[`pr checks 5 --repo ${REPO} --required --json name,bucket`] = [{ name: 'test', bucket: 'pending' }];
+  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW }), /当前 CI 不是全绿.*test=pending/);
+  assert.equal(existsSync(r.wt), true);
+  assert.equal(s.ledger.items[A].state, 'ready');
+
+  // 反例（review-pr72）：分支在主目录检出时拒绝，不假装清理过。
+  r = gitRepoWithWorktree();
+  r.g('worktree', 'remove', r.wt);
+  r.g('checkout', '-q', 'feat/x');
+  s = readyWith(r.head, r.repo);
+  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW }), /在主目录 .* 检出，不清理/);
+  assert.equal(s.ledger.items[A].state, 'ready');
+
+  r = gitRepoWithWorktree();
+  s = readyWith(r.head, r.repo);
+  const res = cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW });
+  assert.equal(res.state, 'cleaned');
+  assert.equal(res.worktree, join(realpathSync(r.repo), '.worktrees', 'keel-1'), 'git 报真实路径（macOS 的 /var 是 /private/var）');
+  assert.equal(res.branch_deleted, true);
+  assert.equal(existsSync(r.wt), false);
+  assert.equal(r.g('branch', '--list', 'feat/x'), '');
+});
+
+test('SC7 archived 只认 archive_sessions 回执；全部收工 run 才 complete，等依赖时是 waiting_merge', () => {
+  const r = gitRepoWithWorktree();
+  const s = readyWith(r.head, r.repo);
+  cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW });
+  assert.throws(() => archived({ ledger: s.ledger, ref: A, result: { ok: true, changed: [{ session_id: 'other', status: 'archived' }] }, now: NOW }), /未包含 owner-1/);
+  assert.throws(() => archived({ ledger: s.ledger, ref: A, result: { archived: true }, now: NOW }), /ok 必须是 true/);
+  const wrapped = { content: [{ type: 'text', text: JSON.stringify({ ok: true, changed: [{ session_id: 'owner-1', status: 'archived' }] }) }] };
+  const res = archived({ ledger: s.ledger, ref: A, result: wrapped, now: NOW });
+  assert.equal(res.state, 'archived');
+  assert.equal(Object.hasOwn(res, 'run_status'), false, '反例（review-pr72 第 2 轮）：run 状态只由 status / next 给，archived 不另算一套');
+  // #12、#14 还没派、#13 等 #11：还没完。
+  assert.notEqual(runStatus(s.ledger), 'complete');
+  for (const ref of [`${REPO}#12`, `${REPO}#14`]) s.ledger.items[ref].state = 'archived';
+  assert.equal(runStatus(s.ledger), 'waiting_merge', '只剩等依赖合并的 #13');
+  assert.equal(next({ ledger: s.ledger, gh: s.gh }).run_status, 'waiting_merge');
+  assert.equal(status({ ledger: s.ledger, gh: s.gh }).run_status, 'waiting_merge');
+  s.ledger.items[C].state = 'closed';
+  assert.equal(runStatus(s.ledger), 'complete');
+});
+
+test('反例（review-pr72）：status 和 next 对同一台账给出同一个 run_status（有可派的子 issue 时是 running）', () => {
+  const s = dispatched();
+  assert.equal(next({ ledger: s.ledger, gh: s.gh }).run_status, 'running');
+  for (const ref of Object.keys(s.ledger.items)) s.ledger.items[ref].state = ref === `${REPO}#12` ? 'pending' : 'archived';
+  const n = next({ ledger: s.ledger, gh: s.gh });
+  assert.deepEqual(n.dispatchable, [`${REPO}#12`]);
+  assert.equal(n.run_status, 'running');
+  assert.equal(status({ ledger: s.ledger, gh: s.gh }).run_status, 'running');
+});
+
+test('「要改」回复写明 KEEL run 结束后用 keel_run 传 pr=<号> 在同一 PR 上继续（#69 待定问题结论）', () => {
+  const s = dispatched();
+  awaiting(s, { lane: 'personal' });
+  const res = verdict({ ledger: s.ledger, ref: A, revise: '补证据', now: NOW });
+  assert.match(res.owner_message, /用 keel_run 传 pr=5 在同一 PR 上接着做/);
 });

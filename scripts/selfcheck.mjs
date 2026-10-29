@@ -29,8 +29,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const AGENTS = ['pi', 'codex', 'claude-code'];
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 const ROUTES = ['execute', 'review', 'e2e', 'pr_merge'];
-// sc-p2c change ② 的触发行原文（整行逐字匹配，防描述被改写后入口失效）
-export const TRIGGER_LINE = '| 批准执行 | `approve-exec` | 直接执行不确认。吃 task-priority final manifest，或把本会话已批准的方案经 context-intake 转成同形 manifest（标注来源，不替代 task-priority），缺输入 fail-closed 指路；lead 拆 PR、派 owner、验收全部 priority/SC；本机 owner 完成 SC/e2e，域内判断先问 Jev、连带文件按策略自改，越界才回 lead。Mivo PR 先保持 Draft，required CI 全绿且审查机进场证据齐备后才转 Ready，Mini 常驻按 PR nodeid 建唯一修复 session，lead 按 pr_ready 事件清理并归档 owner。本 skill 不合入、不跑三机同步 |';
+// 「批准执行」触发行原文（整行逐字匹配，防描述被改写后入口失效）；2026-10-29 改为 issue 入口（PraiseZhu/approve-exec#69）
+export const TRIGGER_LINE = '| 批准执行 | `approve-exec` | 直接执行不确认。接在「开 issue」之后：吃总 issue（或独立 issue / 单个子 issue），缺模板 fail-closed 指路「开 issue」；lead 按并行/串行原则给每个子 issue 开一个独立会话（1 子 issue = 1 PR = 1 会话），派会话不带模型参数；owner 用 KEEL 的 keel_run 推进到验收点写 checkpoint，零 token 续跑脚本叫醒 lead；lead 跑 accept-check 后判通过或要改（最多 2 轮），通过后交接车道才转 Ready，Ready 后清本地并归档会话，依赖合入后开下一批。本 skill 不合入 |';
 // LIVE_LINK 推导：从 config.goalSkillRoot 派生 —— dirname(goalSkillRoot) 即 skills/claude-active 目录，
 // approve-exec 与 goal 同处该目录（与 task-priority 同款：skills 目录内 symlink）。
 // 禁止按仓库在磁盘上的嵌套深度猜层级（'../..' 相对 root）：主 checkout（approve-exec-src）与 worktree
