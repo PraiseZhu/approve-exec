@@ -16,43 +16,18 @@ import { spawnSync } from 'node:child_process';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 // 显式枚举：冻结测试集（字母序）。sc-p0a 契约——只读顶层、不递归、不自动发现。
-// ae-tests-enum：若新增 tests/prewalk-delivery.test.mjs 必须同步写入本数组字母序；
-// 裸增文件会被方向 B 拦成 exit 2。本轮未新增独立测试文件（用例落在既有 run-ledger/ready-check）。
+// 新增测试文件必须同步写入本数组字母序；裸增文件会被方向 B 拦成 exit 2。
 export const TEST_FILES = [
   'accept-check.test.mjs',
-  'collateral.test.mjs',
   'config.test.mjs',
-  'context-intake.test.mjs',
-  'decision-broker.test.mjs',
-  'e2e-dryrun.test.mjs',
   'evolution-note.test.mjs',
-  'finalize.test.mjs',
-  'graph.test.mjs',
   'issue-plan.test.mjs',
   'issue-run.test.mjs',
-  'lead-signal.test.mjs',
-  'mem-probe.test.mjs',
-  'mivo-green-handoff.test.mjs',
-  'mivo-pr-policy.test.mjs',
-  'owner-chain.test.mjs',
-  'pr-plan.test.mjs',
-  'ready-check.test.mjs',
-  'release-mivo-pr.test.mjs',
   'render-issue-handoff.test.mjs',
-  'render-pr-handoff.test.mjs',
-  'run-ledger.test.mjs',
   'run-tests.test.mjs',
   'selfcheck.test.mjs',
-  'session-dispatch.test.mjs',
-  'session-watch.test.mjs',
   'skill-doc.test.mjs',
-  'snapshot.test.mjs',
-  'supplemental-cleanup.test.mjs',
-  'vnext-owner-contract.test.mjs',
-  'worktree-preparation.test.mjs',
-  'wrapup-cleanup.test.mjs',
 ];
-// confirm-watch-registered / confirm-session-archived 的用例落在 wrapup-cleanup.test.mjs，不另开文件。
 
 // 双向校验（纯函数，可单测）：
 //   missing —— 枚举中存在、磁盘上缺失的文件（方向 A：测试被删 → 变硬错）
@@ -95,12 +70,7 @@ export function buildChildEnv(env) {
 // 只跳过 spawn，不删枚举、不改断言。RUN_TESTS_DIR 夹具路径关闭守卫，避免 run-tests.test.mjs
 // 组C-1/组F-1 在 CI 里继承 GITHUB_ACTIONS 后少跑占位文件。
 const CI_HOST_BOUND_FILES = new Map([
-  ['graph.test.mjs', 'module load 读取 config.defaults.routingPath（本机 /Users/praise/.../routing.json），云端不存在'],
-  ['decision-broker.test.mjs', '含读取同一 live routing.json 的用例；allowed_paths 不允许改测试文件，只能整文件跳过'],
-  ['selfcheck.test.mjs', 'selfcheck CLI 始终检查 orcaFanoutScriptsRoot/goalSkillRoot 本机 live 路径；--live 还依赖宿主 symlink'],
-  ['mem-probe.test.mjs', 'mem-probe 现场读 Darwin sysctl -n hw.memsize / vm_stat，ubuntu runner 上 ENOENT'],
-  ['e2e-dryrun.test.mjs', '槽位对账用例 spawn mem-probe，同样依赖 Darwin sysctl'],
-  ['run-ledger.test.mjs', 'mutation-kill 子套件会重跑 e2e-dryrun/mem-probe，失败集在 Linux 上漂移；不走本守卫'],
+  ['selfcheck.test.mjs', 'selfcheck CLI 始终检查 goalSkillRoot 本机 live 路径；--live 还依赖宿主 symlink'],
 ]);
 
 function hostBoundSkipReason(name) {

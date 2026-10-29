@@ -1,362 +1,115 @@
-// SKILL.md 编排守则结构断言测试。
-// 目标：lead 换会话后编排不漂回 D1（亲手执行 / lead 自跑 E/R / /code-review）。
+// SKILL.md 结构断言（PraiseZhu/approve-exec#70 SC1、SC3、SC4）：只留 issue 入口各段、合并红线、保证等级、自进化。
+// 目标：lead 换会话后不漂回旧入口（manifest / brief / 钉死模型），也不丢合并红线。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const skillDoc = readFileSync(join(root, 'SKILL.md'), 'utf8');
-const ledgerSrc = readFileSync(join(root, 'scripts/run-ledger.mjs'), 'utf8');
-const defaults = JSON.parse(readFileSync(join(root, 'config/defaults.json'), 'utf8'));
-const defaultsKeys = Object.keys(defaults);
-const gateBlock0 = readFileSync(join(root, '_tmp/handoff-gate-block-0.md'), 'utf8');
+const defaultsKeys = Object.keys(JSON.parse(readFileSync(join(root, 'config/defaults.json'), 'utf8')));
+const frontmatter = /^---\n([\s\S]*?)\n---\n/.exec(skillDoc)?.[1] ?? '';
 
-const MARKERS = [
-  '## ① 身份与触发',
-  '## ② 输入门：两个来源，同一份 manifest 契约',
-  '## ③ 总流程与席位',
-  '## ④ 拆 PR、并行与合并顺序',
-  '## ⑤ 开工包',
-  '## ⑥ 独立 session 怎么派',
-  '## ⑦ 模型现读纪律',
-  '## ⑧ 子 session 闭环与 lead 指挥',
-  '## ⑨ 台账与状态机',
-  '## ⑩ 交卷 schema',
-  '## ⑪ 预算告警如实声明',
-  '## ⑫ `--dry-run`',
-  '## ⑬ 不停机条款（仅五类停）',
-  '## ⑭ 与提交 PR 的边界',
-  '## ⑮ 保证等级声明',
-  '## ⑯ 防越域与验收',
-  '## ⑰ Fable 决策 sidecar（非第六席）',
-  '## ⑱ 偏航补救与自进化',
-];
+const MARKERS = ['## ⓪ issue 入口', '## 合并红线（最高优先级）', '## 保证等级', '## 自进化'];
+// #70 SC1：旧入口与钉死模型路由的词，不得出现在 SKILL.md、scripts/、config/。
+const BANNED = ['grok-4.6', 'claude-fable', 'routing.json', 'task-priority', 'context-intake', 'gate_goal', 'gate_routing', 'budgetPauseUsd', '800 行', '1600 行'];
 
-function sectionBetween(marker, nextMarker) {
+function section(marker) {
   const start = skillDoc.indexOf(marker);
   assert.ok(start >= 0, `marker 缺失: ${marker}`);
-  const end = nextMarker ? skillDoc.indexOf(nextMarker, start) : skillDoc.length;
-  assert.ok(end > start, `marker 越界: ${marker}`);
-  return skillDoc.slice(start + marker.length, end);
+  const next = skillDoc.indexOf('\n## ', start + marker.length);
+  return skillDoc.slice(start, next === -1 ? undefined : next);
 }
 
-test('frontmatter：name=approve-exec、trigger=批准执行', () => {
-  const fm = skillDoc.slice(0, skillDoc.indexOf('---', 3));
-  assert.match(fm, /name:\s*approve-exec/);
-  assert.match(fm, /trigger:\s*批准执行/);
-  assert.ok(skillDoc.includes('批准执行'), '正文应含触发词「批准执行」');
-});
+function filesUnder(dir) {
+  return readdirSync(join(root, dir), { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? filesUnder(join(dir, e.name)) : [join(dir, e.name)]);
+}
 
-test('十八段 marker 齐全且顺序固定', () => {
-  let pos = -1;
-  for (const m of MARKERS) {
-    const idx = skillDoc.indexOf(m, pos + 1);
-    assert.ok(idx > pos, `marker 缺失或乱序: ${m}`);
-    pos = idx;
+test('frontmatter：name / trigger，description 只描述 issue 入口', () => {
+  assert.match(frontmatter, /^name: approve-exec$/m);
+  assert.match(frontmatter, /^trigger: 批准执行$/m);
+  const description = /^description: (.*)$/m.exec(frontmatter)?.[1] ?? '';
+  for (const must of ['开 issue', '吃总 issue', '独立会话', '不带模型参数', 'keel_run', '不合并']) {
+    assert.ok(description.includes(must), `description 应写「${must}」`);
+  }
+  for (const old of ['manifest', 'brief', '旧']) {
+    assert.equal(description.includes(old), false, `description 不得再提「${old}」`);
   }
 });
 
-test('不得漂回 D1：禁止「亲手执行」与 lead 自跑 E/R', () => {
-  assert.equal(skillDoc.includes('亲手执行'), false, 'SKILL.md 不得再写「亲手执行」');
-  assert.equal(skillDoc.includes('lead 自跑 E/R'), false, 'SKILL.md 不得再写 lead 自跑 E/R');
-  assert.equal(skillDoc.includes('/code-review high --fix'), false, 'SKILL.md 不得再钉 lead /code-review');
-  assert.equal(skillDoc.includes('## ③ 五阶段状态机'), false, '不得保留 D1 段标题「五阶段状态机」');
-  assert.equal(skillDoc.includes('## ④ 设计决策 D0–D4'), false, '不得保留 D1 段标题「设计决策 D0–D4」');
+test('四段 marker 齐全且顺序固定；旧入口第①–⑲段不再出现', () => {
+  const idx = MARKERS.map((m) => skillDoc.indexOf(m));
+  idx.forEach((i, k) => assert.ok(i >= 0, `marker 缺失: ${MARKERS[k]}`));
+  assert.deepEqual([...idx].sort((a, b) => a - b), idx, 'marker 顺序必须固定');
+  assert.doesNotMatch(skillDoc, /^## [①-⑲]/m, '旧入口第①–⑲段已删除');
+  assert.equal(skillDoc.includes('以下为旧入口'), false);
 });
 
-test('doc↔实现：「用 goal skill 执行。」带句号，且与开工闸原文一致', () => {
-  const occurrences = skillDoc.split('用 goal skill 执行').length - 1;
-  assert.ok(occurrences >= 1, 'SKILL.md 应至少出现一次「用 goal skill 执行」');
-  assert.equal(
-    skillDoc.split('用 goal skill 执行。').length - 1,
-    occurrences,
-    'SKILL.md 中每处「用 goal skill 执行」后都必须紧跟句号',
-  );
-  const pushes = [...ledgerSrc.matchAll(/lines\.push\('([^']+)'\);/g)].map((m) => m[1]);
-  const implLiteral = pushes.find((s) => s.includes('goal skill'));
-  if (implLiteral) {
-    assert.ok(skillDoc.includes(implLiteral), `SKILL.md 应包含实现字面量: ${JSON.stringify(implLiteral)}`);
+test('issue 入口：出计划、建台账、列可派；派会话只传四个键，不带模型参数', () => {
+  const s = section('## ⓪ issue 入口');
+  for (const must of ['**出计划。**', 'scripts/issue-plan.mjs', '**建台账。**', '**列可派。**', '**派会话，每个子 issue 一次。**',
+    '只传 `request` 里的四个键', '不传 agent_kind、model、effort、provider_id']) {
+    assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
   }
 });
 
-test('第①段：开工闸代码块与 _tmp/handoff-gate-block-0.md 逐字一致', () => {
-  const s1 = sectionBetween(MARKERS[0], MARKERS[1]);
-  const fence = s1.match(/```\n([\s\S]*?)\n```/);
-  assert.ok(fence, '①段应有开工闸 fenced code block');
-  const expected = gateBlock0.replace(/^# 开工闸[^\n]*\n+/, '').trimEnd();
-  assert.equal(fence[1].trimEnd(), expected, '①段开工闸代码块必须与 _tmp/handoff-gate-block-0.md 正文逐字一致');
-  assert.ok(s1.includes('gate_goal'), '①段应点名 gate_goal');
-  assert.ok(s1.includes('gate_routing'), '①段应点名 gate_routing');
-  assert.ok(s1.includes('不得开工'), '①段应声明不得开工');
-});
-
-test('第②段：输入门三要素 + fail-closed 指路 task-priority，缺则不开跑', () => {
-  const s2 = sectionBetween(MARKERS[1], MARKERS[2]);
-  for (const key of ['waves', 'dispatch', 'receipts']) {
-    assert.ok(s2.includes(key), `输入门段应提及 manifest 要素 ${key}`);
+test('owner 收口：开工包第 3 节 + references/issue-owner-protocol.md；续跑脚本叫醒 lead', () => {
+  const s = section('## ⓪ issue 入口');
+  for (const must of ['**挂续跑脚本', 'scripts/issue-watch.py', '开工包第 3 节', 'references/issue-owner-protocol.md']) {
+    assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
   }
-  assert.ok(s2.includes('fail-closed'), '输入门段应声明 fail-closed');
-  assert.ok(s2.includes('task-priority'), '输入门段应指路 task-priority');
-  assert.ok(s2.includes('不开跑'), '输入门段应声明缺要素时不开跑');
-  // 2026-09-23：上下文方案入口与来源 A 同一契约，且顺序钉死、不按修改时间猜、如实标注来源
-  assert.ok(s2.includes('context-intake.mjs') && s2.includes('approve-exec-brief-v1'), '输入门段应给出上下文入口脚本与 brief schema');
-  assert.ok(s2.includes('provenance.kind=context-brief'), '输入门段应声明上下文产物带 provenance');
-  assert.ok(s2.includes('不按修改时间猜'), '输入门段应钉死取来源顺序');
-  assert.ok(s2.includes('不替代 task-priority') && s2.includes('标注'), '输入门段应声明上下文入口不替代 task-priority 并标注来源');
+  assert.ok(existsSync(join(root, 'references/issue-owner-protocol.md')), 'owner 协议文件必须存在');
 });
 
-test('第⑲段：owner 自主推进——Jev 决策三层与连带文件', () => {
-  const start = skillDoc.indexOf('## ⑲ owner 自主推进');
-  assert.ok(start > skillDoc.indexOf('## ⑱ 偏航补救与自进化'), '⑲段应在⑱段之后');
-  const s19 = skillDoc.slice(start, skillDoc.indexOf('## 历史 Mini 运维前置', start));
-  for (const needle of ['D0 事实题', 'D1 域内判断', 'D2 必须停', 'keel', 'cindy_mcp_call_tool', 'mcp__cindy__ghost_call',
-    'JEV_UNAVAILABLE', 'config/collateral.json', 'generated', 'legacy_test', 'max_files', 'max_lines', 'waiting-ci', 'T1 纪律级']) {
-    assert.ok(s19.includes(needle), `⑲段缺: ${needle}`);
+test('lead 验收：accept-check 后判通过或要改，第 3 次要改停下等用户', () => {
+  const s = section('## ⓪ issue 入口');
+  for (const must of ['**被叫醒后按信号处理**', 'scripts/accept-check.mjs', 'verdict --item <ref> --pass', '第 3 次判「要改」', 'blocked_user']) {
+    assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
   }
-  assert.ok(s19.includes('不给 Jev「上报 lead」选项'), '⑲段应禁止把上报 lead 交给 Jev 选');
-  assert.ok(s19.includes('不是测量值'), '⑲段应如实声明上限是起步值');
 });
 
-test('第③段：DISPATCH_MODES 含 session；E=session；LEAD_SELF=R/V/P；WORKER=T', () => {
-  const s3 = sectionBetween(MARKERS[2], MARKERS[3]);
-  assert.ok(s3.includes('session'), '③段应声明 session 派工模式');
-  assert.ok(s3.includes('DISPATCH_MODES'), '③段应点名 DISPATCH_MODES');
-  assert.ok(/E[\s\S]{0,80}`session`/.test(s3) || s3.includes('E 席 `dispatch=session`') || s3.includes('| E | `session`'),
-    '③段应声明 E.dispatch=session');
-  assert.ok(s3.includes('LEAD_SELF_SEATS') && s3.includes('R') && s3.includes('V') && s3.includes('P'),
-    '③段应声明 LEAD_SELF_SEATS = R、V、P');
-  assert.ok(s3.includes('WORKER_SEATS') && s3.includes('T') && !s3.includes('WORKER_SEATS = R、T'),
-    '③段应声明 WORKER_SEATS = T（本地不再派 reviewer）');
-  assert.ok(s3.includes('以每次现读的所选档为准'),
-    '③段按实际路由取值，不得用旧 agent 枚举覆盖 routing.json');
-  assert.ok(s3.includes('0.7') && s3.includes('SiteScout'), '③段流程应含 0.7 SiteScout');
-  const flow = s3.slice(s3.indexOf('→ 6.'), s3.indexOf('席位真相源'));
-  const wrapupAt = flow.indexOf('wrapup-cleanup.mjs');
-  const archiveAt = flow.indexOf('archive_sessions');
-  assert.ok(wrapupAt >= 0 && archiveAt >= 0, '③段收尾应含 wrapup / archive');
-  assert.ok(wrapupAt < archiveAt, '③段必须先清本地、最后归档 PI');
-  assert.ok(s3.includes('watch_registered') || s3.includes('Mini'), '③段应说明 Mini 的接管回执');
-  assert.ok(s3.includes('confirm-session-archived.mjs'), '③段应收口 archive_sessions 回执脚本');
-  assert.ok(s3.includes('Mini') && (s3.includes('不再 register') || s3.includes('常驻')), '③段应声明 Mini 常驻且本 skill 不再 register');
-});
-
-test('第⑥段：send_to_session create + Art 钉 + 标题正则', () => {
-  const s6 = sectionBetween(MARKERS[5], MARKERS[6]);
-  assert.ok(s6.includes('send_to_session'), '⑥段应点名 send_to_session');
-  assert.ok(s6.includes('agent_kind'), '⑥段应钉 agent_kind=pi');
-  assert.ok(s6.includes('grok-4.6'), '⑥段应钉 model=grok-4.6');
-  assert.ok(s6.includes('provider_id'), '⑥段应说明 create 无 provider_id');
-  assert.ok(s6.includes('art'), '⑥段应钉 Art');
-  assert.ok(s6.includes('丨'), '⑥段标题分隔符必须是 丨');
-  assert.ok(s6.includes('{项目名}-{中文任务名}丨 {MMDD}'), '⑥段应给出标题格式');
-  assert.ok(s6.includes('至少一个汉字'), '⑥段任务段必须含汉字');
-  assert.ok(s6.includes('Asia/Shanghai 首次创建日'), 'Mini 日期必须固定为本地首次创建日');
-  assert.ok(s6.includes('metadata') && s6.includes('保留 session_id'), 'Mini 技术身份留在 metadata，改名不得重建 session');
-  assert.ok(!skillDoc.includes('丨修复丨YYYY-MM-DD'), 'Mini 不得引入第二套标题格式');
-});
-
-test('第⑦段：现读同一份 routing.json，禁止把 luna/sol 当唯一派工值', () => {
-  const s7 = sectionBetween(MARKERS[6], MARKERS[7]);
-  assert.ok(s7.includes('routing.json'), '现读纪律段应提及 routing.json');
-  assert.ok(s7.includes('/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/orca-fanout/routing.json'),
-    '⑦段应给出 routing.json 绝对路径');
-  assert.ok(s7.includes('model-route show'), '⑦段应允许 model-route show');
-  assert.ok(s7.includes('luna') && s7.includes('sol'), '⑦段应点名禁止抄 luna/sol');
-  assert.ok(s7.includes('不要做的') || s7.includes('禁止把 luna'), '⑦段应写禁止事项');
-  assert.ok(s7.includes('429') && s7.includes('fallbacks'), '⑦段应声明 429 走 fallbacks');
-  assert.ok(s7.includes('崩溃') || s7.includes('异常终止'), '⑦段应声明 worker 崩溃走 fallbacks');
-  assert.ok(s7.includes('不换代次'), '⑦段降级只换 provider 不换代次');
-  assert.ok(!s7.includes('fallbacks_tried: []') || s7.includes('禁止空数组'), '⑦段禁止空 fallbacks_tried 就问 lead');
-});
-
-test('第⑧段：create_workers ≥2 禁连续 create_worker 单发', () => {
-  const s8 = sectionBetween(MARKERS[7], MARKERS[8]);
-  assert.ok(s8.includes('create_workers'), '⑧段必须出现 create_workers 字面量');
-  assert.ok(
-    /≥2 worker[\s\S]*?禁连续[\s\S]*?create_worker[\s\S]*?单发/.test(s8),
-    '⑧段应含「≥2 worker 禁连续 create_worker 单发」纪律链',
-  );
-  assert.ok(s8.includes('mem-probe'), '⑧段应要求派 tester 前跑 mem-probe');
-  assert.ok(s8.includes('这五种情况'), '⑧段应声明五类停');
-  assert.ok(s8.includes('PR Ready') && (s8.includes('正常返回') || s8.includes('正常完成')),
-    '⑧段第 1 种停必须是 PR Ready 正常完成，不是 DECISION_REQUIRED');
-  assert.ok(s8.includes('开 PR ≠ Mini 修复开始') || s8.includes('开 PR ≠ 发盯梢') || s8.includes('pr_ready` 之后才注册'),
-    '⑧段不得在仅开 PR 后立刻当作 Mini 修复开始');
-  assert.ok(s8.includes('429') && s8.includes('唤醒条件'),
-    '⑧段应要求可恢复等待有唤醒条件');
-  assert.ok(s8.includes('假设破裂'), '⑧段应含第 5 类停：假设破裂');
-  assert.equal(s8.includes('continuation v2 默认启用'), false, '⑧段不得再写 continuation v2 默认启用');
-  assert.ok(s8.includes('schemaVersion=2'), '⑧段应声明 v2 只在实际部署 schemaVersion=2 时生效');
-  assert.ok(s8.includes('按台账同目录') || s8.includes('按实际配置渲染'), '⑧段应声明开工包按实际续跑配置渲染');
-});
-
-test('第⑨段：新组状态机 + identity 五段 + PR_RECEIPT_KEYS', () => {
-  const s9 = sectionBetween(MARKERS[8], MARKERS[9]);
-  for (const st of ['pending', 'dispatched', 'executing', 'blocked', 'e2e', 'review', 'accepted', 'pr-open', 'local-cleaned', 'archived', 'failed']) {
-    assert.ok(s9.includes(st), `⑨段 GROUP_STATES 应含 ${st}`);
+test('Ready 后收尾与收工标准：清本地、归档会话，run_status complete 才收工', () => {
+  const s = section('## ⓪ issue 入口');
+  for (const must of ['**Ready 后收尾。**', 'issue-run.mjs cleanup', 'archive_sessions', '**收工标准。**', 'run_status', '`complete`', '`waiting_merge`']) {
+    assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
   }
-  if (s9.includes('review_pass')) {
-    assert.ok(s9.includes('删除'), '⑨段若提及 review_pass 必须是删除旧状态，不得当现行 GROUP_STATES');
+});
+
+test('#70 SC4 合并红线：任何 agent 不合并、不开 auto-merge，只有用户对指定 PR 的当次授权才合并', () => {
+  const s = section('## 合并红线（最高优先级）');
+  assert.ok(s.includes('都不得合并'), '合并红线应写明不得合并');
+  assert.ok(s.includes('都不得合并、自动合并、启用 auto-merge、点击合并或调用 gh pr merge'), '合并红线应写明不得合并、不开 auto-merge、不调 gh pr merge');
+  assert.ok(s.includes('只有用户本人对指定 PR 的明确、当次授权才允许合并'), '合并红线应写明只有用户当次授权才合并');
+  assert.ok(section('## ⓪ issue 入口').includes('不合并任何 PR'), '⓪ 段边界应写明 lead 不合并');
+});
+
+test('保证等级 T1，不夸大成宿主强制隔离；接线用 selfcheck --live 检查', () => {
+  const s = section('## 保证等级');
+  for (const must of ['T1', '不是宿主强制隔离', 'scripts/selfcheck.mjs --live', 'tests/skill-doc.test.mjs']) {
+    assert.ok(s.includes(must), `保证等级段应写「${must}」`);
   }
-  if (s9.includes('verified')) {
-    assert.ok(s9.includes('删除'), '⑨段若提及 verified 必须是删除旧状态，不得当现行组状态');
+});
+
+test('自进化：evolution-note 是自进化台账唯一写通道', () => {
+  const s = section('## 自进化');
+  assert.ok(s.includes('evolution/ledger.json') && s.includes('scripts/evolution-note.mjs'));
+});
+
+test('#70 SC1：SKILL.md、scripts/、config/ 里没有旧入口与钉死模型路由的词', () => {
+  const hits = [];
+  for (const rel of ['SKILL.md', ...filesUnder('scripts'), ...filesUnder('config')]) {
+    const text = readFileSync(join(root, rel), 'utf8');
+    for (const word of BANNED) if (text.includes(word)) hits.push(`${rel}: ${word}`);
   }
-  assert.ok(s9.includes('session_id') && s9.includes('title') && s9.includes('pr_url') && s9.includes('provider_id'),
-    '⑨段 GROUP_KEYS 应新增 session_id/title/pr_url/provider_id');
-  assert.ok(s9.includes('seq → worktree → branch → base → session_id'),
-    '⑨段 identityDigest 顺序必须含 session_id');
-  assert.ok(s9.includes('PR_RECEIPT_KEYS'), '⑨段应点名 PR_RECEIPT_KEYS');
-  assert.ok(s9.includes('site_report') && s9.includes('replan_note'), '⑨段 EVENT_TYPES 应含 site_report/replan_note');
-  assert.ok(s9.includes('note-event'), '⑨段应声明 note-event 入账通道');
-  assert.ok(s9.includes('watch_registered'), '⑨段应点名 watch_registered');
-  assert.ok(s9.includes('pr_ready'), '⑨段应点名 pr_ready');
-  assert.ok(s9.includes('谁 Ready 谁清场') || s9.includes('谁 Ready 发谁') || s9.includes('本组已有 `pr_ready`') || s9.includes('尚未 `pr_ready`'),
-    '⑨段应声明按本 PR Ready 独立收尾');
-  assert.ok(s9.includes('不再要求 Mini 名册先于清场') || s9.includes('pr_ready') && s9.includes('local-cleaned'),
-    '⑨段应声明清场前置是 pr_ready');
-  assert.ok(s9.includes('phase=ready') && s9.includes('仍可在 ready 之后写入'),
-    '⑨段应声明验收后收尾不受 run 级 ready 冻结挡住');
-  assert.ok(s9.includes('Mini 名册先于清场') || s9.includes('watch_registered') || s9.includes('不再要求 Mini 名册'),
-    '⑨段应交代 watch_registered 兼容或不再作为清场前置');
-  assert.ok(s9.includes('confirm-pr-open.mjs') && s9.includes('wrapup-cleanup.mjs') && s9.includes('confirm-session-archived.mjs'),
-    '⑨段应收口开 PR / 清本地 / 归档的真实回执');
-  assert.ok(s9.includes('Mini Cindy 常驻程序是云端反馈修复者') || s9.includes('Mini 是 lead 授权后的正常云端反馈修复者'), '⑨段应声明 Mini 的正常反馈责任');
-  assert.ok(s9.includes('ledger_version') && s9.includes('assignment_seq'),
-    '⑨段收尾回执应绑定 ledger_version/assignment_seq');
-  assert.ok(s9.includes('READY_FOR_LATER_SUBMIT_PR_SKILL'), '⑨段 run 级 ready 文案应保留 READY_FOR_LATER_SUBMIT_PR_SKILL 作为验收许可信号');
-  assert.ok(s9.includes('archive_sessions') || skillDoc.includes('archive_sessions'),
-    '正文应点名 archive_sessions 归档 PI session');
-  assert.ok(s9.includes('splitting') && s9.includes('dispatching') && s9.includes('running') && s9.includes('accepting'),
-    '⑨段 PHASE_ORDER 应为 splitting/dispatching/running/accepting/ready');
+  assert.deepEqual(hits, [], `出现了旧入口的词：${hits.join('；')}`);
 });
 
-test('第⑩段：开工闸收据 + 终态交卷 exact schema', () => {
-  const s10 = sectionBetween(MARKERS[9], MARKERS[10]);
-  assert.ok(s10.includes('gate_goal') && s10.includes('gate_routing'), '⑩段应给出两类开工闸收据');
-  assert.ok(s10.includes('goal_skill_sha256') && s10.includes('routing_sha256'), '⑩段收据必须含 sha256');
-  for (const key of ['branch', 'tip_sha', 'scs', 'goal_skill_path', 'e2e', 'size_gate', 'fallbacks_tried']) {
-    assert.ok(s10.includes(key), `candidate 交卷应含键 ${key}`);
-  }
-  assert.equal(s10.includes('review          {unresolved'), false, '⑩段不得再要求本地单审 review 对象');
-  assert.ok(s10.includes('禁止 tried_fallbacks') || s10.includes('禁止用 tried_fallbacks'),
-    '⑩段交卷字段必须是 fallbacks_tried，并禁止混用 tried_fallbacks');
-  assert.ok(s10.includes('不得含 pr_url'), '⑩段应禁止 candidate 交卷带 pr_url');
-  assert.ok(s10.includes('/Users/praise/.agents/skills/goal/SKILL.md'), 'goal_skill_path 必须钉 PI 自己的 goal');
-});
-
-test('第⑪段：budgetPauseUsd 不再被 lead 当机器闸 + --no-budget-pause', () => {
-  const s11 = sectionBetween(MARKERS[10], MARKERS[11]);
-  assert.ok(s11.includes('budgetPauseUsd'), '预算段应引用 budgetPauseUsd');
-  assert.ok(s11.includes('--no-budget-pause'), '预算段应提及 --no-budget-pause');
-  assert.ok(s11.includes('不再被 lead 当机器闸') || s11.includes('不跨 session 加总'),
-    '⑪段应声明 lead 不跨 session 加总账单');
-});
-
-test('第⑫段：--dry-run 不调 send_to_session', () => {
-  const s12 = sectionBetween(MARKERS[11], MARKERS[12]);
-  assert.ok(s12.includes('--dry-run'), '⑫段应点名 --dry-run');
-  assert.ok(s12.includes('不') && s12.includes('send_to_session'), '⑫段应声明不调 send_to_session');
-});
-
-test('第⑤段：开工包第 8 步禁止子 session 合入', () => {
-  const s5 = sectionBetween(MARKERS[4], MARKERS[5]);
-  assert.ok(s5.includes('子 session 不合入') || s5.includes('不得自行 merge'), '⑤段应写明子 session 不合入');
-});
-
-test('合并红线：只有用户当次明确授权才能合并', () => {
-  assert.match(skillDoc, /合并红线/);
-  assert.match(skillDoc, /只有用户本人对指定 PR 的明确、当次授权/);
-  assert.match(skillDoc, /gh pr merge/);
-});
-
-test('第⑭段：本 skill 不合入、不跑三机同步，不改 submit-pr', () => {
-  const s14 = sectionBetween(MARKERS[13], MARKERS[14]);
-  assert.ok(s14.includes('三审'), '⑭段应声明三审不在本 skill');
-  assert.ok(s14.includes('submit-pr') || s14.includes('提交 PR'), '⑭段应点名提交 PR skill');
-  assert.ok(s14.includes('本 skill 不合入'), '⑭段应声明本 skill 不合入');
-  assert.ok(s14.includes('不跑三机同步') || s14.includes('不跑三机'), '⑭段应声明不跑三机同步');
-  assert.ok(s14.includes('子 session 不得自行 merge'), '⑭段应禁止子 session 自行 merge');
-  assert.ok(s14.includes('archive_sessions') || s14.includes('归档') || skillDoc.includes('archive_sessions'), '⑭段应点名归档 PI session');
-});
-
-test('第⑯段：owner 开远端，lead 验收 pr_ready 后清场归档且不等待 Mini', () => {
-  const s16 = sectionBetween(MARKERS[15], MARKERS[16]);
-  assert.ok(s16.includes('archive_sessions'), '⑯段应允许归档 PI session');
-  assert.ok(s16.includes('不允许：改产品代码'), '⑯段仍禁止改产品代码');
-  assert.ok(s16.includes('git merge') || s16.includes('不合入'), '⑯段应禁止 lead git merge');
-  assert.match(s16, /验收本组 pr_ready 后立即派 native cleanup sub[\s\S]*清本地成功后用 `archive_sessions`/,
-    '⑯段应按本组 pr_ready 验收、native cleanup、归档的顺序收尾');
-  assert.ok(s16.includes('替 owner 开 PR'), '⑯段应禁止 lead 替 owner 开远端 PR');
-  assert.ok(s16.includes('不 register、不等待 Mini 接管'), '⑯段应声明本机收尾不等待 Mini 注册或接管');
-  assert.equal(s16.includes('Mini 名册未写就清本地'), false, '⑯段不得保留 Mini 名册先于本机清场的旧禁令');
-  assert.equal(s16.includes('先注册 Mini'), false, '⑯段不得要求先注册 Mini');
-});
-
-test('第⑮段：保证等级 T1，不夸大成宿主拦截', () => {
-  const s15 = sectionBetween(MARKERS[14], MARKERS[15]);
-  assert.ok(s15.includes('T1'), '保证等级段应声明 T1');
-  assert.ok(s15.includes('疏忽') || s15.includes('漂移'), '应声明防疏忽/漂移');
-  assert.equal(s15.includes('防篡改'), false, '不得写「防篡改」类夸大措辞');
-});
-
-test('config 键名比对：SKILL.md 引用的 camelCase 键全部真实存在于 defaults.json', () => {
+test('config 键名比对：SKILL.md 反引号里的 camelCase 键都真实存在于 defaults.json', () => {
   const backtickTokens = [...skillDoc.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
   const camelCaseTokens = backtickTokens.filter((t) => /^[a-z][a-zA-Z0-9]*$/.test(t) && /[A-Z]/.test(t));
   const unknown = camelCaseTokens.filter((t) => !defaultsKeys.includes(t));
   assert.deepEqual(unknown, [], `SKILL.md 引用了 defaults.json 中不存在的键: ${unknown.join(', ')}`);
-  const requiredKeys = ['budgetPauseUsd', 'routingPath'];
-  for (const k of requiredKeys) {
-    assert.ok(defaultsKeys.includes(k), `defaults.json 缺键 ${k}`);
-    assert.ok(skillDoc.includes(k), `SKILL.md 应引用配置键 ${k}`);
-  }
-});
-
-test('第⑰段：Fable sidecar 非第六席 + 禁止 create_worker 调 Fable', () => {
-  const s17 = sectionBetween(MARKERS[16], MARKERS[17]);
-  assert.ok(s17.includes('不进 `graph.json`'), '⑰段应声明不进 graph.json');
-  assert.ok(s17.includes('routing.json'), '⑰段应声明 routing 不加 decision 档');
-  assert.ok(s17.includes('fable-decision.json'), '⑰段应点名独立配置');
-  assert.ok(s17.includes('decision-broker.mjs'), '⑰段应点名 broker');
-  assert.ok(s17.includes('若无代理，grok 将停下来问用户的原句'), '⑰段应钉死唯一入场条件');
-  assert.ok(s17.includes('human_exclusive'), '⑰段应含人独占布尔');
-  assert.ok(s17.includes('handoff_hash'), '⑰段应含 handoff_hash');
-  assert.ok(s17.includes('context_hash'), '⑰段应含 context_hash');
-  assert.ok(s17.includes('decision_key'), '⑰段应含 decision_key');
-  assert.ok(s17.includes('tools_used'), '⑰段应含 T1 闸一 tools_used');
-  assert.ok(s17.includes('porcelain'), '⑰段应含 worktree 零 diff');
-  assert.ok(s17.includes('非空字符串或非空对象'), '⑰段应钉死 handoff 非空');
-  assert.ok(s17.includes('必传 worktree'), '⑰段应钉死 resolve 必传 worktree');
-  assert.ok(s17.includes('bundle_hash'), '⑰段应钉死 bundle_hash 绑定 items');
-  assert.ok(s17.includes('REQUEST_RECORD_KEYS'), '⑰段应声明 journal requests exact 校验');
-  assert.ok(s17.includes('T1 纪律级，不是强制级'), '⑰段应如实声明隔离等级');
-  assert.ok(s17.includes('decision_opened'), '⑰段应声明配额只在 opened 计数');
-  assert.ok(s17.includes('DECISION_SUPERSEDED'), '⑰段应声明晚到不覆盖');
-  assert.ok(s17.includes('禁止 `create_worker` 调 Fable') || s17.includes('禁止 create_worker 调 Fable'),
-    '⑰段必须写明禁止 create_worker 调 Fable');
-  assert.ok(s17.includes('claude-fable-5'), '⑰段应钉死 Fable 模型 id');
-  assert.ok(s17.includes('Fable 只判断（强制）'), '⑰段应强制 Fable 只判断');
-  assert.ok(s17.includes('任何落盘') && s17.includes('必须派 sub'), '⑰段应强制产出也派 sub');
-});
-
-test('第⑱段：replan 四类 + 自进化台账', () => {
-  const s18 = sectionBetween(MARKERS[17], undefined);
-  for (const a of ['repack', 'resplit', 'land-first', 'split-new']) {
-    assert.ok(s18.includes(a), `⑱段应含处置 ${a}`);
-  }
-  assert.ok(s18.includes('evolution-note.mjs'), '⑱段应点名 evolution-note.mjs');
-  assert.ok(s18.includes('ledger-triage.mjs'), '⑱段应点名每周自进化登记');
-  assert.ok(s18.includes('扩权'), '⑱段应声明扩权永不自动落地');
-});
-
-test('Mini 运维前置 + 场景 E：调度四元组与 register 路径按配置', () => {
-  assert.ok(skillDoc.includes('Mini 运维前置'), 'SKILL.md 应含 Mini 运维前置段');
-  assert.ok(skillDoc.includes('goal skill 场景 E'), 'SKILL.md 应点名 Mini 被叫醒后走 goal 场景 E');
-  assert.ok(skillDoc.includes('sessions.dispatch'), 'Mini 调度 capabilities 应含 sessions.dispatch');
-  assert.ok(skillDoc.includes('session-watch-script.py'), '命令应指向本仓 session-watch-script.py');
-  assert.ok(skillDoc.includes('/opt/homebrew/bin'), '调度 env PATH 应含 /opt/homebrew/bin');
-  assert.ok(skillDoc.includes('保持 paused'), '旧两条调度必须保持 paused');
-  assert.ok(skillDoc.includes('可合并'), 'CI 绿后只发可合并通知');
 });

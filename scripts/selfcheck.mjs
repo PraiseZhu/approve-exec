@@ -1,13 +1,9 @@
 #!/usr/bin/env node
-// selfcheck.mjs — approve-exec 派工前 A 类 fail-closed 环境自检（机器化前置）。
+// selfcheck.mjs — approve-exec 派会话前的 fail-closed 环境自检（机器化前置）。
 //
-// 五类检查（exact 枚举，逐项独立报告，不因前项失败跳过后项）：
-//   ① routing（routing.json）：文件存在可读可解析；execute/review/e2e/pr_merge 四档齐；
-//      各档 agent/model/effort 非空字符串；agent ∈ {pi, codex, claude-code}；effort ∈ 六枚举。
-//   ② orca-fanout：worktree-ledger.mjs / worktree-reclaim.mjs 存在（config.orcaFanoutScriptsRoot）。
-//   ③ goal skill：SKILL.md 存在（config.goalSkillRoot）。
-//   ④ runLedgerDir：可创建可写（mkdir -p + 探针文件写入/读回/清理；~ 经 HOME 展开）。
-//   ⑤ --live 模式追加两处接线检查：
+// 检查（exact 枚举，逐项独立报告，不因前项失败跳过后项）：
+//   ① goal skill：SKILL.md 存在（config.goalSkillRoot）；它也是 ② a 推导 live 链接位置的锚点。
+//   ② --live 模式追加两处接线检查：
 //      a. skills/claude-active/approve-exec symlink 指向 approve-exec 仓根（realpath 含 SKILL.md
 //         + 同一 git common dir 或同一 origin + show-toplevel 严格等于 target 自身——
 //         工程仓与 live 是两份独立 clone，common dir 不同不算接线错误；嵌套子目录不能冒充仓根）；
@@ -16,27 +12,23 @@
 //
 // 输出与退出：逐项 PASS/FAIL 行；任一 FAIL → 汇总点名（exit 2）；全过 → exit 0。
 //
-// CLI: node scripts/selfcheck.mjs [--live] [--routing-file <path>]
-//   --routing-file 仅测试注入（夹具）；缺省读 config.defaults.json 的 routingPath。
+// CLI: node scripts/selfcheck.mjs [--live]
 // 只依赖 node 内置模块；路径一律来自 config，不写死。
-import { readFileSync, lstatSync, realpathSync, mkdirSync, writeFileSync, unlinkSync, statSync } from 'node:fs';
+import { readFileSync, lstatSync, realpathSync, statSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-const AGENTS = ['pi', 'codex', 'claude-code'];
-const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
-const ROUTES = ['execute', 'review', 'e2e', 'pr_merge'];
 // 「批准执行」触发行原文（整行逐字匹配，防描述被改写后入口失效）；2026-10-29 改为 issue 入口（PraiseZhu/approve-exec#69）
 export const TRIGGER_LINE = '| 批准执行 | `approve-exec` | 直接执行不确认。接在「开 issue」之后：吃总 issue（或独立 issue / 单个子 issue），缺模板 fail-closed 指路「开 issue」；lead 按并行/串行原则给每个子 issue 开一个独立会话（1 子 issue = 1 PR = 1 会话），派会话不带模型参数；owner 用 KEEL 的 keel_run 推进到验收点写 checkpoint，零 token 续跑脚本叫醒 lead；lead 跑 accept-check 后判通过或要改（最多 2 轮），通过后交接车道才转 Ready，Ready 后清本地并归档会话，依赖合入后开下一批。本 skill 不合入 |';
 // LIVE_LINK 推导：从 config.goalSkillRoot 派生 —— dirname(goalSkillRoot) 即 skills/claude-active 目录，
-// approve-exec 与 goal 同处该目录（与 task-priority 同款：skills 目录内 symlink）。
+// approve-exec 与 goal 同处该目录（skills 目录内 symlink）。
 // 禁止按仓库在磁盘上的嵌套深度猜层级（'../..' 相对 root）：主 checkout（approve-exec-src）与 worktree
 // （approve-exec-worktrees/g2）深度不同，相对层级推导必然在其中一个 checkout 上拼错路径
 // （V 阶段集成暴露：g2 上恰好绿、主 checkout 上 live-symlink FAIL）。
-// 选 config 派生而非新增显式配置键：① 锚点 goalSkillRoot 已被检查③（goal-skill-md）独立验证，
+// 选 config 派生而非新增显式配置键：① 锚点 goalSkillRoot 已被检查①（goal-skill-md）独立验证，
 //   锚点错时③会先红——显式新键反而无人验证其自身；② 不加键即零配置漂移面，claude-active 整体迁移时自动跟随。
 // root 参数仅作测试注入（组B-2 用不同嵌套深度的 root 反证推导与仓库深度无关），正式实现不读它。
 export function deriveLiveLink(config, root) {
@@ -45,14 +37,9 @@ export function deriveLiveLink(config, root) {
 
 // ---------- CLI 解析 ----------
 function parseArgs(argv) {
-  const args = { routingFile: null, live: false };
-  for (let i = 0; i < argv.length; i += 1) {
-    const a = argv[i];
-    if (a === '--routing-file') {
-      const v = argv[++i];
-      if (v === undefined) { console.error('selfcheck: --routing-file 缺参数值'); process.exit(2); }
-      args.routingFile = v;
-    } else if (a === '--live') {
+  const args = { live: false };
+  for (const a of argv) {
+    if (a === '--live') {
       args.live = true;
     } else {
       console.error(`selfcheck: 未知参数 ${a}`);
@@ -118,99 +105,14 @@ function sameRepoIdentity(mineRoot, target) {
   return { ok: false, via: null };
 }
 
-// ---------- ① routing ----------
-function checkRouting(routingFile, items) {
-  let text;
-  try {
-    text = readFileSync(routingFile, 'utf8');
-  } catch (e) {
-    items.push({ id: 'routing-file', ok: false, detail: `读取失败: ${routingFile}（${e.message}）` });
-    return;
-  }
-  let routing;
-  try {
-    routing = JSON.parse(text);
-  } catch (e) {
-    items.push({ id: 'routing-parse', ok: false, detail: `JSON 解析失败: ${routingFile}（${e.message}）` });
-    return;
-  }
-  // 合法 JSON 但非对象（null/标量/数组）：直接取档会 TypeError 崩溃，必须先 fail-closed 点名
-  if (routing === null || typeof routing !== 'object' || Array.isArray(routing)) {
-    items.push({ id: 'routing-parse', ok: false, detail: `结构非法（顶层非对象）: ${routingFile}` });
-    return;
-  }
-  items.push({ id: 'routing-file', ok: true, detail: routingFile });
-  for (const route of ROUTES) {
-    const r = routing[route];
-    if (!r || typeof r !== 'object' || Array.isArray(r)) {
-      items.push({ id: `routing-${route}`, ok: false, detail: `${route} 档缺失（routing.json 无该档）` });
-      continue;
-    }
-    const violations = [];
-    for (const field of ['agent', 'model', 'effort']) {
-      // 有效判据是「trim 后非空」：纯空白字符串（如 model:'   '）无法用于派工，
-      // 只检 length 会把它判「齐全」，最终把空值喂给 Orca 才失败——selfcheck 必须先点名
-      if (typeof r[field] !== 'string' || r[field].trim().length === 0) violations.push(`${field} 空/缺失`);
-    }
-    // 枚举校验必须用未 trim 的原值：先 trim 再查枚举会把 ' codex ' 误判为合法 agent——
-    // 带空白前后缀的枚举外字符串同样不能用于派工（Orca 按整串匹配），selfcheck 必须按原值点名
-    if (typeof r.agent === 'string' && r.agent.trim().length > 0 && !AGENTS.includes(r.agent)) {
-      violations.push(`agent=${r.agent} 不在 {${AGENTS.join(', ')}}`);
-    }
-    if (typeof r.effort === 'string' && r.effort.trim().length > 0 && !EFFORTS.includes(r.effort)) {
-      violations.push(`effort=${r.effort} 不在 {${EFFORTS.join(', ')}}`);
-    }
-    if (violations.length > 0) {
-      items.push({ id: `routing-${route}`, ok: false, detail: `${route} 档: ${violations.join('; ')}` });
-    } else {
-      items.push({ id: `routing-${route}`, ok: true, detail: `${route} 档 agent/model/effort 齐全且枚举合法` });
-    }
-  }
-}
-
-// ---------- ② orca-fanout 脚本 ----------
-function checkOrcaFanoutScripts(config, items) {
-  for (const f of ['worktree-ledger.mjs', 'worktree-reclaim.mjs']) {
-    const p = join(config.orcaFanoutScriptsRoot, f);
-    const ok = isFile(p);
-    items.push({ id: `orca-fanout-${f.replace(/\.mjs$/, '')}`, ok, detail: ok ? p : `不存在或非文件: ${p}` });
-  }
-}
-
-// ---------- ③ goal skill ----------
+// ---------- ① goal skill ----------
 function checkGoalSkill(config, items) {
   const p = join(config.goalSkillRoot, 'SKILL.md');
   const ok = isFile(p);
   items.push({ id: 'goal-skill-md', ok, detail: ok ? p : `不存在或非文件: ${p}` });
 }
 
-// ---------- ④ runLedgerDir 可创建可写 ----------
-function checkRunLedgerDir(config, items) {
-  if (!process.env.HOME) {
-    items.push({ id: 'run-ledger-dir', ok: false, detail: 'HOME 未设置，无法展开 ~ 路径' });
-    return;
-  }
-  const dir = expandHome(config.runLedgerDir);
-  try {
-    mkdirSync(dir, { recursive: true });
-  } catch (e) {
-    items.push({ id: 'run-ledger-dir', ok: false, detail: `不可创建: ${dir}（${e.message}）` });
-    return;
-  }
-  const probe = join(dir, `.selfcheck-probe-${process.pid}`);
-  try {
-    writeFileSync(probe, 'probe');
-    if (readFileSync(probe, 'utf8') !== 'probe') throw new Error('读回内容不一致');
-    unlinkSync(probe);
-    items.push({ id: 'run-ledger-dir', ok: true, detail: `${dir} 可创建可写（探针已清理）` });
-  } catch (e) {
-    // 失败路径也尽力清理探针，不向台账目录留垃圾文件；失败原因如实点名，不吞
-    try { unlinkSync(probe); } catch { /* 清理失败不再追加判定，原失败已点名 */ }
-    items.push({ id: 'run-ledger-dir', ok: false, detail: `探针失败: ${dir}（${e.message}）` });
-  }
-}
-
-// ---------- ⑤ --live：接线两处 ----------
+// ---------- ② --live：接线两处 ----------
 // 导出以便测试注入（组B-4 负向/正向夹具）：liveLink 是待验 symlink 路径，mineRoot 是「本仓」一侧。
 // 三段判据（加强不是替换，任一段 FAIL 即拒）：
 //   ① target 含 SKILL.md 文件（目标确实是 skill 目录）；
@@ -290,21 +192,15 @@ function main() {
     console.error(`selfcheck: config 不可读或不可解析（${configPath}）: ${e.message}`);
     process.exit(2);
   }
-  const requiredKeys = ['routingPath', 'goalSkillRoot', 'orcaFanoutScriptsRoot', 'runLedgerDir', 'skillTriggerScanPath'];
+  const requiredKeys = ['goalSkillRoot', 'skillTriggerScanPath'];
   const missingKeys = requiredKeys.filter((k) => typeof config[k] !== 'string' || config[k].length === 0);
   if (missingKeys.length > 0) {
     console.error(`selfcheck: config 缺必备路径键: ${missingKeys.join(', ')}`);
     process.exit(2);
   }
 
-  // config 相对路径一律按本仓 root 解析（绝对路径 resolve 为恒等），不随调用 cwd 漂移
-  const routingFile = args.routingFile !== null ? resolve(args.routingFile) : resolve(root, config.routingPath);
-
   const items = [];
-  checkRouting(routingFile, items);
-  checkOrcaFanoutScripts(config, items);
   checkGoalSkill(config, items);
-  checkRunLedgerDir(config, items);
   if (args.live) {
     checkLiveSymlink(deriveLiveLink(config, root), root, items);
     checkTriggerLine(config, items);

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // evolution-note.mjs — approve-exec 自进化台账的唯一读写通道（对应 SKILL ⑱）。
-// 抄 task-priority：默认不碰 git；显式 --sync 才 commit+push 两个台账文件。
+// 默认不碰 git；显式 --sync 才 commit+push 两个台账文件。
 //
 //   - <SKILL_ROOT>/evolution/ledger.json : 唯一事实源
 //   - <SKILL_ROOT>/EVOLUTION.md          : 由 ledger 全量再生成（手改会被覆盖）

@@ -1,21 +1,15 @@
-// selfcheck 测试：sc-p0b（五类环境自检 + fail-closed 反向变异）+ sc-p2c（--live 接线机器可检）。
+// selfcheck 测试：派会话前环境自检（goal skill + fail-closed 反向变异）+ sc-p2c（--live 接线机器可检）。
 // 组结构（变异红集预测依据）：
-//   组 A「routing 域」——缺档夹具 exit 2 点名 e2e 且其余三档 PASS（枚举精确性）、
-//                       合法夹具 exit 0、无 --routing-file 读 config routingPath、
-//                       文件缺失 exit 2 点名路径、JSON 不可解析 exit 2 点名、
-//                       agent/effort 越枚举 exit 2 点名、合法 JSON null（非对象）exit 2 点名而非 TypeError 崩溃、
-//                       agent/model/effort 纯空白（trim 后为空）exit 2 各自点名对应档、
-//                       带空格的枚举外值（agent:' codex '）exit 2（枚举校验用未 trim 原值）
+//   组 A「goal skill」——缺省运行 exit 0、只做 goal-skill-md 检查；已删除的 routing / orca-fanout /
+//                       run-ledger-dir 检查不再出现；--routing-file 按未知参数 exit 2（PraiseZhu/approve-exec#70）
 //   组 B「live 域」——--live 两处接线（symlink 指向 approve-exec 仓根 + 触发行）输出 PASS；
 //                       回归锚点：LIVE_LINK 推导与仓库嵌套深度无关（注入浅/深 root 恒同值）+ 与 cwd 无关（异 cwd 黑盒跑）；
 //                       F-B 锚点：target 必须是仓根本身（嵌套子目录冒充 → FAIL 点名）
 //   组 C「CLI 拒绝」——未知参数 exit 2
-// 预测红集：挖掉「档缺失」分支 → 组 A 缺档用例红；挖掉 agent/effort 枚举校验 → 组 A 越枚举两用例红；
-//           挖掉解析 try/catch 或文件读取 try/catch → 对应组 A 用例红（崩溃 exit≠2）；
-//           挖掉 live-symlink / live-trigger-line 检查 → 组 B 对应断言红；
+// 预测红集：挖掉 live-symlink / live-trigger-line 检查 → 组 B 对应断言红；
 //           LIVE_LINK 改回 '../..' 猜层级 → 组B-1（主 checkout 上拼错路径）+ 组B-2（浅深 root 结果分叉）+ 组B-3（异 cwd 下仍按 repo 深度猜）红。组 C 恒绿。
 //           F-B 变异（挖掉 show-toplevel 仓根校验）→ 恰好组B-4 负向用例红（冒充误 PASS）；组B-1/3（真实仓根）/组B-5（正向夹具）恒绿。
-//           F-K 变异（guard 未归一）→ 恰好组F-1 红。trim/枚举变异（先 trim 再查枚举）→ 组A-10 红；纯空白判据被挖 → 组A-9 红。
+//           F-K 变异（guard 未归一）→ 恰好组F-1 红。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdtempSync, rmSync, cpSync, mkdirSync, realpathSync, symlinkSync } from 'node:fs';
@@ -31,10 +25,6 @@ import { buildChildEnv } from '../scripts/run-tests.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const scriptPath = join(root, 'scripts/selfcheck.mjs');
-const FIX = {
-  missingE2e: join(root, 'tests/fixtures/routing-missing-e2e.json'),
-  valid: join(root, 'tests/fixtures/routing-valid.json'),
-};
 
 test('#69 SC9 批准执行触发行：issue 入口、owner 用 KEEL、lead 最终验收、不合并；不再提 manifest', () => {
   assert.match(TRIGGER_LINE, /吃总 issue（或独立 issue \/ 单个子 issue）/);
@@ -51,18 +41,6 @@ function runSelfcheck(args) {
 }
 const out = (r) => `${r.stdout || ''}${r.stderr || ''}`;
 
-// 临时注入夹具（JSON 形状合法/非法路由）——仅测试用，用完即清
-function withTempRouting(content, fn) {
-  const dir = mkdtempSync(join(tmpdir(), 'selfcheck-routing-'));
-  const file = join(dir, 'routing.json');
-  try {
-    writeFileSync(file, content, 'utf8');
-    return fn(file);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
-
 // F-B 临时 git 仓夹具（嵌套子目录冒充 / 仓根正向对照）——全部构造在 tmpdir，不碰真实接线位点
 function withTempRepo(fn) {
   const dir = mkdtempSync(join(tmpdir(), 'selfcheck-live-'));
@@ -77,127 +55,26 @@ function withTempRepo(fn) {
   }
 }
 
-test('组A-1: 缺 e2e 档夹具 → exit 2 且点名 e2e 档缺失、其余三档仍 PASS', () => {
-  const r = runSelfcheck(['--routing-file', FIX.missingE2e]);
-  assert.equal(r.status, 2, `期望 exit 2，实际 ${r.status}\n${out(r)}`);
+test('组A-1: 缺省运行 → exit 0，只做 goal-skill-md 检查；routing / orca-fanout / run-ledger-dir 已删除', (t) => {
+  if (process.env.SC_MUTATION_CHILD === '1') { t.skip('子套件运行跳过真实环境测试（与 F-K 变异无关，防污染其失败集契约）'); return; }
+  const r = runSelfcheck([]);
   const text = out(r);
-  assert.ok(text.includes('FAIL: routing-e2e'), `输出应点名 e2e 档，实际:\n${text}`);
-  assert.ok(text.includes('档缺失'), `输出应含「档缺失」点名字样，实际:\n${text}`);
-  for (const route of ['routing-execute', 'routing-review', 'routing-pr_merge']) {
-    assert.ok(text.includes(`PASS: ${route}`), `其余档 ${route} 应保持 PASS，实际:\n${text}`);
+  assert.equal(r.status, 0, `期望 exit 0，实际 ${r.status}\n${text}`);
+  assert.ok(text.includes('PASS: goal-skill-md'), `① goal SKILL.md 应 PASS，实际:\n${text}`);
+  for (const gone of ['routing-', 'orca-fanout-', 'run-ledger-dir']) {
+    assert.equal(text.includes(gone), false, `已删除的检查 ${gone} 不应再出现，实际:\n${text}`);
   }
 });
 
-test('组A-2: 合法夹具 → exit 0', () => {
-  const r = runSelfcheck(['--routing-file', FIX.valid]);
-  assert.equal(r.status, 0, `期望 exit 0，实际 ${r.status}\n${out(r)}`);
-  assert.ok(out(r).includes('PASS: routing-e2e'), '合法夹具 e2e 档应 PASS');
-});
-
-test('组A-3: 合法 routing 夹具四档齐全且周边路径可检 → exit 0', (t) => {
-  if (process.env.SC_MUTATION_CHILD === '1') { t.skip('子套件运行跳过真实环境测试（与 F-K 变异无关，防污染其失败集契约）'); return; }
-  const r = runSelfcheck(['--routing-file', FIX.valid]);
-  assert.equal(r.status, 0, `期望 exit 0，实际 ${r.status}\n${out(r)}`);
-  const text = out(r);
-  assert.ok(text.includes('PASS: routing-execute'), '缺省路径可用夹具证明四档齐全');
-  assert.ok(text.includes('PASS: orca-fanout-worktree-ledger'), '② orca-fanout worktree-ledger 应 PASS');
-  assert.ok(text.includes('PASS: orca-fanout-worktree-reclaim'), '② orca-fanout worktree-reclaim 应 PASS');
-  assert.ok(text.includes('PASS: goal-skill-md'), '③ goal SKILL.md 应 PASS');
-  assert.ok(text.includes('PASS: run-ledger-dir'), '④ runLedgerDir 应 PASS');
-});
-
-test('组A-4: --routing-file 指向不存在文件 → exit 2 且点名路径', () => {
-  const missing = '/nonexistent/selfcheck-routing.json';
-  const r = runSelfcheck(['--routing-file', missing]);
+test('组A-2: --routing-file 已删除 → 按未知参数 exit 2', () => {
+  const r = runSelfcheck(['--routing-file', 'routing.json']);
   assert.equal(r.status, 2, `期望 exit 2，实际 ${r.status}\n${out(r)}`);
-  assert.ok(out(r).includes(missing), `输出应点名缺失路径，实际:\n${out(r)}`);
-});
-
-test('组A-5: routing JSON 不可解析 → exit 2 且点名解析失败', () => {
-  withTempRouting('{ "execute": {', (file) => {
-    const r = runSelfcheck(['--routing-file', file]);
-    assert.equal(r.status, 2, `期望 exit 2，实际 ${r.status}\n${out(r)}`);
-    assert.ok(out(r).includes('解析失败'), `输出应点名解析失败，实际:\n${out(r)}`);
-  });
-});
-
-test('组A-6: agent 越枚举（不在 {pi, codex, claude-code}）→ exit 2 且点名', () => {
-  const body = JSON.stringify({
-    execute: { agent: 'cobol', model: 'm', effort: 'max' },
-    review: { agent: 'codex', model: 'm', effort: 'xhigh' },
-    e2e: { agent: 'codex', model: 'm', effort: 'high' },
-    pr_merge: { agent: 'claude-code', model: 'm', effort: 'medium' },
-  });
-  withTempRouting(body, (file) => {
-    const r = runSelfcheck(['--routing-file', file]);
-    assert.equal(r.status, 2, `期望 exit 2，实际 ${r.status}\n${out(r)}`);
-    assert.ok(out(r).includes('agent=cobol'), `输出应点名非法 agent 值，实际:\n${out(r)}`);
-  });
-});
-
-test('组A-8: routing JSON 为合法 null（顶层非对象）→ exit 2 点名结构非法，不崩溃成 TypeError', () => {
-  withTempRouting('null', (file) => {
-    const r = runSelfcheck(['--routing-file', file]);
-    assert.equal(r.status, 2, `期望 exit 2，实际 ${r.status}\n${out(r)}`);
-    assert.ok(out(r).includes('结构非法'), `输出应点名结构非法，实际:\n${out(r)}`);
-    assert.ok(!out(r).includes('TypeError'), `不应以 TypeError 崩溃，实际:\n${out(r)}`);
-  });
-});
-
-test('组A-9: agent/model/effort 纯空白（trim 后为空）→ exit 2 且各自点名对应档', () => {
-  const routes = {
-    execute: { agent: 'codex', model: '   ', effort: 'low' },
-    review: { agent: '   ', model: 'm', effort: 'xhigh' },
-    e2e: { agent: 'codex', model: 'm', effort: '   ' },
-    pr_merge: { agent: 'claude-code', model: 'm', effort: 'medium' },
-  };
-  withTempRouting(JSON.stringify(routes), (file) => {
-    const r = runSelfcheck(['--routing-file', file]);
-    assert.equal(r.status, 2, `期望 exit 2，实际 ${r.status}\n${out(r)}`);
-    const text = out(r);
-    assert.ok(text.includes('FAIL: routing-execute') && text.includes('model 空/缺失'),
-      `execute 档纯空白 model 应 FAIL 点名，实际:\n${text}`);
-    assert.ok(text.includes('FAIL: routing-review') && text.includes('agent 空/缺失'),
-      `review 档纯空白 agent 应 FAIL 点名，实际:\n${text}`);
-    assert.ok(text.includes('FAIL: routing-e2e') && text.includes('effort 空/缺失'),
-      `e2e 档纯空白 effort 应 FAIL 点名，实际:\n${text}`);
-    assert.ok(text.includes('PASS: routing-pr_merge'), `合法档 pr_merge 应保持 PASS，实际:\n${text}`);
-  });
-});
-
-test('组A-10: 带空格的枚举外值（agent:" codex "）→ exit 2（枚举校验必须用未 trim 原值）', () => {
-  const routes = {
-    execute: { agent: ' codex ', model: 'm', effort: 'low' },
-    review: { agent: 'codex', model: 'm', effort: 'xhigh' },
-    e2e: { agent: 'codex', model: 'm', effort: 'high' },
-    pr_merge: { agent: 'claude-code', model: 'm', effort: 'medium' },
-  };
-  withTempRouting(JSON.stringify(routes), (file) => {
-    const r = runSelfcheck(['--routing-file', file]);
-    assert.equal(r.status, 2, `期望 exit 2，实际 ${r.status}\n${out(r)}`);
-    const text = out(r);
-    assert.ok(text.includes('FAIL: routing-execute') && text.includes('agent= codex '),
-      `带空格 agent 必须按未 trim 原值判非法枚举并点名，实际:\n${text}`);
-  });
-});
-
-test('组A-7: effort 越六枚举 → exit 2 且点名', () => {
-  const body = JSON.stringify({
-    execute: { agent: 'claude-code', model: 'm', effort: 'turbo' },
-    review: { agent: 'codex', model: 'm', effort: 'xhigh' },
-    e2e: { agent: 'codex', model: 'm', effort: 'high' },
-    pr_merge: { agent: 'claude-code', model: 'm', effort: 'medium' },
-  });
-  withTempRouting(body, (file) => {
-    const r = runSelfcheck(['--routing-file', file]);
-    assert.equal(r.status, 2, `期望 exit 2，实际 ${r.status}\n${out(r)}`);
-    assert.ok(out(r).includes('effort=turbo'), `输出应点名非法 effort 值，实际:\n${out(r)}`);
-  });
+  assert.ok(out(r).includes('未知参数 --routing-file'), `输出应点名未知参数，实际:\n${out(r)}`);
 });
 
 test('组B-1: --live 接线两处（symlink 指向 approve-exec 仓根 + 触发行）→ exit 0 且两项 PASS', (t) => {
   if (process.env.SC_MUTATION_CHILD === '1') { t.skip('子套件运行跳过 live 环境测试（副本根非 git checkout，接线无法验证）'); return; }
-  const r = runSelfcheck(['--live', '--routing-file', FIX.valid]);
+  const r = runSelfcheck(['--live']);
   assert.equal(r.status, 0, `期望 exit 0，实际 ${r.status}\n${out(r)}`);
   const text = out(r);
   assert.ok(text.includes('PASS: live-symlink'), `live-symlink 应 PASS，实际:\n${text}`);
@@ -243,9 +120,6 @@ test('组B-6: checkTriggerLine 从 config.skillTriggerScanPath 读路径（非�
 test('组B-2: LIVE_LINK 推导与仓库嵌套深度无关（注入浅/深 root 恒同值且等于 config 派生）', () => {
   const config = {
     goalSkillRoot: '/capabilities/source/skills/claude-active/goal',
-    routingPath: 'routing.json',
-    orcaFanoutScriptsRoot: '/capabilities/source/skills/claude-active/orca-fanout/scripts',
-    runLedgerDir: '~/.claude/.orca/approve-exec',
   };
   const expected = join(dirname(config.goalSkillRoot), 'approve-exec');
   const shallowRoot = '/capabilities/source/approve-exec-src'; // 3 层，镜像主 checkout
@@ -263,7 +137,7 @@ test('组B-2: LIVE_LINK 推导与仓库嵌套深度无关（注入浅/深 root �
 // 变异反证：改回 '../..' 猜层级 → 本用例在真实主 checkout 上拼错路径，live-symlink FAIL，断言红。
 test('组B-3: --live 在无关 cwd（tmpdir）下跑 → exit 0 且 live-symlink PASS（不依赖 process.cwd()）', (t) => {
   if (process.env.SC_MUTATION_CHILD === '1') { t.skip('子套件运行跳过 live 环境测试（副本根非 git checkout，接线无法验证）'); return; }
-  const r = spawnSync(process.execPath, [scriptPath, '--live', '--routing-file', FIX.valid], { cwd: tmpdir(), encoding: 'utf8' });
+  const r = spawnSync(process.execPath, [scriptPath, '--live'], { cwd: tmpdir(), encoding: 'utf8' });
   const text = `${r.stdout || ''}${r.stderr || ''}`;
   assert.equal(r.status, 0, `期望 exit 0，实际 ${r.status}\n${text}`);
   assert.ok(text.includes('PASS: live-symlink'), `异 cwd 下 live-symlink 应 PASS，实际:\n${text}`);
@@ -374,14 +248,12 @@ test('组F-1: 非规范化路径调用必须实际执行检查并输出 PASS 行
   // 平铺放置会让 root 解析到临时根层（config 读错位，与 guard 无关地失败）
   mkdirSync(join(dir, 'scripts'), { recursive: true });
   mkdirSync(join(dir, 'config'), { recursive: true });
-  mkdirSync(join(dir, 'tests/fixtures'), { recursive: true });
   cpSync(join(root, 'scripts/selfcheck.mjs'), join(dir, 'scripts/selfcheck.mjs'));
   writeFileSync(join(dir, 'config/defaults.json'), readFileSync(join(root, 'config/defaults.json'), 'utf8'));
-  writeFileSync(join(dir, 'tests/fixtures/routing-valid.json'), readFileSync(FIX.valid, 'utf8'));
   let logical = dir;
   if (realpathSync(dir) === dir) {
     // link 名必须唯一：历史用 process.pid，进程被杀时 t.after 未注册 → link-<PID> 残留；
-    // 宿主并发下 PID 复用即撞名 EEXIST（mem-probe 组F-1 同款，tmpdir 曾积上千残留）。
+    // 宿主并发下 PID 复用即撞名 EEXIST（tmpdir 曾积上千残留）。
     // dir 名来自 mkdtemp 唯一，用它派生 link 名——残留永不撞名，非规范化语义不变。
     const link = join(tmpdir(), `selfcheck-norm-link-${basename(dir)}`);
     symlinkSync(dir, link);
@@ -390,15 +262,15 @@ test('组F-1: 非规范化路径调用必须实际执行检查并输出 PASS 行
   }
   assert.notEqual(realpathSync(logical), logical, '前置条件: 调用路径必须非规范化（否则本用例空转）');
   const r = spawnSync(process.execPath,
-    [join(logical, 'scripts/selfcheck.mjs'), '--routing-file', join(logical, 'tests/fixtures/routing-valid.json')],
+    [join(logical, 'scripts/selfcheck.mjs')],
     { encoding: 'utf8' });
   const text = `${r.stdout || ''}${r.stderr || ''}`;
   assert.ok(text.length > 0, '非规范化路径调用不得静默零输出（guard 被 bypass 的形态就是 exit 0 + 全空）');
-  assert.ok(text.includes('PASS: routing-execute'), `非规范化路径调用必须实际执行检查并输出检查项行，实际:\n${text}`);
+  assert.match(text, /^(PASS|FAIL): goal-skill-md: /m, `非规范化路径调用必须实际执行检查并输出检查项行，实际:\n${text}`);
 });
 
 // ---------- 变异反证（F-K）：main guard realpath 归一被挖 → 恰红预测用例，失败模式隔离 ----------
-// 机制与 ready-check 同款：把 scripts/config/tests/fixtures 复制到临时目录（复制到 realpath(tmpdir) 下，
+// 机制：把 scripts/config/tests 复制到临时目录（复制到 realpath(tmpdir) 下，
 // 保证子套件对脚本副本的调用路径已规范化，guard 不误伤其他用例——tmpdir() 的 /var 逻辑路径本身会触发
 // 被挖掉的 guard），对副本应用变异，跑「跳过变异测试自身」的完整套件，断言失败集恰为预测集。
 const SELFCHECK_MUTATIONS = [
@@ -419,7 +291,6 @@ function copyTreeForMutation(t, mutateScript) {
   mkdirSync(join(dir, 'scripts'));
   mkdirSync(join(dir, 'tests'));
   mkdirSync(join(dir, 'config'));
-  mkdirSync(join(dir, 'tests/fixtures'));
   const src = readFileSync(join(root, 'scripts/selfcheck.mjs'), 'utf8');
   const mutated = mutateScript(src);
   assert.notEqual(mutated, src, '变异必须实际改变脚本内容（防替换静默空转）');
@@ -428,8 +299,6 @@ function copyTreeForMutation(t, mutateScript) {
   // 复制树必须带上该文件，否则子套件加载失败（失败集解析成文件路径，恰红契约被破坏）
   writeFileSync(join(dir, 'scripts/run-tests.mjs'), readFileSync(join(root, 'scripts/run-tests.mjs'), 'utf8'));
   writeFileSync(join(dir, 'tests/selfcheck.test.mjs'), readFileSync(join(root, 'tests/selfcheck.test.mjs'), 'utf8'));
-  writeFileSync(join(dir, 'tests/fixtures/routing-valid.json'), readFileSync(FIX.valid, 'utf8'));
-  writeFileSync(join(dir, 'tests/fixtures/routing-missing-e2e.json'), readFileSync(FIX.missingE2e, 'utf8'));
   writeFileSync(join(dir, 'config/defaults.json'), readFileSync(join(root, 'config/defaults.json'), 'utf8'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return join(dir, 'tests/selfcheck.test.mjs');
