@@ -175,3 +175,15 @@ test('SC1 反例（review-pr71）：「与 #11 并行开发，等 #12 合进 mai
   assert.deepEqual(parseDeps('与 #11 并行开发，等 #12 合进 main 后开工', REPO, `${REPO}#13`), { hard: [`${REPO}#12`], after: [] });
   assert.deepEqual(parseDeps('等 #11 合进 main，再开工', REPO, `${REPO}#13`), { hard: [`${REPO}#11`], after: [] });
 });
+
+test('SC3 反例（review-pr71 第 2 轮）：没有冒号的说明行不把标识符当路径；整行只列文件时全收', () => {
+  assert.throws(() => toScope('- adjust `checkpoint` before tests', 'acme/app#20'), /这一行没有反引号包住的文件路径/);
+  assert.deepEqual(toScope('- `Makefile`', 'acme/app#20'), ['Makefile']);
+  assert.deepEqual(toScope('- `scripts/a.mjs`（新）、`LICENSE`', 'acme/app#20'), ['scripts/a.mjs', 'LICENSE']);
+  assert.deepEqual(toScope('- 顺手更新 `docs/x.md` 里的 `TEST_FILES` 说明', 'acme/app#20'), ['docs/x.md']);
+});
+
+test('SC1 反例（review-pr71 第 2 轮）：「不需要等 #11 合进 main，直接开工」不算依赖', () => {
+  assert.deepEqual(parseDeps('不需要等 #11 合进 main，直接开工', REPO, `${REPO}#13`), { hard: [], after: [] });
+  assert.deepEqual(parseDeps('无需等 #11 合入', REPO, `${REPO}#13`), { hard: [], after: [] });
+});

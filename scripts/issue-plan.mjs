@@ -125,7 +125,7 @@ export function expandBraces(pattern) {
 const isPathLike = (t) => !/\s/.test(t) && (t.includes('/') || t.includes('*') || /\.[A-Za-z0-9]+$/.test(t));
 const ticks = (s) => [...s.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim());
 
-/** 列表项按反引号外的第一个冒号拆成「文件或模块」格与说明。 */
+/** 列表项按反引号外的第一个冒号拆成「文件或模块」格与说明；没有冒号时 head 为 null。 */
 function splitHead(line) {
   let inTick = false;
   for (let i = 0; i < line.length; i++) {
@@ -133,13 +133,18 @@ function splitHead(line) {
     if (ch === '`') inTick = !inTick;
     else if (!inTick && (ch === '：' || ch === ':')) return [line.slice(0, i), line.slice(i + 1)];
   }
-  return [line, ''];
+  return [null, line];
 }
+
+const noSpace = (t) => t && !/\s/.test(t);
+// 整行只有反引号路径、顿号逗号和「（新）」这类标注时，算作「只列了文件」。
+const onlyTicks = (s) => s.replace(/`[^`]+`/g, '').replace(/[\s、,，（）()新改删]/g, '') === '';
 
 /**
  * 范围段 → scope glob 列表。模板格式是 `- \`<文件或模块>\`：<改什么>`：冒号前那一格里的反引号内容都当路径
  * （`Makefile` 这类无扩展名文件也收）；说明里只收像路径的词（含 `/`、`*` 或扩展名），
- * `TEST_FILES`、`checkpoint` 这类标识符不收。每个列表项至少要有一个路径。
+ * `TEST_FILES`、`checkpoint` 这类标识符不收。没有冒号的行：整行只列了文件就全收，否则只收像路径的词。
+ * 每个列表项至少要有一个路径。
  */
 export function toScope(text, ref) {
   const scope = [];
@@ -147,8 +152,12 @@ export function toScope(text, ref) {
   for (const line of String(text ?? '').split('\n')) {
     if (!/^\s*[-*]\s+/.test(line)) continue;
     bullets += 1;
-    const [head, rest] = splitHead(line.replace(/^\s*[-*]\s+/, ''));
-    const tokens = [...ticks(head).filter((t) => t && !/\s/.test(t)), ...ticks(rest).filter(isPathLike)];
+    const body = line.replace(/^\s*[-*]\s+/, '');
+    const [head, rest] = splitHead(body);
+    let tokens;
+    if (head !== null) tokens = [...ticks(head).filter(noSpace), ...ticks(rest).filter(isPathLike)];
+    else if (onlyTicks(body)) tokens = ticks(body).filter(noSpace);
+    else tokens = ticks(body).filter(isPathLike);
     if (tokens.length === 0) {
       reject(`${ref} 「范围」这一行没有反引号包住的文件路径或 glob（例如测试要写成 \`tests/**/*.test.mjs\`）：${line.trim()}`);
     }
@@ -178,7 +187,8 @@ export function parseDeps(text, selfRepo, selfRef) {
       .filter((r) => r !== selfRef);
     if (refs.length === 0) continue;
     let bucket;
-    if (/等/.test(clause) && /(合进|合入)/.test(clause)) bucket = hard;
+    if (/(不需要|不用|无需|不必|不)\s*等/.test(clause)) bucket = null;
+    else if (/等/.test(clause) && /(合进|合入)/.test(clause)) bucket = hard;
     else if (/先(合|进)/.test(clause)) bucket = after;
     else if (/并行/.test(clause)) bucket = null;
     else reject(`${selfRef} 「依赖」这一句判断不了是「等合入再开工」还是「只是先后合」：${clause.trim()}`);
@@ -187,12 +197,13 @@ export function parseDeps(text, selfRepo, selfRef) {
   return { hard, after: after.filter((r) => !hard.includes(r)) };
 }
 
-/** 首行引用里的「并行组 X」与「PR 指向 <分支>」。 */
+/** 首行引用里的「总 issue <owner/repo>#号」「并行组 X」与「PR 指向 <分支>」。 */
 export function parseHeader(sections) {
   const intro = sections[0]?.lines.join('\n') ?? '';
+  const parent = /总 issue\s*([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#\d+)/.exec(intro)?.[1] ?? null;
   const group = /并行组\s*([A-Za-z0-9]+)/.exec(intro)?.[1] ?? null;
   const target = /PR 指向\s*`?([A-Za-z0-9._/*-]+)`?/.exec(intro)?.[1] ?? null;
-  return { group, base_ref: target && target !== 'main' ? target : null };
+  return { parent, group, base_ref: target && target !== 'main' ? target : null };
 }
 
 export function pendingQuestions(text) {
@@ -231,6 +242,7 @@ export function toItem(issue, { repo, repoDirs, lead }) {
     title: issue.title,
     url: issue.html_url ?? `https://github.com/${repo}/issues/${issue.number}`,
     closed: issue.state === 'closed',
+    parent_ref: header.parent,
     group: header.group,
     hard_deps: deps.hard,
     merge_after: deps.after,
@@ -279,7 +291,9 @@ export function buildPlan({ root, children, repoDirs, lead, authorization, entry
   const kind = children.length > 0 ? 'parent' : 'single';
   if (kind === 'single' && /^\[总\]/.test(root.issue.title ?? '')) reject(`${root.ref} 是总 issue 却没有挂子 issue`);
   const sources = kind === 'parent' ? children : [{ repo: root.repo, issue: root.issue }];
-  const raw = sources.map(({ repo, issue }) => toItem(issue, { repo, repoDirs, lead }));
+  const raw = sources
+    .map(({ repo, issue }) => toItem(issue, { repo, repoDirs, lead }))
+    .map((i) => (kind === 'parent' ? { ...i, parent_ref: root.ref } : i));
   const { waves, items } = toWaves(raw);
   const plan = {
     schema: PLAN_SCHEMA,
@@ -302,14 +316,25 @@ export function buildPlan({ root, children, repoDirs, lead, authorization, entry
 
 // github
 
-/** 夹具里的评论写入：追加到「读评论」那一项，后续读取能读到。纯函数，CLI 夹具与测试共用。 */
+/**
+ * 夹具里的评论写入：追加到该评论区最后一页（满 100 条开新页），作者取夹具 `api user`，评论 id 全局递增。
+ * 纯函数，CLI 夹具与测试共用。
+ */
 export function fixturePost(fixture, args) {
   const path = args[3];
   const body = (args.find((a) => a.startsWith('body=')) ?? 'body=').slice(5);
-  const key = `api ${path}?per_page=100`;
-  const list = Array.isArray(fixture[key]) ? fixture[key] : [];
-  const comment = { body, html_url: `https://github.com/${path.replace(/^repos\//, '')}#fixture-${list.length + 1}` };
-  fixture[key] = [...list, comment];
+  let page = 1;
+  while (Array.isArray(fixture[`api ${path}?per_page=100&page=${page + 1}`])) page += 1;
+  let key = `api ${path}?per_page=100&page=${page}`;
+  if ((fixture[key] ?? []).length >= 100) key = `api ${path}?per_page=100&page=${page + 1}`;
+  fixture.__next_comment_id = (fixture.__next_comment_id ?? 1000) + 1;
+  const comment = {
+    id: fixture.__next_comment_id,
+    body,
+    user: { login: fixture['api user']?.login ?? 'fixture-user' },
+    html_url: `https://github.com/${path.replace(/^repos\//, '')}#issuecomment-${fixture.__next_comment_id}`,
+  };
+  fixture[key] = [...(fixture[key] ?? []), comment];
   return comment;
 }
 

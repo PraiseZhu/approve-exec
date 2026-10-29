@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // issue-run.mjs — issue 入口的小台账（issue-run-v1）：每个子 issue 一条，记录一次性认领与会话回执。
 // lead 自己调 send_to_session；本脚本只出请求、收回执，不调用任何宿主工具。
-// 跨台账、跨机器的防重靠总 issue 上的评论：prepare 发「批准执行认领」，bind 成功发「批准执行登记」，
-// release 发「批准执行释放」。同一子 issue 有未释放的认领 / 登记时，任何台账的 prepare 都拒绝。
+// 跨台账、跨机器的防重靠子 issue 自己评论区里的标记：prepare 发「批准执行认领」，bind 成功发「批准执行登记」，
+// release 发「批准执行释放」。只认当前 gh 账号发的标记。同一子 issue 有未释放的认领 / 登记时，
+// 任何台账、任何入口（总 issue 或子 issue）的 prepare 都拒绝；两个 lead 同时认领时，评论 id 小的胜出，
+// 后到的一方发释放评论让位。
 //
 // CLI（全部输出一行 JSON；exit 0 成功 / 2 拒绝）：
 //   init    --plan <plan.json> --ledger <ledger.json> [--now ISO]
@@ -95,30 +97,52 @@ function waitingOn(gh, item) {
   return item.hard_deps.map((d) => depStatus(gh, d)).filter((s) => !s.ok);
 }
 
-// root issue comments: cross-ledger claims
+// sub-issue comments: cross-ledger claims
 
 const CLAIM_RE = /^批准执行(认领|登记|释放)：\S+ (\S+#\d+)\b[^\n]*?claim ([0-9a-f-]{36})/;
+const MAX_COMMENT_PAGES = 50;
 
-function commentsPath(ledger) {
-  const { repo, number } = parseIssueRef(ledger.root.ref);
+function commentsPathFor(ref) {
+  const { repo, number } = parseIssueRef(ref);
   return `repos/${repo}/issues/${number}/comments`;
 }
 
-/** 总 issue 评论 → 该子 issue 未释放的认领 / 登记（{claim_id, kind, url}）。 */
-export function activeClaims(comments, ref) {
+/** 分页读完一个 issue 的评论（每页 100 条，最多 50 页，超过就拒绝，不拿半截结果查重）。 */
+export function readComments(gh, path) {
+  const all = [];
+  for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
+    const batch = gh(['api', `${path}?per_page=100&page=${page}`]);
+    if (!Array.isArray(batch)) reject(`读评论返回的不是数组: ${path} 第 ${page} 页`);
+    all.push(...batch);
+    if (batch.length < 100) return all;
+  }
+  reject(`${path} 评论超过 ${MAX_COMMENT_PAGES * 100} 条，无法完整查重`);
+}
+
+export function ghLogin(gh) {
+  const login = gh(['api', 'user'])?.login;
+  if (typeof login !== 'string' || !login) reject('读不到当前 gh 账号（gh api user），无法确认认领评论的作者');
+  return login;
+}
+
+/** 评论 → 该子 issue 未释放的认领 / 登记，按评论 id 从早到晚。只认 login 本人发的评论。 */
+export function activeClaims(comments, ref, login) {
   const byClaim = new Map();
-  for (const c of Array.isArray(comments) ? comments : []) {
+  const sorted = (Array.isArray(comments) ? comments : []).slice().sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+  for (const c of sorted) {
+    if (c.user?.login !== login) continue;
     const m = CLAIM_RE.exec(String(c.body ?? ''));
     if (!m || m[2] !== ref) continue;
     const [, kind, , claimId] = m;
     if (kind === '释放') byClaim.delete(claimId);
-    else byClaim.set(claimId, { claim_id: claimId, kind, url: c.html_url ?? null });
+    else if (!byClaim.has(claimId)) byClaim.set(claimId, { claim_id: claimId, kind, comment_id: c.id ?? null, url: c.html_url ?? null });
+    else byClaim.get(claimId).kind = kind;
   }
   return [...byClaim.values()];
 }
 
-function postComment(gh, ledger, body) {
-  return gh(['api', '-X', 'POST', commentsPath(ledger), '-f', `body=${body}`]);
+function postComment(gh, path, body) {
+  return gh(['api', '-X', 'POST', path, '-f', `body=${body}`]);
 }
 
 // commands
@@ -194,10 +218,12 @@ export function prepare({ ledger, plan, ref, leadSessionId, gh, now }) {
   if (item.state !== 'pending') reject(`${ref} 当前状态 ${item.state}，不能派发`);
   const blockers = waitingOn(gh, item);
   if (blockers.length) reject(`${ref} 的依赖还没满足：${blockers.map((b) => `${b.ref}(${b.reason})`).join('、')}`);
-  const taken = activeClaims(gh(['api', `${commentsPath(ledger)}?per_page=100`]), ref);
+  const path = commentsPathFor(ref);
+  const login = ghLogin(gh);
+  const taken = activeClaims(readComments(gh, path), ref, login);
   if (taken.length) {
     const t = taken[0];
-    reject(`${ref} 已有未释放的批准执行${t.kind}（claim ${t.claim_id}，${t.url ?? '总 issue 评论'}）：同一子 issue 只能有一个会话。确认那个会话已不在后，先发「批准执行释放」再派`);
+    reject(`${ref} 已有未释放的批准执行${t.kind}（claim ${t.claim_id}，${t.url ?? '子 issue 评论'}）：同一子 issue 只能有一个会话。确认那个会话已不在后，先发「批准执行释放」再派`);
   }
   const planItem = plan.items.find((i) => i.ref === ref);
   if (!planItem) reject(`计划里没有 ${ref}`);
@@ -209,7 +235,15 @@ export function prepare({ ledger, plan, ref, leadSessionId, gh, now }) {
     use_worktree: false,
   };
   const claimId = randomUUID();
-  postComment(gh, ledger, `批准执行认领：${now.slice(0, 10)} ${ref} claim ${claimId}（台账 ${ledger.run_id}，lead 会话 ${leadSessionId}）`);
+  const date = now.slice(0, 10);
+  postComment(gh, path, `批准执行认领：${date} ${ref} claim ${claimId}（台账 ${ledger.run_id}，lead 会话 ${leadSessionId}）`);
+  // 先认领后复查：同时认领时评论 id 最小的胜出；自己的认领没读到也按输处理（fail-closed）。
+  const after = activeClaims(readComments(gh, path), ref, login);
+  if (after[0]?.claim_id !== claimId) {
+    const winner = after.find((c) => c.claim_id !== claimId);
+    postComment(gh, path, `批准执行释放：${date} ${ref} claim ${claimId}：与 claim ${winner?.claim_id ?? '未知'} 同时认领，按评论先后让位`);
+    reject(`${ref} 与另一个 lead 同时认领，按评论先后让给 claim ${winner?.claim_id ?? '未知'}；本台账未派发`);
+  }
   ledger.lead_session_id = leadSessionId;
   item.claim_id = claimId;
   item.session_title = title;
@@ -236,13 +270,21 @@ export function bind({ ledger, ref, claimId, result, gh, now }) {
   item.session_id = sessionId;
   move(item, 'dispatched', now, { session_id: sessionId });
   const body = `批准执行登记：${now.slice(0, 10)} ${ref} → 会话 ${sessionId}（${item.session_title}）claim ${claimId}`;
-  try {
-    const posted = postComment(gh, ledger, body);
-    return { ok: true, state: item.state, ref, session_id: sessionId, root_comment_url: posted?.html_url ?? null };
-  } catch (err) {
-    // 认领评论已在总 issue 上，防重不受影响；登记评论没发出去要让 lead 看见并补发。
-    return { ok: true, state: item.state, ref, session_id: sessionId, root_comment_error: String(err.message ?? err), root_comment: body };
+  const out = { ok: true, state: item.state, ref, session_id: sessionId };
+  // 子 issue 上的登记是防重依据；总 issue 上再发一份，方便在总 issue 一处看全（open-issue §6）。
+  // 认领评论已在子 issue 上，防重不受影响；登记评论没发出去要让 lead 看见并补发。
+  const targets = [[commentsPathFor(ref), 'comment']];
+  if (ledger.root.ref !== ref) targets.push([commentsPathFor(ledger.root.ref), 'root_comment']);
+  for (const [path, key] of targets) {
+    try {
+      out[`${key}_url`] = postComment(gh, path, body)?.html_url ?? null;
+    } catch (err) {
+      out[`${key}_error`] = String(err.message ?? err);
+      out[`${key}_path`] = path;
+      out[key] = body;
+    }
   }
+  return out;
 }
 
 export function release({ ledger, ref, evidence, gh, now }) {
@@ -250,7 +292,7 @@ export function release({ ledger, ref, evidence, gh, now }) {
   if (item.state !== 'dispatch_unknown') reject(`${ref} 当前状态 ${item.state}，只有 dispatch_unknown 才能 release`);
   if (!evidence || !String(evidence).trim()) reject('release 需要 --evidence：写明怎么核实的没有建出会话');
   const reason = String(evidence).trim();
-  postComment(gh, ledger, `批准执行释放：${now.slice(0, 10)} ${ref} claim ${item.claim_id}：${reason}`);
+  postComment(gh, commentsPathFor(ref), `批准执行释放：${now.slice(0, 10)} ${ref} claim ${item.claim_id}：${reason}`);
   item.claim_id = null;
   move(item, 'pending', now, { evidence: reason });
   return { ok: true, state: item.state, ref };

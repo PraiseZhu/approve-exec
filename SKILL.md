@@ -16,9 +16,9 @@ lead 的执行框架只能是 claude-code 或 codex：KEEL 不接受 Pi 当主�
 2. **建台账。** `node scripts/issue-run.mjs init --plan <plan.json> --ledger <同目录>/ledger.json`。同一份计划重复 init 不新建。
 3. **列可派。** `node scripts/issue-run.mjs next --ledger <ledger.json>`。只派 `dispatchable` 里的子 issue；`waiting` 里的要等依赖 issue 关闭（对应 PR 合入）后再派；依赖被关成「不做」时交给用户决定。
 4. **派会话，每个子 issue 一次。**
-   - `node scripts/issue-run.mjs prepare --ledger <f> --item <ref> --lead-session <当前会话 id>`，拿到 `request`。返回 `claimed:false` 表示本台账已派过，不再派。prepare 先读总 issue（独立 issue 读它自己）的评论：同一子 issue 有未释放的「批准执行认领 / 登记」就退出码 2，不管它来自哪份台账、哪台电脑；通过后脚本发一条「批准执行认领」评论。
+   - `node scripts/issue-run.mjs prepare --ledger <f> --item <ref> --lead-session <当前会话 id>`，拿到 `request`。返回 `claimed:false` 表示本台账已派过，不再派。prepare 先读该子 issue 自己的评论（分页读完）：有当前 gh 账号发的、未释放的「批准执行认领 / 登记」就退出码 2，不管它来自哪份台账、哪台电脑、从总 issue 还是子 issue 入口；通过后脚本发「批准执行认领」并复查，两个 lead 同时认领时评论 id 小的胜出，后到的一方自动发释放让位并退出码 2。
    - 用 cindy_helper 的 `send_to_session` 新建会话，参数只传 `request` 里的四个键：`title`、`message`、`working_dir`、`use_worktree`。不传 agent_kind、model、effort、provider_id。
-   - 把工具回执原样存成文件，`node scripts/issue-run.mjs bind --ledger <f> --item <ref> --claim <claim_id> --result <回执文件>`。成功时脚本发「批准执行登记」评论；输出带 `root_comment_error` 时用 `gh issue comment` 补发输出里的 `root_comment`。回执不是明确成功时状态停在 `dispatch_unknown`：先核对会话列表，确认没有建出会话，才 `release --evidence "<依据>"` 放回（脚本发「批准执行释放」评论），不盲目重派。
+   - 把工具回执原样存成文件，`node scripts/issue-run.mjs bind --ledger <f> --item <ref> --claim <claim_id> --result <回执文件>`。成功时脚本在子 issue 上发「批准执行登记」，总 issue 上抄一份；输出带 `comment_error` / `root_comment_error` 时，用 `gh issue comment` 把对应正文补发到输出写的位置。回执不是明确成功时状态停在 `dispatch_unknown`：先核对会话列表，确认没有建出会话，才 `release --evidence "<依据>"` 放回（脚本发「批准执行释放」评论），不盲目重派。
 5. **等回执。** owner 会话按开工包自己用 `keel_run` 推进，完成或遇到只有用户能做的事才回报。收到回执后核实 PR 状态与 CI，回到第 3 步派下一批；需要用户做的事汇总告诉用户。
 
 `批准执行 --dry-run <ref>`：只做第 1 步，并用 `node scripts/render-issue-handoff.mjs --plan <plan.json> --item <ref> --lead-session <id>` 打印每个子 issue 的开工包，不建台账、不派会话。

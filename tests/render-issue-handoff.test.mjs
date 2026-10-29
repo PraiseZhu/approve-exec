@@ -64,3 +64,13 @@ test('SC7 反例（review-pr71）：issue 的 SC 原文含模型词时，只出�
     .join('\n');
   assert.doesNotMatch(own, /routing\.json|grok-[0-9]|gpt-[0-9]|claude-(opus|sonnet|haiku|fable)/i);
 });
+
+test('SC7 反例（review-pr71 第 2 轮）：直接以子 issue 为入口时，开工包也带首行写的总 issue 链接', () => {
+  const fixture = parentFixture();
+  const { repoDir } = writeFixture(fixture);
+  const { root, children } = readRoot(ghFrom(fixture), `${REPO}#11`);
+  const plan = buildPlan({ root, children, repoDirs: { [REPO]: repoDir }, lead: 'codex', entry: '批准执行 acme/app#11', now: '2026-10-29T08:00:00.000Z' });
+  assert.equal(plan.root.kind, 'single');
+  const text = renderIssueHandoff({ plan, item: plan.items[0], leadSessionId: 'lead-1' });
+  assert.ok(text.includes(`- 总 issue：https://github.com/${REPO}/issues/10。`), text.slice(0, 600));
+});

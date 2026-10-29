@@ -20,7 +20,11 @@ function mergeOrderLine(item) {
 
 export function renderIssueHandoff({ plan, item, leadSessionId }) {
   if (!leadSessionId) throw new Error('renderIssueHandoff 需要 lead 会话 id');
-  const isParent = plan.root.kind === 'parent';
+  // 总 issue：以总 issue 为入口时取 root；以单个子 issue 为入口时取子 issue 首行写的总 issue。
+  const parentRef = plan.root.kind === 'parent' ? plan.root.ref : item.parent_ref ?? null;
+  const parentUrl = plan.root.kind === 'parent'
+    ? plan.root.url
+    : parentRef && `https://github.com/${parentRef.replace('#', '/issues/')}`;
   const manual = item.manual_scs.length
     ? item.manual_scs.map((s) => `   - ${s.text}`).join('\n')
     : '   - 无';
@@ -35,7 +39,7 @@ export function renderIssueHandoff({ plan, item, leadSessionId }) {
     '## 1. 你负责什么',
     '',
     `- 子 issue：${item.url}。范围、不做、验收标准都以它为准。`,
-    ...(isParent ? [`- 总 issue：${plan.root.url}。并行/串行原则与决策表在这里。`] : []),
+    ...(parentUrl ? [`- 总 issue：${parentUrl}。并行/串行原则与决策表在这里。`] : []),
     `- 目标仓：${item.repo}，主目录 \`${item.keel_run.repo_dir}\`；PR 目标分支：${item.keel_run.base_ref ?? 'main'}。`,
     `- 批次：第 ${item.wave} 批。合并顺序：${mergeOrderLine(item)}。`,
     `- 授权：「${plan.authorization_source}」。推送、开 PR、按目标仓规则转 Ready 都在这句授权内；合并不在。`,

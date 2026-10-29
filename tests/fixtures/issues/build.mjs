@@ -5,6 +5,10 @@ import { tmpdir } from 'node:os';
 import { fixturePost } from '../../../scripts/issue-plan.mjs';
 
 export const REPO = 'acme/app';
+export const LOGIN = 'lead-account';
+
+/** 某 issue 评论区第 1 页的夹具 key（issue-run 分页读评论）。 */
+export const commentsKey = (number, page = 1) => `api repos/${REPO}/issues/${number}/comments?per_page=100&page=${page}`;
 
 export function childBody({
   group = 'A',
@@ -64,7 +68,10 @@ export function parentFixture({ aState = 'open', aReason = null, cBody, extra = 
     [`api repos/${REPO}/issues/12`]: b,
     [`api repos/${REPO}/issues/13`]: c,
     [`api repos/${REPO}/issues/14`]: d,
-    [`api repos/${REPO}/issues/10/comments?per_page=100`]: [],
+    // 直接以子 issue #11 为入口时 readRoot 要读它的子 issue 列表。
+    [`api repos/${REPO}/issues/11/sub_issues?per_page=100`]: [],
+    'api user': { login: LOGIN },
+    ...Object.fromEntries([10, 11, 12, 13, 14].map((n) => [commentsKey(n), []])),
     ...extra,
   };
 }
@@ -74,7 +81,8 @@ export function standaloneFixture(body = childBody()) {
   return {
     [`api repos/${REPO}/issues/20`]: s,
     [`api repos/${REPO}/issues/20/sub_issues?per_page=100`]: [],
-    [`api repos/${REPO}/issues/20/comments?per_page=100`]: [],
+    'api user': { login: LOGIN },
+    [commentsKey(20)]: [],
   };
 }
 
