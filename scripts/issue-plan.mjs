@@ -122,7 +122,8 @@ export function expandBraces(pattern) {
   return m[1].split(',').flatMap((alt) => expandBraces(head + alt.trim() + tail));
 }
 
-const isPathLike = (t) => !/\s/.test(t) && (t.includes('/') || t.includes('*') || /\.[A-Za-z0-9]+$/.test(t));
+// 扩展名要以字母开头：`a.mjs`、`x.d.ts` 算路径，`v1.0`、`1.2.3` 这类版本号不算。
+const isPathLike = (t) => !/\s/.test(t) && (t.includes('/') || t.includes('*') || /\.[A-Za-z][A-Za-z0-9]*$/.test(t));
 const ticks = (s) => [...s.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim());
 
 /** 列表项按反引号外的第一个冒号拆成「文件或模块」格与说明；没有冒号时 head 为 null。 */
@@ -175,13 +176,21 @@ const DEP_REF_RE = /(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?#(\d+)/g;
 
 /**
  * 依赖段 → { hard: 要等它合入才开工, after: 只是排在它后面合 }。按句号、分号和逗号拆成小句逐句判断，
- * 「与 #11 并行开发，等 #12 合进 main 后开工」只把 #12 算开工依赖。判断不了的小句直接拒绝。
+ * 「与 #11 并行开发，等 #12 合进 main 后开工」只把 #12 算开工依赖。
+ * 括号里是补充说明，单独成句：有否定或依赖关键词照常判断（「等 #11 合进 main 后开工（不需要等 #12 合入）」
+ * 保留 #11、不算 #12），没有关键词就忽略（「（删的是 #69 之后才不用的东西）」）。括号外判断不了的小句直接拒绝。
  */
 export function parseDeps(text, selfRepo, selfRef) {
   const hard = [];
   const after = [];
   const body = String(text ?? '').trim();
-  for (const clause of body.split(/[；;。\n，,]/)) {
+  const asides = [...body.matchAll(/[（(]([^（）()]*)[）)]/g)].map((m) => m[1]);
+  const main = body.replace(/[（(][^（）()]*[）)]/g, ' ');
+  const clauses = [
+    ...main.split(/[；;。\n，,]/).map((c) => ({ c, aside: false })),
+    ...asides.flatMap((a) => a.split(/[；;。\n，,]/)).map((c) => ({ c, aside: true })),
+  ];
+  for (const { c: clause, aside } of clauses) {
     const refs = [...clause.matchAll(DEP_REF_RE)]
       .map((m) => `${m[1] ?? selfRepo}#${m[2]}`)
       .filter((r) => r !== selfRef);
@@ -190,7 +199,7 @@ export function parseDeps(text, selfRepo, selfRef) {
     if (/(不需要|不用|无需|不必|不)\s*等/.test(clause)) bucket = null;
     else if (/等/.test(clause) && /(合进|合入)/.test(clause)) bucket = hard;
     else if (/先(合|进)/.test(clause)) bucket = after;
-    else if (/并行/.test(clause)) bucket = null;
+    else if (/并行/.test(clause) || aside) bucket = null;
     else reject(`${selfRef} 「依赖」这一句判断不了是「等合入再开工」还是「只是先后合」：${clause.trim()}`);
     if (bucket) for (const r of refs) if (!bucket.includes(r)) bucket.push(r);
   }

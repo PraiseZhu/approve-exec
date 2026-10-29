@@ -187,3 +187,20 @@ test('SC1 反例（review-pr71 第 2 轮）：「不需要等 #11 合进 main，
   assert.deepEqual(parseDeps('不需要等 #11 合进 main，直接开工', REPO, `${REPO}#13`), { hard: [], after: [] });
   assert.deepEqual(parseDeps('无需等 #11 合入', REPO, `${REPO}#13`), { hard: [], after: [] });
 });
+
+test('SC3 反例（review-pr71 第 3 轮）：版本号不当路径', () => {
+  assert.throws(() => toScope('- Compare `v1.0` with the deployed response', 'acme/app#20'), /这一行没有反引号包住的文件路径/);
+  assert.deepEqual(toScope('- `src/a.ts`：升到 `v1.2.3`，类型见 `types/x.d.ts`', 'acme/app#20'), ['src/a.ts', 'types/x.d.ts']);
+});
+
+test('SC1 反例（review-pr71 第 3 轮）：括号里的否定只管括号里那一句', () => {
+  assert.deepEqual(parseDeps('等 #11 合进 main 后开工（不需要等 #12 合入）', REPO, `${REPO}#13`), { hard: [`${REPO}#11`], after: [] });
+});
+
+test('SC1 回归（真实 #70 依赖原文）：括号里只是解释、提到同一 issue 也不拒绝', () => {
+  assert.deepEqual(
+    parseDeps('等 #69 合进 main 再开工（删的是 #69 之后才不再使用的东西；改同一批文件）', 'PraiseZhu/approve-exec', 'PraiseZhu/approve-exec#70'),
+    { hard: ['PraiseZhu/approve-exec#69'], after: [] },
+  );
+  assert.throws(() => parseDeps('参考 #11 的写法（见 docs）', REPO, `${REPO}#13`), /判断不了.*参考 #11 的写法/, '括号外判断不了仍拒绝');
+});
