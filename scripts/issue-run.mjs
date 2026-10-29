@@ -33,7 +33,7 @@ import { hashObject, isMain, nowIso, parseArgs, readJson, writeJsonAtomic } from
 import { withLock } from './lib/state-lock.mjs';
 import { ghRunner, readIssue, parseIssueRef, PLAN_SCHEMA } from './issue-plan.mjs';
 import { renderIssueHandoff } from './render-issue-handoff.mjs';
-import { acceptCheck, ghChecksRunner } from './accept-check.mjs';
+import { acceptCheck, ciVerdict, ghChecksRunner } from './accept-check.mjs';
 
 export const LEDGER_SCHEMA = 'issue-run-v1';
 export const ITEM_STATES = Object.freeze([
@@ -497,7 +497,7 @@ export function parseWorktrees(text) {
 }
 
 /** Ready 后清本地：删 PR 分支的本地 worktree 与本地分支，不删远端。有未提交改动或本地比 PR 新时拒绝。 */
-export function cleanup({ ledger, plan, ref, gh, git = gitRunner(), now }) {
+export function cleanup({ ledger, plan, ref, gh, checks, git = gitRunner(), now }) {
   const item = itemOf(ledger, ref);
   expectState(item, ['ready'], 'cleanup');
   const repoDir = planItemOf(plan, ref).keel_run.repo_dir;
@@ -507,6 +507,8 @@ export function cleanup({ ledger, plan, ref, gh, git = gitRunner(), now }) {
   if (!branch || !SHA_RE.test(String(prHead))) reject(`${ref} 读不到 PR #${item.checkpoint.pr} 的分支与 head`);
   if (pr.draft !== false) reject(`${ref} 的 PR #${item.checkpoint.pr} 还不是正式 Ready，不清理`);
   if (prHead !== item.checkpoint.head) reject(`${ref} 的 PR head 现在是 ${prHead}，验收通过的是 ${item.checkpoint.head}：新提交没验收过，不清理`);
+  const ci = ciVerdict(checks, item.repo, item.checkpoint.pr);
+  if (!ci.ok) reject(`${ref} 的 PR #${item.checkpoint.pr} 当前 CI 不是全绿（${ci.detail}），不清理`);
   const entries = parseWorktrees(git(['-C', repoDir, 'worktree', 'list', '--porcelain']));
   const main = entries[0]?.worktree ?? null;
   if (entries[0]?.branch === `refs/heads/${branch}`) reject(`${ref} 的分支 ${branch} 在主目录 ${main} 检出，不清理：交给用户切走后再跑 cleanup`);
@@ -562,7 +564,7 @@ export function archived({ ledger, ref, result, now }) {
   expectState(item, ['cleaned'], 'archived');
   item.archive = { ...extractArchiveResult(result, item.session_id), at: now };
   move(item, 'archived', now);
-  return { ok: true, state: item.state, ref, run_status: runStatus(ledger) };
+  return { ok: true, state: item.state, ref };
 }
 
 export function status({ ledger, gh }) {
@@ -627,7 +629,7 @@ export function main(argv = process.argv.slice(2)) {
         } else if (cmd === 'unblock') {
           res = unblock({ ledger, ref, note: str(args.note), now });
         } else if (cmd === 'cleanup') {
-          res = cleanup({ ledger, plan, ref, gh: gh(), now });
+          res = cleanup({ ledger, plan, ref, gh: gh(), checks: ghChecksRunner(typeof args['gh-fixture'] === 'string' ? args['gh-fixture'] : null), now });
         } else {
           res = archived({ ledger, ref, result: JSON.parse(readFileSync(String(args.result), 'utf8')), now });
         }

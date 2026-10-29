@@ -355,6 +355,7 @@ function gitRepoWithWorktree() {
 function readyWith(head, repoDir) {
   const fixture = parentFixture();
   fixture[`api repos/${REPO}/pulls/5`] = { head: { ref: 'feat/x', sha: head }, state: 'open', draft: false };
+  fixture[`pr checks 5 --repo ${REPO} --required --json name,bucket`] = [{ name: 'test', bucket: 'pass' }];
   const s = dispatched({ fixture });
   s.plan.items.find((i) => i.ref === A).keel_run.repo_dir = repoDir;
   awaiting(s, { head });
@@ -367,32 +368,40 @@ test('SC7 cleanup：删本地 KEEL worktree 与本地分支，不碰远端；有
   let r = gitRepoWithWorktree();
   let s = readyWith(r.head, r.repo);
   writeFileSync(join(r.wt, 'dirty.txt'), 'x');
-  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, now: NOW }), /有未提交改动，不清理/);
+  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW }), /有未提交改动，不清理/);
 
   r = gitRepoWithWorktree();
   s = readyWith('c'.repeat(40), r.repo);
-  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, now: NOW }), /与 PR head .* 不一致/);
+  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW }), /与 PR head .* 不一致/);
 
   // 反例（review-pr72）：Ready 之后又变了的 PR 不清理。
   r = gitRepoWithWorktree();
   s = readyWith(r.head, r.repo);
   s.fixture[`api repos/${REPO}/pulls/5`].draft = true;
-  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, now: NOW }), /还不是正式 Ready/);
+  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW }), /还不是正式 Ready/);
   s.fixture[`api repos/${REPO}/pulls/5`] = { head: { ref: 'feat/x', sha: 'd'.repeat(40) }, state: 'open', draft: false };
-  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, now: NOW }), /新提交没验收过/);
+  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW }), /新提交没验收过/);
   assert.equal(existsSync(r.wt), true);
+
+  // 反例（review-pr72 第 2 轮）：同一 head 的 CI 后来变成 pending / 失败时不清理（SC7：当前 head 必需 CI 全绿）。
+  r = gitRepoWithWorktree();
+  s = readyWith(r.head, r.repo);
+  s.fixture[`pr checks 5 --repo ${REPO} --required --json name,bucket`] = [{ name: 'test', bucket: 'pending' }];
+  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW }), /当前 CI 不是全绿.*test=pending/);
+  assert.equal(existsSync(r.wt), true);
+  assert.equal(s.ledger.items[A].state, 'ready');
 
   // 反例（review-pr72）：分支在主目录检出时拒绝，不假装清理过。
   r = gitRepoWithWorktree();
   r.g('worktree', 'remove', r.wt);
   r.g('checkout', '-q', 'feat/x');
   s = readyWith(r.head, r.repo);
-  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, now: NOW }), /在主目录 .* 检出，不清理/);
+  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW }), /在主目录 .* 检出，不清理/);
   assert.equal(s.ledger.items[A].state, 'ready');
 
   r = gitRepoWithWorktree();
   s = readyWith(r.head, r.repo);
-  const res = cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, now: NOW });
+  const res = cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW });
   assert.equal(res.state, 'cleaned');
   assert.equal(res.worktree, join(realpathSync(r.repo), '.worktrees', 'keel-1'), 'git 报真实路径（macOS 的 /var 是 /private/var）');
   assert.equal(res.branch_deleted, true);
@@ -403,12 +412,13 @@ test('SC7 cleanup：删本地 KEEL worktree 与本地分支，不碰远端；有
 test('SC7 archived 只认 archive_sessions 回执；全部收工 run 才 complete，等依赖时是 waiting_merge', () => {
   const r = gitRepoWithWorktree();
   const s = readyWith(r.head, r.repo);
-  cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, now: NOW });
+  cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW });
   assert.throws(() => archived({ ledger: s.ledger, ref: A, result: { ok: true, changed: [{ session_id: 'other', status: 'archived' }] }, now: NOW }), /未包含 owner-1/);
   assert.throws(() => archived({ ledger: s.ledger, ref: A, result: { archived: true }, now: NOW }), /ok 必须是 true/);
   const wrapped = { content: [{ type: 'text', text: JSON.stringify({ ok: true, changed: [{ session_id: 'owner-1', status: 'archived' }] }) }] };
   const res = archived({ ledger: s.ledger, ref: A, result: wrapped, now: NOW });
   assert.equal(res.state, 'archived');
+  assert.equal(Object.hasOwn(res, 'run_status'), false, '反例（review-pr72 第 2 轮）：run 状态只由 status / next 给，archived 不另算一套');
   // #12、#14 还没派、#13 等 #11：还没完。
   assert.notEqual(runStatus(s.ledger), 'complete');
   for (const ref of [`${REPO}#12`, `${REPO}#14`]) s.ledger.items[ref].state = 'archived';

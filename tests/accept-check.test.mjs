@@ -93,6 +93,8 @@ test('反例（review-pr72）：必需检查查询出错时 ci 不过，不退�
   const res = run(scenario({ required: { status: 1, stdout: '', stderr: 'HTTP 500: Internal Server Error' } }));
   assert.deepEqual(failed(res), ['ci']);
   assert.match(res.checks.find((c) => c.name === 'ci').detail, /读不到必需检查（HTTP 500/);
+  const none = run(scenario({ required: { status: 1, stdout: '', stderr: "no checks reported on the 'feat/x' branch" } }));
+  assert.deepEqual(failed(none), ['ci'], '反例（review-pr72 第 2 轮）：「no checks reported」不等于仓库没设必需检查');
 });
 
 test('反例（review-pr72）：「验收对照」一节以外的 SC 表格行不算数', () => {

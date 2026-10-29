@@ -60,7 +60,7 @@ export function ghChecksRunner(fixturePath) {
 function parseChecks(res) {
   const r = Array.isArray(res) ? { status: 0, stdout: JSON.stringify(res) } : res;
   const text = String(r?.stdout ?? '').trim();
-  if (!text.startsWith('[')) return { none: /no required checks|no checks reported/i.test(`${text} ${r?.stderr ?? ''}`), list: [] };
+  if (!text.startsWith('[')) return { none: /no required checks reported/i.test(`${text} ${r?.stderr ?? ''}`), list: [] };
   return { none: false, list: JSON.parse(text) };
 }
 
