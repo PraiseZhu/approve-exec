@@ -144,8 +144,9 @@ test('keel_run 参数：goal / sc / scope / repo_dir / lead；目标分支不是
   assert.equal(parseHeader(splitSections(childBody())).base_ref, null);
 });
 
-test('lead 只能是 claude-code / codex：Pi 拒绝并写明原因', () => {
-  assert.throws(() => plan(parentFixture(), `${REPO}#10`, { lead: 'pi' }), /KEEL 不接受 Pi/);
+test('lead 只能是 claude-code / codex：Pi 拒绝并写明原因（#74：理由写准确，不说 KEEL 不接受 Pi）', () => {
+  assert.throws(() => plan(parentFixture(), `${REPO}#10`, { lead: 'pi' }), (e) => /owner 会话沿用 lead 的执行框架/.test(e.message)
+    && /KEEL 只给 claude-code \/ codex 配了默认主控方案/.test(e.message) && !/不接受 Pi/.test(e.message));
 });
 
 test('SC8 授权原话：--authorization 优先，否则取入口消息原文；都没有就拒绝；source 记录来源', () => {

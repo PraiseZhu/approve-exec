@@ -295,8 +295,11 @@ export function toWaves(items) {
   };
 }
 
+/** 批准执行拒绝 Pi 当 lead 的理由（KEEL 本身接受 Pi 主控，限制来自批准执行要无人值守推进）。 */
+export const PI_LEAD_REJECT = '批准执行的 lead 只能是 claude-code 或 codex：owner 会话沿用 lead 的执行框架，KEEL 只给 claude-code / codex 配了默认主控方案；Pi 当 KEEL 主控要先手动选方案，查资料步骤还会停在人工门，跑不了无人值守';
+
 export function buildPlan({ root, children, repoDirs, lead, authorization, entry, source = 'chat', now = nowIso() }) {
-  if (lead === 'pi') reject('KEEL 不接受 Pi 当主控：lead 会话必须是 claude-code 或 codex');
+  if (lead === 'pi') reject(PI_LEAD_REJECT);
   if (!LEADS.includes(lead)) reject(`--lead-agent 只能是 ${LEADS.join(' / ')}（当前: ${lead}）`);
   if (!['chat', 'script'].includes(source)) reject(`--source 只能是 chat / script（当前: ${source}）`);
   const authorizationSource = String(authorization ?? entry ?? '').trim();

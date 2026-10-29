@@ -10,7 +10,7 @@ trigger: 批准执行
 
 用法：`批准执行 owner/repo#号`。号可以是总 issue（标题以 `[总]` 开头、挂了子 issue）、独立 issue，或单个子 issue。可以带一句「授权：…」；没带时用入口消息原文作授权原话。
 
-lead 的执行框架只能是 claude-code 或 codex：KEEL 不接受 Pi 当主控。owner 会话继承 lead 的执行框架与模型，各环节用什么模型由 KEEL 的主控方案决定；本 skill 不写任何模型、档位或派工路由。
+lead 的执行框架只能是 claude-code 或 codex：KEEL 只给这两种配了默认主控方案，Pi 当 KEEL 主控要先手动选方案、查资料步骤还会停在人工门，跑不了无人值守。owner 会话继承 lead 的执行框架与模型，各环节用什么模型由 KEEL 的主控方案决定；本 skill 不写任何模型、档位或派工路由。
 
 1. **出计划。** `node scripts/issue-plan.mjs --issue <ref> --lead-agent <claude-code|codex> --repo-dir <owner/repo>=<目标仓主目录绝对路径>（每个涉及的仓一条） --entry "<用户原话>" [--authorization "<授权原话>"] --out ~/.claude/.goal/<slug>/plan.json`。exit 2 时把 stderr 原文告诉用户，指路「开 issue」补齐对应子 issue；不手改计划，不替用户补 issue。
 2. **建台账。** `node scripts/issue-run.mjs init --plan <plan.json> --ledger <同目录>/ledger.json`。同一份计划重复 init 不新建。
