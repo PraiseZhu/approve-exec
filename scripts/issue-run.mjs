@@ -31,7 +31,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hashObject, isMain, nowIso, parseArgs, readJson, writeJsonAtomic } from './lib/common.mjs';
 import { withLock } from './lib/state-lock.mjs';
-import { ghRunner, readIssue, parseIssueRef, PLAN_SCHEMA } from './issue-plan.mjs';
+import { ghRunner, readIssue, parseIssueRef, PLAN_SCHEMA, PI_LEAD_REJECT } from './issue-plan.mjs';
 import { renderIssueHandoff } from './render-issue-handoff.mjs';
 import { acceptCheck, ciVerdict, ghChecksRunner } from './accept-check.mjs';
 
@@ -264,7 +264,7 @@ export function next({ ledger, gh }) {
 
 export function prepare({ ledger, ledgerPath, plan, ref, leadSessionId, gh, now }) {
   if (!leadSessionId) reject('缺 --lead-session <lead 会话 id>');
-  if (ledger.lead_agent === 'pi') reject('KEEL 不接受 Pi 当主控：lead 会话必须是 claude-code 或 codex');
+  if (ledger.lead_agent === 'pi') reject(PI_LEAD_REJECT);
   const item = itemOf(ledger, ref);
   if (item.state === 'claimed' || item.state === 'dispatched') {
     return { ok: true, claimed: false, reason: 'already_claimed', state: item.state, session_id: item.session_id };

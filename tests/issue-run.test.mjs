@@ -44,13 +44,15 @@ test('SC5 派会话请求只有四个键：title / message / working_dir（主�
   assert.equal(res.request.title, 'App-同步状态读取丨 1029');
 });
 
-test('SC5 lead 是 Pi 时 CLI 退出码 2，写明 KEEL 不接受 Pi', () => {
+test('SC5 lead 是 Pi 时 CLI 退出码 2，写明准确理由（#74）', () => {
   const { ledgerPath, ledger } = setup();
   ledger.lead_agent = 'pi';
   writeFileSync(ledgerPath, JSON.stringify(ledger));
   const res = spawnSync(process.execPath, [CLI, 'prepare', '--ledger', ledgerPath, '--item', A, '--lead-session', 'lead-1', '--now', NOW], { encoding: 'utf8' });
   assert.equal(res.status, 2);
-  assert.match(res.stderr, /KEEL 不接受 Pi/);
+  assert.match(res.stderr, /owner 会话沿用 lead 的执行框架/);
+  assert.match(res.stderr, /KEEL 只给 claude-code \/ codex 配了默认主控方案/);
+  assert.doesNotMatch(res.stderr, /不接受 Pi/);
 });
 
 test('SC6 同一子 issue 第二次 prepare 返回已认领，不生成第二个请求', () => {
