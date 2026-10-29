@@ -11,6 +11,7 @@ import { acceptCheck, ciVerdict, matchScopeGlob, outOfScope, scRowsInBody } from
 import { REPO, childBody, parentFixture, writeFixture, ghFrom } from './fixtures/issues/build.mjs';
 
 const CLI = fileURLToPath(new URL('../scripts/accept-check.mjs', import.meta.url));
+const RUN_CLI = fileURLToPath(new URL('../scripts/issue-run.mjs', import.meta.url));
 const NOW = '2026-10-29T08:00:00.000Z';
 const A = `${REPO}#11`;
 const HEAD = 'a'.repeat(40);
@@ -50,7 +51,7 @@ function scenario({ pr = {}, files = ['src/sync/status.ts', 'tests/sync/status.t
   const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
   const { claim_id } = prepare({ ledger, plan, ref: A, leadSessionId: 'lead-1', gh, now: NOW });
   bind({ ledger, ref: A, claimId: claim_id, result: { target_session_id: 'owner-1' }, gh, now: NOW });
-  checkpoint({ ledger, plan, ref: A, state: 'awaiting_acceptance', pr: '5', head: HEAD, sc: SC_OK, lane: 'draft-gated-handoff', now: NOW });
+  checkpoint({ ledger, plan, ref: A, state: 'awaiting_acceptance', pr: '5', head: HEAD, sc: SC_OK, keelRun: 'keel-1', lane: 'draft-gated-handoff', now: NOW });
   writeFileSync(ledgerPath, JSON.stringify(ledger));
   writeFileSync(fx.ghPath, JSON.stringify(fixture));
   const checks = (args) => {
@@ -86,6 +87,36 @@ test('SC4 必需检查不是全绿 → ci 不过；没设必需检查时看全�
   assert.match(res.checks.find((c) => c.name === 'ci').detail, /没有任何检查/);
   res = run(scenario({ required: [{ name: 'verify', bucket: 'pass' }], all: [{ name: 'flaky', bucket: 'fail' }] }));
   assert.equal(res.ok, true, '有必需检查时只看必需检查');
+});
+
+test('反例（review-pr72）：必需检查查询出错时 ci 不过，不退回去看全部检查', () => {
+  const res = run(scenario({ required: { status: 1, stdout: '', stderr: 'HTTP 500: Internal Server Error' } }));
+  assert.deepEqual(failed(res), ['ci']);
+  assert.match(res.checks.find((c) => c.name === 'ci').detail, /读不到必需检查（HTTP 500/);
+});
+
+test('反例（review-pr72）：「验收对照」一节以外的 SC 表格行不算数', () => {
+  const body = GOOD_BODY.replace(/^\| SC3 .*$/m, '') + '\n\n## 随手记录\n\n| SC3 提了一句 | 文本 |';
+  const res = run(scenario({ pr: { body } }));
+  assert.deepEqual(failed(res), ['body_sc_rows']);
+});
+
+test('反例（review-pr72）：verdict --pass 自己跑 accept-check，不收 --check；检查不过就拒绝并点名', () => {
+  const verdictCli = (s, ...a) => spawnSync(process.execPath, [RUN_CLI, 'verdict', '--ledger', s.ledgerPath, '--item', A, ...a, '--gh-fixture', s.ghPath, '--now', NOW], { encoding: 'utf8' });
+  let s = scenario({ files: ['src/sync/status.ts', 'README.md'] });
+  const forged = join(s.dir, 'forged.json');
+  writeFileSync(forged, JSON.stringify({ ok: true, stage: 'acceptance', ref: A, pr: 5, head: HEAD }));
+  let res = verdictCli(s, '--pass', '--check', forged);
+  assert.equal(res.status, 2);
+  assert.match(res.stderr, /不收 --check/);
+  res = verdictCli(s, '--pass');
+  assert.equal(res.status, 2);
+  assert.match(res.stderr, /不过的项：scope/);
+  assert.equal(JSON.parse(readFileSync(s.ledgerPath, 'utf8')).items[A].state, 'awaiting_acceptance');
+  s = scenario();
+  res = verdictCli(s, '--pass');
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(JSON.parse(res.stdout).state, 'accepted');
 });
 
 test('SC4 改动文件超出子 issue 范围 → scope 不过，并点名文件', () => {
@@ -131,6 +162,7 @@ test('范围匹配与 KEEL scope.ts 同口径：** / * / 尾斜杠 / node_module
   assert.equal(matchScopeGlob('docs/x/y.md', 'docs/'), true);
   assert.equal(matchScopeGlob('docs', 'docs/**'), true);
   assert.deepEqual(outOfScope(['node_modules/x.js', 'a.md'], ['b.md']), ['a.md']);
-  assert.deepEqual([...scRowsInBody('| **SC2** x |\n| SC10 y |\n- SC3 不是表格行')], ['SC2', 'SC10']);
+  assert.deepEqual([...scRowsInBody('## 验收对照\n| **SC2** x |\n| SC10 y |\n- SC3 不是表格行')], ['SC2', 'SC10']);
+  assert.deepEqual([...scRowsInBody('### 验收对照\n| SC1 x |\n## 风险\n| SC2 y |')], ['SC1'], 'Mivo 模板的三级标题也认，下一个标题之后不算');
   assert.equal(ciVerdict(() => [{ name: 'a', bucket: 'skipping' }], 'o/r', 1).ok, true, 'skipping 算通过');
 });

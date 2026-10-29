@@ -7,7 +7,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { buildPlan, readRoot } from '../scripts/issue-plan.mjs';
-import { init, next, prepare, bind, release, checkpoint, verdict, unblock, cleanup, archived, runStatus, sessionTitle, projectName, sessionIdFrom, activeClaims, REQUEST_KEYS, RunError } from '../scripts/issue-run.mjs';
+import { init, next, prepare, bind, release, checkpoint, verdict, unblock, cleanup, archived, runStatus, status, sessionTitle, projectName, sessionIdFrom, activeClaims, REQUEST_KEYS, RunError } from '../scripts/issue-run.mjs';
 import { REPO, LOGIN, commentsKey, parentFixture, writeFixture, ghFrom } from './fixtures/issues/build.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -263,14 +263,18 @@ function awaiting(s, { lane = 'draft-gated-handoff', head = HEAD } = {}) {
   return checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'awaiting_acceptance', pr: '5', head, sc: SC_OK, keelRun: 'keel-1', lane, now: NOW });
 }
 
+const RUN_META = { keelRun: 'keel-1', lane: 'draft-gated-handoff' };
 const okCheck = (over = {}) => ({ ok: true, stage: 'acceptance', ref: A, pr: 5, head: HEAD, checked_at: NOW, ...over });
 
 test('checkpoint awaiting_acceptance：SC 表要覆盖子 issue 全部 SC，KEEL 管的必须 pass，黑盒项只能 manual / not_run', () => {
   const s = dispatched();
-  assert.throws(() => checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'awaiting_acceptance', pr: '5', head: HEAD, sc: SC_OK.slice(1), now: NOW }), /缺: SC1/);
-  assert.throws(() => checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'awaiting_acceptance', pr: '5', head: HEAD, sc: [{ id: 'SC1', status: 'fail' }, ...SC_OK.slice(1)], now: NOW }), /SC1 还没有通过/);
-  assert.throws(() => checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'awaiting_acceptance', pr: '5', head: HEAD, sc: SC_OK.map((x) => (x.id === 'SC3' ? { ...x, status: 'pass' } : x)), now: NOW }), /SC3 是合并前拿不到证据/);
+  assert.throws(() => checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'awaiting_acceptance', pr: '5', head: HEAD, sc: SC_OK.slice(1), ...RUN_META, now: NOW }), /缺: SC1/);
+  assert.throws(() => checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'awaiting_acceptance', pr: '5', head: HEAD, sc: [{ id: 'SC1', status: 'fail' }, ...SC_OK.slice(1)], ...RUN_META, now: NOW }), /SC1 还没有通过/);
+  assert.throws(() => checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'awaiting_acceptance', pr: '5', head: HEAD, sc: SC_OK.map((x) => (x.id === 'SC3' ? { ...x, status: 'pass' } : x)), ...RUN_META, now: NOW }), /SC3 是合并前拿不到证据/);
   assert.throws(() => checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'awaiting_acceptance', pr: '5', head: 'abc', sc: SC_OK, now: NOW }), /--head 必须是 40 位/);
+  assert.throws(() => checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'awaiting_acceptance', pr: '5', head: HEAD, sc: SC_OK, lane: 'personal', now: NOW }), /缺 --keel-run/, 'SC1 要求 checkpoint 带 KEEL run_id');
+  assert.throws(() => checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'awaiting_acceptance', pr: '5', head: HEAD, sc: SC_OK, keelRun: 'keel-1', now: NOW }), /--lane 只能是/);
+  assert.throws(() => checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'awaiting_acceptance', pr: '5', head: HEAD, sc: SC_OK, keelRun: 'keel-1', lane: 'handoff', now: NOW }), /--lane 只能是/);
   const res = awaiting(s);
   assert.equal(res.state, 'awaiting_acceptance');
   assert.equal(s.ledger.items[A].checkpoint.pr, 5);
@@ -311,6 +315,7 @@ test('SC5 第 3 次判「要改」→ blocked_user，给出总 issue 评论正�
   assert.equal(Object.hasOwn(res, 'owner_message'), false, '第 3 次不发回 owner');
   assert.match(res.root_comment, /^批准执行停下等用户：2026-10-29 acme\/app#11（PR #5）已判「要改」3 次仍未通过.*第 1 次：补 SC2 的验收对照；第 2 次：范围外改了 README；第 3 次：还是缺证据/);
   assert.equal(s.ledger.items[A].blocked.by, 'lead');
+  assert.throws(() => awaiting(s), /owner 不能直接回到验收点/, '反例（review-pr72）：lead 叫停后 owner 不能自己写回待验收');
   const back = unblock({ ledger: s.ledger, ref: A, note: '用户 2026-10-29：同意再改一轮', now: NOW });
   assert.equal(back.state, 'revising');
   assert.equal(s.ledger.items[A].revise_count, 0);
@@ -368,6 +373,23 @@ test('SC7 cleanup：删本地 KEEL worktree 与本地分支，不碰远端；有
   s = readyWith('c'.repeat(40), r.repo);
   assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, now: NOW }), /与 PR head .* 不一致/);
 
+  // 反例（review-pr72）：Ready 之后又变了的 PR 不清理。
+  r = gitRepoWithWorktree();
+  s = readyWith(r.head, r.repo);
+  s.fixture[`api repos/${REPO}/pulls/5`].draft = true;
+  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, now: NOW }), /还不是正式 Ready/);
+  s.fixture[`api repos/${REPO}/pulls/5`] = { head: { ref: 'feat/x', sha: 'd'.repeat(40) }, state: 'open', draft: false };
+  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, now: NOW }), /新提交没验收过/);
+  assert.equal(existsSync(r.wt), true);
+
+  // 反例（review-pr72）：分支在主目录检出时拒绝，不假装清理过。
+  r = gitRepoWithWorktree();
+  r.g('worktree', 'remove', r.wt);
+  r.g('checkout', '-q', 'feat/x');
+  s = readyWith(r.head, r.repo);
+  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, now: NOW }), /在主目录 .* 检出，不清理/);
+  assert.equal(s.ledger.items[A].state, 'ready');
+
   r = gitRepoWithWorktree();
   s = readyWith(r.head, r.repo);
   const res = cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, now: NOW });
@@ -392,8 +414,19 @@ test('SC7 archived 只认 archive_sessions 回执；全部收工 run 才 complet
   for (const ref of [`${REPO}#12`, `${REPO}#14`]) s.ledger.items[ref].state = 'archived';
   assert.equal(runStatus(s.ledger), 'waiting_merge', '只剩等依赖合并的 #13');
   assert.equal(next({ ledger: s.ledger, gh: s.gh }).run_status, 'waiting_merge');
+  assert.equal(status({ ledger: s.ledger, gh: s.gh }).run_status, 'waiting_merge');
   s.ledger.items[C].state = 'closed';
   assert.equal(runStatus(s.ledger), 'complete');
+});
+
+test('反例（review-pr72）：status 和 next 对同一台账给出同一个 run_status（有可派的子 issue 时是 running）', () => {
+  const s = dispatched();
+  assert.equal(next({ ledger: s.ledger, gh: s.gh }).run_status, 'running');
+  for (const ref of Object.keys(s.ledger.items)) s.ledger.items[ref].state = ref === `${REPO}#12` ? 'pending' : 'archived';
+  const n = next({ ledger: s.ledger, gh: s.gh });
+  assert.deepEqual(n.dispatchable, [`${REPO}#12`]);
+  assert.equal(n.run_status, 'running');
+  assert.equal(status({ ledger: s.ledger, gh: s.gh }).run_status, 'running');
 });
 
 test('「要改」回复写明 KEEL run 结束后用 keel_run 传 pr=<号> 在同一 PR 上继续（#69 待定问题结论）', () => {

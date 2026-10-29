@@ -39,7 +39,7 @@ export function outOfScope(files, scope) {
 // github
 
 /** `gh pr checks` 在有失败或进行中时退出码非 0，没有必需检查时退出码 1 且只打印一句话；这里都要拿到原样结果。 */
-function ghChecksRunner(fixturePath) {
+export function ghChecksRunner(fixturePath) {
   if (fixturePath) {
     return (args) => {
       const fixture = JSON.parse(readFileSync(fixturePath, 'utf8'));
@@ -66,9 +66,14 @@ function parseChecks(res) {
 
 /** 有必需检查就只看必需检查；仓库没设必需检查时看全部检查；一项检查都没有判失败。 */
 export function ciVerdict(checks, repo, pr) {
-  const required = parseChecks(checks(['pr', 'checks', String(pr), '--repo', repo, '--required', '--json', 'name,bucket']));
+  const requiredRes = checks(['pr', 'checks', String(pr), '--repo', repo, '--required', '--json', 'name,bucket']);
+  const required = parseChecks(requiredRes);
   let list = required.list;
   let basis = 'required';
+  if (list.length === 0 && !required.none) {
+    const why = String(requiredRes?.stderr ?? requiredRes?.stdout ?? '').trim().split('\n')[0] || '没有输出';
+    return { ok: false, detail: `读不到必需检查（${why}），无法确认 CI 全绿` };
+  }
   if (list.length === 0) {
     list = parseChecks(checks(['pr', 'checks', String(pr), '--repo', repo, '--json', 'name,bucket'])).list;
     basis = 'all';
@@ -90,10 +95,13 @@ function prFiles(gh, repo, pr) {
   throw new Error(`PR #${pr} 改动文件超过 ${MAX_FILE_PAGES * 100} 个，无法完整核对范围`);
 }
 
-/** PR 正文「验收对照」表里出现过的 SC 编号。 */
+/** PR 正文「验收对照」一节（到下一个标题为止）的表格里出现过的 SC 编号。 */
 export function scRowsInBody(body) {
   const ids = new Set();
+  let inSection = false;
   for (const line of String(body ?? '').split('\n')) {
+    if (/^#{1,6}\s/.test(line)) { inSection = /^#{1,6}\s*验收对照\s*$/.test(line.trim()); continue; }
+    if (!inSection) continue;
     const m = /^\s*\|\s*(?:\*\*)?(SC\d+)\b/.exec(line);
     if (m) ids.add(m[1]);
   }

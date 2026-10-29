@@ -17,11 +17,13 @@
 //   release    --ledger <f> --item <ref> --evidence <已核实没有建出会话的依据> [--now ISO] [--gh-fixture <夹具>]
 //   checkpoint --ledger <f> --item <ref> --state awaiting_acceptance|ready|blocked_user
 //              [--pr <号>] [--head <40 位 sha>] [--sc <JSON 数组>] [--keel-run <id>] [--lane <车道>] [--reason <文字>] [--now ISO]
-//   verdict    --ledger <f> --item <ref> (--pass --check <accept-check 输出 JSON 文件> | --revise <要改的条目>) [--now ISO]
+//              （awaiting_acceptance 必带 --pr --head --sc --keel-run --lane）
+//   verdict    --ledger <f> --item <ref> (--pass | --revise <要改的条目>) [--now ISO] [--gh-fixture <夹具>]
+//              （--pass 时自己跑一遍 accept-check --stage acceptance，不过就拒绝）
 //   unblock    --ledger <f> --item <ref> --note <用户怎么处理的> [--now ISO]
 //   cleanup    --ledger <f> --item <ref> [--now ISO] [--gh-fixture <夹具>]
 //   archived   --ledger <f> --item <ref> --result <archive_sessions 回执 JSON 文件> [--now ISO]
-//   status     --ledger <f>
+//   status     --ledger <f> [--gh-fixture <夹具>]
 import { existsSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -31,6 +33,7 @@ import { hashObject, isMain, nowIso, parseArgs, readJson, writeJsonAtomic } from
 import { withLock } from './lib/state-lock.mjs';
 import { ghRunner, readIssue, parseIssueRef, PLAN_SCHEMA } from './issue-plan.mjs';
 import { renderIssueHandoff } from './render-issue-handoff.mjs';
+import { acceptCheck, ghChecksRunner } from './accept-check.mjs';
 
 export const LEDGER_SCHEMA = 'issue-run-v1';
 export const ITEM_STATES = Object.freeze([
@@ -40,6 +43,8 @@ export const ITEM_STATES = Object.freeze([
 ]);
 export const REQUEST_KEYS = Object.freeze(['title', 'message', 'working_dir', 'use_worktree']);
 export const MAX_REVISE_ROUNDS = 2; // 第 3 次判「要改」就停下找用户
+/** KEEL 的车道（`pr_status` 返回值）。 */
+export const LANES = ['personal', 'gated-handoff', 'draft-gated-handoff'];
 export const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const SC_STATUSES = ['pass', 'fail', 'not_run', 'manual'];
 const SHA_RE = /^[0-9a-f]{40}$/;
@@ -381,7 +386,10 @@ export function checkpoint({ ledger, plan, ref, state, pr, head, sc, keelRun, la
   const planItem = planItemOf(plan, ref);
   if (state === 'awaiting_acceptance') {
     expectState(item, ['dispatched', 'revising', 'blocked_user'], 'checkpoint awaiting_acceptance');
+    if (item.blocked?.by === 'lead') reject(`${ref} 是 lead 判「要改」${item.revise_count} 次后停下等用户的，用户处理后由 lead 跑 unblock，owner 不能直接回到验收点`);
     requirePr(pr, head, ref);
+    if (!keelRun || !String(keelRun).trim()) reject(`${ref} 缺 --keel-run <KEEL run_id>`);
+    if (!LANES.includes(lane)) reject(`${ref} --lane 只能是 ${LANES.join(' / ')}（当前: ${lane}）`);
     checkScTable(sc, planItem, ref);
   } else if (state === 'ready') {
     expectState(item, ['accepted'], 'checkpoint ready');
@@ -428,7 +436,8 @@ export function verdict({ ledger, ref, pass, revise, check, now }) {
   const date = now.slice(0, 10);
   if (pass) {
     if (!check || check.ok !== true || check.ref !== ref || check.stage !== 'acceptance' || check.head !== cp.head || check.pr !== cp.pr) {
-      reject(`${ref} 判「通过」需要同一 PR、同一 head（#${cp.pr} ${cp.head}）且 ok=true 的 accept-check --stage acceptance 结果`);
+      const bad = (check?.checks ?? []).filter((c) => !c.ok).map((c) => c.name).join('、');
+      reject(`${ref} 判「通过」需要同一 PR、同一 head（#${cp.pr} ${cp.head}）且 ok=true 的 accept-check --stage acceptance 结果${bad ? `；不过的项：${bad}` : ''}`);
     }
     item.verdicts.push({ at: now, verdict: 'pass', head: cp.head, check_at: check.checked_at ?? null });
     move(item, 'accepted', now, { verdict: 'pass' });
@@ -496,8 +505,11 @@ export function cleanup({ ledger, plan, ref, gh, git = gitRunner(), now }) {
   const branch = pr?.head?.ref;
   const prHead = pr?.head?.sha;
   if (!branch || !SHA_RE.test(String(prHead))) reject(`${ref} 读不到 PR #${item.checkpoint.pr} 的分支与 head`);
+  if (pr.draft !== false) reject(`${ref} 的 PR #${item.checkpoint.pr} 还不是正式 Ready，不清理`);
+  if (prHead !== item.checkpoint.head) reject(`${ref} 的 PR head 现在是 ${prHead}，验收通过的是 ${item.checkpoint.head}：新提交没验收过，不清理`);
   const entries = parseWorktrees(git(['-C', repoDir, 'worktree', 'list', '--porcelain']));
   const main = entries[0]?.worktree ?? null;
+  if (entries[0]?.branch === `refs/heads/${branch}`) reject(`${ref} 的分支 ${branch} 在主目录 ${main} 检出，不清理：交给用户切走后再跑 cleanup`);
   const wt = entries.find((e) => e.branch === `refs/heads/${branch}` && e.worktree !== main);
   const record = { branch, pr_head: prHead, worktree: null, branch_deleted: false, at: now };
   if (wt) {
@@ -508,8 +520,7 @@ export function cleanup({ ledger, plan, ref, gh, git = gitRunner(), now }) {
   }
   let local = null;
   try { local = git(['-C', repoDir, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]); } catch { local = null; }
-  const checkedOutInMain = entries[0]?.branch === `refs/heads/${branch}`;
-  if (local && !checkedOutInMain) {
+  if (local) {
     if (local !== prHead) reject(`${ref} 本地分支 ${branch} 在 ${local}，与 PR head ${prHead} 不一致，不删`);
     git(['-C', repoDir, 'branch', '-D', branch]);
     record.branch_deleted = true;
@@ -554,12 +565,12 @@ export function archived({ ledger, ref, result, now }) {
   return { ok: true, state: item.state, ref, run_status: runStatus(ledger) };
 }
 
-export function status({ ledger }) {
+export function status({ ledger, gh }) {
   const items = Object.values(ledger.items).map((i) => ({
     ref: i.ref, wave: i.wave, state: i.state, session_id: i.session_id,
     pr: i.checkpoint?.pr ?? null, revise_count: i.revise_count, blocked: i.blocked?.reason ?? null,
   }));
-  return { ok: true, root: ledger.root.ref, run_id: ledger.run_id, run_status: runStatus(ledger), items };
+  return { ok: true, root: ledger.root.ref, run_id: ledger.run_id, run_status: next({ ledger, gh }).run_status, items };
 }
 
 // cli
@@ -587,7 +598,7 @@ export function main(argv = process.argv.slice(2)) {
     } else if (cmd === 'next') {
       out = next({ ledger: load(ledgerPath), gh: gh() });
     } else if (cmd === 'status') {
-      out = status({ ledger: load(ledgerPath) });
+      out = status({ ledger: load(ledgerPath), gh: gh() });
     } else if (WRITES.includes(cmd)) {
       out = withLock(`${ledgerPath}.lock`, () => {
         const ledger = load(ledgerPath);
@@ -607,7 +618,11 @@ export function main(argv = process.argv.slice(2)) {
             keelRun: str(args['keel-run']), lane: str(args.lane), reason: str(args.reason), now,
           });
         } else if (cmd === 'verdict') {
-          const check = typeof args.check === 'string' ? JSON.parse(readFileSync(args.check, 'utf8')) : null;
+          if (args.check !== undefined) reject('verdict 不收 --check：判「通过」时自己跑一遍 accept-check --stage acceptance');
+          const fixture = typeof args['gh-fixture'] === 'string' ? args['gh-fixture'] : null;
+          const check = args.pass === true
+            ? acceptCheck({ ledger, plan, ref, stage: 'acceptance', gh: gh(), checks: ghChecksRunner(fixture), now })
+            : null;
           res = verdict({ ledger, ref, pass: args.pass === true, revise: str(args.revise), check, now });
         } else if (cmd === 'unblock') {
           res = unblock({ ledger, ref, note: str(args.note), now });

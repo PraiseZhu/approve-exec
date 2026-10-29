@@ -35,7 +35,7 @@ node <skill>/scripts/issue-run.mjs checkpoint --ledger <台账> --item <ref> --s
   --sc '[{"id":"SC1","status":"pass"}, …]'
 ```
 
-`--sc` 要覆盖子 issue 的每一条 SC：KEEL 判通过的写 `pass`；合并前拿不到证据的黑盒项（`github-live`、`cindy-mac`、`cindy-windows`、`paid`）写 `manual` 或 `not_run`。KEEL 管的 SC 还有没通过的，就没到验收点，脚本会拒收。
+`--pr` `--head` `--sc` `--keel-run` `--lane` 都必须带；`--lane` 只能是 `personal` / `gated-handoff` / `draft-gated-handoff`。`--sc` 要覆盖子 issue 的每一条 SC：KEEL 判通过的写 `pass`；合并前拿不到证据的黑盒项（`github-live`、`cindy-mac`、`cindy-windows`、`paid`）写 `manual` 或 `not_run`。KEEL 管的 SC 还有没通过的，就没到验收点，脚本会拒收。
 
 ## 裁决之后
 
@@ -52,7 +52,7 @@ lead 用 `send_to_session` 发来一条消息：
 node <skill>/scripts/issue-run.mjs checkpoint --ledger <台账> --item <ref> --state blocked_user --reason "<要用户做什么>"
 ```
 
-写完结束本轮。lead 被叫醒后告诉用户，用户处理完后 lead `unblock`，再通知 owner 继续。
+写完结束本轮。lead 判「要改」第 3 次后停下等用户时，owner 不能自己写回 `awaiting_acceptance`，要等 lead `unblock`。lead 被叫醒后告诉用户，用户处理完后 lead `unblock`，再通知 owner 继续。
 
 ## lead 的验收检查（accept-check）
 
@@ -62,15 +62,15 @@ node <skill>/scripts/issue-run.mjs checkpoint --ledger <台账> --item <ref> --s
 |---|---|
 | `pr_head` | PR 当前 head 与 checkpoint 的 head 不一致 |
 | `pr_open` | PR 不是 open |
-| `ci` | 必需检查不是全绿；仓库没设必需检查时看全部检查；一项检查都没有也不过 |
+| `ci` | 必需检查不是全绿；读不到必需检查（查询出错）也不过；仓库没设必需检查时看全部检查；一项检查都没有也不过 |
 | `scope` | 改动文件超出子 issue「范围」的 glob（匹配规则与 KEEL `scope.ts` 相同） |
 | `body_issue_line` | PR 正文缺「任务 issue：<ref>」一行 |
-| `body_sc_rows` | PR 正文「验收对照」缺某条 SC 的行 |
+| `body_sc_rows` | PR 正文「验收对照」一节的表格缺某条 SC 的行（只认这一节，别处提到的 SC 不算） |
 | `pending_questions` | 子 issue「待定问题」里有没写「已定」的条目 |
 
 `--stage ready` 另查 `pr_not_draft`：PR 已不是 Draft。
 
-检查全部通过只是必要条件。lead 还要对照子 issue 的「目标」「原因」「不做」看 diff 是否做对了事，再下裁决。
+`verdict --pass` 会自己再跑一遍 `--stage acceptance`，不接收外部传入的检查结果。检查全部通过只是必要条件。lead 还要对照子 issue 的「目标」「原因」「不做」看 diff 是否做对了事，再下裁决。
 
 ## 防重派
 
