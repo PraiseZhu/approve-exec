@@ -1,4 +1,4 @@
-// render-issue-handoff.mjs：一页开工包（PraiseZhu/approve-exec#68 SC7）。
+// render-issue-handoff.mjs：一页开工包（PraiseZhu/approve-exec#68 SC7、#69 SC6）。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildPlan, readRoot } from '../scripts/issue-plan.mjs';
@@ -23,7 +23,7 @@ test('SC7 开工包含：子 issue 与总 issue 链接、批次与合并顺序�
   assert.ok(text.includes(JSON.stringify(item.keel_run, null, 2)));
   assert.ok(text.includes('「用户 2026-10-29：批准执行 acme/app#10」'));
   assert.ok(text.includes(KEEL_DONE));
-  assert.ok(text.includes('给 lead 会话 lead-1 发一条回执'));
+  assert.ok(text.includes('## 3. 收口：到验收点就停下，等 lead 裁决'), '回报方式改为写 checkpoint（#69）');
   assert.ok(text.includes('SC3 上线后 24 小时内无同步报错。验证：github-live'), '黑盒验收项要列出，标「未执行」');
 });
 
@@ -73,4 +73,25 @@ test('SC7 反例（review-pr71 第 2 轮）：直接以子 issue 为入口时，
   assert.equal(plan.root.kind, 'single');
   const text = renderIssueHandoff({ plan, item: plan.items[0], leadSessionId: 'lead-1' });
   assert.ok(text.includes(`- 总 issue：https://github.com/${REPO}/issues/10。`), text.slice(0, 600));
+});
+
+test('#69 SC6 收口按车道写：交接车道判通过前不调 pr_ready，通过后用授权原话；personal 车道到 report_mergeable 写 checkpoint', () => {
+  const { text } = packet();
+  assert.ok(text.includes('**lead 判通过之前不调 `pr_ready`**'));
+  assert.ok(text.includes('`authorization_source` 填「用户 2026-10-29：批准执行 acme/app#10」'));
+  assert.ok(text.includes('`nextAction` 是 `report_mergeable` 时就是验收点'));
+  assert.ok(text.includes('不用 `send_to_session` 回报，续跑脚本会叫醒 lead'));
+  assert.doesNotMatch(text, /发一条回执/);
+});
+
+test('#69 SC6 checkpoint 命令带脚本与台账的绝对路径、本子 issue 全部 SC（KEEL 管的 pass，黑盒 manual）', () => {
+  const fixture = parentFixture();
+  const { repoDir } = writeFixture(fixture);
+  const { root, children } = readRoot(ghFrom(fixture), `${REPO}#10`);
+  const plan = buildPlan({ root, children, repoDirs: { [REPO]: repoDir }, lead: 'codex', entry: '批准执行', now: '2026-10-29T08:00:00.000Z' });
+  const item = plan.items.find((i) => i.ref === `${REPO}#11`);
+  const text = renderIssueHandoff({ plan, item, leadSessionId: 'lead-1', ledgerPath: '/abs/run/ledger.json', scriptsDir: '/abs/skill/scripts' });
+  assert.ok(text.includes(`node "/abs/skill/scripts/issue-run.mjs" checkpoint --ledger "/abs/run/ledger.json" --item ${REPO}#11 --state awaiting_acceptance`));
+  assert.ok(text.includes(`--sc '[{"id":"SC1","status":"pass"},{"id":"SC2","status":"pass"},{"id":"SC4","status":"pass"},{"id":"SC3","status":"manual"}]'`));
+  assert.ok(text.includes('--state blocked_user --reason'));
 });
