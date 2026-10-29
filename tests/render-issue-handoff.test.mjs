@@ -79,9 +79,12 @@ test('#77 SC1 任何车道都先开 Draft，验收点是「KEEL 只差转 Ready�
   const { text } = packet();
   assert.ok(text.includes('`next` 让你调 `pr_open`：加 `draft: true`，`authorization_source` 填「用户 2026-10-29：批准执行 acme/app#10」。任何车道都先开 Draft。'));
   assert.ok(text.includes(`验收点：${ACCEPTANCE_POINT}。`));
-  assert.ok(ACCEPTANCE_POINT.includes('交接车道是 `next` 让你调 `pr_ready`，其他车道是 done 门只剩 `pr_status 是 mark_ready`'));
+  // review-pr80 P1：PR 是 Draft、CI 干净时 KEEL 对三种车道都给 mark_ready，交接车道不会出现 pr_ready 的 next。
+  assert.ok(ACCEPTANCE_POINT.includes('done 门（`next.kind` 是 `decide`、`gate_id` 是 `done`）的缺项只剩一条 `pr_status 是 mark_ready`。三种车道都一样'));
+  assert.doesNotMatch(ACCEPTANCE_POINT, /交接车道是 `next` 让你调 `pr_ready`/);
+  assert.ok(text.includes('PR 已经不是 Draft（例如 `next` 让你调 `pr_ready`）：不调，先 `gh pr ready <PR 号> --undo` 转回 Draft，再接着做。'));
   assert.ok(text.includes('**lead 判通过之前，任何车道都不调 `pr_ready`**'));
-  assert.ok(text.includes('- 「通过」：调 KEEL 的 `pr_ready`，`authorization_source` 填「用户 2026-10-29：批准执行 acme/app#10」'), '通过后所有车道都由 owner 转正式');
+  assert.ok(text.includes('- 「通过」：调 KEEL 的 `pr_ready`，`authorization_source` 填「用户 2026-10-29：批准执行 acme/app#10」；成功后写 `--state ready --pr <PR 号> --head <同一 sha>`，再把 done 门答 `wait`，KEEL 看到已交接或可合并就收工。'), '通过后所有车道都由 owner 转正式，再答 done 门收工');
   assert.ok(text.includes('不用 `send_to_session` 回报，续跑脚本会叫醒 lead'));
   assert.doesNotMatch(text, /report_mergeable 时就是验收点|personal 车道直接写/, '#69 时 personal 车道 PR 一开就是正式的，验收点已改');
   assert.doesNotMatch(text, /发一条回执/);
@@ -92,8 +95,8 @@ test('#77 SC2 owner 无人值守：只在四种情况结束本轮，等待接着
   assert.deepEqual([...END_TURN_STATES], ['awaiting_acceptance', 'ready', 'needs_lead', 'blocked_user']);
   assert.ok(text.includes('结束本轮只有四种情况：写完 `awaiting_acceptance` / `ready` / `needs_lead` / `blocked_user` 之一。别的时候一直照 `next` 做，不回报进度。'));
   assert.ok(text.includes('`next` 是等待（`keel_wait` 等）：等完照新的 `next` 接着做。在等 CI 不是结束本轮的理由。'));
-  assert.ok(text.includes('`next.kind` 是 `decide`：自己答。拿不准先问 KEEL 的 `jev`；低于执行线时取改动最小、可撤回的选项（KEEL 手册第 9 条）。'));
-  assert.ok(text.includes('done 门缺证据选 `revise`，验证没过选 `retry_verify`，不选 `waive`'));
+  assert.ok(text.includes('`next.kind` 是 `decide`：自己答。done 门缺项只剩 `pr_status 是 mark_ready` 就是验收点，不答这个门，按第 3 节写 checkpoint；缺项是在等 CI（如 `pr_status 是 wait_for_ci`）答 `wait`；缺 SC 证据选 `revise`；验证没过选 `retry_verify`；不选 `waive`'));
+  assert.ok(text.includes('其他门拿不准先问 KEEL 的 `jev`；低于执行线时取改动最小、可撤回的选项（KEEL 手册第 9 条）。'));
   assert.ok(text.includes('`next.kind` 是 `stop`：分支被别的 worktree 占着就跑第 3 节的 `free-worktree`，再调一次；别的原因写 `blocked_user`。'));
   assert.doesNotMatch(text, /回报 lead|问用户|问 lead|回来问/, '没有渠道的指引会让 owner 停下等人');
 });

@@ -300,10 +300,8 @@ test('#77 SC5 verdict --pass：三种车道都让 owner 调 pr_ready 再写 read
     const s = dispatched();
     awaiting(s, { lane });
     const res = verdict({ ledger: s.ledger, ref: A, pass: true, check: okCheck(), now: NOW });
-    assert.match(res.owner_message, /现在调 KEEL 的 pr_ready，authorization_source 填「批准执行 acme\/app#10」；成功后写 checkpoint --state ready --pr 5 --head a{40}/, lane);
+    assert.match(res.owner_message, /现在调 KEEL 的 pr_ready，authorization_source 填「批准执行 acme\/app#10」；成功后写 checkpoint --state ready --pr 5 --head a{40}，再把 done 门答 wait/, lane);
     assert.doesNotMatch(res.owner_message, /已经是 Ready/, lane);
-    if (lane === 'personal') assert.match(res.owner_message, /再把 done 门答 wait/);
-    else assert.doesNotMatch(res.owner_message, /done 门/, lane);
   }
 });
 
@@ -519,6 +517,22 @@ test('#77 SC6 free-worktree：干净且 HEAD 等于 PR head 时删掉旧 KEEL wo
 
   const fresh = dispatched();
   assert.throws(() => freeWorktree({ ledger: fresh.ledger, plan: fresh.plan, ref: A, gh: fresh.gh, now: NOW }), /台账里没有 PR 号/);
+});
+
+test('#77 SC6 反例（review-pr80 P2）：不是 KEEL 建的 worktree（不在 <主目录>/.worktrees/keel-* 下）不删，里面被 gitignore 的文件也还在', () => {
+  const r = gitRepoWithWorktree();
+  r.g('worktree', 'remove', r.wt);
+  const manual = join(r.repo, 'manual-wt');
+  r.g('worktree', 'add', '-q', manual, 'feat/x');
+  writeFileSync(join(r.repo, '.gitignore'), 'local.env\n');
+  writeFileSync(join(manual, '.gitignore'), 'local.env\n');
+  r.g('-C', manual, 'add', '.gitignore');
+  r.g('-C', manual, '-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'ignore');
+  writeFileSync(join(manual, 'local.env'), 'x');
+  const head = r.g('rev-parse', 'feat/x');
+  const s = revisingWith(head, r.repo);
+  assert.throws(() => freeWorktree({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, now: NOW }), /不是 KEEL 建的.*不释放/);
+  assert.equal(existsSync(join(manual, 'local.env')), true, '手工 worktree 和里面的本地文件都还在');
 });
 
 test('#77 SC6 free-worktree CLI：删掉占用后台账落盘、退出码 0', () => {

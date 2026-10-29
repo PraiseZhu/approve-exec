@@ -27,7 +27,8 @@ owner 是无人值守的：KEEL 手册里让主控停下问人的地方，owner 
 
 - `next` 让调 `pr_open`：加 `draft: true`。任何车道都先开 Draft；KEEL 的 personal 车道允许请求 Draft（Project Keel `src/shared/lanes.ts` `draftFor`）。
 - `next` 是等待：等完照新的 `next` 接着做，不因为在等 CI 结束本轮。
-- `next.kind` 是 `decide`：自己答。拿不准先问 KEEL 的 `jev`；低于执行线取改动最小、可撤回的选项（KEEL 手册第 9 条）。done 门缺证据选 `revise`，验证没过选 `retry_verify`，不选 `waive`（要用户原话）。
+- `next.kind` 是 `decide`：自己答。done 门缺项只剩 `pr_status 是 mark_ready` 是验收点（见下节）；缺项是在等 CI 答 `wait`；缺 SC 证据选 `revise`；验证没过选 `retry_verify`；不选 `waive`（要用户原话）。其他门拿不准先问 KEEL 的 `jev`；低于执行线取改动最小、可撤回的选项（KEEL 手册第 9 条）。
+- PR 已经不是 Draft：不调 `pr_ready`，先 `gh pr ready <PR 号> --undo` 转回 Draft。
 - `next.kind` 是 `stop`：分支被别的 worktree 占着就跑 `free-worktree` 再调一次；别的原因写 `blocked_user`。
 - 待定问题和方案选择：问 `jev`，结论写回子 issue。
 
@@ -35,7 +36,7 @@ owner 是无人值守的：KEEL 手册里让主控停下问人的地方，owner 
 
 ## owner 的验收点
 
-KEEL 只差把 Draft 转正式：交接车道（`draft-gated-handoff`、`gated-handoff`）是 `next` 让调 `pr_ready`；其他车道是 done 门只剩一条「`pr_status 是 mark_ready`」（Draft 且 CI 干净时 KEEL 的 `nextAction` 是 `mark_ready`）。这时 PR 还是 Draft、CI 全绿、非作者审查已通过。**lead 判通过之前，任何车道都不调 `pr_ready`**：转正式之后 KEEL 对作者返回 `LANE_HANDED_OFF`（交接车道），lead 也就验不到一个还能改的 PR。`accept-check --stage acceptance` 的 `pr_draft` 项会拒收已经转正式的 PR。
+KEEL 只差把 Draft 转正式：done 门（`next.kind` 是 `decide`、`gate_id` 是 `done`）的缺项只剩一条「`pr_status 是 mark_ready`」。三种车道都一样：PR 是 Draft、CI 干净时 KEEL 的 `nextAction` 是 `mark_ready`（Project Keel `src/shared/lanes.ts` `allowedActions`），done 门因此停在 `wait` / `stop`；交接车道让主控调 `pr_ready` 收口只在 PR 已经不是 Draft 时出现。这时 PR 还是 Draft、CI 全绿、非作者审查已通过。到了验收点不答这个门，写 checkpoint。**lead 判通过之前，任何车道都不调 `pr_ready`**：转正式之后 KEEL 对作者返回 `LANE_HANDED_OFF`（交接车道），lead 也就验不到一个还能改的 PR。`accept-check --stage acceptance` 的 `pr_draft` 项会拒收已经转正式的 PR。
 
 到验收点后写 checkpoint 并结束本轮：
 
@@ -51,8 +52,8 @@ node <skill>/scripts/issue-run.mjs checkpoint --ledger <台账> --item <ref> --s
 
 lead 用 `send_to_session` 发来一条消息：
 
-- **通过**：所有车道都调 `pr_ready`，`authorization_source` 用台账里的授权原话；成功后写 `--state ready --pr <号> --head <同一 sha>`。不是交接车道的，再把 done 门答 `wait`，KEEL 看到可合并就收工。head 和验收时不一致会被拒收：那说明验收后又改了代码，要回到验收点重新写 `awaiting_acceptance`。
-- **要改**：先跑 `issue-run.mjs free-worktree --ledger <台账> --item <ref>`，删掉上一个 KEEL run 占着 PR 分支的 worktree（只删干净、HEAD 等于 PR head 的；保留本地分支）。不删的话 `keel_run` 传 `pr` 会直接 `stop`（KEEL「分支已在 … 检出」）。再用 `keel_run` 传 `pr=<PR 号>`（KEEL 的 `pr` 任务类型，检出已有分支，`scope` 同开工包）在同一 PR 上接着做；改完回到验收点重新写 `awaiting_acceptance`。
+- **通过**：所有车道都调 `pr_ready`，`authorization_source` 用台账里的授权原话；成功后写 `--state ready --pr <号> --head <同一 sha>`，再把 done 门答 `wait`，KEEL 看到已交接（交接车道）或可合并（personal 车道）就收工。head 和验收时不一致会被拒收：那说明验收后又改了代码，要回到验收点重新写 `awaiting_acceptance`。
+- **要改**：先跑 `issue-run.mjs free-worktree --ledger <台账> --item <ref>`，删掉上一个 KEEL run 占着 PR 分支的 worktree（只删 KEEL 建的 `<主目录>/.worktrees/keel-*`，并且要干净、HEAD 等于 PR head；保留本地分支；KEEL worktree 里被 gitignore 的构建产物会一起删掉）。占着分支的不是 KEEL 建的 worktree 时拒绝，写 `blocked_user`。不删的话 `keel_run` 传 `pr` 会直接 `stop`（KEEL「分支已在 … 检出」）。再用 `keel_run` 传 `pr=<PR 号>`（KEEL 的 `pr` 任务类型，检出已有分支，`scope` 同开工包）在同一 PR 上接着做；改完回到验收点重新写 `awaiting_acceptance`。
 
 ## 范围或验收标准必须改
 

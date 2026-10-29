@@ -12,8 +12,10 @@ import { isMain, parseArgs } from './lib/common.mjs';
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 /** owner 的验收点：KEEL 只差把 Draft 转正式（PraiseZhu/approve-exec#77）。 */
+// PR 是 Draft、CI 干净时 KEEL 对三种车道都给 `mark_ready`（Project Keel src/shared/lanes.ts `allowedActions`），
+// done 门因此停在 wait / stop，缺项只剩这一条；交接车道的 `pr_ready` 收口只在 PR 已不是 Draft 时出现。
 export const ACCEPTANCE_POINT =
-  'KEEL 只差转 Ready：交接车道是 `next` 让你调 `pr_ready`，其他车道是 done 门只剩 `pr_status 是 mark_ready`。这时 PR 还是 Draft、CI 全绿、非作者审查已通过';
+  'KEEL 只差转 Ready：done 门（`next.kind` 是 `decide`、`gate_id` 是 `done`）的缺项只剩一条 `pr_status 是 mark_ready`。三种车道都一样，这时 PR 还是 Draft、CI 全绿、非作者审查已通过';
 /** owner 结束本轮只有这四种情况；别的时候一直照 `next` 做。 */
 export const END_TURN_STATES = Object.freeze(['awaiting_acceptance', 'ready', 'needs_lead', 'blocked_user']);
 
@@ -74,7 +76,8 @@ export function renderIssueHandoff({ plan, item, leadSessionId, ledgerPath = '<�
     '2. 之后只照 KEEL 返回的 `next` 推进，一直做到第 3 节的验收点。你是无人值守的 owner：KEEL 手册里让你停下的地方按下面做，自己处理，不找 lead，也不找用户。',
     `   - \`next\` 让你调 \`pr_open\`：加 \`draft: true\`，\`authorization_source\` 填「${auth}」。任何车道都先开 Draft。`,
     '   - `next` 是等待（`keel_wait` 等）：等完照新的 `next` 接着做。在等 CI 不是结束本轮的理由。',
-    '   - `next.kind` 是 `decide`：自己答。拿不准先问 KEEL 的 `jev`；低于执行线时取改动最小、可撤回的选项（KEEL 手册第 9 条）。done 门缺证据选 `revise`，验证没过选 `retry_verify`，不选 `waive`：豁免要用户原话，你没有。',
+    '   - `next.kind` 是 `decide`：自己答。done 门缺项只剩 `pr_status 是 mark_ready` 就是验收点，不答这个门，按第 3 节写 checkpoint；缺项是在等 CI（如 `pr_status 是 wait_for_ci`）答 `wait`；缺 SC 证据选 `revise`；验证没过选 `retry_verify`；不选 `waive`：豁免要用户原话，你没有。其他门拿不准先问 KEEL 的 `jev`；低于执行线时取改动最小、可撤回的选项（KEEL 手册第 9 条）。',
+    '   - PR 已经不是 Draft（例如 `next` 让你调 `pr_ready`）：不调，先 `gh pr ready <PR 号> --undo` 转回 Draft，再接着做。',
     '   - `next.kind` 是 `stop`：分支被别的 worktree 占着就跑第 3 节的 `free-worktree`，再调一次；别的原因写 `blocked_user`。',
     '3. 下面的待定问题，以及执行中遇到的方案选择，先问 KEEL 的 `jev`；把结论写回子 issue（「已定 YYYY-MM-DD：结论」）：',
     pending,
@@ -95,7 +98,7 @@ export function renderIssueHandoff({ plan, item, leadSessionId, ledgerPath = '<�
     '`--sc` 每条 SC 一行：KEEL 判通过的写 `pass`，上面第 5 条的黑盒验收项写 `manual`；还有没通过的就没到验收点。',
     '',
     `lead 会用 \`send_to_session\` 回你一条裁决：`,
-    `- 「通过」：调 KEEL 的 \`pr_ready\`，\`authorization_source\` 填「${auth}」；成功后写 \`--state ready --pr <PR 号> --head <同一 sha>\`。不是交接车道的，再把 done 门答 \`wait\`，KEEL 看到可合并就收工。写完结束。`,
+    `- 「通过」：调 KEEL 的 \`pr_ready\`，\`authorization_source\` 填「${auth}」；成功后写 \`--state ready --pr <PR 号> --head <同一 sha>\`，再把 done 门答 \`wait\`，KEEL 看到已交接或可合并就收工。写完结束。`,
     '- 「要改」：先释放上一个 KEEL run 占着 PR 分支的 worktree，再用 `keel_run` 传 `pr=<PR 号>`（`scope` 同上）在同一 PR 上接着做；改完回到验收点，重新写 `--state awaiting_acceptance`：',
     '',
     '```sh',

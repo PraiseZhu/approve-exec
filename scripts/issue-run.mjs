@@ -30,7 +30,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hashObject, isMain, nowIso, parseArgs, readJson, writeJsonAtomic } from './lib/common.mjs';
 import { withLock } from './lib/state-lock.mjs';
@@ -431,10 +431,6 @@ export function checkpoint({ ledger, plan, ref, state, pr, head, sc, keelRun, la
   return { ok: true, state: item.state, ref, checkpoint_seq: item.checkpoint_seq };
 }
 
-function laneIsHandoff(lane) {
-  return /handoff/.test(String(lane ?? ''));
-}
-
 export function verdict({ ledger, ref, pass, revise, check, now }) {
   const item = itemOf(ledger, ref);
   expectState(item, ['awaiting_acceptance'], 'verdict');
@@ -447,9 +443,8 @@ export function verdict({ ledger, ref, pass, revise, check, now }) {
     }
     item.verdicts.push({ at: now, verdict: 'pass', head: cp.head, check_at: check.checked_at ?? null });
     move(item, 'accepted', now, { verdict: 'pass' });
-    // 所有车道都是 Draft 进验收点（#77），通过后一律由 owner 调 pr_ready 转正式。
-    const ready = `现在调 KEEL 的 pr_ready，authorization_source 填「${ledger.authorization_source}」；成功后写 checkpoint --state ready --pr ${cp.pr} --head ${cp.head}`
-      + (laneIsHandoff(cp.lane) ? '' : '；再把 done 门答 wait，KEEL 看到可合并就收工');
+    // 所有车道都是 Draft 进验收点、停在 done 门（#77）：通过后一律由 owner 调 pr_ready 转正式，再答 done 门 wait 收工。
+    const ready = `现在调 KEEL 的 pr_ready，authorization_source 填「${ledger.authorization_source}」；成功后写 checkpoint --state ready --pr ${cp.pr} --head ${cp.head}，再把 done 门答 wait，KEEL 看到已交接或可合并就收工`;
     return {
       ok: true, state: item.state, ref, target_session_id: item.session_id,
       owner_message: `批准执行验收：${date} ${ref} 通过（head ${cp.head}）。${ready}。写完就结束本轮。`,
@@ -510,12 +505,12 @@ function readPrBranch(gh, item, pr, ref) {
   return { data, branch, prHead };
 }
 
-/** PR 分支在主目录以外的 worktree；分支在主目录检出时拒绝（不能替用户切走主目录）。 */
+/** 主目录与 PR 分支在主目录以外的 worktree；分支在主目录检出时拒绝（不能替用户切走主目录）。 */
 function branchWorktree(git, repoDir, branch, ref, action) {
   const entries = parseWorktrees(git(['-C', repoDir, 'worktree', 'list', '--porcelain']));
   const main = entries[0]?.worktree ?? null;
   if (entries[0]?.branch === `refs/heads/${branch}`) reject(`${ref} 的分支 ${branch} 在主目录 ${main} 检出，不${action}：交给用户切走后再跑`);
-  return entries.find((e) => e.branch === `refs/heads/${branch}` && e.worktree !== main) ?? null;
+  return { main, wt: entries.find((e) => e.branch === `refs/heads/${branch}` && e.worktree !== main) ?? null };
 }
 
 /** 删一个干净、HEAD 等于 PR head 的 worktree；有未提交改动或本地比 PR 新时拒绝。 */
@@ -536,8 +531,14 @@ export function freeWorktree({ ledger, plan, ref, gh, git = gitRunner(), now }) 
   if (!pr) reject(`${ref} 还没有写过 awaiting_acceptance，台账里没有 PR 号，没有要释放的 worktree`);
   const repoDir = planItemOf(plan, ref).keel_run.repo_dir;
   const { branch, prHead } = readPrBranch(gh, item, pr, ref);
-  const wt = branchWorktree(git, repoDir, branch, ref, '释放');
+  const { main, wt } = branchWorktree(git, repoDir, branch, ref, '释放');
   if (!wt) return { ok: true, freed: false, ref, branch };
+  // 只删 KEEL 自己建的（<主目录>/.worktrees/keel-<run>，KEEL src/main/tools/keel.ts materializeRun）：
+  // 别人手工建的 worktree 可能放着被 gitignore 的本地文件，git worktree remove 会一并删掉。
+  const keelPrefix = join(main, '.worktrees', 'keel-');
+  if (!wt.worktree.startsWith(keelPrefix)) {
+    reject(`${ref} 占着分支 ${branch} 的 worktree ${wt.worktree} 不是 KEEL 建的（不在 ${keelPrefix}* 下），不释放：写 blocked_user 交给用户处理`);
+  }
   removeCleanWorktree(git, repoDir, wt, prHead, ref, '释放');
   move(item, item.state, now, { freed_worktree: wt.worktree });
   return { ok: true, freed: true, ref, branch, worktree: wt.worktree };
@@ -553,7 +554,7 @@ export function cleanup({ ledger, plan, ref, gh, checks, git = gitRunner(), now 
   if (prHead !== item.checkpoint.head) reject(`${ref} 的 PR head 现在是 ${prHead}，验收通过的是 ${item.checkpoint.head}：新提交没验收过，不清理`);
   const ci = ciVerdict(checks, item.repo, item.checkpoint.pr);
   if (!ci.ok) reject(`${ref} 的 PR #${item.checkpoint.pr} 当前 CI 不是全绿（${ci.detail}），不清理`);
-  const wt = branchWorktree(git, repoDir, branch, ref, '清理');
+  const { wt } = branchWorktree(git, repoDir, branch, ref, '清理');
   const record = { branch, pr_head: prHead, worktree: null, branch_deleted: false, at: now };
   if (wt) {
     removeCleanWorktree(git, repoDir, wt, prHead, ref, '清理');
