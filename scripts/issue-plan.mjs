@@ -122,8 +122,8 @@ export function expandBraces(pattern) {
   return m[1].split(',').flatMap((alt) => expandBraces(head + alt.trim() + tail));
 }
 
-// 扩展名要以字母开头：`a.mjs`、`x.d.ts` 算路径，`v1.0`、`1.2.3` 这类版本号不算。
-const isPathLike = (t) => !/\s/.test(t) && (t.includes('/') || t.includes('*') || /\.[A-Za-z][A-Za-z0-9]*$/.test(t));
+// 扩展名里要有字母：`a.mjs`、`x.d.ts`、`archive.7z` 算路径，`v1.0`、`1.2.3` 这类版本号不算。
+const isPathLike = (t) => !/\s/.test(t) && (t.includes('/') || t.includes('*') || /\.(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]+$/.test(t));
 const ticks = (s) => [...s.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim());
 
 /** 列表项按反引号外的第一个冒号拆成「文件或模块」格与说明；没有冒号时 head 为 null。 */
@@ -184,8 +184,13 @@ export function parseDeps(text, selfRepo, selfRef) {
   const hard = [];
   const after = [];
   const body = String(text ?? '').trim();
-  const asides = [...body.matchAll(/[（(]([^（）()]*)[）)]/g)].map((m) => m[1]);
-  const main = body.replace(/[（(][^（）()]*[）)]/g, ' ');
+  // 从最里层起逐层取出括号：「（不需要等 #12 合入（仅供参考））」先取「仅供参考」，再取「不需要等 #12 合入」。
+  const asides = [];
+  let main = body;
+  const INNERMOST = /[（(]([^（）()]*)[）)]/g;
+  while (INNERMOST.test(main)) {
+    main = main.replace(INNERMOST, (_, inner) => { asides.push(inner); return ' '; });
+  }
   const clauses = [
     ...main.split(/[；;。\n，,]/).map((c) => ({ c, aside: false })),
     ...asides.flatMap((a) => a.split(/[；;。\n，,]/)).map((c) => ({ c, aside: true })),

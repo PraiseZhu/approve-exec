@@ -204,3 +204,12 @@ test('SC1 回归（真实 #70 依赖原文）：括号里只是解释、提到�
   );
   assert.throws(() => parseDeps('参考 #11 的写法（见 docs）', REPO, `${REPO}#13`), /判断不了.*参考 #11 的写法/, '括号外判断不了仍拒绝');
 });
+
+test('SC3 反例（review-pr71 第 4 轮）：扩展名以数字开头但含字母的文件算路径', () => {
+  assert.deepEqual(toScope('- Update `archive.7z` after generation', 'acme/app#20'), ['archive.7z']);
+  assert.throws(() => toScope('- Bump to `1.2.3`', 'acme/app#20'), /这一行没有反引号包住的文件路径/);
+});
+
+test('SC1 反例（review-pr71 第 4 轮）：嵌套括号逐层拆，括号外的硬依赖不丢', () => {
+  assert.deepEqual(parseDeps('等 #11 合进 main 后开工（不需要等 #12 合入（仅供参考））', REPO, `${REPO}#13`), { hard: [`${REPO}#11`], after: [] });
+});
