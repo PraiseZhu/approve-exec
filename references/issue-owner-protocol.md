@@ -16,7 +16,7 @@
 pending → claimed → dispatched → awaiting_acceptance ─┬─ 通过 → accepted → ready → cleaned → archived
                                      ▲                └─ 要改 → revising ─┘（不设上限；没有进展 → blocked_user）
 dispatch_unknown：派发回执不明，lead 核实后 release
-claimed / dispatched / revising / needs_lead：会话失联时 lead 核实后 release 放回 pending 重派（已有 PR 的接着那个 PR 做）
+claimed / dispatched / revising / needs_lead：会话失联时 lead 核实后 release 放回 pending 重派（台账记着 PR、或 GitHub 上有写着「任务 issue：<ref>」的开着的 PR 时，接着那个 PR 做）
 needs_lead：范围或验收标准必须改，等 lead 定（owner 写），lead 定了以后 unblock
 blocked_user：等用户（owner 写，或判要改没有进展），用户处理后 lead unblock
 closed：计划时子 issue 已关闭

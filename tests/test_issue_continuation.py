@@ -169,6 +169,21 @@ class LeadCloseoutTests(Base):
                 self.assertEqual(len(client.calls), base + 1)
 
 
+class AcceptedStallTests(Base):
+    def test_78_sc2_accepted_stall_gives_executable_steps_not_release(self):
+        self.ledger(item("o/r#11", "accepted", checkpoint={"pr": 5, "head": "a" * 40}))
+        client = FakeClient()
+        gh = FakeGitHub(heads={5: "a" * 40})
+        self.assertEqual(self.run_once(client, gh)["status"], "monitoring")
+        res = self.run_once(client, gh, now=NOW + 1801)
+        self.assertEqual(len(res["signals"]), 1)
+        msg = client.calls[0]["message"]
+        self.assertIn("[停滞] o/r#11：状态 accepted", msg)
+        self.assertIn("checkpoint --state ready", msg)
+        self.assertIn("告诉用户", msg)
+        self.assertNotIn("release", msg, "release 不收 accepted（review-pr81）")
+
+
 class BlockedAndTerminalTests(Base):
     def test_sc8_blocked_user_wakes_lead_with_reason(self):
         self.ledger(item("o/r#11", "blocked_user", blocked={"seq": 2, "at": ISO_NOW, "reason": "需要管理员建规则集"}))

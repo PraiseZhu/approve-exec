@@ -35,6 +35,10 @@ from cindy_script import DuplexClient  # noqa: E402
 SCHEMA = "issue-watch-v1"
 IN_PROGRESS = {"dispatched", "revising", "accepted"}
 # 停在这些状态时下一步是 lead 的；超过阈值没动再叫一次（#78）。
+# 停在 accepted（lead 判了通过、owner 还没转正式）的停滞：工作已做完，不重派（release 不收 accepted，review-pr81）。
+ACCEPTED_STALL = ("lead 判了通过、owner 还没转正式：会话还在就把台账里的通过消息用 send_to_session 再发一次；"
+                  "PR 已转正式且 head 是验收通过的那个，就由 lead 写 issue-run checkpoint --state ready 接着收尾；"
+                  "会话不在、PR 还是 Draft，告诉用户")
 LEAD_PENDING = {
     "claimed": "prepare 之后没 bind：核对 send_to_session 回执与会话列表，建出了会话就 issue-run bind，没建出就 issue-run release --evidence",
     "awaiting_acceptance": "待验收还没裁决：跑 accept-check --stage acceptance，再 issue-run verdict，把 owner_message 发回 owner 会话",
@@ -193,7 +197,8 @@ def collect(ledger: dict[str, Any], gh: Any, now: float, stalled_after: int, hea
                 marker = max(marker, float(seen["since"]))
             if now - marker >= stalled_after and not (pr and gh.ci_pending(item["repo"], pr)):
                 signals.append({"key": f"stalled:{ref}:{int(marker)}", "kind": "stalled", "ref": ref,
-                                "detail": f"状态 {state}，{int((now - marker) // 60)} 分钟没有进展"})
+                                "detail": f"状态 {state}，{int((now - marker) // 60)} 分钟没有进展",
+                                **({"step": ACCEPTED_STALL} if state == "accepted" else {})})
     return signals
 
 

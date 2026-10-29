@@ -55,6 +55,9 @@ export function issue(number, title, body, { state = 'open', state_reason = null
 }
 
 /** 总 issue #10 下挂 A(#11)、B(#12)、C(#13，等 A 合入)；D(#14) 与 A 并行开发、A 先合。 */
+/** 某仓开着的 PR 列表（第 page 页）的夹具键。 */
+export const openPullsKey = (page = 1) => `api repos/${REPO}/pulls?state=open&per_page=100&page=${page}`;
+
 export function parentFixture({ aState = 'open', aReason = null, cBody, extra = {} } = {}) {
   const a = issue(11, '[子1/4] 同步状态读取：从本地缓存读', childBody());
   const b = issue(12, '[子2/4] 同步状态图标', childBody({ scope: ['- `src/sync/icon.ts`：图标', '- `tests/sync/icon.test.ts`：图标测试'] }));
@@ -72,6 +75,8 @@ export function parentFixture({ aState = 'open', aReason = null, cBody, extra = 
     [`api repos/${REPO}/issues/11/sub_issues?per_page=100`]: [],
     'api user': { login: LOGIN },
     ...Object.fromEntries([10, 11, 12, 13, 14].map((n) => [commentsKey(n), []])),
+    // 重派前查已开的 PR（#78）：默认一个都没有。
+    [openPullsKey()]: [],
     ...extra,
   };
 }

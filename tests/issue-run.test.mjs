@@ -7,9 +7,9 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { buildPlan, readRoot } from '../scripts/issue-plan.mjs';
-import { init, next, prepare, bind, release, checkpoint, verdict, unblock, freeWorktree, cleanup, archived, runStatus, status, sessionTitle, projectName, sessionIdFrom, activeClaims, REQUEST_KEYS, RunError } from '../scripts/issue-run.mjs';
+import { init, next, prepare, bind, release, checkpoint, verdict, unblock, freeWorktree, soleOpenPr, cleanup, archived, runStatus, status, sessionTitle, projectName, sessionIdFrom, activeClaims, REQUEST_KEYS, RunError } from '../scripts/issue-run.mjs';
 import { hashObject } from '../scripts/lib/common.mjs';
-import { REPO, LOGIN, commentsKey, parentFixture, writeFixture, ghFrom } from './fixtures/issues/build.mjs';
+import { REPO, LOGIN, commentsKey, openPullsKey, parentFixture, writeFixture, ghFrom } from './fixtures/issues/build.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = join(root, 'scripts/issue-run.mjs');
@@ -613,4 +613,29 @@ test('#78 SC4 release 拒绝已到验收点及之后的状态；CLI 不带 --evi
   const cli = spawnSync(process.execPath, [CLI, 'release', '--ledger', d.ledgerPath, '--item', A, '--now', NOW, '--gh-fixture', d.ghPath], { encoding: 'utf8' });
   assert.equal(cli.status, 2);
   assert.match(cli.stderr, /需要 --evidence/);
+});
+
+test('#78 SC4 反例（review-pr81）：开了 PR、还没写验收点就失联 → 重派按 GitHub 上「任务 issue：」找到的唯一 PR 接手，free-worktree 也认它；多个时拒绝', () => {
+  const s = dispatched();
+  s.fixture[openPullsKey()] = [
+    { number: 7, body: `任务 issue：${A}\nCloses ${A}` },
+    { number: 8, body: `任务 issue：${REPO}#110` },
+    { number: 9, body: '没有任务行' },
+  ];
+  release({ ledger: s.ledger, ref: A, evidence: '会话已被删', gh: s.gh, now: NOW });
+  assert.equal(s.ledger.items[A].checkpoint, null, '失联前没写过验收点');
+  const again = prepare({ ledger: s.ledger, plan: s.plan, ref: A, leadSessionId: 'lead-1', gh: s.gh, now: NOW });
+  assert.match(again.request.message, /^> 接手：上一个 owner 会话失联，PR #7 已经开着。不要开新 PR/);
+  assert.equal(s.ledger.items[A].takeover_pr, 7);
+
+  const r = gitRepoWithWorktree();
+  s.fixture[`api repos/${REPO}/pulls/7`] = { head: { ref: 'feat/x', sha: r.head }, state: 'open', draft: true };
+  s.plan.items.find((i) => i.ref === A).keel_run.repo_dir = r.repo;
+  bind({ ledger: s.ledger, ref: A, claimId: again.claim_id, result: { target_session_id: 'owner-2' }, gh: s.gh, now: NOW });
+  assert.equal(freeWorktree({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, now: NOW }).freed, true, '没有验收点时用接手的 PR 号释放旧 worktree');
+
+  s.fixture[openPullsKey()].push({ number: 12, body: `任务 issue：${A}` });
+  assert.throws(() => soleOpenPr(s.gh, REPO, A), /有 2 个开着的 PR 写着「任务 issue：acme\/app#11」（#7、#12）/);
+  const first = dispatched();
+  assert.doesNotMatch(prepare({ ledger: first.ledger, plan: first.plan, ref: `${REPO}#12`, leadSessionId: 'lead-1', gh: first.gh, now: NOW }).request.message, /^> 接手/, '第一次派发不查也不加接手说明');
 });

@@ -26,7 +26,7 @@ lead 的执行框架只能是 claude-code 或 codex：KEEL 只给这两种配了
    - **需要用户**：把台账里的原因汇总告诉用户；用户处理完后 `unblock`，再通知 owner 继续。
    - **需要 lead**（owner 写了 `needs_lead`：范围或验收标准必须改才能做完）：按原因定。能在范围内换做法就 `issue-run.mjs unblock --item <ref> --note "<结论>"`，把结论用 `send_to_session` 发给 owner 会话。确实要改范围或验收标准时告诉用户：台账锁定了计划，改范围要重新出计划。owner 的其他选择由它自己问 `jev` 定，不回来找 lead。
    - **可派**：回到第 3 步。
-   - **停滞**：查 owner 会话还在不在、卡在哪。还在就 `send_to_session` 催一次；已经不在（崩了、被删了）就 `issue-run.mjs release --item <ref> --evidence "<怎么核实的>"` 放回 `pending`，回到第 4 步重派。台账里已有 PR 时，重派的开工包开头会写明接着那个 PR 做，不开新 PR。
+   - **停滞**：查 owner 会话还在不在、卡在哪。还在就 `send_to_session` 催一次；已经不在（崩了、被删了）就 `issue-run.mjs release --item <ref> --evidence "<怎么核实的>"` 放回 `pending`，回到第 4 步重派。台账里记着 PR、或 GitHub 上有正文写着「任务 issue：<ref>」的开着的 PR 时，重派的开工包开头会写明接着那个 PR 做，不开新 PR（有多个这样的 PR 时 `prepare` 拒绝，先关掉多余的）。停在 `accepted` 的不 release：按消息做（重发通过消息；PR 已转正式且 head 是验收通过的那个就由 lead 写 `checkpoint --state ready`；否则告诉用户）。
    - **待收尾**：owner 写了 `ready`，做第 7 步。
    - **lead 未处理**：停在 `claimed`（prepare 后没 bind）、`awaiting_acceptance`（没裁决）或 `cleaned`（没归档）超过阈值，消息里写了该做哪一步，照做。
 7. **Ready 后收尾。** owner 写了 `ready` checkpoint 后：`accept-check.mjs --stage ready` 复核（非 Draft、当前 head 必需 CI 全绿）→ `issue-run.mjs cleanup --item <ref>`（删本地 KEEL worktree 与本地分支，不删远端；PR 还是 Draft、PR head 不是验收通过的那个、当前 CI 不是全绿、有未提交改动、本地比 PR 新、分支在主目录检出时都拒绝）→ cindy_helper 的 `archive_sessions` 归档 owner 会话 → 把工具回执存成文件后 `issue-run.mjs archived --item <ref> --result <回执文件>`。

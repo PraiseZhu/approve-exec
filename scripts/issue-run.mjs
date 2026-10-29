@@ -286,9 +286,10 @@ export function prepare({ ledger, ledgerPath, plan, ref, leadSessionId, gh, now 
   const planItem = planItemOf(plan, ref);
   const title = sessionTitle(planItem, now);
   const handoff = renderIssueHandoff({ plan, item: planItem, leadSessionId, ...(ledgerPath ? { ledgerPath: resolve(ledgerPath) } : {}), scriptsDir: SCRIPTS_DIR });
+  const takeover = wasReleased(item) ? item.checkpoint?.pr ?? soleOpenPr(gh, item.repo, ref) : null;
   const request = {
     title,
-    message: takeoverNote(item) + handoff,
+    message: takeoverNote(takeover) + handoff,
     working_dir: planItem.keel_run.repo_dir,
     use_worktree: false,
   };
@@ -303,18 +304,42 @@ export function prepare({ ledger, ledgerPath, plan, ref, leadSessionId, gh, now 
     reject(`${ref} 与另一个 lead 同时认领，按评论先后让给 claim ${winner?.claim_id ?? '未知'}；本台账未派发`);
   }
   ledger.lead_session_id = leadSessionId;
+  if (takeover) item.takeover_pr = Number(takeover);
   item.claim_id = claimId;
   item.session_title = title;
   move(item, 'claimed', now, { claim_id: claimId });
   return { ok: true, claimed: true, claim_id: claimId, request };
 }
 
+/** release 放回过的子 issue：重派前要查上一个会话有没有已经开出 PR（#78）。 */
+function wasReleased(item) {
+  return item.history.some((h) => h.to === 'pending');
+}
+
+const OPEN_PR_PAGES = 10;
+
+/**
+ * 上一个会话开了 PR、还没写第一个验收点就失联时，台账里没有 PR 号（review-pr81）：
+ * 到 GitHub 上找正文写着「任务 issue：<ref>」的开着的 PR。一个都没有返回 null，多个就拒绝，交给 lead 处理。
+ */
+export function soleOpenPr(gh, repo, ref) {
+  const hits = [];
+  for (let page = 1; page <= OPEN_PR_PAGES; page++) {
+    const batch = gh(['api', `repos/${repo}/pulls?state=open&per_page=100&page=${page}`]);
+    if (!Array.isArray(batch)) reject(`读 ${repo} 开着的 PR 返回的不是数组（第 ${page} 页）`);
+    hits.push(...batch.filter((pr) => String(pr.body ?? '').split('\n').some((l) => l.trim() === `任务 issue：${ref}`)).map((pr) => pr.number));
+    if (batch.length < 100) break;
+    if (page === OPEN_PR_PAGES) reject(`${repo} 开着的 PR 超过 ${OPEN_PR_PAGES * 100} 个，无法确认 ${ref} 有没有已开的 PR`);
+  }
+  if (hits.length > 1) reject(`${ref} 有 ${hits.length} 个开着的 PR 写着「任务 issue：${ref}」（${hits.map((n) => `#${n}`).join('、')}）：一个子 issue 只能有一个 PR，先关掉多余的再派`);
+  return hits[0] ?? null;
+}
+
 /**
  * 会话失联后重派（#78）：上一个会话已经开了 PR，新会话要接着那个 PR 做，不能再开一个（1 子 issue = 1 PR）。
- * 台账里还留着上一个会话写的 PR 号，就在开工包前面加一节接手说明。
+ * 有 PR 号（台账记的，或 GitHub 上找到的唯一一个）就在开工包前面加一节接手说明。
  */
-function takeoverNote(item) {
-  const pr = item.checkpoint?.pr;
+function takeoverNote(pr) {
   if (!pr) return '';
   return [
     `> 接手：上一个 owner 会话失联，PR #${pr} 已经开着。不要开新 PR：先跑第 3 节的 free-worktree 释放旧会话占着分支的 worktree，`,
@@ -556,7 +581,8 @@ function removeCleanWorktree(git, repoDir, wt, prHead, ref, action) {
 export function freeWorktree({ ledger, plan, ref, gh, git = gitRunner(), now }) {
   const item = itemOf(ledger, ref);
   expectState(item, ['dispatched', 'revising'], 'free-worktree');
-  const pr = item.checkpoint?.pr;
+  // 重派接手时还没写过验收点，用重派时找到的 PR 号（#78）。
+  const pr = item.checkpoint?.pr ?? item.takeover_pr;
   if (!pr) reject(`${ref} 还没有写过 awaiting_acceptance，台账里没有 PR 号，没有要释放的 worktree`);
   const repoDir = planItemOf(plan, ref).keel_run.repo_dir;
   const { branch, prHead } = readPrBranch(gh, item, pr, ref);
