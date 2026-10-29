@@ -8,7 +8,7 @@
 //     (--authorization <授权原话> | --entry <入口消息原文>) [--source chat|script]
 //     --out <plan.json> [--now <ISO>] [--gh-fixture <夹具.json>（测试用，代替 gh）]
 // 输出：stdout 一行 JSON 摘要；exit 0 成功 / 2 拒绝（stderr 点名 issue 与原因，不产出计划文件）。
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { isAbsolute } from 'node:path';
 import { hashObject, isMain, nowIso, parseArgs, writeJsonAtomic } from './lib/common.mjs';
@@ -123,15 +123,32 @@ export function expandBraces(pattern) {
 }
 
 const isPathLike = (t) => !/\s/.test(t) && (t.includes('/') || t.includes('*') || /\.[A-Za-z0-9]+$/.test(t));
+const ticks = (s) => [...s.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim());
 
-/** 范围段 → scope glob 列表。每个列表项至少要有一个反引号包住的路径或 glob。 */
+/** 列表项按反引号外的第一个冒号拆成「文件或模块」格与说明。 */
+function splitHead(line) {
+  let inTick = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '`') inTick = !inTick;
+    else if (!inTick && (ch === '：' || ch === ':')) return [line.slice(0, i), line.slice(i + 1)];
+  }
+  return [line, ''];
+}
+
+/**
+ * 范围段 → scope glob 列表。模板格式是 `- \`<文件或模块>\`：<改什么>`：冒号前那一格里的反引号内容都当路径
+ * （`Makefile` 这类无扩展名文件也收）；说明里只收像路径的词（含 `/`、`*` 或扩展名），
+ * `TEST_FILES`、`checkpoint` 这类标识符不收。每个列表项至少要有一个路径。
+ */
 export function toScope(text, ref) {
   const scope = [];
   let bullets = 0;
   for (const line of String(text ?? '').split('\n')) {
     if (!/^\s*[-*]\s+/.test(line)) continue;
     bullets += 1;
-    const tokens = [...line.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim()).filter(isPathLike);
+    const [head, rest] = splitHead(line.replace(/^\s*[-*]\s+/, ''));
+    const tokens = [...ticks(head).filter((t) => t && !/\s/.test(t)), ...ticks(rest).filter(isPathLike)];
     if (tokens.length === 0) {
       reject(`${ref} 「范围」这一行没有反引号包住的文件路径或 glob（例如测试要写成 \`tests/**/*.test.mjs\`）：${line.trim()}`);
     }
@@ -147,18 +164,21 @@ export function toScope(text, ref) {
 
 const DEP_REF_RE = /(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?#(\d+)/g;
 
-/** 依赖段 → { hard: 要等它合入才开工, after: 只是排在它后面合 }。判断不了的句子直接拒绝。 */
+/**
+ * 依赖段 → { hard: 要等它合入才开工, after: 只是排在它后面合 }。按句号、分号和逗号拆成小句逐句判断，
+ * 「与 #11 并行开发，等 #12 合进 main 后开工」只把 #12 算开工依赖。判断不了的小句直接拒绝。
+ */
 export function parseDeps(text, selfRepo, selfRef) {
   const hard = [];
   const after = [];
   const body = String(text ?? '').trim();
-  for (const clause of body.split(/[；;。\n]/)) {
+  for (const clause of body.split(/[；;。\n，,]/)) {
     const refs = [...clause.matchAll(DEP_REF_RE)]
       .map((m) => `${m[1] ?? selfRepo}#${m[2]}`)
       .filter((r) => r !== selfRef);
     if (refs.length === 0) continue;
     let bucket;
-    if (/等/.test(clause) && /(合进|合入)/.test(clause) && /开工/.test(clause)) bucket = hard;
+    if (/等/.test(clause) && /(合进|合入)/.test(clause)) bucket = hard;
     else if (/先(合|进)/.test(clause)) bucket = after;
     else if (/并行/.test(clause)) bucket = null;
     else reject(`${selfRef} 「依赖」这一句判断不了是「等合入再开工」还是「只是先后合」：${clause.trim()}`);
@@ -282,10 +302,26 @@ export function buildPlan({ root, children, repoDirs, lead, authorization, entry
 
 // github
 
+/** 夹具里的评论写入：追加到「读评论」那一项，后续读取能读到。纯函数，CLI 夹具与测试共用。 */
+export function fixturePost(fixture, args) {
+  const path = args[3];
+  const body = (args.find((a) => a.startsWith('body=')) ?? 'body=').slice(5);
+  const key = `api ${path}?per_page=100`;
+  const list = Array.isArray(fixture[key]) ? fixture[key] : [];
+  const comment = { body, html_url: `https://github.com/${path.replace(/^repos\//, '')}#fixture-${list.length + 1}` };
+  fixture[key] = [...list, comment];
+  return comment;
+}
+
 export function ghRunner(fixturePath) {
   if (fixturePath) {
-    const fixture = JSON.parse(readFileSync(fixturePath, 'utf8'));
     return (args) => {
+      const fixture = JSON.parse(readFileSync(fixturePath, 'utf8'));
+      if (args[1] === '-X' && args[2] === 'POST') {
+        const out = fixturePost(fixture, args);
+        writeFileSync(fixturePath, JSON.stringify(fixture));
+        return out;
+      }
       const key = args.join(' ');
       if (!Object.hasOwn(fixture, key)) throw new Error(`gh 夹具缺少: ${key}`);
       return fixture[key];

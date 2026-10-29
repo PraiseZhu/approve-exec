@@ -6,7 +6,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { buildPlan, readRoot } from '../scripts/issue-plan.mjs';
-import { init, next, prepare, bind, release, sessionTitle, projectName, sessionIdFrom, REQUEST_KEYS, RunError } from '../scripts/issue-run.mjs';
+import { init, next, prepare, bind, release, sessionTitle, projectName, sessionIdFrom, activeClaims, REQUEST_KEYS, RunError } from '../scripts/issue-run.mjs';
 import { REPO, parentFixture, writeFixture, ghFrom } from './fixtures/issues/build.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -25,8 +25,10 @@ function setup({ lead = 'claude-code', fixture = parentFixture(), source = 'chat
   writeFileSync(planPath, JSON.stringify(plan));
   init({ plan, planPath, ledgerPath, now: NOW });
   const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
-  return { ...fx, gh, plan, planPath, ledgerPath, ledger };
+  return { ...fx, fixture, gh, plan, planPath, ledgerPath, ledger };
 }
+
+const COMMENTS = `api repos/${REPO}/issues/10/comments?per_page=100`;
 
 test('SC5 派会话请求只有四个键：title / message / working_dir（主目录绝对路径）/ use_worktree=false', () => {
   const { ledger, plan, gh, repoDir } = setup();
@@ -58,28 +60,71 @@ test('SC6 同一子 issue 第二次 prepare 返回已认领，不生成第二个
   assert.equal(Object.hasOwn(second, 'request'), false);
 });
 
-test('SC6 bind 收到失败或未知回执 → dispatch_unknown，此后 prepare 拒绝；release 要求依据', () => {
-  const { ledger, plan, gh } = setup();
+test('SC6 bind 收到失败或未知回执 → dispatch_unknown，此后 prepare 拒绝；release 要求依据并发释放评论', () => {
+  const { ledger, plan, gh, fixture } = setup();
   const { claim_id } = prepare({ ledger, plan, ref: A, leadSessionId: 'lead-1', gh, now: NOW });
-  const res = bind({ ledger, ref: A, claimId: claim_id, result: { ok: false, errorCode: 'INVALID_ARGS' }, now: NOW });
+  const res = bind({ ledger, ref: A, claimId: claim_id, result: { ok: false, errorCode: 'INVALID_ARGS' }, gh, now: NOW });
   assert.equal(res.ok, false);
   assert.equal(ledger.items[A].state, 'dispatch_unknown');
   assert.throws(() => prepare({ ledger, plan, ref: A, leadSessionId: 'lead-1', gh, now: NOW }), (e) => e instanceof RunError && /结果未知/.test(e.message));
-  assert.throws(() => release({ ledger, ref: A, evidence: '', now: NOW }), /需要 --evidence/);
-  release({ ledger, ref: A, evidence: 'list_sessions 无同名会话；回执 errorCode=INVALID_ARGS 为派发前拒绝', now: NOW });
+  assert.throws(() => release({ ledger, ref: A, evidence: '', gh, now: NOW }), /需要 --evidence/);
+  release({ ledger, ref: A, evidence: 'list_sessions 无同名会话；回执 errorCode=INVALID_ARGS 为派发前拒绝', gh, now: NOW });
   assert.equal(ledger.items[A].state, 'pending');
+  assert.match(fixture[COMMENTS].at(-1).body, new RegExp(`^批准执行释放：2026-10-29 acme/app#11 claim ${claim_id}：list_sessions 无同名会话`));
+  assert.deepEqual(activeClaims(fixture[COMMENTS], A), [], '释放后不再算占用');
+  assert.equal(prepare({ ledger, plan, ref: A, leadSessionId: 'lead-1', gh, now: NOW }).claimed, true, '同一台账释放后可以重新认领');
 });
 
-test('bind 成功：记会话 id，给出总 issue 登记评论；认领号不对时拒绝', () => {
-  const { ledger, plan, gh } = setup();
+test('SC6 跨台账：另一份台账对同一子 issue prepare 时读到未释放的认领 / 登记评论就拒绝', () => {
+  const s = setup();
+  const first = prepare({ ledger: s.ledger, plan: s.plan, ref: A, leadSessionId: 'lead-1', gh: s.gh, now: NOW });
+  assert.equal(first.claimed, true);
+  assert.match(s.fixture[COMMENTS][0].body, new RegExp(`^批准执行认领：2026-10-29 acme/app#11 claim ${first.claim_id}`));
+  // 同一份计划、另一份台账（换会话、换机器重新「批准执行」）共用同一个总 issue 评论区。
+  const otherLedger = join(s.dir, 'ledger-b.json');
+  init({ plan: s.plan, planPath: s.planPath, ledgerPath: otherLedger, now: NOW });
+  const b = JSON.parse(readFileSync(otherLedger, 'utf8'));
+  assert.throws(() => prepare({ ledger: b, plan: s.plan, ref: A, leadSessionId: 'lead-2', gh: s.gh, now: NOW }),
+    (e) => e instanceof RunError && e.message.includes(`已有未释放的批准执行认领（claim ${first.claim_id}`));
+  bind({ ledger: s.ledger, ref: A, claimId: first.claim_id, result: { target_session_id: 's1' }, gh: s.gh, now: NOW });
+  assert.throws(() => prepare({ ledger: b, plan: s.plan, ref: A, leadSessionId: 'lead-2', gh: s.gh, now: NOW }), /已有未释放的批准执行/);
+  assert.equal(prepare({ ledger: b, plan: s.plan, ref: `${REPO}#12`, leadSessionId: 'lead-2', gh: s.gh, now: NOW }).claimed, true, '别的子 issue 不受影响');
+});
+
+test('activeClaims：只认本子 issue 的认领 / 登记，释放后清除；#110 不算 #11', () => {
+  const id1 = '11111111-1111-4111-8111-111111111111';
+  const id2 = '22222222-2222-4222-8222-222222222222';
+  const comments = [
+    { body: `批准执行认领：2026-10-29 acme/app#11 claim ${id1}（台账 x）`, html_url: 'u1' },
+    { body: `批准执行认领：2026-10-29 acme/app#110 claim ${id2}（台账 x）`, html_url: 'u2' },
+    { body: '随便一条评论' },
+  ];
+  assert.deepEqual(activeClaims(comments, A), [{ claim_id: id1, kind: '认领', url: 'u1' }]);
+  comments.push({ body: `批准执行释放：2026-10-29 acme/app#11 claim ${id1}：核实过`, html_url: 'u3' });
+  assert.deepEqual(activeClaims(comments, A), []);
+});
+
+test('bind 成功：记会话 id，在总 issue 发登记评论；认领号不对时拒绝', () => {
+  const { ledger, plan, gh, fixture } = setup();
   const { claim_id } = prepare({ ledger, plan, ref: A, leadSessionId: 'lead-1', gh, now: NOW });
-  assert.throws(() => bind({ ledger, ref: A, claimId: 'wrong', result: { target_session_id: 's1' }, now: NOW }), /认领号对不上/);
-  const res = bind({ ledger, ref: A, claimId: claim_id, result: { target_session_id: 's1', wake_kind: 'created' }, now: NOW });
+  assert.throws(() => bind({ ledger, ref: A, claimId: 'wrong', result: { target_session_id: 's1' }, gh, now: NOW }), /认领号对不上/);
+  const res = bind({ ledger, ref: A, claimId: claim_id, result: { target_session_id: 's1', wake_kind: 'created' }, gh, now: NOW });
   assert.equal(res.ok, true);
   assert.equal(ledger.items[A].state, 'dispatched');
-  assert.equal(res.root_comment, '批准执行登记：2026-10-29 acme/app#11 → 会话 s1（App-同步状态读取丨 1029）');
+  assert.equal(fixture[COMMENTS].at(-1).body, `批准执行登记：2026-10-29 acme/app#11 → 会话 s1（App-同步状态读取丨 1029）claim ${claim_id}`);
+  assert.ok(res.root_comment_url);
   assert.equal(sessionIdFrom({ ok: true, data: { target_session_id: 's2' } }), 's2');
   assert.equal(sessionIdFrom({ ok: true }), null);
+});
+
+test('bind 成功但登记评论发不出去：仍记 dispatched，返回错误与待补发正文', () => {
+  const { ledger, plan, gh } = setup();
+  const { claim_id } = prepare({ ledger, plan, ref: A, leadSessionId: 'lead-1', gh, now: NOW });
+  const failing = (args) => { if (args[2] === 'POST') throw new Error('HTTP 502'); return gh(args); };
+  const res = bind({ ledger, ref: A, claimId: claim_id, result: { target_session_id: 's1' }, gh: failing, now: NOW });
+  assert.equal(ledger.items[A].state, 'dispatched');
+  assert.equal(res.root_comment_error, 'HTTP 502');
+  assert.match(res.root_comment, /^批准执行登记：/);
 });
 
 test('next：依赖未关闭的排在 waiting，依赖关闭后才可派；依赖被关成「不做」也不放行', () => {

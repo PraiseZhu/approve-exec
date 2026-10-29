@@ -2,6 +2,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fixturePost } from '../../../scripts/issue-plan.mjs';
 
 export const REPO = 'acme/app';
 
@@ -63,6 +64,7 @@ export function parentFixture({ aState = 'open', aReason = null, cBody, extra = 
     [`api repos/${REPO}/issues/12`]: b,
     [`api repos/${REPO}/issues/13`]: c,
     [`api repos/${REPO}/issues/14`]: d,
+    [`api repos/${REPO}/issues/10/comments?per_page=100`]: [],
     ...extra,
   };
 }
@@ -72,6 +74,7 @@ export function standaloneFixture(body = childBody()) {
   return {
     [`api repos/${REPO}/issues/20`]: s,
     [`api repos/${REPO}/issues/20/sub_issues?per_page=100`]: [],
+    [`api repos/${REPO}/issues/20/comments?per_page=100`]: [],
   };
 }
 
@@ -85,8 +88,10 @@ export function writeFixture(fixture) {
   return { dir, repoDir, ghPath };
 }
 
+/** 内存版 gh：读取查夹具；发评论写回夹具（同一 fixture 对象），之后的读取能读到。 */
 export function ghFrom(fixture) {
   return (args) => {
+    if (args[1] === '-X' && args[2] === 'POST') return fixturePost(fixture, args);
     const key = args.join(' ');
     if (!Object.hasOwn(fixture, key)) throw new Error(`gh 夹具缺少: ${key}`);
     return fixture[key];

@@ -164,3 +164,14 @@ test('总 issue 没挂子 issue 时拒绝；已关闭的子 issue 标 closed', (
   fx[`api repos/${REPO}/issues/10/sub_issues?per_page=100`][1].state = 'closed';
   assert.equal(plan(fx).items.find((i) => i.ref === `${REPO}#12`).closed, true);
 });
+
+test('SC3 反例（review-pr71）：冒号前那一格的无扩展名文件也收进 scope', () => {
+  assert.deepEqual(toScope('- `Makefile`: build target', 'acme/app#20'), ['Makefile']);
+  assert.deepEqual(toScope('- `Dockerfile`、`LICENSE`：镜像与许可证', 'acme/app#20'), ['Dockerfile', 'LICENSE']);
+  assert.deepEqual(toScope('- 删除旧脚本：`scripts/a.mjs`、`TEST_FILES` 不改', 'acme/app#20'), ['scripts/a.mjs'], '冒号后的标识符不当路径');
+});
+
+test('SC1 反例（review-pr71）：「与 #11 并行开发，等 #12 合进 main 后开工」只把 #12 算开工依赖', () => {
+  assert.deepEqual(parseDeps('与 #11 并行开发，等 #12 合进 main 后开工', REPO, `${REPO}#13`), { hard: [`${REPO}#12`], after: [] });
+  assert.deepEqual(parseDeps('等 #11 合进 main，再开工', REPO, `${REPO}#13`), { hard: [`${REPO}#11`], after: [] });
+});

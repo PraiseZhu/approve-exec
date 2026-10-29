@@ -45,3 +45,22 @@ test('缺 lead 会话 id 时拒绝渲染', () => {
   const { plan, item } = packet();
   assert.throws(() => renderIssueHandoff({ plan, item }), /需要 lead 会话 id/);
 });
+
+test('SC7 反例（review-pr71）：issue 的 SC 原文含模型词时，只出现在照抄的 SC 文本里，脚本自己写的部分不含', () => {
+  const fixture = parentFixture();
+  const subs = fixture[`api repos/${REPO}/issues/10/sub_issues?per_page=100`];
+  subs[0].body = subs[0].body.replace('- [ ] SC4 目标仓测试与 CI 全绿。验证：static',
+    '- [ ] SC4 `git grep` 不到 `grok-4.6`、`routing.json`。验证：static\n- [ ] SC5 上线后不再出现 `claude-fable`。验证：github-live');
+  const { repoDir } = writeFixture(fixture);
+  const { root, children } = readRoot(ghFrom(fixture), `${REPO}#10`);
+  const plan = buildPlan({ root, children, repoDirs: { [REPO]: repoDir }, lead: 'codex', entry: '批准执行', now: '2026-10-29T08:00:00.000Z' });
+  const item = plan.items.find((i) => i.ref === `${REPO}#11`);
+  const text = renderIssueHandoff({ plan, item, leadSessionId: 'lead-1' });
+  assert.match(text, /grok-4\.6/, '照抄的 SC 原文保留');
+  const own = text
+    .replace(JSON.stringify(item.keel_run, null, 2), '')
+    .split('\n')
+    .filter((l) => !item.manual_scs.some((s) => l.includes(s.text)))
+    .join('\n');
+  assert.doesNotMatch(own, /routing\.json|grok-[0-9]|gpt-[0-9]|claude-(opus|sonnet|haiku|fable)/i);
+});

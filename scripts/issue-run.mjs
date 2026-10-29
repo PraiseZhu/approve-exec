@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 // issue-run.mjs — issue 入口的小台账（issue-run-v1）：每个子 issue 一条，记录一次性认领与会话回执。
 // lead 自己调 send_to_session；本脚本只出请求、收回执，不调用任何宿主工具。
+// 跨台账、跨机器的防重靠总 issue 上的评论：prepare 发「批准执行认领」，bind 成功发「批准执行登记」，
+// release 发「批准执行释放」。同一子 issue 有未释放的认领 / 登记时，任何台账的 prepare 都拒绝。
 //
 // CLI（全部输出一行 JSON；exit 0 成功 / 2 拒绝）：
 //   init    --plan <plan.json> --ledger <ledger.json> [--now ISO]
 //   next    --ledger <f> [--gh-fixture <夹具>]                      列出依赖已满足、可派的子 issue
 //   prepare --ledger <f> --item <ref> --lead-session <id> [--now ISO] [--gh-fixture <夹具>]
-//   bind    --ledger <f> --item <ref> --claim <id> --result <send_to_session 回执 JSON 文件> [--now ISO]
-//   release --ledger <f> --item <ref> --evidence <已核实没有建出会话的依据> [--now ISO]
+//   bind    --ledger <f> --item <ref> --claim <id> --result <send_to_session 回执 JSON 文件> [--now ISO] [--gh-fixture <夹具>]
+//   release --ledger <f> --item <ref> --evidence <已核实没有建出会话的依据> [--now ISO] [--gh-fixture <夹具>]
 //   status  --ledger <f>
 import { existsSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -47,10 +49,13 @@ export function projectName(repo) {
 export function sessionTitle(item, now) {
   let task = item.title.replace(/^\[(子\d+\/\d+|总)\]\s*/, '').split(/[：:]/)[0].trim().slice(0, 24);
   if (!HAN_RE.test(task)) task = `任务${item.number}`;
+  return `${projectName(item.repo)}-${task}丨 ${mmdd(now)}`;
+}
+
+function mmdd(now) {
   const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit' })
     .formatToParts(new Date(now));
-  const mmdd = `${parts.find((p) => p.type === 'month').value}${parts.find((p) => p.type === 'day').value}`;
-  return `${projectName(item.repo)}-${task}丨 ${mmdd}`;
+  return `${parts.find((p) => p.type === 'month').value}${parts.find((p) => p.type === 'day').value}`;
 }
 
 function load(path) {
@@ -88,6 +93,32 @@ export function depStatus(gh, ref) {
 
 function waitingOn(gh, item) {
   return item.hard_deps.map((d) => depStatus(gh, d)).filter((s) => !s.ok);
+}
+
+// root issue comments: cross-ledger claims
+
+const CLAIM_RE = /^批准执行(认领|登记|释放)：\S+ (\S+#\d+)\b[^\n]*?claim ([0-9a-f-]{36})/;
+
+function commentsPath(ledger) {
+  const { repo, number } = parseIssueRef(ledger.root.ref);
+  return `repos/${repo}/issues/${number}/comments`;
+}
+
+/** 总 issue 评论 → 该子 issue 未释放的认领 / 登记（{claim_id, kind, url}）。 */
+export function activeClaims(comments, ref) {
+  const byClaim = new Map();
+  for (const c of Array.isArray(comments) ? comments : []) {
+    const m = CLAIM_RE.exec(String(c.body ?? ''));
+    if (!m || m[2] !== ref) continue;
+    const [, kind, , claimId] = m;
+    if (kind === '释放') byClaim.delete(claimId);
+    else byClaim.set(claimId, { claim_id: claimId, kind, url: c.html_url ?? null });
+  }
+  return [...byClaim.values()];
+}
+
+function postComment(gh, ledger, body) {
+  return gh(['api', '-X', 'POST', commentsPath(ledger), '-f', `body=${body}`]);
 }
 
 // commands
@@ -163,6 +194,11 @@ export function prepare({ ledger, plan, ref, leadSessionId, gh, now }) {
   if (item.state !== 'pending') reject(`${ref} 当前状态 ${item.state}，不能派发`);
   const blockers = waitingOn(gh, item);
   if (blockers.length) reject(`${ref} 的依赖还没满足：${blockers.map((b) => `${b.ref}(${b.reason})`).join('、')}`);
+  const taken = activeClaims(gh(['api', `${commentsPath(ledger)}?per_page=100`]), ref);
+  if (taken.length) {
+    const t = taken[0];
+    reject(`${ref} 已有未释放的批准执行${t.kind}（claim ${t.claim_id}，${t.url ?? '总 issue 评论'}）：同一子 issue 只能有一个会话。确认那个会话已不在后，先发「批准执行释放」再派`);
+  }
   const planItem = plan.items.find((i) => i.ref === ref);
   if (!planItem) reject(`计划里没有 ${ref}`);
   const title = sessionTitle(planItem, now);
@@ -173,6 +209,7 @@ export function prepare({ ledger, plan, ref, leadSessionId, gh, now }) {
     use_worktree: false,
   };
   const claimId = randomUUID();
+  postComment(gh, ledger, `批准执行认领：${now.slice(0, 10)} ${ref} claim ${claimId}（台账 ${ledger.run_id}，lead 会话 ${leadSessionId}）`);
   ledger.lead_session_id = leadSessionId;
   item.claim_id = claimId;
   item.session_title = title;
@@ -187,7 +224,7 @@ export function sessionIdFrom(result) {
   return typeof id === 'string' && id.length > 0 ? id : null;
 }
 
-export function bind({ ledger, ref, claimId, result, now }) {
+export function bind({ ledger, ref, claimId, result, gh, now }) {
   const item = itemOf(ledger, ref);
   if (item.state !== 'claimed') reject(`${ref} 当前状态 ${item.state}，只有 claimed 才能 bind`);
   if (item.claim_id !== claimId) reject(`${ref} 的认领号对不上（台账 ${item.claim_id}，传入 ${claimId}）`);
@@ -198,22 +235,24 @@ export function bind({ ledger, ref, claimId, result, now }) {
   }
   item.session_id = sessionId;
   move(item, 'dispatched', now, { session_id: sessionId });
-  const date = now.slice(0, 10);
-  return {
-    ok: true,
-    state: item.state,
-    ref,
-    session_id: sessionId,
-    root_comment: `批准执行登记：${date} ${ref} → 会话 ${sessionId}（${item.session_title}）`,
-  };
+  const body = `批准执行登记：${now.slice(0, 10)} ${ref} → 会话 ${sessionId}（${item.session_title}）claim ${claimId}`;
+  try {
+    const posted = postComment(gh, ledger, body);
+    return { ok: true, state: item.state, ref, session_id: sessionId, root_comment_url: posted?.html_url ?? null };
+  } catch (err) {
+    // 认领评论已在总 issue 上，防重不受影响；登记评论没发出去要让 lead 看见并补发。
+    return { ok: true, state: item.state, ref, session_id: sessionId, root_comment_error: String(err.message ?? err), root_comment: body };
+  }
 }
 
-export function release({ ledger, ref, evidence, now }) {
+export function release({ ledger, ref, evidence, gh, now }) {
   const item = itemOf(ledger, ref);
   if (item.state !== 'dispatch_unknown') reject(`${ref} 当前状态 ${item.state}，只有 dispatch_unknown 才能 release`);
   if (!evidence || !String(evidence).trim()) reject('release 需要 --evidence：写明怎么核实的没有建出会话');
+  const reason = String(evidence).trim();
+  postComment(gh, ledger, `批准执行释放：${now.slice(0, 10)} ${ref} claim ${item.claim_id}：${reason}`);
   item.claim_id = null;
-  move(item, 'pending', now, { evidence: String(evidence).trim() });
+  move(item, 'pending', now, { evidence: reason });
   return { ok: true, state: item.state, ref };
 }
 
@@ -251,9 +290,9 @@ export function main(argv = process.argv.slice(2)) {
           res = prepare({ ledger, plan, ref, leadSessionId: args['lead-session'] === true ? null : args['lead-session'], gh: gh(), now });
         } else if (cmd === 'bind') {
           const result = JSON.parse(readFileSync(String(args.result), 'utf8'));
-          res = bind({ ledger, ref, claimId: String(args.claim), result, now });
+          res = bind({ ledger, ref, claimId: String(args.claim), result, gh: gh(), now });
         } else {
-          res = release({ ledger, ref, evidence: args.evidence === true ? '' : args.evidence, now });
+          res = release({ ledger, ref, evidence: args.evidence === true ? '' : args.evidence, gh: gh(), now });
         }
         if (!(cmd === 'prepare' && res.claimed === false)) save(ledgerPath, ledger, now);
         return res;
