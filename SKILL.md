@@ -1,6 +1,6 @@
 ---
 name: approve-exec
-description: 批准执行——接在「开 issue」之后：吃总 issue（或独立 issue / 单个子 issue），lead 按总 issue 的并行/串行原则给每个子 issue 开一个独立会话（1 子 issue = 1 PR = 1 会话），派会话不带模型参数；owner 会话用 KEEL 的 keel_run 推进到验收点，零 token 续跑脚本叫醒 lead 验收（通过 / 要改，最多 2 轮），通过后转 Ready、清本地、归档会话，依赖合入后开下一批；lead 不写产品代码、不合并。触发词：批准执行。
+description: 批准执行——接在「开 issue」之后：吃总 issue（或独立 issue / 单个子 issue），lead 按总 issue 的并行/串行原则给每个子 issue 开一个独立会话（1 子 issue = 1 PR = 1 会话），派会话不带模型参数；owner 会话用 KEEL 的 keel_run 推进到验收点，零 token 续跑脚本叫醒 lead 验收（通过 / 要改，不设轮数上限、没有进展才找用户），通过后转 Ready、清本地、归档会话，依赖合入后开下一批；lead 不写产品代码、不合并。触发词：批准执行。
 trigger: 批准执行
 ---
 
@@ -22,11 +22,13 @@ lead 的执行框架只能是 claude-code 或 codex：KEEL 只给这两种配了
 5. **挂续跑脚本（每个 run 一条，第一次派发后马上做）。** 在台账同目录写 `issue-watch.json`：`{"schema":"issue-watch-v1","lead_session_id":"<当前会话 id>","ledger_paths":["<台账绝对路径>"],"stalled_after_sec":1800}`。先用 `schedule_list` 按总 issue 号查重，已有就复用；没有才 `schedule_create`：`executionMode:"script"`，`scriptConfig.command` 为 `python3 <本 skill>/scripts/issue-watch.py --config <issue-watch.json 绝对路径>`，`capabilities:["sessions.dispatch"]`，`cronExpr:"*/5 * * * *"`，`timezone:"Asia/Shanghai"`，`bindToCurrentSession:true`，`workingDir:<台账目录>`，`silentWhenIdle:true`。之后 lead 结束本轮；owner 不给 lead 发消息，脚本发现情况才叫醒 lead。
 6. **被叫醒后按信号处理**（脚本消息里逐条写了是哪个子 issue、哪种信号）：
    - **待验收**：`node scripts/accept-check.mjs --ledger <f> --item <ref> --stage acceptance --out <同目录>/check-<号>.json`。有不过的项：`issue-run.mjs verdict --item <ref> --revise "<不过的项与要改的内容>"`。全部通过后，再对照子 issue 的「目标」「原因」「不做」看 diff 是否做对了事，拿不准问 KEEL 的 `jev`；判通过：`verdict --item <ref> --pass`（脚本自己再跑一遍 accept-check，不过就拒收）。把输出里的 `owner_message` 用 `send_to_session` 发给输出里的 `target_session_id`。裁决写成子 issue 评论；看板的「验收」「裁决」字段属于验收机，lead 不写。
-   - 第 3 次判「要改」时脚本把状态转成 `blocked_user` 并给出 `root_comment`：发到总 issue，告诉用户，不再发回 owner。用户定了以后 `issue-run.mjs unblock --item <ref> --note "<用户怎么定的>"`，再通知 owner。
+   - 判「要改」不设轮数上限，会话一直修到通过。只有没有进展时脚本才把状态转成 `blocked_user` 并给出 `root_comment`：这次要改的条目原文和上一次相同，或 owner 回到验收点时的 head 和上一次判要改时一样（没有新提交）。把 `root_comment` 发到总 issue，告诉用户，不再发回 owner。用户定了以后 `issue-run.mjs unblock --item <ref> --note "<用户怎么定的>"`，再通知 owner。
    - **需要用户**：把台账里的原因汇总告诉用户；用户处理完后 `unblock`，再通知 owner 继续。
    - **需要 lead**（owner 写了 `needs_lead`：范围或验收标准必须改才能做完）：按原因定。能在范围内换做法就 `issue-run.mjs unblock --item <ref> --note "<结论>"`，把结论用 `send_to_session` 发给 owner 会话。确实要改范围或验收标准时告诉用户：台账锁定了计划，改范围要重新出计划。owner 的其他选择由它自己问 `jev` 定，不回来找 lead。
    - **可派**：回到第 3 步。
-   - **停滞**：查 owner 会话还在不在、卡在哪；需要时 `send_to_session` 催一次。
+   - **停滞**：查 owner 会话还在不在、卡在哪。还在就 `send_to_session` 催一次；已经不在（崩了、被删了）就 `issue-run.mjs release --item <ref> --evidence "<怎么核实的>"` 放回 `pending`，回到第 4 步重派。台账里已有 PR 时，重派的开工包开头会写明接着那个 PR 做，不开新 PR。
+   - **待收尾**：owner 写了 `ready`，做第 7 步。
+   - **lead 未处理**：停在 `claimed`（prepare 后没 bind）、`awaiting_acceptance`（没裁决）或 `cleaned`（没归档）超过阈值，消息里写了该做哪一步，照做。
 7. **Ready 后收尾。** owner 写了 `ready` checkpoint 后：`accept-check.mjs --stage ready` 复核（非 Draft、当前 head 必需 CI 全绿）→ `issue-run.mjs cleanup --item <ref>`（删本地 KEEL worktree 与本地分支，不删远端；PR 还是 Draft、PR head 不是验收通过的那个、当前 CI 不是全绿、有未提交改动、本地比 PR 新、分支在主目录检出时都拒绝）→ cindy_helper 的 `archive_sessions` 归档 owner 会话 → 把工具回执存成文件后 `issue-run.mjs archived --item <ref> --result <回执文件>`。
 8. **收工标准。** 子 issue 收工 = PR 非 Draft + 当前 head 必需 CI 全绿 + lead 判通过，并已清理、归档。`issue-run.mjs status` 的 `run_status`：`complete` 才算整个 run 收工，这时删掉第 5 步的续跑调度并告诉用户；`waiting_merge` 表示剩下的子 issue 在等依赖 PR 合入（合并由用户做），告诉用户先合哪个，续跑脚本发现合入后会叫醒 lead；`blocked_user` 表示在等用户。集成分支（`integration/*`）上的子 PR 也是 Ready 即收工，审查机兜底后由用户指派 agent 合入。
 

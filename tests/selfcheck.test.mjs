@@ -36,6 +36,12 @@ test('#69 SC9 批准执行触发行：issue 入口、owner 用 KEEL、lead 最�
   }
 });
 
+test('#78 SC5 触发行不再写「最多 2 轮」「交接车道才转 Ready」：不设轮数上限、没有进展才找用户，任何车道通过后才转 Ready', () => {
+  for (const old of ['最多 2 轮', '交接车道才转 Ready']) assert.equal(TRIGGER_LINE.includes(old), false, `触发行不得再出现 ${old}`);
+  assert.match(TRIGGER_LINE, /不设轮数上限，没有进展才找用户/);
+  assert.match(TRIGGER_LINE, /通过后才转 Ready/);
+});
+
 function runSelfcheck(args) {
   return spawnSync(process.execPath, [scriptPath, ...args], { cwd: root, encoding: 'utf8' });
 }
