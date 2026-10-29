@@ -168,7 +168,7 @@ test('总 issue 没挂子 issue 时拒绝；已关闭的子 issue 标 closed', (
 test('SC3 反例（review-pr71）：冒号前那一格的无扩展名文件也收进 scope', () => {
   assert.deepEqual(toScope('- `Makefile`: build target', 'acme/app#20'), ['Makefile']);
   assert.deepEqual(toScope('- `Dockerfile`、`LICENSE`：镜像与许可证', 'acme/app#20'), ['Dockerfile', 'LICENSE']);
-  assert.deepEqual(toScope('- 删除旧脚本：`scripts/a.mjs`、`TEST_FILES` 不改', 'acme/app#20'), ['scripts/a.mjs'], '冒号后的标识符不当路径');
+  assert.deepEqual(toScope('- `scripts/run-tests.mjs`：`TEST_FILES` 登记新测试', 'acme/app#20'), ['scripts/run-tests.mjs'], '冒号前已是文件格时，冒号后的标识符不当路径');
 });
 
 test('SC1 反例（review-pr71）：「与 #11 并行开发，等 #12 合进 main 后开工」只把 #12 算开工依赖', () => {
@@ -205,11 +205,20 @@ test('SC1 回归（真实 #70 依赖原文）：括号里只是解释、提到�
   assert.throws(() => parseDeps('参考 #11 的写法（见 docs）', REPO, `${REPO}#13`), /判断不了.*参考 #11 的写法/, '括号外判断不了仍拒绝');
 });
 
-test('SC3 反例（review-pr71 第 4 轮）：扩展名以数字开头但含字母的文件算路径', () => {
-  assert.deepEqual(toScope('- Update `archive.7z` after generation', 'acme/app#20'), ['archive.7z']);
-  assert.throws(() => toScope('- Bump to `1.2.3`', 'acme/app#20'), /这一行没有反引号包住的文件路径/);
+test('SC3 反例（review-pr71 第 4、5 轮）：说明句里只认带 / 或 * 的词；根目录文件写在冒号前那一格', () => {
+  assert.deepEqual(toScope('- `archive.7z`：生成后更新', 'acme/app#20'), ['archive.7z'], '模板写法收根目录文件');
+  assert.deepEqual(toScope('- `archive.7z`', 'acme/app#20'), ['archive.7z'], '整行只列文件也收');
+  for (const prose of ['- Update `archive.7z` after generation', '- Compare `v1.0rc1` with deployed output', '- Bump to `1.2.3`']) {
+    assert.throws(() => toScope(prose, 'acme/app#20'), /按模板写成/, `说明句不猜路径：${prose}`);
+  }
+  assert.deepEqual(toScope('- `src/a.ts`：升到 `v1.0rc1`，见 `docs/release.md`', 'acme/app#20'), ['src/a.ts', 'docs/release.md']);
 });
 
 test('SC1 反例（review-pr71 第 4 轮）：嵌套括号逐层拆，括号外的硬依赖不丢', () => {
   assert.deepEqual(parseDeps('等 #11 合进 main 后开工（不需要等 #12 合入（仅供参考））', REPO, `${REPO}#13`), { hard: [`${REPO}#11`], after: [] });
+});
+
+test('SC3 文件格：冒号前没有反引号时，冒号后的反引号内容是文件格（真实 #70 的「修改：`SKILL.md`、`README.md`」）', () => {
+  assert.deepEqual(toScope('- 修改：`SKILL.md`（只留 issue 入口）、`README.md`、`config/defaults.json`', 'x#70'), ['SKILL.md', 'README.md', 'config/defaults.json']);
+  assert.deepEqual(toScope('- `scripts/issue-watch.py`（新）：续跑脚本（`sessions.dispatch` 唤醒 lead）', 'x#69'), ['scripts/issue-watch.py'], '能力名不进 scope');
 });

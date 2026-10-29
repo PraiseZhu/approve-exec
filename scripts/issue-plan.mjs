@@ -122,8 +122,9 @@ export function expandBraces(pattern) {
   return m[1].split(',').flatMap((alt) => expandBraces(head + alt.trim() + tail));
 }
 
-// 扩展名里要有字母：`a.mjs`、`x.d.ts`、`archive.7z` 算路径，`v1.0`、`1.2.3` 这类版本号不算。
-const isPathLike = (t) => !/\s/.test(t) && (t.includes('/') || t.includes('*') || /\.(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]+$/.test(t));
+// 说明文字里的反引号词只有带 `/` 或 `*` 才算路径；不按扩展名猜，`v1.0rc1`、`1.2.3` 这类版本号不会混进来。
+// 根目录文件（`Makefile`、`archive.7z`）写在冒号前那一格，或整行只列文件。
+const isPathLike = (t) => !/\s/.test(t) && (t.includes('/') || t.includes('*'));
 const ticks = (s) => [...s.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim());
 
 /** 列表项按反引号外的第一个冒号拆成「文件或模块」格与说明；没有冒号时 head 为 null。 */
@@ -142,9 +143,11 @@ const noSpace = (t) => t && !/\s/.test(t);
 const onlyTicks = (s) => s.replace(/`[^`]+`/g, '').replace(/[\s、,，（）()新改删]/g, '') === '';
 
 /**
- * 范围段 → scope glob 列表。模板格式是 `- \`<文件或模块>\`：<改什么>`：冒号前那一格里的反引号内容都当路径
- * （`Makefile` 这类无扩展名文件也收）；说明里只收像路径的词（含 `/`、`*` 或扩展名），
- * `TEST_FILES`、`checkpoint` 这类标识符不收。没有冒号的行：整行只列了文件就全收，否则只收像路径的词。
+ * 范围段 → scope glob 列表。每个列表项按「文件格」取路径（PraiseZhu/approve-exec#68 SC3）：
+ * - 冒号前有反引号（模板 `- \`<文件或模块>\`：<改什么>`）：冒号前的反引号内容是文件格，全收；
+ *   冒号后的说明只收带 `/` 或 `*` 的词，`TEST_FILES`、`checkpoint`、`v1.0` 不收。
+ * - 冒号前没有反引号（`- 修改：\`SKILL.md\`、\`README.md\``）：冒号后的反引号内容是文件格，全收。
+ * - 没有冒号：整行只列了文件就全收，否则只收带 `/` 或 `*` 的词。
  * 每个列表项至少要有一个路径。
  */
 export function toScope(text, ref) {
@@ -156,11 +159,12 @@ export function toScope(text, ref) {
     const body = line.replace(/^\s*[-*]\s+/, '');
     const [head, rest] = splitHead(body);
     let tokens;
-    if (head !== null) tokens = [...ticks(head).filter(noSpace), ...ticks(rest).filter(isPathLike)];
+    if (head !== null && ticks(head).some(noSpace)) tokens = [...ticks(head).filter(noSpace), ...ticks(rest).filter(isPathLike)];
+    else if (head !== null) tokens = ticks(rest).filter(noSpace);
     else if (onlyTicks(body)) tokens = ticks(body).filter(noSpace);
     else tokens = ticks(body).filter(isPathLike);
     if (tokens.length === 0) {
-      reject(`${ref} 「范围」这一行没有反引号包住的文件路径或 glob（例如测试要写成 \`tests/**/*.test.mjs\`）：${line.trim()}`);
+      reject(`${ref} 「范围」这一行没有反引号包住的文件路径或 glob（按模板写成「- \`<文件或 glob>\`：<改什么>」，例如测试写 \`tests/**/*.test.mjs\`）：${line.trim()}`);
     }
     for (const t of tokens.flatMap(expandBraces)) {
       const p = t.replace(/^\.\//, '');
