@@ -1,11 +1,9 @@
 # approve-exec 云端测试证据（非 required：私有仓分支保护 403）。
 # 本机 node v26；云端用 actions 支持的 Node 24 LTS。测试未使用 26-only API。
-# 只放云端能真实跑绿的测试。依赖本机 live 路径或 Darwin 的测试不在云端跑（原 continue-on-error
-# 的 test-known job 在 ubuntu 上恒红，只让 main 一直挂红叉，没有信号），改为本机运行：
-#   node --test --test-force-exit tests/graph.test.mjs tests/decision-broker.test.mjs \
-#     tests/selfcheck.test.mjs tests/mem-probe.test.mjs tests/e2e-dryrun.test.mjs tests/run-ledger.test.mjs
-# graph / decision-broker / selfcheck 读 /Users/praise 下的 live 配置；mem-probe / e2e-dryrun / run-ledger
-# 需要 Darwin sysctl/vm_stat（run-ledger 的 mutation-kill 会重跑前两者，本机约 10 分钟以上）。
+# 只放云端能真实跑绿的测试。依赖本机 live 路径的测试由 scripts/run-tests.mjs 在云端跳过（CI_HOST_BOUND_FILES），
+# 改为本机运行（原 continue-on-error 的 test-known job 在 ubuntu 上恒红，只让 main 一直挂红叉，没有信号）：
+#   node --test --test-force-exit tests/selfcheck.test.mjs
+# selfcheck 读本机 live 配置：goal skill 目录、skills/claude-active/approve-exec 链接、触发表「批准执行」行。
 # 不删用例、不改断言。
 name: test
 

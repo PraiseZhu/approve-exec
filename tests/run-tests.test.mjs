@@ -97,7 +97,7 @@ test('组C-1: 夹具与枚举完全一致 → exit 0 且汇总行全绿', () => 
   });
 });
 
-// ============ 组 F：main guard realpath 归一（与 selfcheck 组F-1 / mem-probe 组F-1 同型） ============
+// ============ 组 F：main guard realpath 归一（与 selfcheck 组F-1 同型） ============
 // 前提：import.meta.url 已被 ESM loader 规范化（realpath 后的真实路径），而 process.argv[1] 是调用方
 // 原样路径。macOS 上 os.tmpdir() 落在 /var/folders/...（/var → /private/var symlink），以逻辑 /var 路径
 // 调用时两者恒不相等——旧 guard 会让 main 静默不执行（exit 0 + 零输出，与「全绿汇总行」同形）。
