@@ -1,8 +1,8 @@
-// render-issue-handoff.mjs：一页开工包（PraiseZhu/approve-exec#68 SC7、#69 SC6）。
+// render-issue-handoff.mjs：一页开工包（PraiseZhu/approve-exec#68 SC7、#69 SC6、#77 SC1 SC2 SC6）。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildPlan, readRoot } from '../scripts/issue-plan.mjs';
-import { renderIssueHandoff, KEEL_DONE } from '../scripts/render-issue-handoff.mjs';
+import { renderIssueHandoff, ACCEPTANCE_POINT, END_TURN_STATES } from '../scripts/render-issue-handoff.mjs';
 import { REPO, parentFixture, writeFixture, ghFrom } from './fixtures/issues/build.mjs';
 
 function packet(ref = `${REPO}#11`) {
@@ -22,7 +22,7 @@ test('SC7 开工包含：子 issue 与总 issue 链接、批次与合并顺序�
   assert.ok(text.includes(`${REPO}#11 先合，你的 PR 再合`));
   assert.ok(text.includes(JSON.stringify(item.keel_run, null, 2)));
   assert.ok(text.includes('「用户 2026-10-29：批准执行 acme/app#10」'));
-  assert.ok(text.includes(KEEL_DONE));
+  assert.ok(text.includes(ACCEPTANCE_POINT));
   assert.ok(text.includes('## 3. 收口：到验收点就停下，等 lead 裁决'), '回报方式改为写 checkpoint（#69）');
   assert.ok(text.includes('SC3 上线后 24 小时内无同步报错。验证：github-live'), '黑盒验收项要列出，标「未执行」');
 });
@@ -75,13 +75,27 @@ test('SC7 反例（review-pr71 第 2 轮）：直接以子 issue 为入口时，
   assert.ok(text.includes(`- 总 issue：https://github.com/${REPO}/issues/10。`), text.slice(0, 600));
 });
 
-test('#69 SC6 收口按车道写：交接车道判通过前不调 pr_ready，通过后用授权原话；personal 车道到 report_mergeable 写 checkpoint', () => {
+test('#77 SC1 任何车道都先开 Draft，验收点是「KEEL 只差转 Ready」，lead 判通过之前不调 pr_ready', () => {
   const { text } = packet();
-  assert.ok(text.includes('**lead 判通过之前不调 `pr_ready`**'));
-  assert.ok(text.includes('`authorization_source` 填「用户 2026-10-29：批准执行 acme/app#10」'));
-  assert.ok(text.includes('`nextAction` 是 `report_mergeable` 时就是验收点'));
+  assert.ok(text.includes('`next` 让你调 `pr_open`：加 `draft: true`，`authorization_source` 填「用户 2026-10-29：批准执行 acme/app#10」。任何车道都先开 Draft。'));
+  assert.ok(text.includes(`验收点：${ACCEPTANCE_POINT}。`));
+  assert.ok(ACCEPTANCE_POINT.includes('交接车道是 `next` 让你调 `pr_ready`，其他车道是 done 门只剩 `pr_status 是 mark_ready`'));
+  assert.ok(text.includes('**lead 判通过之前，任何车道都不调 `pr_ready`**'));
+  assert.ok(text.includes('- 「通过」：调 KEEL 的 `pr_ready`，`authorization_source` 填「用户 2026-10-29：批准执行 acme/app#10」'), '通过后所有车道都由 owner 转正式');
   assert.ok(text.includes('不用 `send_to_session` 回报，续跑脚本会叫醒 lead'));
+  assert.doesNotMatch(text, /report_mergeable 时就是验收点|personal 车道直接写/, '#69 时 personal 车道 PR 一开就是正式的，验收点已改');
   assert.doesNotMatch(text, /发一条回执/);
+});
+
+test('#77 SC2 owner 无人值守：只在四种情况结束本轮，等待接着等，decide 门自己答，不留没有渠道的「回报 lead / 问用户」', () => {
+  const { text } = packet();
+  assert.deepEqual([...END_TURN_STATES], ['awaiting_acceptance', 'ready', 'needs_lead', 'blocked_user']);
+  assert.ok(text.includes('结束本轮只有四种情况：写完 `awaiting_acceptance` / `ready` / `needs_lead` / `blocked_user` 之一。别的时候一直照 `next` 做，不回报进度。'));
+  assert.ok(text.includes('`next` 是等待（`keel_wait` 等）：等完照新的 `next` 接着做。在等 CI 不是结束本轮的理由。'));
+  assert.ok(text.includes('`next.kind` 是 `decide`：自己答。拿不准先问 KEEL 的 `jev`；低于执行线时取改动最小、可撤回的选项（KEEL 手册第 9 条）。'));
+  assert.ok(text.includes('done 门缺证据选 `revise`，验证没过选 `retry_verify`，不选 `waive`'));
+  assert.ok(text.includes('`next.kind` 是 `stop`：分支被别的 worktree 占着就跑第 3 节的 `free-worktree`，再调一次；别的原因写 `blocked_user`。'));
+  assert.doesNotMatch(text, /回报 lead|问用户|问 lead|回来问/, '没有渠道的指引会让 owner 停下等人');
 });
 
 test('#69 SC6 checkpoint 命令带脚本与台账的绝对路径、本子 issue 全部 SC（KEEL 管的 pass，黑盒 manual）', () => {
@@ -94,4 +108,6 @@ test('#69 SC6 checkpoint 命令带脚本与台账的绝对路径、本子 issue 
   assert.ok(text.includes(`node "/abs/skill/scripts/issue-run.mjs" checkpoint --ledger "/abs/run/ledger.json" --item ${REPO}#11 --state awaiting_acceptance`));
   assert.ok(text.includes(`--sc '[{"id":"SC1","status":"pass"},{"id":"SC2","status":"pass"},{"id":"SC4","status":"pass"},{"id":"SC3","status":"manual"}]'`));
   assert.ok(text.includes('--state blocked_user --reason'));
+  assert.ok(text.includes(`node "/abs/skill/scripts/issue-run.mjs" checkpoint --ledger "/abs/run/ledger.json" --item ${REPO}#11 --state needs_lead --reason`), '#77 SC4：范围或验收标准必须改时交回 lead');
+  assert.ok(text.includes(`node "/abs/skill/scripts/issue-run.mjs" free-worktree --ledger "/abs/run/ledger.json" --item ${REPO}#11\n`), '#77 SC6：判要改后先释放旧 worktree');
 });

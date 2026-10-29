@@ -1,4 +1,4 @@
-// accept-check.mjs：lead 验收前的确定性检查（PraiseZhu/approve-exec#69 SC4）。
+// accept-check.mjs：lead 验收前的确定性检查（PraiseZhu/approve-exec#69 SC4、#77 SC3）。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -139,6 +139,19 @@ test('SC4 子 issue「待定问题」里有没写「已定」的条目 → pendi
   const res = run(scenario({ issueBody: childBody({ pending: '- 用哪个缓存库\n- 已定 2026-10-29：图标用 svg' }) }));
   assert.deepEqual(failed(res), ['pending_questions']);
   assert.match(res.checks.find((c) => c.name === 'pending_questions').detail, /用哪个缓存库/);
+});
+
+test('#77 SC3 --stage acceptance：PR 已不是 Draft 时 pr_draft 不过，verdict --pass 拒收；是 Draft 时通过', () => {
+  const res = run(scenario({ pr: { draft: false } }));
+  assert.equal(res.ok, false);
+  assert.deepEqual(failed(res), ['pr_draft']);
+  assert.match(res.checks.find((c) => c.name === 'pr_draft').detail, /lead 判通过之前不该转正式/);
+  assert.equal(run(scenario()).checks.find((c) => c.name === 'pr_draft').ok, true);
+  const s = scenario({ pr: { draft: false } });
+  const cli = spawnSync(process.execPath, [RUN_CLI, 'verdict', '--ledger', s.ledgerPath, '--item', A, '--pass', '--gh-fixture', s.ghPath, '--now', NOW], { encoding: 'utf8' });
+  assert.equal(cli.status, 2);
+  assert.match(cli.stderr, /不过的项：pr_draft/);
+  assert.equal(JSON.parse(readFileSync(s.ledgerPath, 'utf8')).items[A].state, 'awaiting_acceptance');
 });
 
 test('--stage ready：PR 还是 Draft 时不过', () => {

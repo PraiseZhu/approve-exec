@@ -7,7 +7,8 @@
 // 后到的一方发释放评论让位。
 //
 // 状态：pending → claimed → dispatched → awaiting_acceptance →（verdict）accepted | revising →
-//       ready → cleaned → archived；dispatch_unknown、blocked_user 是停点；closed 是计划时就已关闭。
+//       ready → cleaned → archived；dispatch_unknown、needs_lead、blocked_user 是停点；closed 是计划时就已关闭。
+// owner 只在四种情况交回（#77）：awaiting_acceptance、ready、needs_lead（范围或验收标准必须改）、blocked_user（只有用户能做）。
 //
 // CLI（全部输出一行 JSON；exit 0 成功 / 2 拒绝）：
 //   init       --plan <plan.json> --ledger <ledger.json> [--now ISO]
@@ -15,12 +16,14 @@
 //   prepare    --ledger <f> --item <ref> --lead-session <id> [--now ISO] [--gh-fixture <夹具>]
 //   bind       --ledger <f> --item <ref> --claim <id> --result <send_to_session 回执 JSON 文件> [--now ISO] [--gh-fixture <夹具>]
 //   release    --ledger <f> --item <ref> --evidence <已核实没有建出会话的依据> [--now ISO] [--gh-fixture <夹具>]
-//   checkpoint --ledger <f> --item <ref> --state awaiting_acceptance|ready|blocked_user
+//   checkpoint --ledger <f> --item <ref> --state awaiting_acceptance|ready|needs_lead|blocked_user
 //              [--pr <号>] [--head <40 位 sha>] [--sc <JSON 数组>] [--keel-run <id>] [--lane <车道>] [--reason <文字>] [--now ISO]
-//              （awaiting_acceptance 必带 --pr --head --sc --keel-run --lane）
+//              （awaiting_acceptance 必带 --pr --head --sc --keel-run --lane；needs_lead / blocked_user 必带 --reason）
+//   free-worktree --ledger <f> --item <ref> [--now ISO] [--gh-fixture <夹具>]
+//              （owner 判「要改」后用：删掉上一个 KEEL run 占着 PR 分支的 worktree，保留本地分支）
 //   verdict    --ledger <f> --item <ref> (--pass | --revise <要改的条目>) [--now ISO] [--gh-fixture <夹具>]
 //              （--pass 时自己跑一遍 accept-check --stage acceptance，不过就拒绝）
-//   unblock    --ledger <f> --item <ref> --note <用户怎么处理的> [--now ISO]
+//   unblock    --ledger <f> --item <ref> --note <用户或 lead 怎么定的> [--now ISO]
 //   cleanup    --ledger <f> --item <ref> [--now ISO] [--gh-fixture <夹具>]
 //   archived   --ledger <f> --item <ref> --result <archive_sessions 回执 JSON 文件> [--now ISO]
 //   status     --ledger <f> [--gh-fixture <夹具>]
@@ -39,7 +42,7 @@ export const LEDGER_SCHEMA = 'issue-run-v1';
 export const ITEM_STATES = Object.freeze([
   'pending', 'claimed', 'dispatched', 'dispatch_unknown',
   'awaiting_acceptance', 'revising', 'accepted', 'ready', 'cleaned', 'archived',
-  'blocked_user', 'closed',
+  'needs_lead', 'blocked_user', 'closed',
 ]);
 export const REQUEST_KEYS = Object.freeze(['title', 'message', 'working_dir', 'use_worktree']);
 export const MAX_REVISE_ROUNDS = 2; // 第 3 次判「要改」就停下找用户
@@ -48,7 +51,7 @@ export const LANES = ['personal', 'gated-handoff', 'draft-gated-handoff'];
 export const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const SC_STATUSES = ['pass', 'fail', 'not_run', 'manual'];
 const SHA_RE = /^[0-9a-f]{40}$/;
-const IN_FLIGHT = ['claimed', 'dispatched', 'dispatch_unknown', 'awaiting_acceptance', 'revising', 'accepted', 'ready', 'cleaned'];
+const IN_FLIGHT = ['claimed', 'dispatched', 'dispatch_unknown', 'awaiting_acceptance', 'revising', 'accepted', 'ready', 'cleaned', 'needs_lead'];
 const DONE = ['archived', 'closed'];
 
 export class RunError extends Error {
@@ -400,8 +403,11 @@ export function checkpoint({ ledger, plan, ref, state, pr, head, sc, keelRun, la
   } else if (state === 'blocked_user') {
     expectState(item, ['dispatched', 'revising', 'awaiting_acceptance', 'accepted'], 'checkpoint blocked_user');
     if (!reason || !String(reason).trim()) reject(`${ref} blocked_user 需要 --reason：写明要用户做什么`);
+  } else if (state === 'needs_lead') {
+    expectState(item, ['dispatched', 'revising'], 'checkpoint needs_lead');
+    if (!reason || !String(reason).trim()) reject(`${ref} needs_lead 需要 --reason：写明要加哪些文件或改哪条 SC、为什么`);
   } else {
-    reject(`--state 只能是 awaiting_acceptance / ready / blocked_user（当前: ${state}）`);
+    reject(`--state 只能是 awaiting_acceptance / ready / needs_lead / blocked_user（当前: ${state}）`);
   }
   item.checkpoint_seq += 1;
   const record = {
@@ -415,7 +421,7 @@ export function checkpoint({ ledger, plan, ref, state, pr, head, sc, keelRun, la
     ...(lane ? { lane: String(lane) } : {}),
     ...(reason ? { reason: String(reason).trim() } : {}),
   };
-  if (state === 'blocked_user') {
+  if (state === 'blocked_user' || state === 'needs_lead') {
     item.blocked = { seq: item.checkpoint_seq, by: 'owner', reason: record.reason, prev_state: item.state, at: now };
   } else {
     item.checkpoint = record;
@@ -441,9 +447,9 @@ export function verdict({ ledger, ref, pass, revise, check, now }) {
     }
     item.verdicts.push({ at: now, verdict: 'pass', head: cp.head, check_at: check.checked_at ?? null });
     move(item, 'accepted', now, { verdict: 'pass' });
-    const ready = laneIsHandoff(cp.lane)
-      ? `现在调 KEEL 的 pr_ready，authorization_source 填「${ledger.authorization_source}」；成功后写 checkpoint --state ready --pr ${cp.pr} --head ${cp.head}`
-      : `PR 已经是 Ready，直接写 checkpoint --state ready --pr ${cp.pr} --head ${cp.head}`;
+    // 所有车道都是 Draft 进验收点（#77），通过后一律由 owner 调 pr_ready 转正式。
+    const ready = `现在调 KEEL 的 pr_ready，authorization_source 填「${ledger.authorization_source}」；成功后写 checkpoint --state ready --pr ${cp.pr} --head ${cp.head}`
+      + (laneIsHandoff(cp.lane) ? '' : '；再把 done 门答 wait，KEEL 看到可合并就收工');
     return {
       ok: true, state: item.state, ref, target_session_id: item.session_id,
       owner_message: `批准执行验收：${date} ${ref} 通过（head ${cp.head}）。${ready}。写完就结束本轮。`,
@@ -465,14 +471,14 @@ export function verdict({ ledger, ref, pass, revise, check, now }) {
   move(item, 'revising', now, { verdict: 'revise', round: item.revise_count });
   return {
     ok: true, state: item.state, ref, target_session_id: item.session_id,
-    owner_message: `批准执行验收：${date} ${ref} 要改（第 ${item.revise_count} 次，最多 ${MAX_REVISE_ROUNDS} 次）。要改的条目：${items}。上一个 KEEL run 已结束时用 keel_run 传 pr=${cp.pr} 在同一 PR 上接着做；改完回到验收点，重新写 checkpoint --state awaiting_acceptance。`,
+    owner_message: `批准执行验收：${date} ${ref} 要改（第 ${item.revise_count} 次，最多 ${MAX_REVISE_ROUNDS} 次）。要改的条目：${items}。先跑开工包第 3 节的 free-worktree，释放上一个 KEEL run 占着分支的 worktree，再用 keel_run 传 pr=${cp.pr} 在同一 PR 上接着做（scope 同开工包）；改完回到验收点，重新写 checkpoint --state awaiting_acceptance。`,
   };
 }
 
 export function unblock({ ledger, ref, note, now }) {
   const item = itemOf(ledger, ref);
-  expectState(item, ['blocked_user'], 'unblock');
-  if (!note || !String(note).trim()) reject(`${ref} unblock 需要 --note：写明用户怎么处理的`);
+  expectState(item, ['blocked_user', 'needs_lead'], 'unblock');
+  if (!note || !String(note).trim()) reject(`${ref} unblock 需要 --note：写明${item.state === 'needs_lead' ? ' lead ' : '用户'}怎么定的`);
   const back = item.blocked?.by === 'lead' ? 'revising' : item.blocked?.prev_state ?? 'dispatched';
   if (item.blocked?.by === 'lead') item.revise_count = 0;
   item.blocked = null;
@@ -496,28 +502,61 @@ export function parseWorktrees(text) {
   return out;
 }
 
+function readPrBranch(gh, item, pr, ref) {
+  const data = gh(['api', `repos/${item.repo}/pulls/${pr}`]);
+  const branch = data?.head?.ref;
+  const prHead = data?.head?.sha;
+  if (!branch || !SHA_RE.test(String(prHead))) reject(`${ref} 读不到 PR #${pr} 的分支与 head`);
+  return { data, branch, prHead };
+}
+
+/** PR 分支在主目录以外的 worktree；分支在主目录检出时拒绝（不能替用户切走主目录）。 */
+function branchWorktree(git, repoDir, branch, ref, action) {
+  const entries = parseWorktrees(git(['-C', repoDir, 'worktree', 'list', '--porcelain']));
+  const main = entries[0]?.worktree ?? null;
+  if (entries[0]?.branch === `refs/heads/${branch}`) reject(`${ref} 的分支 ${branch} 在主目录 ${main} 检出，不${action}：交给用户切走后再跑`);
+  return entries.find((e) => e.branch === `refs/heads/${branch}` && e.worktree !== main) ?? null;
+}
+
+/** 删一个干净、HEAD 等于 PR head 的 worktree；有未提交改动或本地比 PR 新时拒绝。 */
+function removeCleanWorktree(git, repoDir, wt, prHead, ref, action) {
+  if (git(['-C', wt.worktree, 'status', '--porcelain'])) reject(`${ref} 的 worktree ${wt.worktree} 有未提交改动，不${action}`);
+  if (wt.head !== prHead) reject(`${ref} 的 worktree HEAD ${wt.head} 与 PR head ${prHead} 不一致（有没推送的提交？），不${action}`);
+  git(['-C', repoDir, 'worktree', 'remove', wt.worktree]);
+}
+
+/**
+ * 判「要改」后 owner 用（#77 SC6）：上一个 KEEL run 的 worktree 还占着 PR 分支时，`keel_run` 传 `pr`
+ * 会直接 stop（KEEL「分支已在 … 检出」）。这里删掉那个 worktree，保留本地分支，台账状态不变。
+ */
+export function freeWorktree({ ledger, plan, ref, gh, git = gitRunner(), now }) {
+  const item = itemOf(ledger, ref);
+  expectState(item, ['dispatched', 'revising'], 'free-worktree');
+  const pr = item.checkpoint?.pr;
+  if (!pr) reject(`${ref} 还没有写过 awaiting_acceptance，台账里没有 PR 号，没有要释放的 worktree`);
+  const repoDir = planItemOf(plan, ref).keel_run.repo_dir;
+  const { branch, prHead } = readPrBranch(gh, item, pr, ref);
+  const wt = branchWorktree(git, repoDir, branch, ref, '释放');
+  if (!wt) return { ok: true, freed: false, ref, branch };
+  removeCleanWorktree(git, repoDir, wt, prHead, ref, '释放');
+  move(item, item.state, now, { freed_worktree: wt.worktree });
+  return { ok: true, freed: true, ref, branch, worktree: wt.worktree };
+}
+
 /** Ready 后清本地：删 PR 分支的本地 worktree 与本地分支，不删远端。有未提交改动或本地比 PR 新时拒绝。 */
 export function cleanup({ ledger, plan, ref, gh, checks, git = gitRunner(), now }) {
   const item = itemOf(ledger, ref);
   expectState(item, ['ready'], 'cleanup');
   const repoDir = planItemOf(plan, ref).keel_run.repo_dir;
-  const pr = gh(['api', `repos/${item.repo}/pulls/${item.checkpoint.pr}`]);
-  const branch = pr?.head?.ref;
-  const prHead = pr?.head?.sha;
-  if (!branch || !SHA_RE.test(String(prHead))) reject(`${ref} 读不到 PR #${item.checkpoint.pr} 的分支与 head`);
+  const { data: pr, branch, prHead } = readPrBranch(gh, item, item.checkpoint.pr, ref);
   if (pr.draft !== false) reject(`${ref} 的 PR #${item.checkpoint.pr} 还不是正式 Ready，不清理`);
   if (prHead !== item.checkpoint.head) reject(`${ref} 的 PR head 现在是 ${prHead}，验收通过的是 ${item.checkpoint.head}：新提交没验收过，不清理`);
   const ci = ciVerdict(checks, item.repo, item.checkpoint.pr);
   if (!ci.ok) reject(`${ref} 的 PR #${item.checkpoint.pr} 当前 CI 不是全绿（${ci.detail}），不清理`);
-  const entries = parseWorktrees(git(['-C', repoDir, 'worktree', 'list', '--porcelain']));
-  const main = entries[0]?.worktree ?? null;
-  if (entries[0]?.branch === `refs/heads/${branch}`) reject(`${ref} 的分支 ${branch} 在主目录 ${main} 检出，不清理：交给用户切走后再跑 cleanup`);
-  const wt = entries.find((e) => e.branch === `refs/heads/${branch}` && e.worktree !== main);
+  const wt = branchWorktree(git, repoDir, branch, ref, '清理');
   const record = { branch, pr_head: prHead, worktree: null, branch_deleted: false, at: now };
   if (wt) {
-    if (git(['-C', wt.worktree, 'status', '--porcelain'])) reject(`${ref} 的 worktree ${wt.worktree} 有未提交改动，不清理`);
-    if (wt.head !== prHead) reject(`${ref} 的 worktree HEAD ${wt.head} 与 PR head ${prHead} 不一致（有没推送的提交？），不清理`);
-    git(['-C', repoDir, 'worktree', 'remove', wt.worktree]);
+    removeCleanWorktree(git, repoDir, wt, prHead, ref, '清理');
     record.worktree = wt.worktree;
   }
   let local = null;
@@ -589,7 +628,7 @@ export function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv.slice(1));
   const now = typeof args.now === 'string' ? args.now : nowIso();
   const gh = () => ghRunner(typeof args['gh-fixture'] === 'string' ? args['gh-fixture'] : null);
-  const WRITES = ['prepare', 'bind', 'release', 'checkpoint', 'verdict', 'unblock', 'cleanup', 'archived'];
+  const WRITES = ['prepare', 'bind', 'release', 'checkpoint', 'verdict', 'unblock', 'free-worktree', 'cleanup', 'archived'];
   try {
     if (!args.ledger || args.ledger === true) reject('缺 --ledger <ledger.json>');
     const ledgerPath = String(args.ledger);
@@ -628,6 +667,8 @@ export function main(argv = process.argv.slice(2)) {
           res = verdict({ ledger, ref, pass: args.pass === true, revise: str(args.revise), check, now });
         } else if (cmd === 'unblock') {
           res = unblock({ ledger, ref, note: str(args.note), now });
+        } else if (cmd === 'free-worktree') {
+          res = freeWorktree({ ledger, plan, ref, gh: gh(), now });
         } else if (cmd === 'cleanup') {
           res = cleanup({ ledger, plan, ref, gh: gh(), checks: ghChecksRunner(typeof args['gh-fixture'] === 'string' ? args['gh-fixture'] : null), now });
         } else {
@@ -637,7 +678,7 @@ export function main(argv = process.argv.slice(2)) {
         return res;
       });
     } else {
-      reject(`未知子命令: ${cmd}（init / next / prepare / bind / release / checkpoint / verdict / unblock / cleanup / archived / status）`);
+      reject(`未知子命令: ${cmd}（init / next / prepare / bind / release / checkpoint / verdict / unblock / free-worktree / cleanup / archived / status）`);
     }
     process.stdout.write(JSON.stringify(out) + '\n');
     return out.ok === false ? 2 : 0;

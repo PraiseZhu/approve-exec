@@ -24,6 +24,7 @@ lead 的执行框架只能是 claude-code 或 codex：KEEL 只给这两种配了
    - **待验收**：`node scripts/accept-check.mjs --ledger <f> --item <ref> --stage acceptance --out <同目录>/check-<号>.json`。有不过的项：`issue-run.mjs verdict --item <ref> --revise "<不过的项与要改的内容>"`。全部通过后，再对照子 issue 的「目标」「原因」「不做」看 diff 是否做对了事，拿不准问 KEEL 的 `jev`；判通过：`verdict --item <ref> --pass`（脚本自己再跑一遍 accept-check，不过就拒收）。把输出里的 `owner_message` 用 `send_to_session` 发给输出里的 `target_session_id`。裁决写成子 issue 评论；看板的「验收」「裁决」字段属于验收机，lead 不写。
    - 第 3 次判「要改」时脚本把状态转成 `blocked_user` 并给出 `root_comment`：发到总 issue，告诉用户，不再发回 owner。用户定了以后 `issue-run.mjs unblock --item <ref> --note "<用户怎么定的>"`，再通知 owner。
    - **需要用户**：把台账里的原因汇总告诉用户；用户处理完后 `unblock`，再通知 owner 继续。
+   - **需要 lead**（owner 写了 `needs_lead`：范围或验收标准必须改才能做完）：按原因定。能在范围内换做法就 `issue-run.mjs unblock --item <ref> --note "<结论>"`，把结论用 `send_to_session` 发给 owner 会话。确实要改范围或验收标准时告诉用户：台账锁定了计划，改范围要重新出计划。owner 的其他选择由它自己问 `jev` 定，不回来找 lead。
    - **可派**：回到第 3 步。
    - **停滞**：查 owner 会话还在不在、卡在哪；需要时 `send_to_session` 催一次。
 7. **Ready 后收尾。** owner 写了 `ready` checkpoint 后：`accept-check.mjs --stage ready` 复核（非 Draft、当前 head 必需 CI 全绿）→ `issue-run.mjs cleanup --item <ref>`（删本地 KEEL worktree 与本地分支，不删远端；PR 还是 Draft、PR head 不是验收通过的那个、当前 CI 不是全绿、有未提交改动、本地比 PR 新、分支在主目录检出时都拒绝）→ cindy_helper 的 `archive_sessions` 归档 owner 会话 → 把工具回执存成文件后 `issue-run.mjs archived --item <ref> --result <回执文件>`。

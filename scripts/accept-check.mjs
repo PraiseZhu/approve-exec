@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // accept-check.mjs — lead 验收前的确定性检查（PraiseZhu/approve-exec#69 SC4）。只读 GitHub 与台账，不改任何东西。
-// 判「通过」之前先跑 --stage acceptance；owner 转 Ready 后跑 --stage ready 再清理。
+// 判「通过」之前先跑 --stage acceptance（PR 必须还是 Draft，#77）；owner 转 Ready 后跑 --stage ready 再清理。
 //
 // CLI: node scripts/accept-check.mjs --ledger <ledger.json> --item <owner/repo#号> [--stage acceptance|ready]
 //        [--out <结果.json>] [--gh-fixture <夹具>]
@@ -124,6 +124,8 @@ export function acceptCheck({ ledger, plan, ref, stage = 'acceptance', gh, check
   const pr = gh(['api', `repos/${item.repo}/pulls/${cp.pr}`]);
   add('pr_head', pr?.head?.sha === cp.head, `PR head ${pr?.head?.sha ?? '未知'}，checkpoint head ${cp.head}`);
   add('pr_open', pr?.state === 'open', `PR 状态 ${pr?.state ?? '未知'}`);
+  // 所有车道都先开 Draft、lead 判通过后才转正式（#77）：验收时已经是正式的，说明没等 lead 就转了。
+  if (stage === 'acceptance') add('pr_draft', pr?.draft === true, pr?.draft === true ? 'PR 还是 Draft' : 'PR 已不是 Draft：lead 判通过之前不该转正式');
   if (stage === 'ready') add('pr_not_draft', pr?.draft === false, pr?.draft ? 'PR 还是 Draft' : 'PR 已是正式 Ready');
 
   const ci = ciVerdict(checks, item.repo, cp.pr);
