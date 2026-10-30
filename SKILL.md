@@ -29,7 +29,7 @@ lead 的执行框架只能是 claude-code 或 codex：KEEL 只给这两种配了
    - **停滞**：查 owner 会话还在不在、卡在哪。还在就 `send_to_session` 催一次；已经不在（崩了、被删了）就 `issue-run.mjs release --item <ref> --evidence "<怎么核实的>"` 放回 `pending`，回到第 4 步重派。台账里记着 PR、或 GitHub 上有正文写着「任务 issue：<ref>」的开着的 PR 时，重派的开工包开头会写明接着那个 PR 做，不开新 PR（有多个这样的 PR 时 `prepare` 拒绝，先关掉多余的）。停在 `accepted` 的不 release：按消息做（重发通过消息；先跑 `accept-check --stage ready`，通过了才由 lead 写 `checkpoint --state ready`；不过（含 PR 关了没合）就告诉用户）。
    - **待收尾**：owner 写了 `ready`，做第 7 步。
    - **lead 未处理**：停在 `claimed`（prepare 后没 bind）、`awaiting_acceptance`（没裁决）或 `cleaned`（没归档）超过阈值，消息里写了该做哪一步，照做。
-7. **Ready 后收尾。** owner 写了 `ready` checkpoint 后：`accept-check.mjs --stage ready` 复核（非 Draft、当前 head 必需 CI 全绿）→ `issue-run.mjs cleanup --item <ref>`（删本地 KEEL worktree 与本地分支，不删远端；PR 不是 open（关了没合）、PR 还是 Draft、PR head 不是验收通过的那个、当前 CI 不是全绿、有未提交改动、本地比 PR 新、分支在主目录检出时都拒绝）→ cindy_helper 的 `archive_sessions` 归档 owner 会话 → 把工具回执存成文件后 `issue-run.mjs archived --item <ref> --result <回执文件>`。
+7. **Ready 后收尾。** owner 写了 `ready` checkpoint 后：`accept-check.mjs --stage ready` 复核（非 Draft、当前 head 必需 CI 全绿）→ `issue-run.mjs cleanup --item <ref>`（删本地 KEEL worktree 与本地分支，不删远端；PR 关了没合（已合并的照常清理）、PR 还是 Draft、PR head 不是验收通过的那个、当前 CI 不是全绿、有未提交改动、本地比 PR 新、分支在主目录检出时都拒绝）→ cindy_helper 的 `archive_sessions` 归档 owner 会话 → 把工具回执存成文件后 `issue-run.mjs archived --item <ref> --result <回执文件>`。
 8. **收工标准。** 子 issue 收工 = PR 非 Draft + 当前 head 必需 CI 全绿 + lead 判通过，并已清理、归档。`issue-run.mjs status` 的 `run_status`：`complete` 才算整个 run 收工，这时删掉第 5 步的续跑调度并告诉用户；`waiting_merge` 表示剩下的子 issue 在等依赖 PR 合入（合并由用户做），告诉用户先合哪个，续跑脚本发现合入后会叫醒 lead；`blocked_user` 表示在等用户。集成分支（`integration/*`）上的子 PR 也是 Ready 即收工，审查机兜底后由用户指派 agent 合入。
 
 owner 一侧的协议（验收点、checkpoint 命令、裁决之后怎么做）写在开工包第 3 节，完整说明见 `references/issue-owner-protocol.md`。

@@ -90,7 +90,7 @@ node <skill>/scripts/issue-run.mjs checkpoint --ledger <台账> --item <ref> --s
 | `body_sc_rows` | PR 正文「验收对照」一节的表格缺某条 SC 的行（只认这一节，别处提到的 SC 不算） |
 | `pending_questions` | 子 issue「待定问题」里有没写「已定」的条目 |
 
-`--stage ready` 另查 `pr_not_draft`：PR 已不是 Draft。
+`--stage ready` 另查 `pr_not_draft`：PR 已不是 Draft；`pr_open` 在这一档也接受已合并的 PR（用户在 lead 收尾前合了），关了没合仍不过。
 
 `verdict --pass` 会自己再跑一遍 `--stage acceptance`，不接收外部传入的检查结果。检查全部通过只是必要条件。lead 还要对照子 issue 的「目标」「原因」「不做」看 diff 是否做对了事，再下裁决。
 

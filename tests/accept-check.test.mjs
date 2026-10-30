@@ -154,6 +154,12 @@ test('#77 SC3 --stage acceptance：PR 已不是 Draft 时 pr_draft 不过，verd
   assert.equal(JSON.parse(readFileSync(s.ledgerPath, 'utf8')).items[A].state, 'awaiting_acceptance');
 });
 
+test('#78 SC2 --stage ready：已合并的 PR 算过，关了没合不过；验收档已合并也不过', () => {
+  assert.equal(run(scenario({ pr: { draft: false, state: 'closed', merged: true } }), 'ready').ok, true);
+  assert.deepEqual(failed(run(scenario({ pr: { draft: false, state: 'closed', merged: false } }), 'ready')), ['pr_open']);
+  assert.ok(failed(run(scenario({ pr: { draft: true, state: 'closed', merged: true } }))).includes('pr_open'), '验收档 PR 必须还开着');
+});
+
 test('--stage ready：PR 还是 Draft 时不过', () => {
   assert.deepEqual(failed(run(scenario(), 'ready')), ['pr_not_draft']);
   assert.equal(run(scenario({ pr: { draft: false } }), 'ready').ok, true);

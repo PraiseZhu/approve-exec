@@ -644,8 +644,17 @@ test('#78 SC2 反例（review-pr81 第 2 轮）：PR 关了没合时 cleanup 拒
   const r = gitRepoWithWorktree();
   const s = readyWith(r.head, r.repo);
   s.fixture[`api repos/${REPO}/pulls/5`].state = 'closed';
-  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW }), /PR #5 状态是 closed，不是 open（关了没合？），不清理/);
+  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW }), /PR #5 关了没合（状态 closed），不清理/);
   assert.equal(existsSync(r.wt), true);
   assert.equal(r.g('rev-parse', 'feat/x'), r.head);
   assert.equal(s.ledger.items[A].state, 'ready');
+});
+
+test('#78 SC2 反例（review-pr81 第 3 轮）：用户在 lead 收尾前合了 PR → cleanup 照常清理', () => {
+  const r = gitRepoWithWorktree();
+  const s = readyWith(r.head, r.repo);
+  Object.assign(s.fixture[`api repos/${REPO}/pulls/5`], { state: 'closed', merged: true });
+  const res = cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW });
+  assert.equal(res.state, 'cleaned');
+  assert.equal(existsSync(r.wt), false);
 });

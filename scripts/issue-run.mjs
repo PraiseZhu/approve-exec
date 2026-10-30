@@ -605,8 +605,8 @@ export function cleanup({ ledger, plan, ref, gh, checks, git = gitRunner(), now 
   expectState(item, ['ready'], 'cleanup');
   const repoDir = planItemOf(plan, ref).keel_run.repo_dir;
   const { data: pr, branch, prHead } = readPrBranch(gh, item, item.checkpoint.pr, ref);
-  // 关了没合的 PR 不算收尾（review-pr81 第 2 轮）：删本地分支、归档会话之后就找不回来了。
-  if (pr.state !== 'open') reject(`${ref} 的 PR #${item.checkpoint.pr} 状态是 ${pr.state ?? '未知'}，不是 open（关了没合？），不清理：告诉用户`);
+  // 关了没合的 PR 不算收尾（review-pr81 第 2 轮）：删本地分支、归档会话之后就找不回来了。已合并的照常清理（#78）。
+  if (pr.state !== 'open' && pr.merged !== true) reject(`${ref} 的 PR #${item.checkpoint.pr} 关了没合（状态 ${pr.state ?? '未知'}），不清理：告诉用户`);
   if (pr.draft !== false) reject(`${ref} 的 PR #${item.checkpoint.pr} 还不是正式 Ready，不清理`);
   if (prHead !== item.checkpoint.head) reject(`${ref} 的 PR head 现在是 ${prHead}，验收通过的是 ${item.checkpoint.head}：新提交没验收过，不清理`);
   const ci = ciVerdict(checks, item.repo, item.checkpoint.pr);
