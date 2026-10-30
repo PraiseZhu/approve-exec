@@ -9,7 +9,7 @@
 - unlock：pending 子 issue 的依赖都已关闭（completed），可以派了
 - stalled：在途子 issue 的台账活动和 PR head 都超过 stalled_after_sec 没变，且 PR 不在等 CI
 - lead_stalled：该 lead 动手的状态（claimed / awaiting_acceptance / cleaned）超过 stalled_after_sec 没动（#78）
-全部子 issue 收工（archived / closed）后不再叫醒，状态写 complete。
+- root：全部子 issue 收工、还没交接总 issue 验收（#79）；交接后才算 complete，不再叫醒。
 
 配置 JSON：{"schema": "issue-watch-v1", "lead_session_id": "…", "ledger_paths": ["…"], "stalled_after_sec": 1800}
 状态写在配置旁边的 <配置文件名>.state.json。
@@ -46,13 +46,15 @@ LEAD_PENDING = {
 }
 DONE = {"archived", "closed"}
 LABELS = {"accept": "待验收", "ready": "待收尾", "lead": "需要 lead", "blocked": "需要用户", "unlock": "可派", "stalled": "停滞",
-          "lead_stalled": "lead 未处理"}
+          "lead_stalled": "lead 未处理", "root": "待总验收"}
 NEXT_STEP = {
     "accept": "跑 accept-check --stage acceptance，再 issue-run verdict，把 owner_message 发回 owner 会话",
     "lead": "按原因定：能在范围内换做法就 issue-run unblock --note 写明结论，再用 send_to_session 发给 owner 会话；确实要改范围或验收标准就告诉用户（台账锁定了计划）",
     "blocked": "把原因汇总告诉用户；用户处理完后 issue-run unblock，再通知 owner 会话",
     "unlock": "跑 issue-run next，对可派的子 issue 走 prepare → send_to_session → bind",
     "ready": "跑 accept-check --stage ready，再 issue-run cleanup，用 archive_sessions 归档 owner 会话，回执存成文件后 issue-run archived",
+    "root": ("按 SKILL.md 第 8 步验收总 issue：跑 root-check --preview，在预览目录按目标仓规则跑测试，对照总 issue 整体验收项逐条验；"
+             "通过就写 lead 结果文件跑 issue-run handoff 交接验收机，不通过就在总 issue 下补子 issue、重新出计划后 issue-run add 再派；最后 root-check --cleanup"),
     "stalled": "查 owner 会话还在不在、卡在哪；还在就 send_to_session 催一次，已经不在就 issue-run release --evidence 放回再派",
 }
 
@@ -158,6 +160,15 @@ def epoch(iso: str | None) -> float:
     return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
 
 
+def root_pending(ledger: dict[str, Any]) -> bool:
+    """全部子 issue 收工后还要不要交接总 issue（和 issue-run.mjs rootPending 同口径）。"""
+    items = ledger.get("items", {})
+    if not all(i.get("state") in DONE for i in items.values()) or ledger.get("root_acceptance") is False:
+        return False
+    handoffs = ledger.get("handoffs") or []
+    return not handoffs or any(ref not in handoffs[-1].get("items", []) for ref in items)
+
+
 def collect(ledger: dict[str, Any], gh: Any, now: float, stalled_after: int, heads: dict[str, Any]) -> list[dict[str, Any]]:
     """一份台账 → 本轮的信号列表；heads 记每个 PR head 第一次被看到的时间（原地更新）。"""
     signals: list[dict[str, Any]] = []
@@ -199,6 +210,11 @@ def collect(ledger: dict[str, Any], gh: Any, now: float, stalled_after: int, hea
                 signals.append({"key": f"stalled:{ref}:{int(marker)}", "kind": "stalled", "ref": ref,
                                 "detail": f"状态 {state}，{int((now - marker) // 60)} 分钟没有进展",
                                 **({"step": ACCEPTED_STALL} if state == "accepted" else {})})
+    if root_pending(ledger):
+        root = (ledger.get("root") or {}).get("ref", "?")
+        n = len(ledger.get("handoffs") or []) + 1
+        signals.append({"key": f"root:{root}:{n}:{len(ledger.get('items', {}))}", "kind": "root", "ref": root,
+                        "detail": f"全部子 issue 收工，还没交接第 {n} 次总 issue 验收"})
     return signals
 
 
@@ -223,7 +239,7 @@ def run_once(config_path: str | Path, *, client: Any, gh: Any, now: float | None
         notified: dict[str, float] = dict(state.get("notified") or {})
         heads: dict[str, Any] = dict(state.get("heads") or {})
         ledgers = [(p, read_json(Path(p), f"台账 {p}")) for p in cfg["ledger_paths"]]
-        if all(all(i.get("state") in DONE for i in l.get("items", {}).values()) for _, l in ledgers):
+        if all(all(i.get("state") in DONE for i in l.get("items", {}).values()) and not root_pending(l) for _, l in ledgers):
             result = {"status": "complete", "dispatched": False}
             write_atomic(state_path, {**state, "status": "complete", "checked_at": now})
             return result

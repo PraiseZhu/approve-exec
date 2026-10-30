@@ -7,7 +7,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { buildPlan, readRoot } from '../scripts/issue-plan.mjs';
-import { init, next, prepare, bind, release, checkpoint, verdict, unblock, freeWorktree, soleOpenPr, cleanup, archived, runStatus, status, sessionTitle, projectName, sessionIdFrom, activeClaims, REQUEST_KEYS, RunError } from '../scripts/issue-run.mjs';
+import { init, next, prepare, bind, release, checkpoint, verdict, unblock, freeWorktree, soleOpenPr, add, handoff, rootPending, cleanup, archived, runStatus, status, sessionTitle, projectName, sessionIdFrom, activeClaims, REQUEST_KEYS, RunError } from '../scripts/issue-run.mjs';
 import { hashObject } from '../scripts/lib/common.mjs';
 import { REPO, LOGIN, commentsKey, openPullsKey, parentFixture, writeFixture, ghFrom } from './fixtures/issues/build.mjs';
 
@@ -457,7 +457,7 @@ test('SC7 cleanup：删本地 KEEL worktree 与本地分支，不碰远端；有
   assert.equal(r.g('branch', '--list', 'feat/x'), '');
 });
 
-test('SC7 archived 只认 archive_sessions 回执；全部收工 run 才 complete，等依赖时是 waiting_merge', () => {
+test('SC7 archived 只认 archive_sessions 回执；全部收工后是 root_pending（#79：还要验收总 issue），等依赖时是 waiting_merge', () => {
   const r = gitRepoWithWorktree();
   const s = readyWith(r.head, r.repo);
   cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW });
@@ -474,7 +474,7 @@ test('SC7 archived 只认 archive_sessions 回执；全部收工 run 才 complet
   assert.equal(next({ ledger: s.ledger, gh: s.gh }).run_status, 'waiting_merge');
   assert.equal(status({ ledger: s.ledger, gh: s.gh }).run_status, 'waiting_merge');
   s.ledger.items[C].state = 'closed';
-  assert.equal(runStatus(s.ledger), 'complete');
+  assert.equal(runStatus(s.ledger), 'root_pending');
 });
 
 test('反例（review-pr72）：status 和 next 对同一台账给出同一个 run_status（有可派的子 issue 时是 running）', () => {
@@ -657,4 +657,141 @@ test('#78 SC2 反例（review-pr81 第 3 轮）：用户在 lead 收尾前合了
   const res = cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW });
   assert.equal(res.state, 'cleaned');
   assert.equal(existsSync(r.wt), false);
+});
+
+// 总 issue 验收与交接（PraiseZhu/approve-exec#79 SC1、SC4、SC5）
+
+const ROOT_SC_BODY = '## 整体验收\n\n- [ ] SC1 真实运行不找 lead。验证：github-live\n- [ ] SC2 两仓测试全绿。验证：static';
+const LEAD_RESULT = {
+  conclusion: 'lead 判总 issue 通过。',
+  sc: [{ id: 'SC1', result: '人工手测', evidence: '亲见会话没找 lead' }, { id: 'SC2', result: '通过', evidence: '集成预览 run-tests all pass' }],
+  focus: ['#5 只在预览里跑过'],
+};
+
+/** 全部子 issue 收工：#11、#12 已归档（PR 5、6），#13、#14 计划时已关闭；总 issue 正文带 SC。 */
+function allDone({ rootBody = ROOT_SC_BODY } = {}) {
+  const fixture = parentFixture();
+  fixture[`api repos/${REPO}/issues/10`] = { ...fixture[`api repos/${REPO}/issues/10`], body: rootBody };
+  const s = setup({ fixture });
+  for (const [ref, pr] of [[A, 5], [`${REPO}#12`, 6]]) {
+    Object.assign(s.ledger.items[ref], { state: 'archived', checkpoint: { seq: 2, state: 'ready', pr, head: H('a'), lane: 'personal' } });
+    fixture[`api repos/${REPO}/pulls/${pr}`] = { head: { ref: `feat/${pr}`, sha: H('a') }, state: 'open', draft: false, merged: false };
+    fixture[`pr checks ${pr} --repo ${REPO} --required --json name,bucket`] = [{ name: 'test', bucket: 'pass' }];
+  }
+  for (const ref of [C, `${REPO}#14`]) s.ledger.items[ref].state = 'closed';
+  return s;
+}
+
+test('#79 SC1 全部收工 → root_pending；handoff 成功后 complete；单个子 issue 入口（首行有总 issue）不做总 issue 验收', () => {
+  const s = allDone();
+  assert.equal(status({ ledger: s.ledger, gh: s.gh }).run_status, 'root_pending');
+  const res = handoff({ ledger: s.ledger, result: LEAD_RESULT, gh: s.gh, checks: s.gh, now: NOW });
+  assert.deepEqual([res.ok, res.n], [true, 1]);
+  assert.equal(status({ ledger: s.ledger, gh: s.gh }).run_status, 'complete');
+  assert.equal(rootPending(s.ledger), false);
+
+  const single = setup({ entryRef: A });
+  assert.equal(single.ledger.root_acceptance, false);
+  for (const ref of Object.keys(single.ledger.items)) single.ledger.items[ref].state = 'archived';
+  assert.equal(runStatus(single.ledger), 'complete', '单个子 issue 入口收工即 complete');
+});
+
+test('#79 SC4 handoff 在总 issue 发首行固定的交接评论，记进台账；第二次是「第 2 次」', () => {
+  const s = allDone();
+  handoff({ ledger: s.ledger, result: LEAD_RESULT, gh: s.gh, checks: s.gh, now: NOW });
+  const body = s.fixture[ROOT_COMMENTS].at(-1).body;
+  assert.match(body, /^\[批准执行\] 交接验收 · 第 1 次\n总 issue：acme\/app#10 · lead 验收：/);
+  for (const h of ['结论', '子 PR', '整体验收项', '请重点查', 'lead 没验到的', '上线后验证', '范围核对']) assert.ok(body.includes(`\n## ${h}\n`), h);
+  assert.ok(body.includes(`| acme/app#11 | #5 | ${H('a')} | ${H('a')} | personal | 否 |`));
+  assert.deepEqual(s.ledger.handoffs.map((h) => [h.n, h.items.length]), [[1, 4]]);
+  // 补了一个子 issue 并收工后再交接：第 2 次。
+  s.ledger.items[`${REPO}#99`] = { ...s.ledger.items[C], ref: `${REPO}#99` };
+  assert.equal(runStatus(s.ledger), 'root_pending', '最后一次交接没覆盖新子 issue');
+  assert.equal(handoff({ ledger: s.ledger, result: LEAD_RESULT, gh: s.gh, checks: s.gh, now: NOW }).n, 2);
+  assert.match(s.fixture[ROOT_COMMENTS].at(-1).body, /^\[批准执行\] 交接验收 · 第 2 次\n/);
+});
+
+test('#79 SC4 handoff 拒绝：还没全部收工、root-check 不过、缺 SC、有「未通过」、带本机绝对路径；被拒时不发评论', () => {
+  const posted = (s) => s.fixture[ROOT_COMMENTS].length;
+  let s = setup();
+  assert.throws(() => handoff({ ledger: s.ledger, result: LEAD_RESULT, gh: s.gh, checks: s.gh, now: NOW }), /run 状态是 waiting_merge，不是 root_pending：全部子 issue 收工后才交接总 issue/);
+  s = allDone();
+  s.fixture[`api repos/${REPO}/pulls/5`].draft = true;
+  assert.throws(() => handoff({ ledger: s.ledger, result: LEAD_RESULT, gh: s.gh, checks: s.gh, now: NOW }), /root-check 不过，不交接：acme\/app#11 PR #5 还是 Draft/);
+  s = allDone();
+  const before = posted(s);
+  assert.throws(() => handoff({ ledger: s.ledger, result: { ...LEAD_RESULT, sc: LEAD_RESULT.sc.slice(1) }, gh: s.gh, checks: s.gh, now: NOW }), /缺总 issue 的 SC1/);
+  assert.throws(() => handoff({ ledger: s.ledger, result: { ...LEAD_RESULT, sc: [LEAD_RESULT.sc[0], { id: 'SC2', result: '未通过', evidence: 'x' }] }, gh: s.gh, checks: s.gh, now: NOW }), /SC2 未通过/);
+  assert.throws(() => handoff({ ledger: s.ledger, result: { ...LEAD_RESULT, focus: ['看 /Users/me/repo/a.ts'] }, gh: s.gh, checks: s.gh, now: NOW }), /本机绝对路径（\/Users\/…）/);
+  assert.equal(posted(s), before, '被拒时一条评论都不发');
+  assert.deepEqual(s.ledger.handoffs, []);
+  s = allDone({ rootBody: '总 issue 正文，没有 SC' });
+  assert.throws(() => handoff({ ledger: s.ledger, result: LEAD_RESULT, gh: s.gh, checks: s.gh, now: NOW }), /正文里没有 SC 行/);
+});
+
+test('#79 SC4 handoff CLI：--result 文件，exit 0，台账落盘；不带 --result exit 2', () => {
+  const s = allDone();
+  writeFileSync(s.ledgerPath, JSON.stringify(s.ledger));
+  writeFileSync(s.ghPath, JSON.stringify(s.fixture));
+  const resultPath = join(s.dir, 'lead-result.json');
+  writeFileSync(resultPath, JSON.stringify(LEAD_RESULT));
+  const run = (...a) => spawnSync(process.execPath, [CLI, 'handoff', '--ledger', s.ledgerPath, '--now', NOW, '--gh-fixture', s.ghPath, ...a], { encoding: 'utf8' });
+  assert.equal(run().status, 2);
+  const res = run('--result', resultPath);
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(JSON.parse(readFileSync(s.ledgerPath, 'utf8')).handoffs.length, 1);
+});
+
+/** 新计划：在原计划基础上多一个子 issue #15（或改动已有子 issue）。 */
+function planWith(s, mutate) {
+  const next = JSON.parse(JSON.stringify(s.plan));
+  mutate(next);
+  const path = join(s.dir, `plan-2-${Math.random().toString(16).slice(2)}.json`);
+  writeFileSync(path, JSON.stringify(next));
+  return { next, path };
+}
+const extra = (p) => p.items.push({ ...JSON.parse(JSON.stringify(p.items[0])), ref: `${REPO}#15`, number: 15, title: '[子5/5] 补漏', closed: false, wave: 1, hard_deps: [], merge_after: [] });
+
+test('#79 SC5 add 把新子 issue 以 pending 加进台账、换计划指纹，之后能派；加完 run_status 不再是 root_pending / complete', () => {
+  const s = allDone();
+  assert.equal(runStatus(s.ledger), 'root_pending');
+  const { next: np, path } = planWith(s, extra);
+  const res = add({ ledger: s.ledger, oldPlan: s.plan, newPlan: np, newPlanPath: path, now: NOW });
+  assert.deepEqual(res.added, [`${REPO}#15`]);
+  assert.equal(s.ledger.items[`${REPO}#15`].state, 'pending');
+  assert.equal(s.ledger.plan.path, path);
+  assert.notEqual(runStatus(s.ledger), 'root_pending');
+  assert.notEqual(runStatus(s.ledger), 'complete');
+  s.fixture[commentsKey(15)] = [];
+  s.fixture[`api repos/${REPO}/issues/15`] = { ...s.fixture[`api repos/${REPO}/issues/11`], number: 15 };
+  assert.equal(prepare({ ledger: s.ledger, plan: np, ref: `${REPO}#15`, leadSessionId: 'lead-1', gh: s.gh, now: NOW }).claimed, true);
+});
+
+test('#79 SC5 add 拒绝：已有子 issue 的范围 / SC / 依赖变了（needs_lead 的除外）、删子 issue、换总 issue、什么都没新增', () => {
+  let s = allDone();
+  let { next: np, path } = planWith(s, (p) => { extra(p); p.items[0].keel_run.scope = ['src/other/**']; });
+  assert.throws(() => add({ ledger: s.ledger, oldPlan: s.plan, newPlan: np, newPlanPath: path, now: NOW }), /acme\/app#11 的范围、SC 或依赖在新计划里变了（当前状态 archived）/);
+  ({ next: np, path } = planWith(s, (p) => { p.items.pop(); }));
+  assert.throws(() => add({ ledger: s.ledger, oldPlan: s.plan, newPlan: np, newPlanPath: path, now: NOW }), /新计划里没有 acme\/app#14/);
+  ({ next: np, path } = planWith(s, (p) => { p.root.ref = `${REPO}#99`; }));
+  assert.throws(() => add({ ledger: s.ledger, oldPlan: s.plan, newPlan: np, newPlanPath: path, now: NOW }), /新计划的总 issue 是 acme\/app#99/);
+  assert.throws(() => add({ ledger: s.ledger, oldPlan: s.plan, newPlan: s.plan, newPlanPath: s.planPath, now: NOW }), /没有新的子 issue/);
+
+  s = dispatched();
+  checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'needs_lead', reason: '要加 docs/x.md', now: NOW });
+  ({ next: np, path } = planWith(s, (p) => { p.items[0].keel_run.scope = [...p.items[0].keel_run.scope, 'docs/x.md']; }));
+  assert.deepEqual(add({ ledger: s.ledger, oldPlan: s.plan, newPlan: np, newPlanPath: path, now: NOW }).changed, [A], 'needs_lead 的子 issue 可以改');
+});
+
+test('#79 SC5 add CLI：原计划被改过就拒绝；正常时 exit 0 并落盘', () => {
+  const s = allDone();
+  writeFileSync(s.ledgerPath, JSON.stringify(s.ledger));
+  const { path } = planWith(s, extra);
+  const run = (...a) => spawnSync(process.execPath, [CLI, 'add', '--ledger', s.ledgerPath, '--now', NOW, ...a], { encoding: 'utf8' });
+  assert.equal(run().status, 2, '不带 --plan');
+  const res = run('--plan', path);
+  assert.equal(res.status, 0, res.stderr);
+  const saved = JSON.parse(readFileSync(s.ledgerPath, 'utf8'));
+  assert.equal(saved.items[`${REPO}#15`].state, 'pending');
+  assert.equal(saved.plan.path, path);
 });

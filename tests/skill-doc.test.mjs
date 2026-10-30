@@ -73,6 +73,14 @@ test('lead 验收：accept-check 后判通过或要改，不设轮数上限、�
   }
 });
 
+test('#79 总 issue 验收与交接：root-check 预览、不过就补子 issue 再 add、过了 handoff 给验收机；root_pending 写进收工标准', () => {
+  const s = section('## ⓪ issue 入口');
+  for (const must of ['**总 issue 验收与交接。**', 'scripts/root-check.mjs --ledger <f> --preview', 'issue-run.mjs add --ledger <f> --plan <新计划>',
+    'issue-run.mjs handoff --ledger <f> --result <结果文件>', '[批准执行] 交接验收 · 第 <n> 次', 'root-check.mjs --ledger <f> --cleanup', '`root_pending`', 'lead 不合并、不关总 issue']) {
+    assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
+  }
+});
+
 test('Ready 后收尾与收工标准：清本地、归档会话，run_status complete 才收工', () => {
   const s = section('## ⓪ issue 入口');
   for (const must of ['**Ready 后收尾。**', 'issue-run.mjs cleanup', 'archive_sessions', '**收工标准。**', 'run_status', '`complete`', '`waiting_merge`']) {
