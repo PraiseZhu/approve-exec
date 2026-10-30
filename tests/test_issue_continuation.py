@@ -1,4 +1,4 @@
-"""issue-watch.py：零 token 续跑脚本（PraiseZhu/approve-exec#69 SC1、SC2、SC3、SC8，#77 SC4，#78 SC1、SC2）。"""
+"""issue-watch.py：零 token 续跑脚本（PraiseZhu/approve-exec#69 SC1、SC2、SC3、SC8，#77 SC4，#78 SC1、SC2，#79 SC1）。"""
 
 from __future__ import annotations
 
@@ -65,9 +65,9 @@ class Base(unittest.TestCase):
         self.config.write_text(json.dumps({"schema": "issue-watch-v1", "lead_session_id": LEAD,
                                            "ledger_paths": [str(self.ledger_path)], "stalled_after_sec": 1800}))
 
-    def ledger(self, *items):
+    def ledger(self, *items, **extra):
         self.ledger_path.write_text(json.dumps({"schema": "issue-run-v1", "root": {"ref": "o/r#10"},
-                                                "items": {i["ref"]: i for i in items}}))
+                                                "items": {i["ref"]: i for i in items}, **extra}))
 
     def run_once(self, client, gh, now=NOW):
         return issue_watch.run_once(self.config, client=client, gh=gh, now=now)
@@ -206,7 +206,32 @@ class BlockedAndTerminalTests(Base):
         self.assertEqual(len(client.calls), 1, "同一次 needs_lead 不重复唤醒")
 
     def test_complete_run_never_wakes(self):
-        self.ledger(item("o/r#11", "archived"), item("o/r#12", "closed"))
+        self.ledger(item("o/r#11", "archived"), item("o/r#12", "closed"),
+                    handoffs=[{"n": 1, "items": ["o/r#11", "o/r#12"]}])
+        client = FakeClient()
+        self.assertEqual(self.run_once(client, FakeGitHub())["status"], "complete")
+        self.assertEqual(client.calls, [])
+
+    def test_79_sc1_all_done_wakes_root_acceptance_once_until_handoff(self):
+        self.ledger(item("o/r#11", "archived"), item("o/r#12", "closed"), handoffs=[])
+        client = FakeClient()
+        res = self.run_once(client, FakeGitHub())
+        self.assertEqual(res["signals"], ["root:o/r#10:1:2"])
+        msg = client.calls[0]["message"]
+        self.assertIn("[待总验收] o/r#10：全部子 issue 收工，还没交接第 1 次总 issue 验收", msg)
+        for step in ("root-check --preview", "issue-run handoff", "issue-run add", "root-check --cleanup"):
+            self.assertIn(step, msg)
+        self.assertEqual(self.run_once(client, FakeGitHub(), now=NOW + 300)["status"], "monitoring", "同一次只叫一次")
+        self.assertEqual(len(client.calls), 1)
+        # 交接后 complete；add 了新子 issue 并收工后要再交接一次（第 2 次）。
+        self.ledger(item("o/r#11", "archived"), item("o/r#12", "closed"), handoffs=[{"n": 1, "items": ["o/r#11", "o/r#12"]}])
+        self.assertEqual(self.run_once(client, FakeGitHub(), now=NOW + 600)["status"], "complete")
+        self.ledger(item("o/r#11", "archived"), item("o/r#12", "closed"), item("o/r#15", "archived"),
+                    handoffs=[{"n": 1, "items": ["o/r#11", "o/r#12"]}])
+        self.assertEqual(self.run_once(client, FakeGitHub(), now=NOW + 900)["signals"], ["root:o/r#10:2:3"])
+
+    def test_79_sc1_single_child_entry_has_no_root_acceptance(self):
+        self.ledger(item("o/r#11", "archived"), root_acceptance=False, handoffs=[])
         client = FakeClient()
         self.assertEqual(self.run_once(client, FakeGitHub())["status"], "complete")
         self.assertEqual(client.calls, [])

@@ -30,7 +30,13 @@ lead 的执行框架只能是 claude-code 或 codex：KEEL 只给这两种配了
    - **待收尾**：owner 写了 `ready`，做第 7 步。
    - **lead 未处理**：停在 `claimed`（prepare 后没 bind）、`awaiting_acceptance`（没裁决）或 `cleaned`（没归档）超过阈值，消息里写了该做哪一步，照做。
 7. **Ready 后收尾。** owner 写了 `ready` checkpoint 后：`accept-check.mjs --stage ready` 复核（非 Draft、当前 head 必需 CI 全绿）→ `issue-run.mjs cleanup --item <ref>`（删本地 KEEL worktree 与本地分支，不删远端；PR 关了没合（已合并的照常清理）、PR 还是 Draft、PR head 不是验收通过的那个、当前 CI 不是全绿、有未提交改动、本地比 PR 新、分支在主目录检出时都拒绝）→ cindy_helper 的 `archive_sessions` 归档 owner 会话 → 把工具回执存成文件后 `issue-run.mjs archived --item <ref> --result <回执文件>`。
-8. **收工标准。** 子 issue 收工 = PR 非 Draft + 当前 head 必需 CI 全绿 + lead 判通过，并已清理、归档。`issue-run.mjs status` 的 `run_status`：`complete` 才算整个 run 收工，这时删掉第 5 步的续跑调度并告诉用户；`waiting_merge` 表示剩下的子 issue 在等依赖 PR 合入（合并由用户做），告诉用户先合哪个，续跑脚本发现合入后会叫醒 lead；`blocked_user` 表示在等用户。集成分支（`integration/*`）上的子 PR 也是 Ready 即收工，审查机兜底后由用户指派 agent 合入。
+8. **总 issue 验收与交接。** 全部子 issue 收工后 `run_status` 是 `root_pending`，续跑脚本叫醒 lead（「待总验收」）。以单个子 issue 为入口、它首行写着总 issue 时没有这一步。
+   - `node scripts/root-check.mjs --ledger <f> --preview --out <同目录>/root-check.json`：逐个子 PR 查非 Draft、当前 CI 全绿、还开着或已合并，personal 车道 head 没变（交接车道 head 变了只记下来）；再在每个涉及的仓从 `origin/<目标分支>` 开预览 worktree（`<仓>/.worktrees/approve-exec-preview-<run>`），按批次依次合入各子 PR。有冲突就报 PR 号和文件。
+   - 在预览目录里按目标仓规则跑测试，对照总 issue「整体验收」逐条验：`static` / `unit` 层在预览目录里跑，`github-live` 等层写亲眼看到的情况；再核对所有 PR 合起来只碰总 issue 范围内的文件、没违反「不做」。
+   - **不通过**：当场补。在总 issue 下按「开 issue」的模板补一个子 issue（挂上去、在总 issue 变更记录记一行），重新出计划存成新文件，`node scripts/issue-run.mjs add --ledger <f> --plan <新计划>`（只追加；已有子 issue 改了范围、SC 或依赖会被拒，`needs_lead` 的除外），回到第 3 步派会话。
+   - **通过**：写 lead 结果文件 `{"conclusion":"…","sc":[{"id":"SC1","result":"通过|人工手测","evidence":"…","hint":"…"}],"focus":["请验收机重点查的地方"],"not_verified":[…],"post_launch":[…],"scope":[…]}`，`sc` 覆盖总 issue 的全部 SC。`node scripts/issue-run.mjs handoff --ledger <f> --result <结果文件>`：脚本自己再跑一遍 `root-check`，校验结果（缺 SC、有「未通过」、带本机绝对路径都拒），在总 issue 发首行为 `[批准执行] 交接验收 · 第 <n> 次` 的评论。验收机读它、等它之后才开轮，「请重点查」每条都会给结论。
+   - 最后 `node scripts/root-check.mjs --ledger <f> --cleanup` 删预览 worktree。lead 不合并、不关总 issue：总 issue 由验收机验收后关闭。
+9. **收工标准。** 子 issue 收工 = PR 非 Draft + 当前 head 必需 CI 全绿 + lead 判通过，并已清理、归档。`issue-run.mjs status` 的 `run_status`：`complete` 才算整个 run 收工（全部子 issue 收工，并已交接总 issue 验收），这时删掉第 5 步的续跑调度并告诉用户；`root_pending` 表示该做第 8 步；`waiting_merge` 表示剩下的子 issue 在等依赖 PR 合入（合并由用户做），告诉用户先合哪个，续跑脚本发现合入后会叫醒 lead；`blocked_user` 表示在等用户。集成分支（`integration/*`）上的子 PR 也是 Ready 即收工，审查机兜底后由用户指派 agent 合入。
 
 owner 一侧的协议（验收点、checkpoint 命令、裁决之后怎么做）写在开工包第 3 节，完整说明见 `references/issue-owner-protocol.md`。
 

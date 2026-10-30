@@ -28,6 +28,10 @@
 //   cleanup    --ledger <f> --item <ref> [--now ISO] [--gh-fixture <夹具>]
 //   archived   --ledger <f> --item <ref> --result <archive_sessions 回执 JSON 文件> [--now ISO]
 //   status     --ledger <f> [--gh-fixture <夹具>]
+//   add        --ledger <f> --plan <新计划> [--now ISO]
+//              （总 issue 验收不过、补了子 issue 后用：只追加新子 issue；已有子 issue 的范围、SC、依赖变了就拒绝，needs_lead 的除外，#79）
+//   handoff    --ledger <f> --result <lead 结果.json> [--now ISO] [--gh-fixture <夹具>]
+//              （全部子 issue 收工后：自己跑一遍 root-check，校验 lead 结果，在总 issue 发交接评论给验收机，#79）
 import { existsSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -38,6 +42,8 @@ import { withLock } from './lib/state-lock.mjs';
 import { ghRunner, readIssue, parseIssueRef, PLAN_SCHEMA, PI_LEAD_REJECT } from './issue-plan.mjs';
 import { renderIssueHandoff } from './render-issue-handoff.mjs';
 import { acceptCheck, ciVerdict, ghChecksRunner } from './accept-check.mjs';
+import { rootCheck } from './root-check.mjs';
+import { LOCAL_PATH_RE, renderAcceptanceHandoff, rootScs, validateResult } from './render-acceptance-handoff.mjs';
 
 export const LEDGER_SCHEMA = 'issue-run-v1';
 export const ITEM_STATES = Object.freeze([
@@ -138,10 +144,20 @@ function waitingOn(gh, item) {
   return item.hard_deps.map((d) => depStatus(gh, d)).filter((s) => !s.ok);
 }
 
-/** run 状态：全部收工 complete；有子 issue 等用户 blocked_user；有在途的 running；只剩等依赖合并的 waiting_merge。 */
+/**
+ * 全部子 issue 收工后还要不要 lead 验收总 issue 并交接（#79）：以单个子 issue 为入口、它首行写着总 issue 时不要
+ * （init 记 root_acceptance=false）；要的话，最后一次交接没覆盖到全部子 issue（之后又 add 了）就还要再交接一次。
+ */
+export function rootPending(ledger) {
+  if (ledger.root_acceptance === false) return false;
+  const last = (ledger.handoffs ?? []).at(-1);
+  return !last || Object.keys(ledger.items).some((ref) => !last.items.includes(ref));
+}
+
+/** run 状态：全部收工且已交接 complete；全部收工、待总 issue 验收 root_pending；有子 issue 等用户 blocked_user；有在途的 running；只剩等依赖合并的 waiting_merge。 */
 export function runStatus(ledger, { dispatchable = [] } = {}) {
   const items = Object.values(ledger.items);
-  if (items.every((i) => DONE.includes(i.state))) return 'complete';
+  if (items.every((i) => DONE.includes(i.state))) return rootPending(ledger) ? 'root_pending' : 'complete';
   if (items.some((i) => i.state === 'blocked_user')) return 'blocked_user';
   if (items.some((i) => IN_FLIGHT.includes(i.state)) || dispatchable.length) return 'running';
   return 'waiting_merge';
@@ -197,6 +213,31 @@ function postComment(gh, path, body) {
 
 // commands: dispatch
 
+function newItem(i, now) {
+  return {
+    ref: i.ref,
+    repo: i.repo,
+    number: i.number,
+    title: i.title,
+    wave: i.wave,
+    hard_deps: i.hard_deps,
+    merge_after: i.merge_after,
+    state: i.closed ? 'closed' : 'pending',
+    claim_id: null,
+    session_id: null,
+    session_title: null,
+    checkpoint: null,
+    checkpoint_seq: 0,
+    revise_count: 0,
+    verdicts: [],
+    blocked: null,
+    cleanup: null,
+    archive: null,
+    last_activity_at: now,
+    history: [],
+  };
+}
+
 export function init({ plan, planPath, ledgerPath, now }) {
   if (plan.schema !== PLAN_SCHEMA) reject(`计划 schema 不是 ${PLAN_SCHEMA}`);
   const planSha = hashObject(plan);
@@ -206,30 +247,7 @@ export function init({ plan, planPath, ledgerPath, now }) {
     return { ok: true, created: false, ledger: ledgerPath };
   }
   const items = {};
-  for (const i of plan.items) {
-    items[i.ref] = {
-      ref: i.ref,
-      repo: i.repo,
-      number: i.number,
-      title: i.title,
-      wave: i.wave,
-      hard_deps: i.hard_deps,
-      merge_after: i.merge_after,
-      state: i.closed ? 'closed' : 'pending',
-      claim_id: null,
-      session_id: null,
-      session_title: null,
-      checkpoint: null,
-      checkpoint_seq: 0,
-      revise_count: 0,
-      verdicts: [],
-      blocked: null,
-      cleanup: null,
-      archive: null,
-      last_activity_at: now,
-      history: [],
-    };
-  }
+  for (const i of plan.items) items[i.ref] = newItem(i, now);
   const ledger = {
     schema: LEDGER_SCHEMA,
     run_id: randomUUID(),
@@ -242,6 +260,9 @@ export function init({ plan, planPath, ledgerPath, now }) {
     lead_session_id: null,
     source: plan.source,
     authorization_source: plan.authorization_source,
+    // 单个子 issue 入口且首行写着总 issue：总 issue 由它自己的批准执行验收，这里不做（#79）。
+    root_acceptance: plan.root.kind === 'parent' || !plan.items.some((i) => i.parent_ref),
+    handoffs: [],
     items,
   };
   save(ledgerPath, ledger, now);
@@ -664,12 +685,66 @@ export function archived({ ledger, ref, result, now }) {
   return { ok: true, state: item.state, ref };
 }
 
+// commands: root acceptance（#79）
+
+const planSig = (i) => JSON.stringify({ scope: i.keel_run.scope, sc: i.keel_run.sc, manual: i.manual_scs, deps: i.hard_deps, after: i.merge_after });
+
+/** 总 issue 验收不过、补了子 issue 之后：把新计划里新出现的子 issue 加进台账；已有的不许改，needs_lead 的除外。 */
+export function add({ ledger, oldPlan, newPlan, newPlanPath, now }) {
+  if (newPlan?.schema !== PLAN_SCHEMA) reject(`新计划 schema 不是 ${PLAN_SCHEMA}`);
+  if (newPlan.root?.ref !== ledger.root.ref) reject(`新计划的总 issue 是 ${newPlan.root?.ref}，台账的是 ${ledger.root.ref}`);
+  const added = [];
+  const changed = [];
+  for (const [ref, item] of Object.entries(ledger.items)) {
+    const before = planItemOf(oldPlan, ref);
+    const after = newPlan.items.find((i) => i.ref === ref);
+    if (!after) reject(`新计划里没有 ${ref}：add 只追加子 issue，不删`);
+    if (planSig(before) === planSig(after)) continue;
+    if (item.state !== 'needs_lead') reject(`${ref} 的范围、SC 或依赖在新计划里变了（当前状态 ${item.state}）：只有 needs_lead 的子 issue 可以改`);
+    Object.assign(item, { wave: after.wave, hard_deps: after.hard_deps, merge_after: after.merge_after });
+    changed.push(ref);
+  }
+  for (const i of newPlan.items) {
+    if (ledger.items[i.ref]) continue;
+    ledger.items[i.ref] = newItem(i, now);
+    added.push(i.ref);
+  }
+  if (!added.length && !changed.length) reject('新计划里没有新的子 issue，也没有要改的 needs_lead 子 issue');
+  ledger.plan = { path: newPlanPath, sha256: hashObject(newPlan) };
+  return { ok: true, added, changed };
+}
+
+/**
+ * 全部子 issue 收工后，lead 验收总 issue 通过，在总 issue 上发交接评论给验收机（PraiseZhu/vigil#140 读它）。
+ * 自己跑一遍 root-check（不收外部传入的检查结果）；lead 结果要覆盖总 issue 的全部 SC、没有「未通过」、不带本机路径。
+ */
+export function handoff({ ledger, result, gh, checks, now }) {
+  const run = runStatus(ledger);
+  if (run !== 'root_pending') reject(`run 状态是 ${run}，不是 root_pending：全部子 issue 收工后才交接总 issue`);
+  const check = rootCheck({ ledger, gh, checks, now });
+  if (!check.ok) {
+    reject(`root-check 不过，不交接：${check.rows.filter((r) => !r.ok).map((r) => `${r.ref} ${r.problems.join('；')}`).join(' | ')}`);
+  }
+  const { repo, number } = parseIssueRef(ledger.root.ref);
+  const scs = rootScs(readIssue(gh, repo, number).body);
+  if (!scs.length) reject(`${ledger.root.ref} 正文里没有 SC 行（- [ ] SC<n> …），验收机没法对照`);
+  const problems = validateResult({ result, scs });
+  if (problems.length) reject(`lead 结果不合格，不交接：${problems.join('；')}`);
+  const n = (ledger.handoffs ?? []).length + 1;
+  const body = renderAcceptanceHandoff({ ledger, check, result, scs, n, now });
+  const leak = LOCAL_PATH_RE.exec(body);
+  if (leak) reject(`交接正文里有本机绝对路径（${leak[0]}…），不交接：改成仓内相对路径`);
+  const posted = postComment(gh, commentsPathFor(ledger.root.ref), body);
+  ledger.handoffs = [...(ledger.handoffs ?? []), { n, at: now, url: posted?.html_url ?? null, items: Object.keys(ledger.items) }];
+  return { ok: true, n, ref: ledger.root.ref, url: posted?.html_url ?? null };
+}
+
 export function status({ ledger, gh }) {
   const items = Object.values(ledger.items).map((i) => ({
     ref: i.ref, wave: i.wave, state: i.state, session_id: i.session_id,
     pr: i.checkpoint?.pr ?? null, revise_count: i.revise_count, blocked: i.blocked?.reason ?? null,
   }));
-  return { ok: true, root: ledger.root.ref, run_id: ledger.run_id, run_status: next({ ledger, gh }).run_status, items };
+  return { ok: true, root: ledger.root.ref, run_id: ledger.run_id, run_status: next({ ledger, gh }).run_status, handoffs: ledger.handoffs ?? [], items };
 }
 
 // cli
@@ -686,7 +761,7 @@ export function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv.slice(1));
   const now = typeof args.now === 'string' ? args.now : nowIso();
   const gh = () => ghRunner(typeof args['gh-fixture'] === 'string' ? args['gh-fixture'] : null);
-  const WRITES = ['prepare', 'bind', 'release', 'checkpoint', 'verdict', 'unblock', 'free-worktree', 'cleanup', 'archived'];
+  const WRITES = ['prepare', 'bind', 'release', 'checkpoint', 'verdict', 'unblock', 'free-worktree', 'cleanup', 'archived', 'handoff'];
   try {
     if (!args.ledger || args.ledger === true) reject('缺 --ledger <ledger.json>');
     const ledgerPath = String(args.ledger);
@@ -698,6 +773,16 @@ export function main(argv = process.argv.slice(2)) {
       out = next({ ledger: load(ledgerPath), gh: gh() });
     } else if (cmd === 'status') {
       out = status({ ledger: load(ledgerPath), gh: gh() });
+    } else if (cmd === 'add') {
+      out = withLock(`${ledgerPath}.lock`, () => {
+        const ledger = load(ledgerPath);
+        const oldPlan = readJson(ledger.plan.path);
+        if (hashObject(oldPlan) !== ledger.plan.sha256) reject('原计划文件在 init 之后被改过：add 要拿原计划比对，不能改原计划，新计划另存一个文件');
+        if (!args.plan || args.plan === true) reject('add 需要 --plan <新计划>');
+        const res = add({ ledger, oldPlan, newPlan: readJson(String(args.plan)), newPlanPath: resolve(String(args.plan)), now });
+        save(ledgerPath, ledger, now);
+        return res;
+      });
     } else if (WRITES.includes(cmd)) {
       out = withLock(`${ledgerPath}.lock`, () => {
         const ledger = load(ledgerPath);
@@ -727,6 +812,10 @@ export function main(argv = process.argv.slice(2)) {
           res = unblock({ ledger, ref, note: str(args.note), now });
         } else if (cmd === 'free-worktree') {
           res = freeWorktree({ ledger, plan, ref, gh: gh(), now });
+        } else if (cmd === 'handoff') {
+          if (!args.result || args.result === true) reject('handoff 需要 --result <lead 结果.json>');
+          const fixture = typeof args['gh-fixture'] === 'string' ? args['gh-fixture'] : null;
+          res = handoff({ ledger, result: JSON.parse(readFileSync(String(args.result), 'utf8')), gh: gh(), checks: ghChecksRunner(fixture), now });
         } else if (cmd === 'cleanup') {
           res = cleanup({ ledger, plan, ref, gh: gh(), checks: ghChecksRunner(typeof args['gh-fixture'] === 'string' ? args['gh-fixture'] : null), now });
         } else {
@@ -736,7 +825,7 @@ export function main(argv = process.argv.slice(2)) {
         return res;
       });
     } else {
-      reject(`未知子命令: ${cmd}（init / next / prepare / bind / release / checkpoint / verdict / unblock / free-worktree / cleanup / archived / status）`);
+      reject(`未知子命令: ${cmd}（init / next / prepare / bind / release / checkpoint / verdict / unblock / free-worktree / cleanup / archived / status / add / handoff）`);
     }
     process.stdout.write(JSON.stringify(out) + '\n');
     return out.ok === false ? 2 : 0;

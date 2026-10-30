@@ -8,7 +8,7 @@
 |---|---|---|
 | owner 会话 | 用 KEEL 的 `keel_run` 推进一个子 issue 对应的 PR，自己处理 KEEL 的等待、判断门和 `stop`；到验收点写 checkpoint；收到裁决后照做 | 不给 lead 发消息报进度；不找用户；不合并；不改 issue 的范围和验收标准 |
 | 续跑脚本 | 每 5 分钟只读台账与 GitHub，发现「待验收、待收尾、需要 lead、需要用户、可派、停滞、lead 未处理」时叫醒 lead，同一情况只叫一次 | 不改台账，不调用模型 |
-| lead 会话 | 派会话、跑 accept-check、判通过或要改、收尾归档、开下一批 | 不写产品代码，不代 owner 推进，不合并 |
+| lead 会话 | 派会话、跑 accept-check、判通过或要改、收尾归档、开下一批；全部收工后验收总 issue，不过就补子 issue，过了就交接验收机 | 不写产品代码，不代 owner 推进，不合并，不关总 issue |
 
 ## 台账状态
 
@@ -20,6 +20,10 @@ claimed / dispatched / revising / needs_lead：会话失联时 lead 核实后 re
 needs_lead：范围或验收标准必须改，等 lead 定（owner 写），lead 定了以后 unblock
 blocked_user：等用户（owner 写，或判要改没有进展），用户处理后 lead unblock
 closed：计划时子 issue 已关闭
+
+全部子 issue 是 archived / closed 后，run 进 root_pending：lead 跑 root-check（--preview 合在一起试）、对照总 issue 整体验收项；
+  不通过 → 补子 issue，issue-run add 加进台账（新子 issue 从 pending 开始）
+  通过   → issue-run handoff 在总 issue 发交接评论给验收机 → complete
 ```
 
 ## owner 自己处理的事
