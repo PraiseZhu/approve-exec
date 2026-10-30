@@ -27,7 +27,8 @@ const MERGE_ID = ['-c', 'user.name=approve-exec', '-c', 'user.email=approve-exec
 export function previewName(ledger, base = 'main') {
   const name = `${PREVIEW_PREFIX}${ledger.run_id}`;
   if (base === 'main') return name;
-  return `${name}--${String(base).replace(/[^A-Za-z0-9._-]+/g, '-')}-${sha256(String(base)).slice(0, 12)}`;
+  // 可读部分最多 40 字符，整个目录名不超过文件名上限（255）；不同分支靠哈希区分（review-pr82 第 3 轮）。
+  return `${name}--${String(base).replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 40)}-${sha256(String(base)).slice(0, 12)}`;
 }
 
 function gitRunner() {

@@ -206,14 +206,22 @@ test('#79 SC3 反例（review-pr82）：检查之后 PR 又推了提交 → 预�
 test('#79 SC3 反例（review-pr82 第 2 轮）：release/foo 与 release-foo 落到不同目录；cleanup 不删前缀相同的别的 run 的目录', () => {
   const l = { run_id: '12345678-aaaa-4bbb-8ccc-000000000001' };
   assert.notEqual(previewName(l, 'release/foo'), previewName(l, 'release-foo'));
+  // review-pr82 第 3 轮：200 字符的合法分支名也不超过文件名上限；前 40 字符相同的两个长分支仍然不同目录。
+  const long = `release/${'x'.repeat(192)}`;
+  assert.ok(previewName(l, long).length <= 255, `${previewName(l, long).length}`);
+  assert.notEqual(previewName(l, `${long}a`), previewName(l, `${long}b`));
   const w = gitWorld();
+  const longBase = `release/${'y'.repeat(192)}`;
+  w.g(w.repo, 'push', '-q', 'origin', `origin/main:refs/heads/${longBase}`);
   const s = previewRun(w);
+  s.plan.items.find((i) => i.ref === B).keel_run.base_ref = longBase;
   const other = join(w.repo, '.worktrees', `approve-exec-preview-${s.ledger.run_id.slice(0, 8)}-ffff-4fff-8fff-ffffffffffff`);
   w.g(w.repo, 'worktree', 'add', '-q', '--detach', other, 'origin/main');
   const mine = preview({ ledger: s.ledger, plan: s.plan, check: check(s) });
   assert.equal(mine.ok, true);
+  assert.ok(mine.repos.some((r) => r.base === longBase && existsSync(r.dir)), '200 字符的目标分支也能开出预览目录');
   const res = cleanupPreview({ ledger: s.ledger, plan: s.plan });
-  assert.equal(res.removed.length, 1);
+  assert.equal(res.removed.length, 2);
   assert.equal(existsSync(other), true, '别的 run 的预览目录还在');
   w.g(w.repo, 'worktree', 'remove', '--force', other);
 });
