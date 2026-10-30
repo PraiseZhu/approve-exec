@@ -37,8 +37,8 @@ IN_PROGRESS = {"dispatched", "revising", "accepted"}
 # 停在这些状态时下一步是 lead 的；超过阈值没动再叫一次（#78）。
 # 停在 accepted（lead 判了通过、owner 还没转正式）的停滞：工作已做完，不重派（release 不收 accepted，review-pr81）。
 ACCEPTED_STALL = ("lead 判了通过、owner 还没转正式：会话还在就把台账里的通过消息用 send_to_session 再发一次；"
-                  "PR 已转正式且 head 是验收通过的那个，就由 lead 写 issue-run checkpoint --state ready 接着收尾；"
-                  "会话不在、PR 还是 Draft，告诉用户")
+                  "先跑 accept-check --stage ready，通过了（PR 还开着、已转正式、head 是验收通过的那个、CI 全绿）"
+                  "才由 lead 写 issue-run checkpoint --state ready 接着收尾；不过（含 PR 关了没合）或会话不在、PR 还是 Draft，告诉用户")
 LEAD_PENDING = {
     "claimed": "prepare 之后没 bind：核对 send_to_session 回执与会话列表，建出了会话就 issue-run bind，没建出就 issue-run release --evidence",
     "awaiting_acceptance": "待验收还没裁决：跑 accept-check --stage acceptance，再 issue-run verdict，把 owner_message 发回 owner 会话",

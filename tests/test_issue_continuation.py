@@ -180,6 +180,8 @@ class AcceptedStallTests(Base):
         msg = client.calls[0]["message"]
         self.assertIn("[停滞] o/r#11：状态 accepted", msg)
         self.assertIn("checkpoint --state ready", msg)
+        self.assertIn("先跑 accept-check --stage ready", msg, "补写 ready 前要过 ready 档检查（review-pr81 第 2 轮）")
+        self.assertLess(msg.index("accept-check --stage ready"), msg.index("checkpoint --state ready"))
         self.assertIn("告诉用户", msg)
         self.assertNotIn("release", msg, "release 不收 accepted（review-pr81）")
 

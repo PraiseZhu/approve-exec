@@ -639,3 +639,13 @@ test('#78 SC4 反例（review-pr81）：开了 PR、还没写验收点就失联 
   const first = dispatched();
   assert.doesNotMatch(prepare({ ledger: first.ledger, plan: first.plan, ref: `${REPO}#12`, leadSessionId: 'lead-1', gh: first.gh, now: NOW }).request.message, /^> 接手/, '第一次派发不查也不加接手说明');
 });
+
+test('#78 SC2 反例（review-pr81 第 2 轮）：PR 关了没合时 cleanup 拒绝，worktree、本地分支、台账状态都不动', () => {
+  const r = gitRepoWithWorktree();
+  const s = readyWith(r.head, r.repo);
+  s.fixture[`api repos/${REPO}/pulls/5`].state = 'closed';
+  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW }), /PR #5 状态是 closed，不是 open（关了没合？），不清理/);
+  assert.equal(existsSync(r.wt), true);
+  assert.equal(r.g('rev-parse', 'feat/x'), r.head);
+  assert.equal(s.ledger.items[A].state, 'ready');
+});
