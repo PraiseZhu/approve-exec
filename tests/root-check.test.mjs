@@ -107,7 +107,7 @@ function gitWorld({ conflict = false } = {}) {
   const h6 = branch('feat/6', conflict ? 'a.txt' : 'b.txt', 'from #12\n');
   g(repo, 'checkout', '-q', 'main');
   g(repo, 'push', '-q', 'origin', `${h5}:refs/pull/5/head`, `${h6}:refs/pull/6/head`);
-  return { repo, h5, h6, g };
+  return { repo, origin, h5, h6, g, id };
 }
 
 function previewRun(world) {
@@ -167,4 +167,38 @@ test('#79 SC2/SC3 CLI：检查不过 exit 2；--preview 结果写进 --out；--c
   res = run();
   assert.equal(res.status, 2);
   assert.equal(JSON.parse(res.stdout).ok, false);
+});
+
+test('#79 SC3 反例（review-pr82）：同一个仓有不同目标分支时各开一个预览目录，互不覆盖；--cleanup 都删掉', () => {
+  const w = gitWorld();
+  w.g(w.repo, 'push', '-q', 'origin', 'origin/main:refs/heads/release');
+  const s = previewRun(w);
+  s.plan.items.find((i) => i.ref === B).keel_run.base_ref = 'release';
+  const res = preview({ ledger: s.ledger, plan: s.plan, check: check(s) });
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(res.repos.length, 2);
+  const dirs = res.repos.map((r) => r.dir);
+  assert.notEqual(dirs[0], dirs[1]);
+  assert.ok(dirs.every((d) => existsSync(d)), '两个预览目录都在');
+  assert.match(res.repos.find((r) => r.base === 'release').dir, new RegExp(`${previewName(s.ledger)}-release$`));
+  assert.equal(cleanupPreview({ ledger: s.ledger, plan: s.plan }).removed.length, 2);
+  assert.ok(dirs.every((d) => !existsSync(d)));
+});
+
+test('#79 SC3 反例（review-pr82）：检查之后 PR 又推了提交 → 预览不合旧提交，报 head_moved、ok=false', () => {
+  const w = gitWorld();
+  const s = previewRun(w);
+  const checked = check(s);
+  w.g(w.repo, 'checkout', '-q', 'feat/6');
+  writeFileSync(join(w.repo, 'c.txt'), 'later\n');
+  w.g(w.repo, 'add', '.');
+  w.g(w.repo, ...w.id, 'commit', '-q', '-m', 'later');
+  const later = w.g(w.repo, 'rev-parse', 'HEAD');
+  w.g(w.repo, 'checkout', '-q', 'main');
+  w.g(w.repo, 'push', '-q', '-f', 'origin', `${later}:refs/pull/6/head`);
+  const res = preview({ ledger: s.ledger, plan: s.plan, check: checked });
+  assert.equal(res.ok, false);
+  assert.deepEqual(res.repos[0].merged, [5]);
+  assert.deepEqual(res.repos[0].head_moved, { pr: 6, ref: B, checked: w.h6, now: later });
+  cleanupPreview({ ledger: s.ledger, plan: s.plan });
 });

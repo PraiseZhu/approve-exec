@@ -69,7 +69,9 @@ test('#79 SC4 validateResult：缺 SC、多 SC、有「未通过」、缺证据�
   assert.match(p({ focus: 'x' }), /focus 必须是字符串数组/);
 });
 
-test('#79 SC4 本机绝对路径识别：/Users/、/home/、/tmp/、/private/、盘符；仓内相对路径不算', () => {
-  for (const s of ['/Users/x/a', '在 /home/u/b 里', '/tmp/x', '/private/var/y', 'C:\\work']) assert.match(s, LOCAL_PATH_RE, s);
-  for (const s of ['scripts/root-check.mjs', 'https://github.com/acme/app/pull/5', '.worktrees/approve-exec-preview-1']) assert.doesNotMatch(s, LOCAL_PATH_RE, s);
+test('#79 SC4 本机绝对路径识别：独立出现的 /Users/、/home/、/tmp/、/private/、C:\\ 与 C:/；仓内相对路径和 URL 里的路径不算（review-pr82）', () => {
+  for (const s of ['/Users/x/a', '在 /home/u/b 里', '/tmp/x', '/private/var/y', 'C:\\work', 'C:/work/repo', '（/tmp/a）', '`/Users/x`']) assert.match(s, LOCAL_PATH_RE, s);
+  for (const s of ['scripts/root-check.mjs', 'https://github.com/acme/app/pull/5', 'https://x.com/tmp/a', 'https://a.b/home/c', '.worktrees/approve-exec-preview-1', 'SC1:/x']) {
+    assert.doesNotMatch(s, LOCAL_PATH_RE, s);
+  }
 });

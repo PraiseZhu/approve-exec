@@ -7,8 +7,11 @@
 export const HANDOFF_SECTIONS = Object.freeze(['结论', '子 PR', '整体验收项', '请重点查', 'lead 没验到的', '上线后验证', '范围核对']);
 /** lead 对总 issue 每条 SC 的结论。「未通过」不交接：先补子 issue。 */
 export const SC_RESULTS = Object.freeze(['通过', '未通过', '人工手测']);
-/** 本机绝对路径：交接发到 GitHub，不能带。 */
-export const LOCAL_PATH_RE = /\/Users\/|\/home\/|\/tmp\/|\/private\/|\/var\/folders\/|\b[A-Za-z]:\\/;
+/**
+ * 本机绝对路径：交接发到 GitHub，不能带。只认独立出现的路径开头（前面不是字母、数字、`.`、`/`、`:`、`-`），
+ * URL 里的 `/tmp/` 这类不算；盘符 `C:\` 和 `C:/` 都算（review-pr82）。
+ */
+export const LOCAL_PATH_RE = /(?<![\w.\/:-])(?:\/Users\/|\/home\/|\/tmp\/|\/private\/|\/var\/folders\/|[A-Za-z]:[\\/])/;
 
 const SC_LINE = /^\s*[-*]\s*\[[ xX]\]\s*(?:\*\*)?(SC\d+)\b(?:\*\*)?\s*(.*)$/;
 

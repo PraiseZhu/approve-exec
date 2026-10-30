@@ -8,7 +8,7 @@
 //
 // CLI: node scripts/root-check.mjs --ledger <ledger.json> [--preview | --cleanup] [--out <结果.json>] [--gh-fixture <夹具>]
 // 输出一行 JSON；ok exit 0，否则 exit 2。
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { isMain, nowIso, parseArgs, readJson, writeJsonAtomic } from './lib/common.mjs';
@@ -20,8 +20,10 @@ export const PREVIEW_PREFIX = 'approve-exec-preview-';
 export const HANDOFF_LANES = Object.freeze(['gated-handoff', 'draft-gated-handoff']);
 const MERGE_ID = ['-c', 'user.name=approve-exec', '-c', 'user.email=approve-exec@localhost', '-c', 'commit.gpgsign=false'];
 
-export function previewName(ledger) {
-  return `${PREVIEW_PREFIX}${String(ledger.run_id).slice(0, 8)}`;
+export function previewName(ledger, base = 'main') {
+  const name = `${PREVIEW_PREFIX}${String(ledger.run_id).slice(0, 8)}`;
+  // 同一个仓有不同目标分支时各开一个目录，互不覆盖（review-pr82）。
+  return base === 'main' ? name : `${name}-${String(base).replace(/[^A-Za-z0-9._-]+/g, '-')}`;
 }
 
 function gitRunner() {
@@ -79,15 +81,22 @@ export function preview({ ledger, plan, check, git = gitRunner() }) {
   }
   const out = [];
   for (const { repo, dir, base, rows } of groups.values()) {
-    const wt = join(dir, '.worktrees', previewName(ledger));
+    const wt = join(dir, '.worktrees', previewName(ledger, base));
     if (existsSync(wt)) git(['-C', dir, 'worktree', 'remove', '--force', wt]);
     git(['-C', dir, 'fetch', '--quiet', 'origin', base]);
     git(['-C', dir, 'worktree', 'add', '--quiet', '--detach', wt, `origin/${base}`]);
     const merged = [];
     let conflict = null;
+    let moved = null;
     const ordered = rows.slice().sort((a, b) => (a.wave - b.wave) || a.ref.localeCompare(b.ref, 'en', { numeric: true }));
     for (const row of ordered) {
       git(['-C', dir, 'fetch', '--quiet', 'origin', `refs/pull/${row.pr}/head`]);
+      // 检查之后 PR 又推了提交：合进去的就不是检查过的那个，停下让 lead 重跑（review-pr82）。
+      const fetched = git(['-C', dir, 'rev-parse', 'FETCH_HEAD']);
+      if (fetched !== row.current_head) {
+        moved = { pr: row.pr, ref: row.ref, checked: row.current_head, now: fetched };
+        break;
+      }
       try {
         git(['-C', wt, ...MERGE_ID, 'merge', '--no-ff', '--no-edit', '--quiet', row.current_head]);
         merged.push(row.pr);
@@ -98,19 +107,22 @@ export function preview({ ledger, plan, check, git = gitRunner() }) {
         break;
       }
     }
-    out.push({ repo, base, dir: wt, merged, conflict });
+    out.push({ repo, base, dir: wt, merged, conflict, head_moved: moved });
   }
-  return { ok: out.every((o) => !o.conflict), repos: out };
+  return { ok: out.every((o) => !o.conflict && !o.head_moved), repos: out };
 }
 
-/** 删掉本 run 的预览 worktree（只删 approve-exec-preview-<run> 这一个名字）。 */
+/** 删掉本 run 的预览 worktree（只删 approve-exec-preview-<run> 与它带目标分支的变体）。 */
 export function cleanupPreview({ ledger, plan, git = gitRunner() }) {
   const removed = [];
+  const name = previewName(ledger);
   for (const dir of new Set(plan.items.map((i) => i.keel_run.repo_dir))) {
-    const wt = join(dir, '.worktrees', previewName(ledger));
-    if (!existsSync(wt)) continue;
-    git(['-C', dir, 'worktree', 'remove', '--force', wt]);
-    removed.push(wt);
+    const root = join(dir, '.worktrees');
+    if (!existsSync(root)) continue;
+    for (const entry of readdirSync(root).filter((e) => e === name || e.startsWith(`${name}-`))) {
+      git(['-C', dir, 'worktree', 'remove', '--force', join(root, entry)]);
+      removed.push(join(root, entry));
+    }
   }
   return { ok: true, removed };
 }
