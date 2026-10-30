@@ -126,7 +126,7 @@ test('#79 SC3 --preview 从 origin/main 开 .worktrees/approve-exec-preview-<run
   const [repo] = res.repos;
   const wt = join(w.repo, '.worktrees', previewName(s.ledger));
   assert.equal(realpathSync(repo.dir), realpathSync(wt));
-  assert.match(previewName(s.ledger), /^approve-exec-preview-[0-9a-f-]{8}$/);
+  assert.equal(previewName(s.ledger), `approve-exec-preview-${s.ledger.run_id}`, '用完整 run id');
   assert.deepEqual(repo.merged, [5, 6]);
   assert.equal(readFileSync(join(wt, 'a.txt'), 'utf8'), 'from #11\n');
   assert.equal(readFileSync(join(wt, 'b.txt'), 'utf8'), 'from #12\n');
@@ -180,7 +180,7 @@ test('#79 SC3 反例（review-pr82）：同一个仓有不同目标分支时各�
   const dirs = res.repos.map((r) => r.dir);
   assert.notEqual(dirs[0], dirs[1]);
   assert.ok(dirs.every((d) => existsSync(d)), '两个预览目录都在');
-  assert.match(res.repos.find((r) => r.base === 'release').dir, new RegExp(`${previewName(s.ledger)}-release$`));
+  assert.match(res.repos.find((r) => r.base === 'release').dir, new RegExp(`${previewName(s.ledger)}--release-[0-9a-f]{12}$`));
   assert.equal(cleanupPreview({ ledger: s.ledger, plan: s.plan }).removed.length, 2);
   assert.ok(dirs.every((d) => !existsSync(d)));
 });
@@ -201,4 +201,19 @@ test('#79 SC3 反例（review-pr82）：检查之后 PR 又推了提交 → 预�
   assert.deepEqual(res.repos[0].merged, [5]);
   assert.deepEqual(res.repos[0].head_moved, { pr: 6, ref: B, checked: w.h6, now: later });
   cleanupPreview({ ledger: s.ledger, plan: s.plan });
+});
+
+test('#79 SC3 反例（review-pr82 第 2 轮）：release/foo 与 release-foo 落到不同目录；cleanup 不删前缀相同的别的 run 的目录', () => {
+  const l = { run_id: '12345678-aaaa-4bbb-8ccc-000000000001' };
+  assert.notEqual(previewName(l, 'release/foo'), previewName(l, 'release-foo'));
+  const w = gitWorld();
+  const s = previewRun(w);
+  const other = join(w.repo, '.worktrees', `approve-exec-preview-${s.ledger.run_id.slice(0, 8)}-ffff-4fff-8fff-ffffffffffff`);
+  w.g(w.repo, 'worktree', 'add', '-q', '--detach', other, 'origin/main');
+  const mine = preview({ ledger: s.ledger, plan: s.plan, check: check(s) });
+  assert.equal(mine.ok, true);
+  const res = cleanupPreview({ ledger: s.ledger, plan: s.plan });
+  assert.equal(res.removed.length, 1);
+  assert.equal(existsSync(other), true, '别的 run 的预览目录还在');
+  w.g(w.repo, 'worktree', 'remove', '--force', other);
 });

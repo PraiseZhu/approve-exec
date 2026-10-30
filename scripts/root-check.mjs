@@ -11,7 +11,7 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
-import { isMain, nowIso, parseArgs, readJson, writeJsonAtomic } from './lib/common.mjs';
+import { isMain, nowIso, parseArgs, readJson, sha256, writeJsonAtomic } from './lib/common.mjs';
 import { ghRunner } from './issue-plan.mjs';
 import { ciVerdict, ghChecksRunner } from './accept-check.mjs';
 
@@ -20,10 +20,14 @@ export const PREVIEW_PREFIX = 'approve-exec-preview-';
 export const HANDOFF_LANES = Object.freeze(['gated-handoff', 'draft-gated-handoff']);
 const MERGE_ID = ['-c', 'user.name=approve-exec', '-c', 'user.email=approve-exec@localhost', '-c', 'commit.gpgsign=false'];
 
+/**
+ * 预览目录名：完整 run id（不同 run 不会撞名，cleanup 不会删到别的 run）；目标分支不是 main 时再加
+ * 「可读分支名 + 分支名哈希」，`release/foo` 和 `release-foo` 也落到不同目录（review-pr82 第 2 轮）。
+ */
 export function previewName(ledger, base = 'main') {
-  const name = `${PREVIEW_PREFIX}${String(ledger.run_id).slice(0, 8)}`;
-  // 同一个仓有不同目标分支时各开一个目录，互不覆盖（review-pr82）。
-  return base === 'main' ? name : `${name}-${String(base).replace(/[^A-Za-z0-9._-]+/g, '-')}`;
+  const name = `${PREVIEW_PREFIX}${ledger.run_id}`;
+  if (base === 'main') return name;
+  return `${name}--${String(base).replace(/[^A-Za-z0-9._-]+/g, '-')}-${sha256(String(base)).slice(0, 12)}`;
 }
 
 function gitRunner() {
@@ -112,14 +116,14 @@ export function preview({ ledger, plan, check, git = gitRunner() }) {
   return { ok: out.every((o) => !o.conflict && !o.head_moved), repos: out };
 }
 
-/** 删掉本 run 的预览 worktree（只删 approve-exec-preview-<run> 与它带目标分支的变体）。 */
+/** 删掉本 run 的预览 worktree（只删 approve-exec-preview-<run id> 与它带目标分支的 `--…` 变体）。 */
 export function cleanupPreview({ ledger, plan, git = gitRunner() }) {
   const removed = [];
   const name = previewName(ledger);
   for (const dir of new Set(plan.items.map((i) => i.keel_run.repo_dir))) {
     const root = join(dir, '.worktrees');
     if (!existsSync(root)) continue;
-    for (const entry of readdirSync(root).filter((e) => e === name || e.startsWith(`${name}-`))) {
+    for (const entry of readdirSync(root).filter((e) => e === name || e.startsWith(`${name}--`))) {
       git(['-C', dir, 'worktree', 'remove', '--force', join(root, entry)]);
       removed.push(join(root, entry));
     }
