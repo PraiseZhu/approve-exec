@@ -1,4 +1,4 @@
-"""issue-watch.py：零 token 续跑脚本（PraiseZhu/approve-exec#69 SC1、SC2、SC3、SC8，#77 SC4）。"""
+"""issue-watch.py：零 token 续跑脚本（PraiseZhu/approve-exec#69 SC1、SC2、SC3、SC8，#77 SC4，#78 SC1、SC2）。"""
 
 from __future__ import annotations
 
@@ -134,6 +134,56 @@ class StallTests(Base):
         self.run_once(client, FakeGitHub(pending={5}))
         self.assertEqual(self.run_once(client, FakeGitHub(pending={5}), now=NOW + 4000)["status"], "monitoring")
         self.assertEqual(client.calls, [])
+
+
+class LeadCloseoutTests(Base):
+    def test_78_sc1_ready_wakes_lead_once_with_closeout_steps(self):
+        self.ledger(item("o/r#11", "ready", checkpoint_seq=3, checkpoint={"pr": 5, "head": "a" * 40}))
+        client = FakeClient()
+        res = self.run_once(client, FakeGitHub())
+        self.assertEqual(res["signals"], ["ready:o/r#11:3"])
+        msg = client.calls[0]["message"]
+        self.assertIn("[待收尾] o/r#11：PR #5 已转正式", msg)
+        for step in ("accept-check --stage ready", "issue-run cleanup", "archive_sessions", "issue-run archived"):
+            self.assertIn(step, msg)
+        self.assertEqual(self.run_once(client, FakeGitHub(), now=NOW + 300)["status"], "monitoring")
+        self.assertEqual(len(client.calls), 1, "同一个 ready 不重复唤醒")
+
+    def test_78_sc2_lead_pending_states_wake_once_after_threshold(self):
+        steps = {"claimed": "issue-run bind", "awaiting_acceptance": "issue-run verdict", "cleaned": "issue-run archived"}
+        for state, step in steps.items():
+            with self.subTest(state=state):
+                self.setUp()
+                self.ledger(item("o/r#11", state, checkpoint_seq=1, checkpoint={"pr": 5, "head": "a" * 40}))
+                client = FakeClient()
+                first = self.run_once(client, FakeGitHub())
+                base = 1 if state == "awaiting_acceptance" else 0  # 待验收本来就当场叫一次
+                self.assertEqual(len(client.calls), base)
+                self.assertEqual(self.run_once(client, FakeGitHub(), now=NOW + 1700)["status"], "monitoring", "未到阈值不叫")
+                res = self.run_once(client, FakeGitHub(), now=NOW + 1801)
+                self.assertEqual(res["signals"], [f"lead_stalled:o/r#11:{state}:{int(NOW)}"])
+                msg = client.calls[-1]["message"]
+                self.assertIn(f"[lead 未处理] o/r#11：停在 {state} 30 分钟", msg)
+                self.assertIn(step, msg)
+                self.assertEqual(self.run_once(client, FakeGitHub(), now=NOW + 3700)["status"], "monitoring", "同一次停留只叫一次")
+                self.assertEqual(len(client.calls), base + 1)
+
+
+class AcceptedStallTests(Base):
+    def test_78_sc2_accepted_stall_gives_executable_steps_not_release(self):
+        self.ledger(item("o/r#11", "accepted", checkpoint={"pr": 5, "head": "a" * 40}))
+        client = FakeClient()
+        gh = FakeGitHub(heads={5: "a" * 40})
+        self.assertEqual(self.run_once(client, gh)["status"], "monitoring")
+        res = self.run_once(client, gh, now=NOW + 1801)
+        self.assertEqual(len(res["signals"]), 1)
+        msg = client.calls[0]["message"]
+        self.assertIn("[停滞] o/r#11：状态 accepted", msg)
+        self.assertIn("checkpoint --state ready", msg)
+        self.assertIn("先跑 accept-check --stage ready", msg, "补写 ready 前要过 ready 档检查（review-pr81 第 2 轮）")
+        self.assertLess(msg.index("accept-check --stage ready"), msg.index("checkpoint --state ready"))
+        self.assertIn("告诉用户", msg)
+        self.assertNotIn("release", msg, "release 不收 accepted（review-pr81）")
 
 
 class BlockedAndTerminalTests(Base):

@@ -7,9 +7,9 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { buildPlan, readRoot } from '../scripts/issue-plan.mjs';
-import { init, next, prepare, bind, release, checkpoint, verdict, unblock, freeWorktree, cleanup, archived, runStatus, status, sessionTitle, projectName, sessionIdFrom, activeClaims, REQUEST_KEYS, RunError } from '../scripts/issue-run.mjs';
+import { init, next, prepare, bind, release, checkpoint, verdict, unblock, freeWorktree, soleOpenPr, cleanup, archived, runStatus, status, sessionTitle, projectName, sessionIdFrom, activeClaims, REQUEST_KEYS, RunError } from '../scripts/issue-run.mjs';
 import { hashObject } from '../scripts/lib/common.mjs';
-import { REPO, LOGIN, commentsKey, parentFixture, writeFixture, ghFrom } from './fixtures/issues/build.mjs';
+import { REPO, LOGIN, commentsKey, openPullsKey, parentFixture, writeFixture, ghFrom } from './fixtures/issues/build.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = join(root, 'scripts/issue-run.mjs');
@@ -330,25 +330,43 @@ test('#77 SC4 needs_lead：要 --reason；记下原状态；unblock 放回；只
   assert.equal(unblock({ ledger: s.ledger, ref: A, note: '定了', now: NOW }).state, 'revising');
 });
 
-test('SC5 第 3 次判「要改」→ blocked_user，给出总 issue 评论正文，不再发回 owner', () => {
+const H = (c) => c.repeat(40);
+
+test('#78 SC3 判「要改」不设轮数上限：条目和 head 每次都变，第 3、4 次仍发回 owner', () => {
   const s = dispatched();
-  awaiting(s);
-  let res = verdict({ ledger: s.ledger, ref: A, revise: '补 SC2 的验收对照', now: NOW });
-  assert.equal(res.state, 'revising');
-  assert.match(res.owner_message, /第 1 次，最多 2 次/);
-  awaiting(s);
-  res = verdict({ ledger: s.ledger, ref: A, revise: '范围外改了 README', now: NOW });
-  assert.equal(res.state, 'revising');
-  awaiting(s);
-  res = verdict({ ledger: s.ledger, ref: A, revise: '还是缺证据', now: NOW });
+  const rounds = [['a', '补 SC2 的验收对照'], ['b', '范围外改了 README'], ['c', '还缺 SC4 证据'], ['d', '测试名写错']];
+  for (const [i, [c, items]] of rounds.entries()) {
+    awaiting(s, { head: H(c) });
+    const res = verdict({ ledger: s.ledger, ref: A, revise: items, now: NOW });
+    assert.equal(res.state, 'revising', `第 ${i + 1} 次`);
+    assert.match(res.owner_message, new RegExp(`要改（第 ${i + 1} 次）。要改的条目：${items}`));
+    assert.doesNotMatch(res.owner_message, /最多/);
+  }
+});
+
+test('#78 SC3 没有进展才停下找用户：条目原文和上一次相同 → blocked_user，root_comment 写明没有进展和两次条目', () => {
+  const s = dispatched();
+  awaiting(s, { head: H('a') });
+  verdict({ ledger: s.ledger, ref: A, revise: '补 SC2 的验收对照', now: NOW });
+  awaiting(s, { head: H('b') });
+  const res = verdict({ ledger: s.ledger, ref: A, revise: '  补 SC2 的验收对照 ', now: NOW });
   assert.equal(res.state, 'blocked_user');
-  assert.equal(Object.hasOwn(res, 'owner_message'), false, '第 3 次不发回 owner');
-  assert.match(res.root_comment, /^批准执行停下等用户：2026-10-29 acme\/app#11（PR #5）已判「要改」3 次仍未通过.*第 1 次：补 SC2 的验收对照；第 2 次：范围外改了 README；第 3 次：还是缺证据/);
+  assert.equal(Object.hasOwn(res, 'owner_message'), false, '没有进展时不再发回 owner');
+  assert.match(res.root_comment, /^批准执行停下等用户：2026-10-29 acme\/app#11（PR #5）第 2 次判「要改」没有进展（要改的条目和上一次相同），不再发回会话 owner-1。第 1 次：补 SC2 的验收对照；第 2 次：补 SC2 的验收对照$/);
   assert.equal(s.ledger.items[A].blocked.by, 'lead');
   assert.throws(() => awaiting(s), /owner 不能直接回到验收点/, '反例（review-pr72）：lead 叫停后 owner 不能自己写回待验收');
-  const back = unblock({ ledger: s.ledger, ref: A, note: '用户 2026-10-29：同意再改一轮', now: NOW });
+  const back = unblock({ ledger: s.ledger, ref: A, note: '用户 2026-10-30：同意再改一轮', now: NOW });
   assert.equal(back.state, 'revising');
-  assert.equal(s.ledger.items[A].revise_count, 0);
+});
+
+test('#78 SC3 没有进展才停下找用户：head 和上一次判要改时一样（没有新提交）→ blocked_user', () => {
+  const s = dispatched();
+  awaiting(s, { head: H('a') });
+  verdict({ ledger: s.ledger, ref: A, revise: '补证据', now: NOW });
+  awaiting(s, { head: H('a') });
+  const res = verdict({ ledger: s.ledger, ref: A, revise: '换个说法：补 SC2 证据', now: NOW });
+  assert.equal(res.state, 'blocked_user');
+  assert.match(res.root_comment, new RegExp(`没有进展（head 还是上一次判要改时的 ${H('a')}，没有新提交）`));
 });
 
 test('SC8 owner 写 blocked_user：台账记原因；unblock 回到原状态；没有原因就拒绝', () => {
@@ -545,5 +563,98 @@ test('#77 SC6 free-worktree CLI：删掉占用后台账落盘、退出码 0', ()
   const res = spawnSync(process.execPath, [CLI, 'free-worktree', '--ledger', s.ledgerPath, '--item', A, '--now', NOW, '--gh-fixture', s.ghPath], { encoding: 'utf8' });
   assert.equal(res.status, 0, res.stderr);
   assert.equal(JSON.parse(res.stdout).freed, true);
+  assert.equal(existsSync(r.wt), false);
+});
+
+test('#78 SC4 release 接受 claimed / dispatched / revising / needs_lead：发释放评论、清会话绑定、回 pending，之后能重派', () => {
+  for (const to of ['claimed', 'dispatched', 'revising', 'needs_lead']) {
+    const s = dispatched();
+    if (to === 'claimed') {
+      s.ledger.items[A].state = 'claimed';
+      s.ledger.items[A].session_id = null;
+    } else if (to === 'revising') {
+      awaiting(s);
+      verdict({ ledger: s.ledger, ref: A, revise: '补证据', now: NOW });
+    } else if (to === 'needs_lead') {
+      checkpoint({ ledger: s.ledger, plan: s.plan, ref: A, state: 'needs_lead', reason: '要改范围', now: NOW });
+    }
+    assert.equal(s.ledger.items[A].state, to);
+    const claim = s.ledger.items[A].claim_id;
+    assert.throws(() => release({ ledger: s.ledger, ref: A, evidence: ' ', gh: s.gh, now: NOW }), /需要 --evidence/, to);
+    const res = release({ ledger: s.ledger, ref: A, evidence: 'list_sessions 里没有这个会话（已被删）', gh: s.gh, now: NOW });
+    assert.equal(res.state, 'pending', to);
+    assert.equal(s.ledger.items[A].session_id, null, `${to}：会话绑定清掉`);
+    assert.match(s.fixture[COMMENTS].at(-1).body, new RegExp(`^批准执行释放：2026-10-29 acme/app#11 claim ${claim}：list_sessions 里没有这个会话`), to);
+    assert.deepEqual(activeClaims(s.fixture[COMMENTS], A, LOGIN), [], `${to}：释放后不再占用`);
+    const again = prepare({ ledger: s.ledger, plan: s.plan, ref: A, leadSessionId: 'lead-1', gh: s.gh, now: NOW });
+    assert.equal(again.claimed, true, `${to}：能重派`);
+    if (to === 'revising') {
+      assert.match(again.request.message, /^> 接手：上一个 owner 会话失联，PR #5 已经开着。不要开新 PR/, '已有 PR 的重派接着那个 PR 做');
+      assert.match(again.request.message, /keel_run` 传 `pr=5`/);
+    } else {
+      assert.doesNotMatch(again.request.message, /^> 接手/, `${to}：还没开 PR 的照常开工`);
+    }
+  }
+});
+
+test('#78 SC4 release 拒绝已到验收点及之后的状态；CLI 不带 --evidence 退出码 2', () => {
+  const s = dispatched();
+  awaiting(s);
+  assert.throws(() => release({ ledger: s.ledger, ref: A, evidence: '会话不在', gh: s.gh, now: NOW }), /当前状态 awaiting_acceptance，release 只接受 dispatch_unknown \/ claimed \/ dispatched \/ revising \/ needs_lead/);
+  verdict({ ledger: s.ledger, ref: A, pass: true, check: okCheck(), now: NOW });
+  assert.throws(() => release({ ledger: s.ledger, ref: A, evidence: '会话不在', gh: s.gh, now: NOW }), /当前状态 accepted/);
+  for (const state of ['ready', 'cleaned']) {
+    s.ledger.items[A].state = state;
+    assert.throws(() => release({ ledger: s.ledger, ref: A, evidence: '会话不在', gh: s.gh, now: NOW }), new RegExp(`当前状态 ${state}`));
+  }
+  const d = dispatched();
+  writeFileSync(d.ledgerPath, JSON.stringify(d.ledger));
+  writeFileSync(d.ghPath, JSON.stringify(d.fixture));
+  const cli = spawnSync(process.execPath, [CLI, 'release', '--ledger', d.ledgerPath, '--item', A, '--now', NOW, '--gh-fixture', d.ghPath], { encoding: 'utf8' });
+  assert.equal(cli.status, 2);
+  assert.match(cli.stderr, /需要 --evidence/);
+});
+
+test('#78 SC4 反例（review-pr81）：开了 PR、还没写验收点就失联 → 重派按 GitHub 上「任务 issue：」找到的唯一 PR 接手，free-worktree 也认它；多个时拒绝', () => {
+  const s = dispatched();
+  s.fixture[openPullsKey()] = [
+    { number: 7, body: `任务 issue：${A}\nCloses ${A}` },
+    { number: 8, body: `任务 issue：${REPO}#110` },
+    { number: 9, body: '没有任务行' },
+  ];
+  release({ ledger: s.ledger, ref: A, evidence: '会话已被删', gh: s.gh, now: NOW });
+  assert.equal(s.ledger.items[A].checkpoint, null, '失联前没写过验收点');
+  const again = prepare({ ledger: s.ledger, plan: s.plan, ref: A, leadSessionId: 'lead-1', gh: s.gh, now: NOW });
+  assert.match(again.request.message, /^> 接手：上一个 owner 会话失联，PR #7 已经开着。不要开新 PR/);
+  assert.equal(s.ledger.items[A].takeover_pr, 7);
+
+  const r = gitRepoWithWorktree();
+  s.fixture[`api repos/${REPO}/pulls/7`] = { head: { ref: 'feat/x', sha: r.head }, state: 'open', draft: true };
+  s.plan.items.find((i) => i.ref === A).keel_run.repo_dir = r.repo;
+  bind({ ledger: s.ledger, ref: A, claimId: again.claim_id, result: { target_session_id: 'owner-2' }, gh: s.gh, now: NOW });
+  assert.equal(freeWorktree({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, now: NOW }).freed, true, '没有验收点时用接手的 PR 号释放旧 worktree');
+
+  s.fixture[openPullsKey()].push({ number: 12, body: `任务 issue：${A}` });
+  assert.throws(() => soleOpenPr(s.gh, REPO, A), /有 2 个开着的 PR 写着「任务 issue：acme\/app#11」（#7、#12）/);
+  const first = dispatched();
+  assert.doesNotMatch(prepare({ ledger: first.ledger, plan: first.plan, ref: `${REPO}#12`, leadSessionId: 'lead-1', gh: first.gh, now: NOW }).request.message, /^> 接手/, '第一次派发不查也不加接手说明');
+});
+
+test('#78 SC2 反例（review-pr81 第 2 轮）：PR 关了没合时 cleanup 拒绝，worktree、本地分支、台账状态都不动', () => {
+  const r = gitRepoWithWorktree();
+  const s = readyWith(r.head, r.repo);
+  s.fixture[`api repos/${REPO}/pulls/5`].state = 'closed';
+  assert.throws(() => cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW }), /PR #5 关了没合（状态 closed），不清理/);
+  assert.equal(existsSync(r.wt), true);
+  assert.equal(r.g('rev-parse', 'feat/x'), r.head);
+  assert.equal(s.ledger.items[A].state, 'ready');
+});
+
+test('#78 SC2 反例（review-pr81 第 3 轮）：用户在 lead 收尾前合了 PR → cleanup 照常清理', () => {
+  const r = gitRepoWithWorktree();
+  const s = readyWith(r.head, r.repo);
+  Object.assign(s.fixture[`api repos/${REPO}/pulls/5`], { state: 'closed', merged: true });
+  const res = cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW });
+  assert.equal(res.state, 'cleaned');
   assert.equal(existsSync(r.wt), false);
 });

@@ -35,6 +35,7 @@ test('frontmatter：name / trigger，description 只描述 issue 入口', () => 
   for (const must of ['开 issue', '吃总 issue', '独立会话', '不带模型参数', 'keel_run', '不合并']) {
     assert.ok(description.includes(must), `description 应写「${must}」`);
   }
+  assert.equal(description.includes('最多 2 轮'), false, '#78：description 不再写最多 2 轮');
   for (const old of ['manifest', 'brief', '旧']) {
     assert.equal(description.includes(old), false, `description 不得再提「${old}」`);
   }
@@ -64,9 +65,10 @@ test('owner 收口：开工包第 3 节 + references/issue-owner-protocol.md；�
   assert.ok(existsSync(join(root, 'references/issue-owner-protocol.md')), 'owner 协议文件必须存在');
 });
 
-test('lead 验收：accept-check 后判通过或要改，第 3 次要改停下等用户', () => {
+test('lead 验收：accept-check 后判通过或要改，不设轮数上限、没有进展才停下等用户（#78）', () => {
   const s = section('## ⓪ issue 入口');
-  for (const must of ['**被叫醒后按信号处理**', 'scripts/accept-check.mjs', 'verdict --item <ref> --pass', '第 3 次判「要改」', 'blocked_user', '**需要 lead**', '`needs_lead`']) {
+  for (const must of ['**被叫醒后按信号处理**', 'scripts/accept-check.mjs', 'verdict --item <ref> --pass', '判「要改」不设轮数上限', '只有没有进展时', 'blocked_user', '**需要 lead**', '`needs_lead`',
+    '**待收尾**', '**lead 未处理**', 'issue-run.mjs release --item <ref> --evidence']) {
     assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
   }
 });

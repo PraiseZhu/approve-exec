@@ -21,8 +21,8 @@ import { spawnSync } from 'node:child_process';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-// 「批准执行」触发行原文（整行逐字匹配，防描述被改写后入口失效）；2026-10-29 改为 issue 入口（PraiseZhu/approve-exec#69）
-export const TRIGGER_LINE = '| 批准执行 | `approve-exec` | 直接执行不确认。接在「开 issue」之后：吃总 issue（或独立 issue / 单个子 issue），缺模板 fail-closed 指路「开 issue」；lead 按并行/串行原则给每个子 issue 开一个独立会话（1 子 issue = 1 PR = 1 会话），派会话不带模型参数；owner 用 KEEL 的 keel_run 推进到验收点写 checkpoint，零 token 续跑脚本叫醒 lead；lead 跑 accept-check 后判通过或要改（最多 2 轮），通过后交接车道才转 Ready，Ready 后清本地并归档会话，依赖合入后开下一批。本 skill 不合入 |';
+// 「批准执行」触发行原文（整行逐字匹配，防描述被改写后入口失效）；2026-10-29 改为 issue 入口（PraiseZhu/approve-exec#69）；2026-10-30 轮数与转 Ready 说法随 #77、#78 更新
+export const TRIGGER_LINE = '| 批准执行 | `approve-exec` | 直接执行不确认。接在「开 issue」之后：吃总 issue（或独立 issue / 单个子 issue），缺模板 fail-closed 指路「开 issue」；lead 按并行/串行原则给每个子 issue 开一个独立会话（1 子 issue = 1 PR = 1 会话），派会话不带模型参数；owner 用 KEEL 的 keel_run 自主推进到验收点（Draft + CI 绿）写 checkpoint，零 token 续跑脚本叫醒 lead；lead 跑 accept-check 后判通过或要改（不设轮数上限，没有进展才找用户），通过后才转 Ready，Ready 后清本地并归档会话，依赖合入后开下一批。本 skill 不合入 |';
 // LIVE_LINK 推导：从 config.goalSkillRoot 派生 —— dirname(goalSkillRoot) 即 skills/claude-active 目录，
 // approve-exec 与 goal 同处该目录（skills 目录内 symlink）。
 // 禁止按仓库在磁盘上的嵌套深度猜层级（'../..' 相对 root）：主 checkout（approve-exec-src）与 worktree

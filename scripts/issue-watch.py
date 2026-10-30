@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """issue-watch.py — 批准执行 issue 入口的零 token 续跑脚本（cindy-script/1，PraiseZhu/approve-exec#69）。
 
-每轮只读台账与 GitHub，发现下面五种情况时用 sessions.dispatch 叫醒 lead；同一情况只叫一次：
+每轮只读台账与 GitHub，发现下面几种情况时用 sessions.dispatch 叫醒 lead；同一情况只叫一次：
 - accept：owner 写了 awaiting_acceptance checkpoint（按 checkpoint 序号去重）
+- ready：owner 转了正式、写了 ready checkpoint，该 lead 收尾（按 checkpoint 序号去重，#78）
 - lead：owner 写了 needs_lead，范围或验收标准要 lead 定（按停下的那一次去重，#77）
 - blocked：子 issue 停在 blocked_user（按停下的那一次去重）
 - unlock：pending 子 issue 的依赖都已关闭（completed），可以派了
 - stalled：在途子 issue 的台账活动和 PR head 都超过 stalled_after_sec 没变，且 PR 不在等 CI
+- lead_stalled：该 lead 动手的状态（claimed / awaiting_acceptance / cleaned）超过 stalled_after_sec 没动（#78）
 全部子 issue 收工（archived / closed）后不再叫醒，状态写 complete。
 
 配置 JSON：{"schema": "issue-watch-v1", "lead_session_id": "…", "ledger_paths": ["…"], "stalled_after_sec": 1800}
@@ -32,14 +34,26 @@ from cindy_script import DuplexClient  # noqa: E402
 
 SCHEMA = "issue-watch-v1"
 IN_PROGRESS = {"dispatched", "revising", "accepted"}
+# 停在这些状态时下一步是 lead 的；超过阈值没动再叫一次（#78）。
+# 停在 accepted（lead 判了通过、owner 还没转正式）的停滞：工作已做完，不重派（release 不收 accepted，review-pr81）。
+ACCEPTED_STALL = ("lead 判了通过、owner 还没转正式：会话还在就把台账里的通过消息用 send_to_session 再发一次；"
+                  "先跑 accept-check --stage ready，通过了（PR 还开着、已转正式、head 是验收通过的那个、CI 全绿）"
+                  "才由 lead 写 issue-run checkpoint --state ready 接着收尾；不过（含 PR 关了没合）或会话不在、PR 还是 Draft，告诉用户")
+LEAD_PENDING = {
+    "claimed": "prepare 之后没 bind：核对 send_to_session 回执与会话列表，建出了会话就 issue-run bind，没建出就 issue-run release --evidence",
+    "awaiting_acceptance": "待验收还没裁决：跑 accept-check --stage acceptance，再 issue-run verdict，把 owner_message 发回 owner 会话",
+    "cleaned": "清理完还没归档：用 archive_sessions 归档 owner 会话，回执存成文件后 issue-run archived",
+}
 DONE = {"archived", "closed"}
-LABELS = {"accept": "待验收", "lead": "需要 lead", "blocked": "需要用户", "unlock": "可派", "stalled": "停滞"}
+LABELS = {"accept": "待验收", "ready": "待收尾", "lead": "需要 lead", "blocked": "需要用户", "unlock": "可派", "stalled": "停滞",
+          "lead_stalled": "lead 未处理"}
 NEXT_STEP = {
     "accept": "跑 accept-check --stage acceptance，再 issue-run verdict，把 owner_message 发回 owner 会话",
     "lead": "按原因定：能在范围内换做法就 issue-run unblock --note 写明结论，再用 send_to_session 发给 owner 会话；确实要改范围或验收标准就告诉用户（台账锁定了计划）",
     "blocked": "把原因汇总告诉用户；用户处理完后 issue-run unblock，再通知 owner 会话",
     "unlock": "跑 issue-run next，对可派的子 issue 走 prepare → send_to_session → bind",
-    "stalled": "查 owner 会话还在不在、卡在哪；需要时 send_to_session 催一次，或按 SKILL.md 改判",
+    "ready": "跑 accept-check --stage ready，再 issue-run cleanup，用 archive_sessions 归档 owner 会话，回执存成文件后 issue-run archived",
+    "stalled": "查 owner 会话还在不在、卡在哪；还在就 send_to_session 催一次，已经不在就 issue-run release --evidence 放回再派",
 }
 
 
@@ -150,9 +164,17 @@ def collect(ledger: dict[str, Any], gh: Any, now: float, stalled_after: int, hea
     for item in ledger.get("items", {}).values():
         ref, state = item["ref"], item["state"]
         cp = item.get("checkpoint") or {}
+        if state in LEAD_PENDING:
+            marker = epoch(item.get("last_activity_at"))
+            if now - marker >= stalled_after:
+                signals.append({"key": f"lead_stalled:{ref}:{state}:{int(marker)}", "kind": "lead_stalled", "ref": ref,
+                                "detail": f"停在 {state} {int((now - marker) // 60)} 分钟", "step": LEAD_PENDING[state]})
         if state == "awaiting_acceptance":
             signals.append({"key": f"accept:{ref}:{item.get('checkpoint_seq')}", "kind": "accept", "ref": ref,
                             "detail": f"PR #{cp.get('pr')} head {cp.get('head')}"})
+        elif state == "ready":
+            signals.append({"key": f"ready:{ref}:{item.get('checkpoint_seq')}", "kind": "ready", "ref": ref,
+                            "detail": f"PR #{cp.get('pr')} 已转正式（head {cp.get('head')}）"})
         elif state in ("blocked_user", "needs_lead"):
             blocked = item.get("blocked") or {}
             kind = "blocked" if state == "blocked_user" else "lead"
@@ -175,7 +197,8 @@ def collect(ledger: dict[str, Any], gh: Any, now: float, stalled_after: int, hea
                 marker = max(marker, float(seen["since"]))
             if now - marker >= stalled_after and not (pr and gh.ci_pending(item["repo"], pr)):
                 signals.append({"key": f"stalled:{ref}:{int(marker)}", "kind": "stalled", "ref": ref,
-                                "detail": f"状态 {state}，{int((now - marker) // 60)} 分钟没有进展"})
+                                "detail": f"状态 {state}，{int((now - marker) // 60)} 分钟没有进展",
+                                **({"step": ACCEPTED_STALL} if state == "accepted" else {})})
     return signals
 
 
@@ -184,7 +207,7 @@ def compose(signals: list[dict[str, Any]], roots: dict[str, str]) -> str:
     for ledger_path, root in roots.items():
         lines.append(f"总 issue {root}；台账 {ledger_path}")
     for s in signals:
-        lines.append(f"- [{LABELS[s['kind']]}] {s['ref']}：{s['detail']}。{NEXT_STEP[s['kind']]}。")
+        lines.append(f"- [{LABELS[s['kind']]}] {s['ref']}：{s['detail']}。{s.get('step') or NEXT_STEP[s['kind']]}。")
     return "\n".join(lines)
 
 

@@ -15,7 +15,8 @@
 //   next       --ledger <f> [--gh-fixture <夹具>]                      可派的子 issue 与 run 状态
 //   prepare    --ledger <f> --item <ref> --lead-session <id> [--now ISO] [--gh-fixture <夹具>]
 //   bind       --ledger <f> --item <ref> --claim <id> --result <send_to_session 回执 JSON 文件> [--now ISO] [--gh-fixture <夹具>]
-//   release    --ledger <f> --item <ref> --evidence <已核实没有建出会话的依据> [--now ISO] [--gh-fixture <夹具>]
+//   release    --ledger <f> --item <ref> --evidence <已核实旧会话不在 / 没建出来的依据> [--now ISO] [--gh-fixture <夹具>]
+//              （dispatch_unknown / claimed / dispatched / revising / needs_lead 可用：会话失联时放回 pending 重派，#78）
 //   checkpoint --ledger <f> --item <ref> --state awaiting_acceptance|ready|needs_lead|blocked_user
 //              [--pr <号>] [--head <40 位 sha>] [--sc <JSON 数组>] [--keel-run <id>] [--lane <车道>] [--reason <文字>] [--now ISO]
 //              （awaiting_acceptance 必带 --pr --head --sc --keel-run --lane；needs_lead / blocked_user 必带 --reason）
@@ -45,7 +46,6 @@ export const ITEM_STATES = Object.freeze([
   'needs_lead', 'blocked_user', 'closed',
 ]);
 export const REQUEST_KEYS = Object.freeze(['title', 'message', 'working_dir', 'use_worktree']);
-export const MAX_REVISE_ROUNDS = 2; // 第 3 次判「要改」就停下找用户
 /** KEEL 的车道（`pr_status` 返回值）。 */
 export const LANES = ['personal', 'gated-handoff', 'draft-gated-handoff'];
 export const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -285,9 +285,11 @@ export function prepare({ ledger, ledgerPath, plan, ref, leadSessionId, gh, now 
   }
   const planItem = planItemOf(plan, ref);
   const title = sessionTitle(planItem, now);
+  const handoff = renderIssueHandoff({ plan, item: planItem, leadSessionId, ...(ledgerPath ? { ledgerPath: resolve(ledgerPath) } : {}), scriptsDir: SCRIPTS_DIR });
+  const takeover = wasReleased(item) ? item.checkpoint?.pr ?? soleOpenPr(gh, item.repo, ref) : null;
   const request = {
     title,
-    message: renderIssueHandoff({ plan, item: planItem, leadSessionId, ...(ledgerPath ? { ledgerPath: resolve(ledgerPath) } : {}), scriptsDir: SCRIPTS_DIR }),
+    message: takeoverNote(takeover) + handoff,
     working_dir: planItem.keel_run.repo_dir,
     use_worktree: false,
   };
@@ -302,10 +304,49 @@ export function prepare({ ledger, ledgerPath, plan, ref, leadSessionId, gh, now 
     reject(`${ref} 与另一个 lead 同时认领，按评论先后让给 claim ${winner?.claim_id ?? '未知'}；本台账未派发`);
   }
   ledger.lead_session_id = leadSessionId;
+  if (takeover) item.takeover_pr = Number(takeover);
   item.claim_id = claimId;
   item.session_title = title;
   move(item, 'claimed', now, { claim_id: claimId });
   return { ok: true, claimed: true, claim_id: claimId, request };
+}
+
+/** release 放回过的子 issue：重派前要查上一个会话有没有已经开出 PR（#78）。 */
+function wasReleased(item) {
+  return item.history.some((h) => h.to === 'pending');
+}
+
+const OPEN_PR_PAGES = 10;
+
+/**
+ * 上一个会话开了 PR、还没写第一个验收点就失联时，台账里没有 PR 号（review-pr81）：
+ * 到 GitHub 上找正文写着「任务 issue：<ref>」的开着的 PR。一个都没有返回 null，多个就拒绝，交给 lead 处理。
+ */
+export function soleOpenPr(gh, repo, ref) {
+  const hits = [];
+  for (let page = 1; page <= OPEN_PR_PAGES; page++) {
+    const batch = gh(['api', `repos/${repo}/pulls?state=open&per_page=100&page=${page}`]);
+    if (!Array.isArray(batch)) reject(`读 ${repo} 开着的 PR 返回的不是数组（第 ${page} 页）`);
+    hits.push(...batch.filter((pr) => String(pr.body ?? '').split('\n').some((l) => l.trim() === `任务 issue：${ref}`)).map((pr) => pr.number));
+    if (batch.length < 100) break;
+    if (page === OPEN_PR_PAGES) reject(`${repo} 开着的 PR 超过 ${OPEN_PR_PAGES * 100} 个，无法确认 ${ref} 有没有已开的 PR`);
+  }
+  if (hits.length > 1) reject(`${ref} 有 ${hits.length} 个开着的 PR 写着「任务 issue：${ref}」（${hits.map((n) => `#${n}`).join('、')}）：一个子 issue 只能有一个 PR，先关掉多余的再派`);
+  return hits[0] ?? null;
+}
+
+/**
+ * 会话失联后重派（#78）：上一个会话已经开了 PR，新会话要接着那个 PR 做，不能再开一个（1 子 issue = 1 PR）。
+ * 有 PR 号（台账记的，或 GitHub 上找到的唯一一个）就在开工包前面加一节接手说明。
+ */
+function takeoverNote(pr) {
+  if (!pr) return '';
+  return [
+    `> 接手：上一个 owner 会话失联，PR #${pr} 已经开着。不要开新 PR：先跑第 3 节的 free-worktree 释放旧会话占着分支的 worktree，`,
+    `> 再用 \`keel_run\` 传 \`pr=${pr}\`（其他参数同第 2 节）在这个 PR 上接着做；之后照开工包推进。`,
+    '',
+    '',
+  ].join('\n');
 }
 
 /** send_to_session 回执 → 会话 id；不是明确成功一律返回 null。 */
@@ -344,15 +385,21 @@ export function bind({ ledger, ref, claimId, result, gh, now }) {
   return out;
 }
 
+/** 会话失联、派发回执不明时放回 pending（#78）：已到验收点及之后的状态不放回，免得打断验收与收尾。 */
+export const RELEASABLE = Object.freeze(['dispatch_unknown', 'claimed', 'dispatched', 'revising', 'needs_lead']);
+
 export function release({ ledger, ref, evidence, gh, now }) {
   const item = itemOf(ledger, ref);
-  if (item.state !== 'dispatch_unknown') reject(`${ref} 当前状态 ${item.state}，只有 dispatch_unknown 才能 release`);
-  if (!evidence || !String(evidence).trim()) reject('release 需要 --evidence：写明怎么核实的没有建出会话');
+  if (!RELEASABLE.includes(item.state)) reject(`${ref} 当前状态 ${item.state}，release 只接受 ${RELEASABLE.join(' / ')}`);
+  if (!evidence || !String(evidence).trim()) reject('release 需要 --evidence：写明怎么核实的旧会话已不在（或没建出来）');
   const reason = String(evidence).trim();
   postComment(gh, commentsPathFor(ref), `批准执行释放：${now.slice(0, 10)} ${ref} claim ${item.claim_id}：${reason}`);
+  const previous = item.session_id;
   item.claim_id = null;
-  move(item, 'pending', now, { evidence: reason });
-  return { ok: true, state: item.state, ref };
+  item.session_id = null;
+  item.blocked = null;
+  move(item, 'pending', now, { evidence: reason, ...(previous ? { released_session: previous } : {}) });
+  return { ok: true, state: item.state, ref, ...(previous ? { released_session: previous } : {}) };
 }
 
 // commands: owner closeout and lead acceptance
@@ -378,6 +425,8 @@ function checkScTable(sc, planItem, ref) {
     if (manual.has(s.id) && !['manual', 'not_run'].includes(s.status)) reject(`${ref} ${s.id} 是合并前拿不到证据的验收项，只能写 manual / not_run`);
   }
 }
+
+const squash = (text) => String(text ?? '').replace(/\s+/g, ' ').trim();
 
 function requirePr(pr, head, ref) {
   if (!Number.isSafeInteger(Number(pr)) || Number(pr) <= 0) reject(`${ref} 缺 --pr <PR 号>`);
@@ -452,21 +501,26 @@ export function verdict({ ledger, ref, pass, revise, check, now }) {
   }
   const items = String(revise ?? '').trim();
   if (!items) reject(`${ref} 判「要改」需要 --revise <要改的条目>`);
+  // 不设轮数上限（用户 2026-10-30：不通过就让会话接着修，直到通过）。只有没有进展才停下找用户：
+  // 这次要改的条目原文和上一次一样，或 owner 回到验收点时的 head 和上一次判要改时一样（没有新提交）。
+  const prev = item.verdicts.filter((v) => v.verdict === 'revise').at(-1);
+  const sameItems = Boolean(prev) && squash(prev.items) === squash(items);
+  const sameHead = Boolean(prev) && prev.head === cp.head;
   item.revise_count += 1;
   item.verdicts.push({ at: now, verdict: 'revise', head: cp.head, items, round: item.revise_count });
-  if (item.revise_count > MAX_REVISE_ROUNDS) {
-    item.blocked = { seq: item.checkpoint_seq, by: 'lead', reason: `已判「要改」${item.revise_count} 次仍未通过`, prev_state: 'revising', at: now };
+  if (sameItems || sameHead) {
+    const why = sameItems ? '要改的条目和上一次相同' : `head 还是上一次判要改时的 ${cp.head}，没有新提交`;
+    item.blocked = { seq: item.checkpoint_seq, by: 'lead', reason: `判「要改」没有进展：${why}`, prev_state: 'revising', at: now };
     move(item, 'blocked_user', now, { verdict: 'revise', round: item.revise_count });
-    const rounds = item.verdicts.filter((v) => v.verdict === 'revise').map((v) => `第 ${v.round} 次：${v.items}`).join('；');
     return {
       ok: true, state: item.state, ref,
-      root_comment: `批准执行停下等用户：${date} ${ref}（PR #${cp.pr}）已判「要改」${item.revise_count} 次仍未通过，不再发回会话 ${item.session_id}。${rounds}`,
+      root_comment: `批准执行停下等用户：${date} ${ref}（PR #${cp.pr}）第 ${item.revise_count} 次判「要改」没有进展（${why}），不再发回会话 ${item.session_id}。第 ${prev.round} 次：${prev.items}；第 ${item.revise_count} 次：${items}`,
     };
   }
   move(item, 'revising', now, { verdict: 'revise', round: item.revise_count });
   return {
     ok: true, state: item.state, ref, target_session_id: item.session_id,
-    owner_message: `批准执行验收：${date} ${ref} 要改（第 ${item.revise_count} 次，最多 ${MAX_REVISE_ROUNDS} 次）。要改的条目：${items}。先跑开工包第 3 节的 free-worktree，释放上一个 KEEL run 占着分支的 worktree，再用 keel_run 传 pr=${cp.pr} 在同一 PR 上接着做（scope 同开工包）；改完回到验收点，重新写 checkpoint --state awaiting_acceptance。`,
+    owner_message: `批准执行验收：${date} ${ref} 要改（第 ${item.revise_count} 次）。要改的条目：${items}。先跑开工包第 3 节的 free-worktree，释放上一个 KEEL run 占着分支的 worktree，再用 keel_run 传 pr=${cp.pr} 在同一 PR 上接着做（scope 同开工包）；改完回到验收点，重新写 checkpoint --state awaiting_acceptance。`,
   };
 }
 
@@ -527,7 +581,8 @@ function removeCleanWorktree(git, repoDir, wt, prHead, ref, action) {
 export function freeWorktree({ ledger, plan, ref, gh, git = gitRunner(), now }) {
   const item = itemOf(ledger, ref);
   expectState(item, ['dispatched', 'revising'], 'free-worktree');
-  const pr = item.checkpoint?.pr;
+  // 重派接手时还没写过验收点，用重派时找到的 PR 号（#78）。
+  const pr = item.checkpoint?.pr ?? item.takeover_pr;
   if (!pr) reject(`${ref} 还没有写过 awaiting_acceptance，台账里没有 PR 号，没有要释放的 worktree`);
   const repoDir = planItemOf(plan, ref).keel_run.repo_dir;
   const { branch, prHead } = readPrBranch(gh, item, pr, ref);
@@ -550,6 +605,8 @@ export function cleanup({ ledger, plan, ref, gh, checks, git = gitRunner(), now 
   expectState(item, ['ready'], 'cleanup');
   const repoDir = planItemOf(plan, ref).keel_run.repo_dir;
   const { data: pr, branch, prHead } = readPrBranch(gh, item, item.checkpoint.pr, ref);
+  // 关了没合的 PR 不算收尾（review-pr81 第 2 轮）：删本地分支、归档会话之后就找不回来了。已合并的照常清理（#78）。
+  if (pr.state !== 'open' && pr.merged !== true) reject(`${ref} 的 PR #${item.checkpoint.pr} 关了没合（状态 ${pr.state ?? '未知'}），不清理：告诉用户`);
   if (pr.draft !== false) reject(`${ref} 的 PR #${item.checkpoint.pr} 还不是正式 Ready，不清理`);
   if (prHead !== item.checkpoint.head) reject(`${ref} 的 PR head 现在是 ${prHead}，验收通过的是 ${item.checkpoint.head}：新提交没验收过，不清理`);
   const ci = ciVerdict(checks, item.repo, item.checkpoint.pr);

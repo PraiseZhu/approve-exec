@@ -123,7 +123,9 @@ export function acceptCheck({ ledger, plan, ref, stage = 'acceptance', gh, check
 
   const pr = gh(['api', `repos/${item.repo}/pulls/${cp.pr}`]);
   add('pr_head', pr?.head?.sha === cp.head, `PR head ${pr?.head?.sha ?? '未知'}，checkpoint head ${cp.head}`);
-  add('pr_open', pr?.state === 'open', `PR 状态 ${pr?.state ?? '未知'}`);
+  // ready 档收尾时 PR 已合并也算过（用户在 lead 收尾前合了，#78）；关了没合仍不过。验收档必须还开着。
+  const merged = stage === 'ready' && pr?.merged === true;
+  add('pr_open', pr?.state === 'open' || merged, merged ? 'PR 已合并' : `PR 状态 ${pr?.state ?? '未知'}`);
   // 所有车道都先开 Draft、lead 判通过后才转正式（#77）：验收时已经是正式的，说明没等 lead 就转了。
   if (stage === 'acceptance') add('pr_draft', pr?.draft === true, pr?.draft === true ? 'PR 还是 Draft' : 'PR 已不是 Draft：lead 判通过之前不该转正式');
   if (stage === 'ready') add('pr_not_draft', pr?.draft === false, pr?.draft ? 'PR 还是 Draft' : 'PR 已是正式 Ready');

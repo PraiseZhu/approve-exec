@@ -7,17 +7,18 @@
 | 角色 | 做什么 | 不做什么 |
 |---|---|---|
 | owner 会话 | 用 KEEL 的 `keel_run` 推进一个子 issue 对应的 PR，自己处理 KEEL 的等待、判断门和 `stop`；到验收点写 checkpoint；收到裁决后照做 | 不给 lead 发消息报进度；不找用户；不合并；不改 issue 的范围和验收标准 |
-| 续跑脚本 | 每 5 分钟只读台账与 GitHub，发现「待验收、需要 lead、需要用户、可派、停滞」时叫醒 lead，同一情况只叫一次 | 不改台账，不调用模型 |
+| 续跑脚本 | 每 5 分钟只读台账与 GitHub，发现「待验收、待收尾、需要 lead、需要用户、可派、停滞、lead 未处理」时叫醒 lead，同一情况只叫一次 | 不改台账，不调用模型 |
 | lead 会话 | 派会话、跑 accept-check、判通过或要改、收尾归档、开下一批 | 不写产品代码，不代 owner 推进，不合并 |
 
 ## 台账状态
 
 ```
 pending → claimed → dispatched → awaiting_acceptance ─┬─ 通过 → accepted → ready → cleaned → archived
-                                     ▲                └─ 要改 → revising ─┘（最多 2 次，第 3 次 → blocked_user）
+                                     ▲                └─ 要改 → revising ─┘（不设上限；没有进展 → blocked_user）
 dispatch_unknown：派发回执不明，lead 核实后 release
+claimed / dispatched / revising / needs_lead：会话失联时 lead 核实后 release 放回 pending 重派（台账记着 PR、或 GitHub 上有写着「任务 issue：<ref>」的开着的 PR 时，接着那个 PR 做）
 needs_lead：范围或验收标准必须改，等 lead 定（owner 写），lead 定了以后 unblock
-blocked_user：等用户（owner 写，或第 3 次要改），用户处理后 lead unblock
+blocked_user：等用户（owner 写，或判要改没有进展），用户处理后 lead unblock
 closed：计划时子 issue 已关闭
 ```
 
@@ -73,7 +74,7 @@ node <skill>/scripts/issue-run.mjs checkpoint --ledger <台账> --item <ref> --s
 node <skill>/scripts/issue-run.mjs checkpoint --ledger <台账> --item <ref> --state blocked_user --reason "<要用户做什么>"
 ```
 
-写完结束本轮。lead 判「要改」第 3 次后停下等用户时，owner 不能自己写回 `awaiting_acceptance`，要等 lead `unblock`。lead 被叫醒后告诉用户，用户处理完后 lead `unblock`，再通知 owner 继续。
+写完结束本轮。lead 判「要改」没有进展（这次条目和上一次相同，或 head 没变）而停下等用户时，owner 不能自己写回 `awaiting_acceptance`，要等 lead `unblock`。lead 被叫醒后告诉用户，用户处理完后 lead `unblock`，再通知 owner 继续。
 
 ## lead 的验收检查（accept-check）
 
@@ -89,7 +90,7 @@ node <skill>/scripts/issue-run.mjs checkpoint --ledger <台账> --item <ref> --s
 | `body_sc_rows` | PR 正文「验收对照」一节的表格缺某条 SC 的行（只认这一节，别处提到的 SC 不算） |
 | `pending_questions` | 子 issue「待定问题」里有没写「已定」的条目 |
 
-`--stage ready` 另查 `pr_not_draft`：PR 已不是 Draft。
+`--stage ready` 另查 `pr_not_draft`：PR 已不是 Draft；`pr_open` 在这一档也接受已合并的 PR（用户在 lead 收尾前合了），关了没合仍不过。
 
 `verdict --pass` 会自己再跑一遍 `--stage acceptance`，不接收外部传入的检查结果。检查全部通过只是必要条件。lead 还要对照子 issue 的「目标」「原因」「不做」看 diff 是否做对了事，再下裁决。
 
