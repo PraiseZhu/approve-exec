@@ -5,6 +5,21 @@
 
 ## 待维护者拍板(扩权类提案,永不自动落地)
 
+- `spec-file-gaps-in-existing-issue` **issue 写了派发前未修的验收矛盾** — 出现 1 次,首见 2026-10-31,最近 2026-10-31,status: open
+  - 现象:2026-10-30 mivo#1328：原范围写已有就直接回 ACK，与 libraryWriteEpoch.protocol.test.ts 冲突，靠诊断时发现才改写。若直接派发，owner 会一路做到不通。
+  - 提案:拆 issue 时把范围里涉及的协议约定与现有守卫测试对照一遍。
+- `worktree-lost-during-blocked-run` **owner 阻塞等待时工作树被夜间清理** — 出现 1 次,首见 2026-10-31,最近 2026-10-31,status: open
+  - 现象:2026-10-30 至 31 mivo#1328：等 Mac 测试和预算恢复期间，KEEL 工作树两次消失，分支还在；未推送的提交只靠本地分支保住。
+  - 提案:写 blocked_user 前先把分支推到远端或打保护标记；查清理工作树的日任务为何不避开台账在途的工作树。
+- `keel-max-attempts-after-real-findings` **审查轮数上限和批准执行的验收点冲突** — 出现 1 次,首见 2026-10-31,最近 2026-10-31,status: open
+  - 现象:2026-10-31 mivo#1328：4 轮审查都查出真 P2，KEEL astra-final-review 达 max_attempts 只给 stop，当前 head 没有非作者结论，到不了验收点。owner 提议开第 3 个 run 绕过；lead 改派独立 Orca reviewer，又查出 3 条 P2，修后复核通过。
+  - 提案:到上限时开工包写明走 needs_lead，由 lead 派独立 reviewer；只复核上一轮修复；再出新 P2 交用户定。
+- `pending-question-blocks-unattended-owner` **写着问用户的待定问题，会卡住验收** — 出现 1 次,首见 2026-10-31,最近 2026-10-31,status: open
+  - 现象:2026-10-31 makecindy/cindy#8081：待定问题写“开工后问用户”，owner 无人值守问不了，accept-check 因此不过，lead 要在验收时补写结论。
+  - 提案:issue-plan 派发前提示写着问用户的待定问题，要求开工前定好，或写明默认做法。
+- `owner-skip-local-gate-unreported` **owner 自行跳过本地门禁，lead 验收时没发现** — 出现 1 次,首见 2026-10-31,最近 2026-10-31,status: open
+  - 现象:2026-10-30 makecindy/cindy#8080：owner 问 Jev 后用 SKIP_DEMO_GATE=1 推送，只写在 PR 正文和最后回报里，accept-check 不看，lead 验收漏报给用户；#8081 同样被拦时 owner 改为 needs_lead，由用户批准。
+  - 提案:开工包写明：跳过任何本地或仓库门禁都写 needs_lead，不用 Jev 代替用户授权；accept-check 增加 PR 正文跳过声明提示。
 - `repo-handoff-path-missing-from-scope` **拆 issue 时漏了目标仓强制要求的路径** — 出现 1 次,首见 2026-10-30,最近 2026-10-30,status: open
   - 现象:2026-10-30 mivo#1328：改写范围时漏了 docs/pr/**，而 Mivo 的 pr-handoff-gate 强制要求，派发前才发现，要释放认领重出计划。
   - 提案:issue-plan 对 xindong/mivo-canvas-plugin 校验范围含 docs/pr/**，缺失时 fail-closed。

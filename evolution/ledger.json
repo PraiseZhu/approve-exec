@@ -78,6 +78,71 @@
       "occurrences": 1,
       "firstSeen": "2026-10-30T11:26:11.901Z",
       "lastSeen": "2026-10-30T11:26:11.901Z"
+    },
+    {
+      "fingerprint": "owner-skip-local-gate-unreported",
+      "tier": "proposal",
+      "title": "owner 自行跳过本地门禁，lead 验收时没发现",
+      "detail": "2026-10-30 makecindy/cindy#8080：owner 问 Jev 后用 SKIP_DEMO_GATE=1 推送，只写在 PR 正文和最后回报里，accept-check 不看，lead 验收漏报给用户；#8081 同样被拦时 owner 改为 needs_lead，由用户批准。",
+      "proposal": "开工包写明：跳过任何本地或仓库门禁都写 needs_lead，不用 Jev 代替用户授权；accept-check 增加 PR 正文跳过声明提示。",
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-10-31T06:34:54.528Z",
+      "lastSeen": "2026-10-31T06:34:54.528Z"
+    },
+    {
+      "fingerprint": "pending-question-blocks-unattended-owner",
+      "tier": "proposal",
+      "title": "写着问用户的待定问题，会卡住验收",
+      "detail": "2026-10-31 makecindy/cindy#8081：待定问题写“开工后问用户”，owner 无人值守问不了，accept-check 因此不过，lead 要在验收时补写结论。",
+      "proposal": "issue-plan 派发前提示写着问用户的待定问题，要求开工前定好，或写明默认做法。",
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-10-31T06:34:54.577Z",
+      "lastSeen": "2026-10-31T06:34:54.577Z"
+    },
+    {
+      "fingerprint": "keel-max-attempts-after-real-findings",
+      "tier": "proposal",
+      "title": "审查轮数上限和批准执行的验收点冲突",
+      "detail": "2026-10-31 mivo#1328：4 轮审查都查出真 P2，KEEL astra-final-review 达 max_attempts 只给 stop，当前 head 没有非作者结论，到不了验收点。owner 提议开第 3 个 run 绕过；lead 改派独立 Orca reviewer，又查出 3 条 P2，修后复核通过。",
+      "proposal": "到上限时开工包写明走 needs_lead，由 lead 派独立 reviewer；只复核上一轮修复；再出新 P2 交用户定。",
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-10-31T18:36:37.266Z",
+      "lastSeen": "2026-10-31T18:36:37.266Z"
+    },
+    {
+      "fingerprint": "worktree-lost-during-blocked-run",
+      "tier": "proposal",
+      "title": "owner 阻塞等待时工作树被夜间清理",
+      "detail": "2026-10-30 至 31 mivo#1328：等 Mac 测试和预算恢复期间，KEEL 工作树两次消失，分支还在；未推送的提交只靠本地分支保住。",
+      "proposal": "写 blocked_user 前先把分支推到远端或打保护标记；查清理工作树的日任务为何不避开台账在途的工作树。",
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-10-31T18:36:37.309Z",
+      "lastSeen": "2026-10-31T18:36:37.309Z"
+    },
+    {
+      "fingerprint": "spec-file-gaps-in-existing-issue",
+      "tier": "proposal",
+      "title": "issue 写了派发前未修的验收矛盾",
+      "detail": "2026-10-30 mivo#1328：原范围写已有就直接回 ACK，与 libraryWriteEpoch.protocol.test.ts 冲突，靠诊断时发现才改写。若直接派发，owner 会一路做到不通。",
+      "proposal": "拆 issue 时把范围里涉及的协议约定与现有守卫测试对照一遍。",
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-10-31T18:36:37.353Z",
+      "lastSeen": "2026-10-31T18:36:37.353Z"
     }
   ]
 }
