@@ -29,6 +29,7 @@ export const TEST_FILES = [
   'run-tests.test.mjs',
   'selfcheck.test.mjs',
   'skill-doc.test.mjs',
+  'wait-check.test.mjs',
 ];
 
 // 双向校验（纯函数，可单测）：
