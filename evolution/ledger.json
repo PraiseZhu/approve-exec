@@ -44,14 +44,14 @@
       "fingerprint": "stalled-signal-false-positive",
       "tier": "proposal",
       "title": "停滞信号只看台账，owner 正常干活也会误报",
-      "detail": "2026-10-30 两个 run 派发 33 分钟后都报停滞，核实时两个 owner 都 idle_minutes=0 且已有提交。台账到验收点才更新，长任务必然误报；SKILL 要求还在就催一次，催促消息只会排到本轮结束，多跑一轮。",
+      "detail": "2026-11-01 mivo#1461：换岗接手 35 分钟后报停滞，核实 owner idle_minutes=0，已开新 KEEL run 8d9c，工作树里已有 3 个提交，节点 implement 在跑。",
       "proposal": "issue-watch 判停滞时先用 get_task_digest 的 phase 和 idle_minutes 过滤；SKILL 改成确实无活动才催。",
       "status": "open",
       "commit": null,
       "note": null,
-      "occurrences": 1,
+      "occurrences": 2,
       "firstSeen": "2026-10-30T11:26:11.813Z",
-      "lastSeen": "2026-10-30T11:26:11.813Z"
+      "lastSeen": "2026-11-01T09:43:47.535Z"
     },
     {
       "fingerprint": "fork-only-repo-handoff-gap",
@@ -143,6 +143,84 @@
       "occurrences": 1,
       "firstSeen": "2026-10-31T18:36:37.353Z",
       "lastSeen": "2026-10-31T18:36:37.353Z"
+    },
+    {
+      "fingerprint": "merged-after-handoff-head-mismatch",
+      "tier": "proposal",
+      "title": "交接后盯梢推新提交再合并，台账 cleanup/archived 因 head 不一致拒绝",
+      "detail": "2026-11-01 mivo#1309 / PR #1478：checkpoint head 是 028d87a99，转 Ready 交 Mini 盯梢后盯梢补了提交，合并时 head 是 50f2c31cc（028d87a99 是其祖先）。PR 已合并、issue 已关、worktree 与分支都已不在，台账仍停在 ready，cleanup 因 head 不一致拒绝，只能靠 lead 手工登记收尾，不绕脚本改台账。",
+      "proposal": "cleanup / archived 对已合并 PR，接受「验收 head 是合并 head 的祖先」，不再要求两者相等；续跑脚本对已合并且 issue 已关的 ready 项不再反复唤醒。",
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-11-01T09:08:01.974Z",
+      "lastSeen": "2026-11-01T09:08:01.974Z"
+    },
+    {
+      "fingerprint": "duplicate-lead-after-old-lead-revived",
+      "tier": "proposal",
+      "title": "旧 lead 被归档后又被用户消息唤醒，不知道新 lead 已接手，又派了一个重复的新 lead",
+      "detail": "2026-11-01 mivo#1460/#1309：一次性调度建的新 lead aec30e8d 已接手并归档旧 lead f6b80a21，用户随后在 f6b80a21 里问「目前什么情况」，旧 lead 上下文里没有接手记录，又发了一份完整交接包给新会话 ce7bb5b3，并把 issue-watch.json 和两条续跑调度改指向它。靠 ce7bb5b3 核对台账、调度和 GitHub 评论才发现 #1461 已换过 owner，没有重复 release 或重派。",
+      "proposal": "交接旧 lead 时，新 lead 在两份 issue-watch.json 旁写一个 LEAD_HANDOFF.md（新 lead id、时间、已做步骤）；旧 lead 被唤醒第一步先读它，有就只汇报不再交接；SKILL 第 6 步写明「交接前先查台账 lead_session_id 和 issue-watch 配置是否已经换人」。",
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-11-01T09:32:14.393Z",
+      "lastSeen": "2026-11-01T09:32:14.393Z"
+    },
+    {
+      "fingerprint": "scope-misses-test-helpers",
+      "tier": "proposal",
+      "title": "范围只写 *.test.ts 时测试夹具会被 accept-check 判越界",
+      "detail": "#1329：brainHarness.ts、depositTestHarness.ts 被 scope 检查拒；awaiting_acceptance 不能 add 计划，只能 revise→needs_lead→add→unblock 绕一圈。建议 issue-plan 给 *.test.ts 自动带上 __tests__/** 夹具，或允许 lead 在 awaiting_acceptance 时追加纯测试路径。",
+      "proposal": null,
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-11-01T16:11:28.672Z",
+      "lastSeen": "2026-11-01T16:11:28.672Z"
+    },
+    {
+      "fingerprint": "owner-turn-ends-without-checkpoint",
+      "tier": "proposal",
+      "title": "owner 会话多次没写 checkpoint 就结束本轮",
+      "detail": "#1329 第 2、3 任 owner 都在长测试或上下文膨胀时停下且不写 checkpoint，靠 stalled 信号 30 分钟后才发现；第 2 任被误判卡死后又复活，与第 3 任同时写同一棵树。建议 release 前先停掉并归档旧会话，开工包写明上下文预算与分批 commit。",
+      "proposal": null,
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-11-01T16:11:28.717Z",
+      "lastSeen": "2026-11-01T16:11:28.717Z"
+    },
+    {
+      "fingerprint": "send-to-session-rejects-gateway-model",
+      "tier": "proposal",
+      "title": "send_to_session 新建不接受 Cindy AI 网关模型",
+      "detail": "用户点名 Cindy AI 网关 sonnet 5.5 xhigh，send_to_session 只认当前位置的 anthropic 模型；只能用一次性定时任务（schedule_create 带 model/providerId/effort + run_now）开会话，bind 回执要手工拼。建议支持这种开会话方式的回执。",
+      "proposal": null,
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-11-01T16:11:28.760Z",
+      "lastSeen": "2026-11-01T16:11:28.760Z"
+    },
+    {
+      "fingerprint": "scope-negation-parsed-as-path",
+      "tier": "proposal",
+      "title": "范围行里写「不改 .github/」会被解析成可改路径",
+      "detail": "#1329 范围说明里带反引号的 .github/ 进了 KEEL 写域；issue-plan 应跳过否定语境的路径，或要求不做的事只写在「不做」段。",
+      "proposal": null,
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-11-01T16:11:28.807Z",
+      "lastSeen": "2026-11-01T16:11:28.807Z"
     }
   ]
 }

@@ -5,6 +5,23 @@
 
 ## 待维护者拍板(扩权类提案,永不自动落地)
 
+- `scope-negation-parsed-as-path` **范围行里写「不改 .github/」会被解析成可改路径** — 出现 1 次,首见 2026-11-01,最近 2026-11-01,status: open
+  - 现象:#1329 范围说明里带反引号的 .github/ 进了 KEEL 写域；issue-plan 应跳过否定语境的路径，或要求不做的事只写在「不做」段。
+- `send-to-session-rejects-gateway-model` **send_to_session 新建不接受 Cindy AI 网关模型** — 出现 1 次,首见 2026-11-01,最近 2026-11-01,status: open
+  - 现象:用户点名 Cindy AI 网关 sonnet 5.5 xhigh，send_to_session 只认当前位置的 anthropic 模型；只能用一次性定时任务（schedule_create 带 model/providerId/effort + run_now）开会话，bind 回执要手工拼。建议支持这种开会话方式的回执。
+- `owner-turn-ends-without-checkpoint` **owner 会话多次没写 checkpoint 就结束本轮** — 出现 1 次,首见 2026-11-01,最近 2026-11-01,status: open
+  - 现象:#1329 第 2、3 任 owner 都在长测试或上下文膨胀时停下且不写 checkpoint，靠 stalled 信号 30 分钟后才发现；第 2 任被误判卡死后又复活，与第 3 任同时写同一棵树。建议 release 前先停掉并归档旧会话，开工包写明上下文预算与分批 commit。
+- `scope-misses-test-helpers` **范围只写 *.test.ts 时测试夹具会被 accept-check 判越界** — 出现 1 次,首见 2026-11-01,最近 2026-11-01,status: open
+  - 现象:#1329：brainHarness.ts、depositTestHarness.ts 被 scope 检查拒；awaiting_acceptance 不能 add 计划，只能 revise→needs_lead→add→unblock 绕一圈。建议 issue-plan 给 *.test.ts 自动带上 __tests__/** 夹具，或允许 lead 在 awaiting_acceptance 时追加纯测试路径。
+- `stalled-signal-false-positive` **停滞信号只看台账，owner 正常干活也会误报** — 出现 2 次,首见 2026-10-30,最近 2026-11-01,status: open
+  - 现象:2026-11-01 mivo#1461：换岗接手 35 分钟后报停滞，核实 owner idle_minutes=0，已开新 KEEL run 8d9c，工作树里已有 3 个提交，节点 implement 在跑。
+  - 提案:issue-watch 判停滞时先用 get_task_digest 的 phase 和 idle_minutes 过滤；SKILL 改成确实无活动才催。
+- `duplicate-lead-after-old-lead-revived` **旧 lead 被归档后又被用户消息唤醒，不知道新 lead 已接手，又派了一个重复的新 lead** — 出现 1 次,首见 2026-11-01,最近 2026-11-01,status: open
+  - 现象:2026-11-01 mivo#1460/#1309：一次性调度建的新 lead aec30e8d 已接手并归档旧 lead f6b80a21，用户随后在 f6b80a21 里问「目前什么情况」，旧 lead 上下文里没有接手记录，又发了一份完整交接包给新会话 ce7bb5b3，并把 issue-watch.json 和两条续跑调度改指向它。靠 ce7bb5b3 核对台账、调度和 GitHub 评论才发现 #1461 已换过 owner，没有重复 release 或重派。
+  - 提案:交接旧 lead 时，新 lead 在两份 issue-watch.json 旁写一个 LEAD_HANDOFF.md（新 lead id、时间、已做步骤）；旧 lead 被唤醒第一步先读它，有就只汇报不再交接；SKILL 第 6 步写明「交接前先查台账 lead_session_id 和 issue-watch 配置是否已经换人」。
+- `merged-after-handoff-head-mismatch` **交接后盯梢推新提交再合并，台账 cleanup/archived 因 head 不一致拒绝** — 出现 1 次,首见 2026-11-01,最近 2026-11-01,status: open
+  - 现象:2026-11-01 mivo#1309 / PR #1478：checkpoint head 是 028d87a99，转 Ready 交 Mini 盯梢后盯梢补了提交，合并时 head 是 50f2c31cc（028d87a99 是其祖先）。PR 已合并、issue 已关、worktree 与分支都已不在，台账仍停在 ready，cleanup 因 head 不一致拒绝，只能靠 lead 手工登记收尾，不绕脚本改台账。
+  - 提案:cleanup / archived 对已合并 PR，接受「验收 head 是合并 head 的祖先」，不再要求两者相等；续跑脚本对已合并且 issue 已关的 ready 项不再反复唤醒。
 - `spec-file-gaps-in-existing-issue` **issue 写了派发前未修的验收矛盾** — 出现 1 次,首见 2026-10-31,最近 2026-10-31,status: open
   - 现象:2026-10-30 mivo#1328：原范围写已有就直接回 ACK，与 libraryWriteEpoch.protocol.test.ts 冲突，靠诊断时发现才改写。若直接派发，owner 会一路做到不通。
   - 提案:拆 issue 时把范围里涉及的协议约定与现有守卫测试对照一遍。
@@ -26,9 +43,6 @@
 - `fork-only-repo-handoff-gap` **开工包没有覆盖只读仓的 fork 推送** — 出现 1 次,首见 2026-10-30,最近 2026-10-30,status: open
   - 现象:2026-10-30 makecindy/cindy#8080：账号只有读权限，origin 推不上去，开工包没写 fork 流程，lead 只能派发后补一条消息并转插话。
   - 提案:issue-plan 查 repo permissions；push=false 时开工包写明 fork 远端和 --head 写法。
-- `stalled-signal-false-positive` **停滞信号只看台账，owner 正常干活也会误报** — 出现 1 次,首见 2026-10-30,最近 2026-10-30,status: open
-  - 现象:2026-10-30 两个 run 派发 33 分钟后都报停滞，核实时两个 owner 都 idle_minutes=0 且已有提交。台账到验收点才更新，长任务必然误报；SKILL 要求还在就催一次，催促消息只会排到本轮结束，多跑一轮。
-  - 提案:issue-watch 判停滞时先用 get_task_digest 的 phase 和 idle_minutes 过滤；SKILL 改成确实无活动才催。
 - `schedule-silent-when-idle-rejected` **第 5 步写的 silentWhenIdle 被 script 调度拒绝** — 出现 1 次,首见 2026-10-30,最近 2026-10-30,status: open
   - 现象:2026-10-30 makecindy/cindy#8080、mivo#1328：schedule_create 在 executionMode=script 时返回 INVALID_PARAMS: script execution does not support silentWhenIdle，还要求 agentKind、kind、useWorktree、notify。
   - 提案:SKILL 第 5 步去掉 silentWhenIdle，写全必填字段，并写 notify 全 false，避免每 5 分钟通知一次。
