@@ -6,7 +6,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import {
-  buildPlan, readRoot, toKeelSc, toScope, parseDeps, expandBraces, parseHeader, splitSections, PlanError,
+  buildPlan, readRoot, toKeelSc, toScope, toTestHelperGlob, parseDeps, expandBraces, parseHeader, splitSections, PlanError,
 } from '../scripts/issue-plan.mjs';
 import { REPO, childBody, issue, parentFixture, standaloneFixture, writeFixture, ghFrom } from './fixtures/issues/build.mjs';
 
@@ -91,7 +91,7 @@ test('SC3 范围：反引号路径原样成为 scope，花括号展开，非路�
     '- `scripts/lib/{a,b}.mjs`（新）',
     '- `tests/**/*.test.mjs`：相关测试',
   ].join('\n'), 'x#1');
-  assert.deepEqual(scope, ['scripts/issue-run.mjs', 'scripts/lib/a.mjs', 'scripts/lib/b.mjs', 'tests/**/*.test.mjs']);
+  assert.deepEqual(scope, ['scripts/issue-run.mjs', 'scripts/lib/a.mjs', 'scripts/lib/b.mjs', 'tests/**/*.test.mjs', 'tests/**/__tests__/**/*']);
   assert.deepEqual(expandBraces('a/{x,y}/{1,2}.md'), ['a/x/1.md', 'a/x/2.md', 'a/y/1.md', 'a/y/2.md']);
 });
 
@@ -227,4 +227,26 @@ test('SC3 文件格：冒号前没有反引号时，冒号后的反引号内容�
 test('SC3 反例（review-pr71 第 6 轮）：文件格里的路径带空格也照收，冒号后的标识符不收', () => {
   assert.deepEqual(toScope('- `docs/Design Spec.md`: update `TEST_FILES`', 'acme/app#20'), ['docs/Design Spec.md']);
   assert.deepEqual(toScope('- 修改：`docs/Design Spec.md`、`README.md`', 'acme/app#20'), ['docs/Design Spec.md', 'README.md']);
+});
+
+test('范围（mivo#1329）：说明里「不改 `.github/`」之后的路径不进写域', () => {
+  assert.deepEqual(toScope('- `scripts/ci/*deposit*`：CI 守卫；不改 `.github/`', 'x#1'), ['scripts/ci/*deposit*']);
+  assert.deepEqual(toScope('- 修改：`a/b.md`，不碰 `a/c.md`', 'x#1'), ['a/b.md']);
+  assert.throws(() => toScope('- 不改 `.github/`', 'x#1'), /这一行没有反引号包住的文件路径/);
+});
+
+test('范围（mivo#1329）：测试 glob 自动带上同目录下的 __tests__ 夹具', () => {
+  assert.deepEqual(toScope('- `cindyplugin/src/**/*.test.ts`：相关测试', 'x#1'), ['cindyplugin/src/**/*.test.ts', 'cindyplugin/src/**/__tests__/**/*']);
+  assert.equal(toTestHelperGlob('src/lib/a.test.ts'), null, '单个测试文件不推导');
+  assert.equal(toTestHelperGlob('src/lib/a.ts'), null);
+  assert.equal(toTestHelperGlob('**/*.spec.ts'), '**/__tests__/**/*');
+  assert.equal(toTestHelperGlob('apps/desktop/src/main/cindy-brain/__tests__/*.test.ts'), 'apps/desktop/src/main/cindy-brain/__tests__/**/*', '测试本身在 __tests__ 里时，带上同目录的夹具（cindy#8488）');
+});
+
+test('范围（mivo#1329）：推导出的夹具 glob 在 accept-check 的匹配里真能放行夹具、不放行源码', async () => {
+  const { matchScopeGlob } = await import('../scripts/accept-check.mjs');
+  const glob = toTestHelperGlob('cindyplugin/src/**/*.test.ts');
+  assert.equal(matchScopeGlob('cindyplugin/src/__tests__/brainHarness.ts', glob), true);
+  assert.equal(matchScopeGlob('cindyplugin/src/agent/__tests__/fx/data.json', glob), true);
+  assert.equal(matchScopeGlob('cindyplugin/src/agent/deposit.ts', glob), false);
 });

@@ -7,7 +7,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { buildPlan, readRoot } from '../scripts/issue-plan.mjs';
-import { init, next, prepare, bind, release, checkpoint, verdict, unblock, freeWorktree, soleOpenPr, add, handoff, rootPending, cleanup, archived, runStatus, status, sessionTitle, projectName, sessionIdFrom, activeClaims, REQUEST_KEYS, RunError } from '../scripts/issue-run.mjs';
+import { init, next, prepare, bind, release, checkpoint, verdict, unblock, freeWorktree, soleOpenPr, add, handoff, rootPending, cleanup, archived, upsertLedgerRow, updateRootLedger, runStatus, status, sessionTitle, projectName, sessionIdFrom, activeClaims, REQUEST_KEYS, RunError } from '../scripts/issue-run.mjs';
 import { hashObject } from '../scripts/lib/common.mjs';
 import { REPO, LOGIN, commentsKey, openPullsKey, parentFixture, writeFixture, ghFrom } from './fixtures/issues/build.mjs';
 
@@ -457,6 +457,41 @@ test('SC7 cleanup：删本地 KEEL worktree 与本地分支，不碰远端；有
   assert.equal(r.g('branch', '--list', 'feat/x'), '');
 });
 
+test('分支与工作树台账：bind 在总 issue 正文登记「进行中」，cleanup 改成「已清」并写仓内相对路径', () => {
+  const r = gitRepoWithWorktree();
+  const s = readyWith(r.head, r.repo);
+  const rootBody = () => s.fixture[`api repos/${REPO}/issues/10`].body;
+  assert.match(rootBody(), /^总 issue 正文\n\n## 分支与工作树\n/, '原正文保留，新节接在后面');
+  assert.match(rootBody(), /\| #11 \| — \| — \| — \| 进行中（会话 owner-1） \|/);
+  const res = cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: s.gh, checks: s.gh, now: NOW });
+  assert.equal(res.root_ledger_error, undefined);
+  assert.match(rootBody(), /\| #11 \| #5 \| `feat\/x` 本地已删，远端未动 \| `\.worktrees\/keel-1` 已删 \| 已清 2026-10-29 \|/);
+  assert.equal(rootBody().match(/\| #11 \|/g).length, 1, '同一子 issue 只有一行');
+  assert.doesNotMatch(rootBody(), new RegExp(realpathSync(r.repo).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), '不写本机绝对路径');
+});
+
+test('分支与工作树台账：写不进去时不挡收尾，把要补的那一行交给 lead', () => {
+  const r = gitRepoWithWorktree();
+  const s = readyWith(r.head, r.repo);
+  const failing = (args) => { if (args[2] === 'PATCH') throw new Error('HTTP 502'); return s.gh(args); };
+  const res = cleanup({ ledger: s.ledger, plan: s.plan, ref: A, gh: failing, checks: s.gh, now: NOW });
+  assert.equal(res.state, 'cleaned');
+  assert.equal(res.root_ledger_error, 'HTTP 502');
+  assert.match(res.root_ledger_row, /^\| #11 \| #5 \|.*已清 2026-10-29 \|$/);
+});
+
+test('分支与工作树台账：只改这一节；正文读出来是空的、或别处会变时拒写', () => {
+  const body = '## 目标\n\nx\n\n## 分支与工作树\n\n无\n\n## 变更记录\n\n| 日期 |';
+  const once = upsertLedgerRow(body, '#3', ['—', '—', '—', '进行中']);
+  assert.ok(once.startsWith('## 目标\n\nx\n\n## 分支与工作树\n\n| 子 issue |'), '「无」换成表格');
+  assert.ok(once.endsWith('## 变更记录\n\n| 日期 |'));
+  const twice = upsertLedgerRow(once, '#3', ['#9', '`b`', '—', '已清']);
+  assert.equal(twice.match(/\| #3 \|/g).length, 1);
+  assert.match(upsertLedgerRow('## 目标\n\nx\n\n## 变更记录\n', '#4', ['a', 'b|c', 'd', 'e']), /## 分支与工作树\n\n.*\n.*\n\| #4 \| a \| b\\\|c \| d \| e \|\n\n## 变更记录/, '插在变更记录前，单元格里的 | 转义');
+  const empty = { 'api repos/o/r/issues/1': { body: '  ' } };
+  assert.throws(() => updateRootLedger((a) => empty[a.join(' ')], 'o/r#1', '#2', ['a', 'b', 'c', 'd']), /正文读出来是空的/);
+});
+
 test('SC7 archived 只认 archive_sessions 回执；全部收工后是 root_pending（#79：还要验收总 issue），等依赖时是 waiting_merge', () => {
   const r = gitRepoWithWorktree();
   const s = readyWith(r.head, r.repo);
@@ -492,6 +527,7 @@ test('「要改」回复写明先跑 free-worktree，再用 keel_run 传 pr=<号
   awaiting(s, { lane: 'personal' });
   const res = verdict({ ledger: s.ledger, ref: A, revise: '补证据', now: NOW });
   assert.match(res.owner_message, /先跑开工包第 3 节的 free-worktree，释放上一个 KEEL run 占着分支的 worktree，再用 keel_run 传 pr=5 在同一 PR 上接着做/);
+  assert.match(res.owner_message, /KEEL 不可用时（ghost_call 报 GHOST_ASLEEP 或 KEEL_UNAVAILABLE），不跑 free-worktree 和 keel_run：在 PR #5 的分支上直接改/, 'mivo#1329：KEEL 停用时给出 git + gh 的改法');
 });
 
 /** 判了一次「要改」、PR #5 分支 feat/x 的 head 是 head 的台账，计划里的主目录指向 repoDir。 */

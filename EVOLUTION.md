@@ -5,6 +5,20 @@
 
 ## 待维护者拍板(扩权类提案,永不自动落地)
 
+- `scope-placeholder-not-rejected` **issue 范围写了模板占位符 docs/pr/<PR号>/，issue-plan 原样收进计划，验收时把真实交接文件判越界** — 出现 1 次,首见 2026-11-02,最近 2026-11-02,status: open
+  - 现象:2026-11-02 mivo #1604/#1605：lead 建 issue 时范围行沿用 <PR号> 占位符；issue-plan 不检查，accept-check 的 scope 把 docs/pr/1614/qa.md、review.md 判越界。补救走 verdict --revise → needs_lead → 重出计划 add → unblock → 同 head 重写 awaiting_acceptance。
+  - 提案:issue-plan.mjs 遇到范围行含 <…> 占位符时 exit 2 并提示改成 glob（如 docs/pr/*/review.md）；task-issue-child.md 范围示例给出 docs/pr/*/ 写法
+- `user-direct-ready-bypasses-ledger` **用户直接让 owner 转 Ready 后，台账没有路走到收尾** — 出现 1 次,首见 2026-11-02,最近 2026-11-02,status: open
+  - 现象:2026-11-02 cindy#8488：用户在 owner 会话里说「转 ready」，owner 转了 PR #8497；lead 验收时 accept-check 要求 Draft，verdict --pass 走不通，只能写 blocked_user 并手工收尾。建议 verdict 支持「用户已直接转 Ready」：accept-check 改用 ready 档复核，通过后直接进 accepted→ready。另：本次 scope 只因抽出的新文件不在范围而不过，lead 补 issue 范围后仍需 needs_lead→add 才能改计划。
+- `stalled-signal-false-positive` **停滞信号只看台账，owner 正常干活也会误报** — 出现 3 次,首见 2026-10-30,最近 2026-11-02,status: open
+  - 现象:2026-11-02 22:35 mivo#1612、cindy#8488 同时报停滞（30、32 分钟）；get_session_runtime 两个都是 phase=running、最后活动是当下，KEEL worktree 刚提交先红测试。建议停滞判定先查会话 runtime 或 worktree 最近提交，活跃就不报。
+  - 提案:issue-watch 判停滞时先用 get_task_digest 的 phase 和 idle_minutes 过滤；SKILL 改成确实无活动才催。
+- `deps-line-related-item-unparseable` **依赖一句提到关联项「互不依赖」时出计划被拒** — 出现 1 次,首见 2026-11-02,最近 2026-11-02,status: open
+  - 现象:2026-11-02 mivo#1612：依赖写「无，随时可开工。与关联项 makecindy/cindy#8488 互不依赖，谁先合都行」，parseDeps 判断不了类型而拒收；「互不依赖」「不依赖」这类否定句应按无依赖处理，或模板注明依赖段只写会挡开工的项。
+- `scope-desc-leading-slash-rejected` **范围说明里的端点名（如 /app-context）被当成绝对路径拒收** — 出现 1 次,首见 2026-11-02,最近 2026-11-02,status: open
+  - 现象:2026-11-02 mivo#1612：范围行说明文字里写了反引号的 /app-context，isPathLike 因含 / 收进 scope，再被「必须是仓内相对路径」拒收。说明格里以 / 开头的词应跳过而不是整份拒收。
+- `script-schedule-rejects-silent-when-idle` **SKILL 第 5 步让 script 调度带 silentWhenIdle，宿主拒收** — 出现 1 次,首见 2026-11-02,最近 2026-11-02,status: open
+  - 现象:2026-11-02 mivo#1612/cindy#8488：schedule_create executionMode=script 带 silentWhenIdle:true 返回 INVALID_PARAMS「script execution does not support silentWhenIdle」，去掉后才建成。SKILL.md 第 5 步应删掉这个参数。
 - `scope-negation-parsed-as-path` **范围行里写「不改 .github/」会被解析成可改路径** — 出现 1 次,首见 2026-11-01,最近 2026-11-01,status: open
   - 现象:#1329 范围说明里带反引号的 .github/ 进了 KEEL 写域；issue-plan 应跳过否定语境的路径，或要求不做的事只写在「不做」段。
 - `send-to-session-rejects-gateway-model` **send_to_session 新建不接受 Cindy AI 网关模型** — 出现 1 次,首见 2026-11-01,最近 2026-11-01,status: open
@@ -13,9 +27,6 @@
   - 现象:#1329 第 2、3 任 owner 都在长测试或上下文膨胀时停下且不写 checkpoint，靠 stalled 信号 30 分钟后才发现；第 2 任被误判卡死后又复活，与第 3 任同时写同一棵树。建议 release 前先停掉并归档旧会话，开工包写明上下文预算与分批 commit。
 - `scope-misses-test-helpers` **范围只写 *.test.ts 时测试夹具会被 accept-check 判越界** — 出现 1 次,首见 2026-11-01,最近 2026-11-01,status: open
   - 现象:#1329：brainHarness.ts、depositTestHarness.ts 被 scope 检查拒；awaiting_acceptance 不能 add 计划，只能 revise→needs_lead→add→unblock 绕一圈。建议 issue-plan 给 *.test.ts 自动带上 __tests__/** 夹具，或允许 lead 在 awaiting_acceptance 时追加纯测试路径。
-- `stalled-signal-false-positive` **停滞信号只看台账，owner 正常干活也会误报** — 出现 2 次,首见 2026-10-30,最近 2026-11-01,status: open
-  - 现象:2026-11-01 mivo#1461：换岗接手 35 分钟后报停滞，核实 owner idle_minutes=0，已开新 KEEL run 8d9c，工作树里已有 3 个提交，节点 implement 在跑。
-  - 提案:issue-watch 判停滞时先用 get_task_digest 的 phase 和 idle_minutes 过滤；SKILL 改成确实无活动才催。
 - `duplicate-lead-after-old-lead-revived` **旧 lead 被归档后又被用户消息唤醒，不知道新 lead 已接手，又派了一个重复的新 lead** — 出现 1 次,首见 2026-11-01,最近 2026-11-01,status: open
   - 现象:2026-11-01 mivo#1460/#1309：一次性调度建的新 lead aec30e8d 已接手并归档旧 lead f6b80a21，用户随后在 f6b80a21 里问「目前什么情况」，旧 lead 上下文里没有接手记录，又发了一份完整交接包给新会话 ce7bb5b3，并把 issue-watch.json 和两条续跑调度改指向它。靠 ce7bb5b3 核对台账、调度和 GitHub 评论才发现 #1461 已换过 owner，没有重复 release 或重派。
   - 提案:交接旧 lead 时，新 lead 在两份 issue-watch.json 旁写一个 LEAD_HANDOFF.md（新 lead id、时间、已做步骤）；旧 lead 被唤醒第一步先读它，有就只汇报不再交接；SKILL 第 6 步写明「交接前先查台账 lead_session_id 和 issue-watch 配置是否已经换人」。

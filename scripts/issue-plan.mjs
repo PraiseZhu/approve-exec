@@ -140,6 +140,12 @@ function splitHead(line) {
 
 // 文件格里的反引号内容照收（Git 路径可以带空格）；说明文字里才用 isPathLike 过滤。
 const nonEmpty = (t) => t.length > 0;
+// 说明里「不改 `.github/`」这类否定语境之后的路径不收：那是不许碰的，不是写域（approve-exec 自进化 scope-negation-parsed-as-path）。
+const NEGATION_RE = /不(?:改|碰|动|修改|含|包括)|除了/;
+const beforeNegation = (s) => {
+  const m = NEGATION_RE.exec(s);
+  return m ? s.slice(0, m.index) : s;
+};
 // 整行只有反引号路径、顿号逗号和「（新）」这类标注时，算作「只列了文件」。
 const onlyTicks = (s) => s.replace(/`[^`]+`/g, '').replace(/[\s、,，（）()新改删]/g, '') === '';
 
@@ -160,10 +166,10 @@ export function toScope(text, ref) {
     const body = line.replace(/^\s*[-*]\s+/, '');
     const [head, rest] = splitHead(body);
     let tokens;
-    if (head !== null && ticks(head).some(nonEmpty)) tokens = [...ticks(head).filter(nonEmpty), ...ticks(rest).filter(isPathLike)];
-    else if (head !== null) tokens = ticks(rest).filter(nonEmpty);
+    if (head !== null && ticks(head).some(nonEmpty)) tokens = [...ticks(head).filter(nonEmpty), ...ticks(beforeNegation(rest)).filter(isPathLike)];
+    else if (head !== null) tokens = ticks(beforeNegation(rest)).filter(nonEmpty);
     else if (onlyTicks(body)) tokens = ticks(body).filter(nonEmpty);
-    else tokens = ticks(body).filter(isPathLike);
+    else tokens = ticks(beforeNegation(body)).filter(isPathLike);
     if (tokens.length === 0) {
       reject(`${ref} 「范围」这一行没有反引号包住的文件路径或 glob（按模板写成「- \`<文件或 glob>\`：<改什么>」，例如测试写 \`tests/**/*.test.mjs\`）：${line.trim()}`);
     }
@@ -174,7 +180,28 @@ export function toScope(text, ref) {
     }
   }
   if (bullets === 0) reject(`${ref} 「范围」段没有任何文件路径列表项`);
+  for (const helper of scope.map(toTestHelperGlob)) {
+    if (helper && !scope.includes(helper)) scope.push(helper);
+  }
   return scope;
+}
+
+/**
+ * 测试 glob 自动带上同一目录下的 `__tests__/` 夹具：`cindyplugin/src/**\/*.test.ts` → `cindyplugin/src/**\/__tests__/**\/*`。
+ * 只认带通配的测试 glob；单个测试文件不推导。结尾写成 `/**\/*` 而不是 `/**`：KEEL 的 scope 匹配对结尾 `/**` 按字面前缀比，前缀里的 `**` 不展开。
+ * 来源：mivo#1329 的 brainHarness.ts、depositTestHarness.ts 不在 `*.test.ts` 里，accept-check 判越界，绕了一整轮 needs_lead。
+ */
+export function toTestHelperGlob(glob) {
+  const parts = glob.split('/');
+  const base = parts[parts.length - 1];
+  if (!/\.(?:test|spec)\./.test(base) || !glob.includes('*')) return null;
+  const first = parts.findIndex((seg) => seg.includes('*'));
+  const head = parts.slice(0, first);
+  // 测试 glob 本身就在 __tests__/ 里（`x/__tests__/*.test.ts`）：夹具是这个目录下的其余文件。
+  const own = head.lastIndexOf('__tests__');
+  if (own !== -1) return `${head.slice(0, own + 1).join('/')}/**/*`;
+  const prefix = head.join('/');
+  return `${prefix ? `${prefix}/` : ''}**/__tests__/**/*`;
 }
 
 const DEP_REF_RE = /(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?#(\d+)/g;
@@ -360,12 +387,21 @@ export function fixturePost(fixture, args) {
   return comment;
 }
 
+/** 夹具里的 `gh api -X PATCH repos/<r>/issues/<n> -f body=…`：改写那条 issue 的正文。 */
+export function fixturePatch(fixture, args) {
+  const key = `api ${args[3]}`;
+  if (!Object.hasOwn(fixture, key)) throw new Error(`gh 夹具缺少: ${key}`);
+  const body = (args.find((a) => a.startsWith('body=')) ?? 'body=').slice(5);
+  fixture[key] = { ...fixture[key], body };
+  return fixture[key];
+}
+
 export function ghRunner(fixturePath) {
   if (fixturePath) {
     return (args) => {
       const fixture = JSON.parse(readFileSync(fixturePath, 'utf8'));
-      if (args[1] === '-X' && args[2] === 'POST') {
-        const out = fixturePost(fixture, args);
+      if (args[1] === '-X' && (args[2] === 'POST' || args[2] === 'PATCH')) {
+        const out = args[2] === 'POST' ? fixturePost(fixture, args) : fixturePatch(fixture, args);
         writeFileSync(fixturePath, JSON.stringify(fixture));
         return out;
       }

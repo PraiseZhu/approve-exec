@@ -2,7 +2,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { fixturePost } from '../../../scripts/issue-plan.mjs';
+import { fixturePost, fixturePatch } from '../../../scripts/issue-plan.mjs';
 
 export const REPO = 'acme/app';
 export const LOGIN = 'lead-account';
@@ -105,6 +105,7 @@ export function writeFixture(fixture) {
 export function ghFrom(fixture) {
   return (args) => {
     if (args[1] === '-X' && args[2] === 'POST') return fixturePost(fixture, args);
+    if (args[1] === '-X' && args[2] === 'PATCH') return fixturePatch(fixture, args);
     const key = args.join(' ');
     if (!Object.hasOwn(fixture, key)) throw new Error(`gh 夹具缺少: ${key}`);
     return fixture[key];

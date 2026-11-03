@@ -32,10 +32,10 @@
 //              （总 issue 验收不过、补了子 issue 后用：只追加新子 issue；已有子 issue 的范围、SC、依赖变了就拒绝，needs_lead 的除外，#79）
 //   handoff    --ledger <f> --result <lead 结果.json> [--now ISO] [--gh-fixture <夹具>]
 //              （全部子 issue 收工后：自己跑一遍 root-check，校验 lead 结果，在总 issue 发交接评论给验收机，#79）
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hashObject, isMain, nowIso, parseArgs, readJson, writeJsonAtomic } from './lib/common.mjs';
 import { withLock } from './lib/state-lock.mjs';
@@ -209,6 +209,88 @@ export function activeClaims(comments, ref, login) {
 
 function postComment(gh, path, body) {
   return gh(['api', '-X', 'POST', path, '-f', `body=${body}`]);
+}
+
+// root issue ledger：总 issue 正文里的「分支与工作树」一节，一个子 issue 一行，收尾时一眼看出哪些还没清（retro 2026-11-02）。
+
+export const LEDGER_HEADING = '## 分支与工作树';
+const LEDGER_HEADER = ['| 子 issue | PR | 分支 | 工作树 | 状态 |', '|---|---|---|---|---|'];
+const cell = (v) => String(v ?? '—').replace(/\|/g, '\\|').replace(/\s+/g, ' ').trim() || '—';
+// 去掉「分支与工作树」一节、合并空行后的正文：写台账前后这部分必须一字不差。
+function outsideLedger(text) {
+  const lines = String(text).split('\n');
+  const start = lines.findIndex((l) => l.trim() === LEDGER_HEADING);
+  if (start !== -1) {
+    let end = lines.findIndex((l, i) => i > start && /^##\s/.test(l));
+    if (end === -1) end = lines.length;
+    lines.splice(start, end - start);
+  }
+  return lines.join('\n').replace(/\n\s*\n+/g, '\n').trim();
+}
+
+/** 正文 → 更新（或新增）一行后的正文。没有这一节时插在「## 变更记录」前，没有变更记录就放末尾。 */
+export function upsertLedgerRow(body, key, cells) {
+  const row = `| ${[key, ...cells].map(cell).join(' | ')} |`;
+  const lines = String(body).split('\n');
+  const start = lines.findIndex((l) => l.trim() === LEDGER_HEADING);
+  if (start === -1) {
+    const block = [LEDGER_HEADING, '', ...LEDGER_HEADER, row, ''];
+    const at = lines.findIndex((l) => l.trim() === '## 变更记录');
+    if (at === -1) return [...lines, ...(lines.at(-1)?.trim() ? [''] : []), ...block].join('\n');
+    return [...lines.slice(0, at), ...block, ...lines.slice(at)].join('\n');
+  }
+  let end = lines.findIndex((l, i) => i > start && /^##\s/.test(l));
+  if (end === -1) end = lines.length;
+  const section = lines.slice(start + 1, end);
+  const mine = section.findIndex((l) => l.startsWith(`| ${key} |`));
+  if (mine !== -1) {
+    section[mine] = row;
+  } else if (section.some((l) => l.trim() === LEDGER_HEADER[0])) {
+    const last = section.reduce((acc, l, i) => (l.trim().startsWith('|') ? i : acc), -1);
+    section.splice(last + 1, 0, row);
+  } else {
+    // 只有「无」或说明文字：换成表格，说明文字不留。
+    section.splice(0, section.length, '', ...LEDGER_HEADER, row, '');
+  }
+  return [...lines.slice(0, start + 1), ...section, ...lines.slice(end)].join('\n');
+}
+
+/** 把一行写进总 issue 正文。写前校验这一节以外的正文一字不差，免得把正文写坏；失败交给调用方报给 lead。 */
+export function updateRootLedger(gh, rootRef, key, cells) {
+  const { repo, number } = parseIssueRef(rootRef);
+  const before = String(readIssue(gh, repo, number)?.body ?? '');
+  if (!before.trim()) throw new Error(`${rootRef} 正文读出来是空的，不写台账`);
+  const after = upsertLedgerRow(before, key, cells);
+  if (outsideLedger(after) !== outsideLedger(before)) throw new Error(`${rootRef} 新正文在「分支与工作树」一节以外有变化，不写`);
+  if (after === before) return { changed: false };
+  gh(['api', '-X', 'PATCH', `repos/${repo}/issues/${number}`, '-f', `body=${after}`]);
+  return { changed: true };
+}
+
+/** git 报的是真实路径（macOS 的 /var 是 /private/var），先把主目录也换成真实路径再算；算出仓外路径时只留目录名。 */
+function repoRelative(repoDir, path) {
+  let base = repoDir;
+  try { base = realpathSync(repoDir); } catch { /* 主目录读不到时按原样算 */ }
+  const rel = relative(base, path);
+  return rel.startsWith('..') || isAbsolute(rel) ? basename(path) : rel;
+}
+
+const ledgerKey = (ledger, ref) => {
+  const root = parseIssueRef(ledger.root.ref);
+  const it = parseIssueRef(ref);
+  return it.repo === root.repo ? `#${it.number}` : ref;
+};
+
+/** 写台账行；子 issue 本身就是入口（没有总 issue）时不写。失败不挡主流程，把要写的行交给 lead 手工补。 */
+function writeLedgerRow(gh, ledger, ref, cells, out) {
+  if (ledger.root.ref === ref) return;
+  const key = ledgerKey(ledger, ref);
+  try {
+    updateRootLedger(gh, ledger.root.ref, key, cells);
+  } catch (err) {
+    out.root_ledger_error = String(err.message ?? err);
+    out.root_ledger_row = `| ${[key, ...cells].map(cell).join(' | ')} |`;
+  }
 }
 
 // commands: dispatch
@@ -403,6 +485,7 @@ export function bind({ ledger, ref, claimId, result, gh, now }) {
       out[key] = body;
     }
   }
+  writeLedgerRow(gh, ledger, ref, ['—', '—', '—', `进行中（会话 ${sessionId}）`], out);
   return out;
 }
 
@@ -541,7 +624,7 @@ export function verdict({ ledger, ref, pass, revise, check, now }) {
   move(item, 'revising', now, { verdict: 'revise', round: item.revise_count });
   return {
     ok: true, state: item.state, ref, target_session_id: item.session_id,
-    owner_message: `批准执行验收：${date} ${ref} 要改（第 ${item.revise_count} 次）。要改的条目：${items}。先跑开工包第 3 节的 free-worktree，释放上一个 KEEL run 占着分支的 worktree，再用 keel_run 传 pr=${cp.pr} 在同一 PR 上接着做（scope 同开工包）；改完回到验收点，重新写 checkpoint --state awaiting_acceptance。`,
+    owner_message: `批准执行验收：${date} ${ref} 要改（第 ${item.revise_count} 次）。要改的条目：${items}。先跑开工包第 3 节的 free-worktree，释放上一个 KEEL run 占着分支的 worktree，再用 keel_run 传 pr=${cp.pr} 在同一 PR 上接着做（scope 同开工包）；改完回到验收点，重新写 checkpoint --state awaiting_acceptance。KEEL 不可用时（ghost_call 报 GHOST_ASLEEP 或 KEEL_UNAVAILABLE），不跑 free-worktree 和 keel_run：在 PR #${cp.pr} 的分支上直接改、提交、推送，CI 绿后回到验收点，--keel-run 填最近一次 KEEL run_id。`,
   };
 }
 
@@ -647,7 +730,12 @@ export function cleanup({ ledger, plan, ref, gh, checks, git = gitRunner(), now 
   }
   item.cleanup = record;
   move(item, 'cleaned', now, { worktree: record.worktree, branch_deleted: record.branch_deleted });
-  return { ok: true, state: item.state, ref, ...record, target_session_id: item.session_id };
+  const out = { ok: true, state: item.state, ref, ...record, target_session_id: item.session_id };
+  // 工作树写仓内相对路径：总 issue 是公开的，不写本机绝对路径。
+  const wtCell = record.worktree ? `\`${repoRelative(repoDir, record.worktree)}\` 已删` : '本地没有';
+  const branchCell = `\`${branch}\` ${record.branch_deleted ? '本地已删' : '本地没有'}，远端未动`;
+  writeLedgerRow(gh, ledger, ref, [`#${item.checkpoint.pr}`, branchCell, wtCell, `已清 ${now.slice(0, 10)}`], out);
+  return out;
 }
 
 function asRecord(raw) {

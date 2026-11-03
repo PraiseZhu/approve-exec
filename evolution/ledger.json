@@ -44,14 +44,14 @@
       "fingerprint": "stalled-signal-false-positive",
       "tier": "proposal",
       "title": "停滞信号只看台账，owner 正常干活也会误报",
-      "detail": "2026-11-01 mivo#1461：换岗接手 35 分钟后报停滞，核实 owner idle_minutes=0，已开新 KEEL run 8d9c，工作树里已有 3 个提交，节点 implement 在跑。",
+      "detail": "2026-11-02 22:35 mivo#1612、cindy#8488 同时报停滞（30、32 分钟）；get_session_runtime 两个都是 phase=running、最后活动是当下，KEEL worktree 刚提交先红测试。建议停滞判定先查会话 runtime 或 worktree 最近提交，活跃就不报。",
       "proposal": "issue-watch 判停滞时先用 get_task_digest 的 phase 和 idle_minutes 过滤；SKILL 改成确实无活动才催。",
       "status": "open",
       "commit": null,
       "note": null,
-      "occurrences": 2,
+      "occurrences": 3,
       "firstSeen": "2026-10-30T11:26:11.813Z",
-      "lastSeen": "2026-11-01T09:43:47.535Z"
+      "lastSeen": "2026-11-02T14:36:17.186Z"
     },
     {
       "fingerprint": "fork-only-repo-handoff-gap",
@@ -221,6 +221,71 @@
       "occurrences": 1,
       "firstSeen": "2026-11-01T16:11:28.807Z",
       "lastSeen": "2026-11-01T16:11:28.807Z"
+    },
+    {
+      "fingerprint": "script-schedule-rejects-silent-when-idle",
+      "tier": "proposal",
+      "title": "SKILL 第 5 步让 script 调度带 silentWhenIdle，宿主拒收",
+      "detail": "2026-11-02 mivo#1612/cindy#8488：schedule_create executionMode=script 带 silentWhenIdle:true 返回 INVALID_PARAMS「script execution does not support silentWhenIdle」，去掉后才建成。SKILL.md 第 5 步应删掉这个参数。",
+      "proposal": null,
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-11-02T14:05:24.151Z",
+      "lastSeen": "2026-11-02T14:05:24.151Z"
+    },
+    {
+      "fingerprint": "scope-desc-leading-slash-rejected",
+      "tier": "proposal",
+      "title": "范围说明里的端点名（如 /app-context）被当成绝对路径拒收",
+      "detail": "2026-11-02 mivo#1612：范围行说明文字里写了反引号的 /app-context，isPathLike 因含 / 收进 scope，再被「必须是仓内相对路径」拒收。说明格里以 / 开头的词应跳过而不是整份拒收。",
+      "proposal": null,
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-11-02T14:05:24.195Z",
+      "lastSeen": "2026-11-02T14:05:24.195Z"
+    },
+    {
+      "fingerprint": "deps-line-related-item-unparseable",
+      "tier": "proposal",
+      "title": "依赖一句提到关联项「互不依赖」时出计划被拒",
+      "detail": "2026-11-02 mivo#1612：依赖写「无，随时可开工。与关联项 makecindy/cindy#8488 互不依赖，谁先合都行」，parseDeps 判断不了类型而拒收；「互不依赖」「不依赖」这类否定句应按无依赖处理，或模板注明依赖段只写会挡开工的项。",
+      "proposal": null,
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-11-02T14:05:24.238Z",
+      "lastSeen": "2026-11-02T14:05:24.238Z"
+    },
+    {
+      "fingerprint": "user-direct-ready-bypasses-ledger",
+      "tier": "proposal",
+      "title": "用户直接让 owner 转 Ready 后，台账没有路走到收尾",
+      "detail": "2026-11-02 cindy#8488：用户在 owner 会话里说「转 ready」，owner 转了 PR #8497；lead 验收时 accept-check 要求 Draft，verdict --pass 走不通，只能写 blocked_user 并手工收尾。建议 verdict 支持「用户已直接转 Ready」：accept-check 改用 ready 档复核，通过后直接进 accepted→ready。另：本次 scope 只因抽出的新文件不在范围而不过，lead 补 issue 范围后仍需 needs_lead→add 才能改计划。",
+      "proposal": null,
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-11-02T15:25:07.429Z",
+      "lastSeen": "2026-11-02T15:25:07.429Z"
+    },
+    {
+      "fingerprint": "scope-placeholder-not-rejected",
+      "tier": "proposal",
+      "title": "issue 范围写了模板占位符 docs/pr/<PR号>/，issue-plan 原样收进计划，验收时把真实交接文件判越界",
+      "detail": "2026-11-02 mivo #1604/#1605：lead 建 issue 时范围行沿用 <PR号> 占位符；issue-plan 不检查，accept-check 的 scope 把 docs/pr/1614/qa.md、review.md 判越界。补救走 verdict --revise → needs_lead → 重出计划 add → unblock → 同 head 重写 awaiting_acceptance。",
+      "proposal": "issue-plan.mjs 遇到范围行含 <…> 占位符时 exit 2 并提示改成 glob（如 docs/pr/*/review.md）；task-issue-child.md 范围示例给出 docs/pr/*/ 写法",
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-11-02T15:51:37.133Z",
+      "lastSeen": "2026-11-02T15:51:37.133Z"
     }
   ]
 }

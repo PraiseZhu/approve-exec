@@ -59,6 +59,7 @@ lead 用 `send_to_session` 发来一条消息：
 
 - **通过**：所有车道都调 `pr_ready`，`authorization_source` 用台账里的授权原话；成功后写 `--state ready --pr <号> --head <同一 sha>`，再把 done 门答 `wait`，KEEL 看到已交接（交接车道）或可合并（personal 车道）就收工。head 和验收时不一致会被拒收：那说明验收后又改了代码，要回到验收点重新写 `awaiting_acceptance`。
 - **要改**：先跑 `issue-run.mjs free-worktree --ledger <台账> --item <ref>`，删掉上一个 KEEL run 占着 PR 分支的 worktree（只删 KEEL 建的 `<主目录>/.worktrees/keel-*`，并且要干净、HEAD 等于 PR head；保留本地分支；KEEL worktree 里被 gitignore 的构建产物会一起删掉）。占着分支的不是 KEEL 建的 worktree 时拒绝，写 `blocked_user`。不删的话 `keel_run` 传 `pr` 会直接 `stop`（KEEL「分支已在 … 检出」）。再用 `keel_run` 传 `pr=<PR 号>`（KEEL 的 `pr` 任务类型，检出已有分支，`scope` 同开工包）在同一 PR 上接着做；改完回到验收点重新写 `awaiting_acceptance`。
+  KEEL 不可用时（`ghost_call` 报 `GHOST_ASLEEP` 或 `KEEL_UNAVAILABLE`）不跑 `free-worktree` 和 `keel_run`：在 PR 分支上直接改、提交、推送，CI 绿后回到验收点，`--keel-run` 填最近一次 KEEL run_id。来源：mivo#1329，KEEL 停用期间判要改，owner 照旧消息去重跑 `keel_run`，lead 只能另发消息纠正。
 
 ## 范围或验收标准必须改
 
