@@ -58,6 +58,14 @@ test('issue 入口：出计划、建台账、列可派；派会话只传五个�
   }
 });
 
+test('收尾：归档 owner 连带 worker，complete 时都已归档，遗留由两台扫地僧每天清（用户 2026-11-04）', () => {
+  const s = section('## ⓪ issue 入口');
+  for (const must of ['连带归档它的 worker 会话', '`complete` 时本 run 派出的 owner 会话都已归档', 'Pro、Mini 两台扫地僧每天清',
+    '未提交内容也清', '本台账没收尾的 owner 会话由 lead 归档，扫地僧不碰', 'capabilities/source/scripts/dispatched-sessions.mjs', 'merged-cleanup.mjs']) {
+    assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
+  }
+});
+
 test('owner 收口：开工包第 3 节 + references/issue-owner-protocol.md；续跑脚本叫醒 lead', () => {
   const s = section('## ⓪ issue 入口');
   for (const must of ['**挂续跑脚本', 'scripts/issue-watch.py', '开工包第 3 节', 'references/issue-owner-protocol.md']) {
