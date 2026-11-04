@@ -5,6 +5,18 @@
 
 ## 待维护者拍板(扩权类提案,永不自动落地)
 
+- `repo-mandated-handoff-scope` **开工包 scope 漏了目标仓强制的 PR 交接目录** — 出现 1 次,首见 2026-11-04,最近 2026-11-04,status: open
+  - 现象:mivo-canvas-plugin AGENTS.md 要求每个 PR 附 docs/pr/<PR号>/review.md、qa.md（必需检查 pr-handoff-gate），但 issue-plan 只从子 issue「范围」取 scope；#1687 的 13 个子 issue 都没写，#1671 到 PR 阶段被 KEEL 判 SCOPE_VIOLATION 停成 needs_lead。add 只允许改 needs_lead 项，其余子 issue 只能逐个等它们卡住再补。
+  - 提案:issue-plan 按目标仓规则自动给 scope 追加 docs/pr/<PR号>/**（或 accept-check / KEEL 对仓库强制交接目录豁免）；open-issue 模板在 Mivo 仓的范围节默认带这一行。
+- `merged-after-handoff-head-mismatch` **交接后盯梢推新提交再合并，台账 cleanup/archived 因 head 不一致拒绝** — 出现 3 次,首见 2026-11-01,最近 2026-11-03,status: open
+  - 现象:第 3 次：#1462（PR #1663：验收 938a1288b，合并 head 806a8248c，新增只改 docs/pr/1663，2026-11-03）
+  - 提案:cleanup / archived 对已合并 PR，接受「验收 head 是合并 head 的祖先」，不再要求两者相等；续跑脚本对已合并且 issue 已关的 ready 项不再反复唤醒。
+- `owner-brief-virtual-paths` **开工包里的绝对路径是 lead 会话的虚拟路径，owner 会话解析不到台账** — 出现 1 次,首见 2026-11-03,最近 2026-11-03,status: open
+  - 现象:2026-11-03 PraiseZhu/Review-PR#167：lead 在 remote-agent 工作区里运行，路径显示成 /home/box/.config/CindyGlobal/remote-agent/.../p/p/... 形式；台账因此建在 ~/AI-Agent/Claude/projects/Project Mivo Canvas-Plugin/.claude/.goal/ 而不是 ~/.claude/.goal/。owner 会话（同一台 Pro）把开工包里的路径解析成 ~/.claude/.goal/...，checkpoint 写不进去，停了 31 分钟才被续跑脚本发现。
+  - 提案:出计划/建台账时把台账路径规范到 ~/.claude/.goal/<slug>（用 $HOME 展开后的真实路径），render-issue-handoff 输出用 ~ 开头的路径；issue-plan 校验台账目录不在目标仓或其它项目仓内
+- `watch-schedule-silent-rejected` **第 5 步续跑调度的 silentWhenIdle 被宿主拒绝** — 出现 1 次,首见 2026-11-03,最近 2026-11-03,status: open
+  - 现象:2026-11-03 PraiseZhu/Review-PR#166：schedule_create executionMode=script 带 silentWhenIdle:true 返回 INVALID_PARAMS「script execution does not support silentWhenIdle」；去掉后创建成功，首轮 run success。另 schedule_create 要求必填 agentKind/kind/useWorktree/notify，SKILL.md 第 5 步没写。
+  - 提案:SKILL.md 第 5 步删去 silentWhenIdle:true，补上 agentKind、kind:cron、useWorktree:false、notify 必填字段
 - `scope-placeholder-not-rejected` **issue 范围写了模板占位符 docs/pr/<PR号>/，issue-plan 原样收进计划，验收时把真实交接文件判越界** — 出现 1 次,首见 2026-11-02,最近 2026-11-02,status: open
   - 现象:2026-11-02 mivo #1604/#1605：lead 建 issue 时范围行沿用 <PR号> 占位符；issue-plan 不检查，accept-check 的 scope 把 docs/pr/1614/qa.md、review.md 判越界。补救走 verdict --revise → needs_lead → 重出计划 add → unblock → 同 head 重写 awaiting_acceptance。
   - 提案:issue-plan.mjs 遇到范围行含 <…> 占位符时 exit 2 并提示改成 glob（如 docs/pr/*/review.md）；task-issue-child.md 范围示例给出 docs/pr/*/ 写法
@@ -30,9 +42,6 @@
 - `duplicate-lead-after-old-lead-revived` **旧 lead 被归档后又被用户消息唤醒，不知道新 lead 已接手，又派了一个重复的新 lead** — 出现 1 次,首见 2026-11-01,最近 2026-11-01,status: open
   - 现象:2026-11-01 mivo#1460/#1309：一次性调度建的新 lead aec30e8d 已接手并归档旧 lead f6b80a21，用户随后在 f6b80a21 里问「目前什么情况」，旧 lead 上下文里没有接手记录，又发了一份完整交接包给新会话 ce7bb5b3，并把 issue-watch.json 和两条续跑调度改指向它。靠 ce7bb5b3 核对台账、调度和 GitHub 评论才发现 #1461 已换过 owner，没有重复 release 或重派。
   - 提案:交接旧 lead 时，新 lead 在两份 issue-watch.json 旁写一个 LEAD_HANDOFF.md（新 lead id、时间、已做步骤）；旧 lead 被唤醒第一步先读它，有就只汇报不再交接；SKILL 第 6 步写明「交接前先查台账 lead_session_id 和 issue-watch 配置是否已经换人」。
-- `merged-after-handoff-head-mismatch` **交接后盯梢推新提交再合并，台账 cleanup/archived 因 head 不一致拒绝** — 出现 1 次,首见 2026-11-01,最近 2026-11-01,status: open
-  - 现象:2026-11-01 mivo#1309 / PR #1478：checkpoint head 是 028d87a99，转 Ready 交 Mini 盯梢后盯梢补了提交，合并时 head 是 50f2c31cc（028d87a99 是其祖先）。PR 已合并、issue 已关、worktree 与分支都已不在，台账仍停在 ready，cleanup 因 head 不一致拒绝，只能靠 lead 手工登记收尾，不绕脚本改台账。
-  - 提案:cleanup / archived 对已合并 PR，接受「验收 head 是合并 head 的祖先」，不再要求两者相等；续跑脚本对已合并且 issue 已关的 ready 项不再反复唤醒。
 - `spec-file-gaps-in-existing-issue` **issue 写了派发前未修的验收矛盾** — 出现 1 次,首见 2026-10-31,最近 2026-10-31,status: open
   - 现象:2026-10-30 mivo#1328：原范围写已有就直接回 ACK，与 libraryWriteEpoch.protocol.test.ts 冲突，靠诊断时发现才改写。若直接派发，owner 会一路做到不通。
   - 提案:拆 issue 时把范围里涉及的协议约定与现有守卫测试对照一遍。
@@ -63,3 +72,7 @@
 - `scope-path-prefix-omitted` **子 issue 范围列文件时省略目录前缀，issue-plan 按字面当根目录文件，accept-check 判超范围** — 出现 1 次,首见 2026-10-29,最近 2026-10-29,status: open
   - 现象:2026-10-29 PraiseZhu/approve-exec#70：范围行「`scripts/run-ledger.mjs`、`context-intake.mjs`…」只有第一个带 scripts/，e2e 在 PR #73 上 accept-check 判 26 个删除文件超出范围；补全前缀后通过。
   - 提案:open-issue §1 与 task-issue-child 模板写明「每个文件写仓根起的完整路径，不省略目录前缀」；或 issue-plan 在同一范围行里带目录与不带目录的文件混写时 fail-closed 并点名。
+
+## 已否决的提案(留档防止重复提出)
+
+- `cleanup-rejects-watcher-head-after-merge` PR 转 Ready 后 Mini 盯梢推新提交再合并，cleanup/archived 因验收 head 与 PR head 不一致拒绝收尾，台账永远停在 ready — 重复登记，合并到 merged-after-handoff-head-mismatch

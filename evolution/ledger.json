@@ -148,14 +148,14 @@
       "fingerprint": "merged-after-handoff-head-mismatch",
       "tier": "proposal",
       "title": "交接后盯梢推新提交再合并，台账 cleanup/archived 因 head 不一致拒绝",
-      "detail": "2026-11-01 mivo#1309 / PR #1478：checkpoint head 是 028d87a99，转 Ready 交 Mini 盯梢后盯梢补了提交，合并时 head 是 50f2c31cc（028d87a99 是其祖先）。PR 已合并、issue 已关、worktree 与分支都已不在，台账仍停在 ready，cleanup 因 head 不一致拒绝，只能靠 lead 手工登记收尾，不绕脚本改台账。",
+      "detail": "第 3 次：#1462（PR #1663：验收 938a1288b，合并 head 806a8248c，新增只改 docs/pr/1663，2026-11-03）",
       "proposal": "cleanup / archived 对已合并 PR，接受「验收 head 是合并 head 的祖先」，不再要求两者相等；续跑脚本对已合并且 issue 已关的 ready 项不再反复唤醒。",
       "status": "open",
       "commit": null,
       "note": null,
-      "occurrences": 1,
+      "occurrences": 3,
       "firstSeen": "2026-11-01T09:08:01.974Z",
-      "lastSeen": "2026-11-01T09:08:01.974Z"
+      "lastSeen": "2026-11-03T13:18:22.373Z"
     },
     {
       "fingerprint": "duplicate-lead-after-old-lead-revived",
@@ -286,6 +286,58 @@
       "occurrences": 1,
       "firstSeen": "2026-11-02T15:51:37.133Z",
       "lastSeen": "2026-11-02T15:51:37.133Z"
+    },
+    {
+      "fingerprint": "cleanup-rejects-watcher-head-after-merge",
+      "tier": "proposal",
+      "title": "PR 转 Ready 后 Mini 盯梢推新提交再合并，cleanup/archived 因验收 head 与 PR head 不一致拒绝收尾，台账永远停在 ready",
+      "detail": "#1309（PR #1478：验收 028d87a99，合并 head 50f2c31cc）与 #1461（PR #1553：验收 85010e922，合并 head 65b201d22）各一次；两次验收 head 都是合并 head 的祖先，PR 已 MERGED",
+      "proposal": "cleanup/archived 对 MERGED 的 PR 接受「验收 head 是合并前 head 的祖先」；或 Ready 后由盯梢推送时让 lead 对新增提交做一次范围复核后更新 accepted head",
+      "status": "rejected",
+      "commit": null,
+      "note": "重复登记，合并到 merged-after-handoff-head-mismatch",
+      "occurrences": 1,
+      "firstSeen": "2026-11-03T06:40:20.301Z",
+      "lastSeen": "2026-11-03T06:40:20.301Z"
+    },
+    {
+      "fingerprint": "watch-schedule-silent-rejected",
+      "tier": "proposal",
+      "title": "第 5 步续跑调度的 silentWhenIdle 被宿主拒绝",
+      "detail": "2026-11-03 PraiseZhu/Review-PR#166：schedule_create executionMode=script 带 silentWhenIdle:true 返回 INVALID_PARAMS「script execution does not support silentWhenIdle」；去掉后创建成功，首轮 run success。另 schedule_create 要求必填 agentKind/kind/useWorktree/notify，SKILL.md 第 5 步没写。",
+      "proposal": "SKILL.md 第 5 步删去 silentWhenIdle:true，补上 agentKind、kind:cron、useWorktree:false、notify 必填字段",
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-11-03T10:21:23.238Z",
+      "lastSeen": "2026-11-03T10:21:23.238Z"
+    },
+    {
+      "fingerprint": "owner-brief-virtual-paths",
+      "tier": "proposal",
+      "title": "开工包里的绝对路径是 lead 会话的虚拟路径，owner 会话解析不到台账",
+      "detail": "2026-11-03 PraiseZhu/Review-PR#167：lead 在 remote-agent 工作区里运行，路径显示成 /home/box/.config/CindyGlobal/remote-agent/.../p/p/... 形式；台账因此建在 ~/AI-Agent/Claude/projects/Project Mivo Canvas-Plugin/.claude/.goal/ 而不是 ~/.claude/.goal/。owner 会话（同一台 Pro）把开工包里的路径解析成 ~/.claude/.goal/...，checkpoint 写不进去，停了 31 分钟才被续跑脚本发现。",
+      "proposal": "出计划/建台账时把台账路径规范到 ~/.claude/.goal/<slug>（用 $HOME 展开后的真实路径），render-issue-handoff 输出用 ~ 开头的路径；issue-plan 校验台账目录不在目标仓或其它项目仓内",
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-11-03T10:53:16.487Z",
+      "lastSeen": "2026-11-03T10:53:16.487Z"
+    },
+    {
+      "fingerprint": "repo-mandated-handoff-scope",
+      "tier": "proposal",
+      "title": "开工包 scope 漏了目标仓强制的 PR 交接目录",
+      "detail": "mivo-canvas-plugin AGENTS.md 要求每个 PR 附 docs/pr/<PR号>/review.md、qa.md（必需检查 pr-handoff-gate），但 issue-plan 只从子 issue「范围」取 scope；#1687 的 13 个子 issue 都没写，#1671 到 PR 阶段被 KEEL 判 SCOPE_VIOLATION 停成 needs_lead。add 只允许改 needs_lead 项，其余子 issue 只能逐个等它们卡住再补。",
+      "proposal": "issue-plan 按目标仓规则自动给 scope 追加 docs/pr/<PR号>/**（或 accept-check / KEEL 对仓库强制交接目录豁免）；open-issue 模板在 Mivo 仓的范围节默认带这一行。",
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-11-04T00:27:11.650Z",
+      "lastSeen": "2026-11-04T00:27:11.650Z"
     }
   ]
 }
