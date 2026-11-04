@@ -32,7 +32,19 @@ function runCmd({ scriptsDir, ledgerPath, ref }, sub, tail = '') {
   return `node ${JSON.stringify(`${scriptsDir}/issue-run.mjs`)} ${sub} --ledger ${JSON.stringify(ledgerPath)} --item ${ref}${tail ? ` ${tail}` : ''}`;
 }
 
-export function renderIssueHandoff({ plan, item, leadSessionId, ledgerPath = '<台账路径，派发时填入>', scriptsDir = HERE }) {
+/**
+ * 开出 PR 后会话标题怎么改（用户 2026-11-04 定：#<PR号>-<人话任务名>丨<MMDD>）。
+ * retitle 是改后的完整标题（含 `<PR 号>` 占位）；null 表示标题已带 PR 号（接手已有 PR），不用改；dry-run 没有标题时给通用写法。
+ */
+function retitleLine(retitle) {
+  if (retitle === null) return [];
+  const how = retitle
+    ? `把本会话标题改成 \`${retitle}\`（\`<PR 号>\` 换成真实号码）`
+    : '在本会话标题前补上 `#<PR 号>-`';
+  return [`   - \`pr_open\` 成功、拿到 PR 号后，马上调 cindy_helper 的 \`set_current_session_title\`，${how}。`];
+}
+
+export function renderIssueHandoff({ plan, item, leadSessionId, ledgerPath = '<台账路径，派发时填入>', scriptsDir = HERE, retitle }) {
   if (!leadSessionId) throw new Error('renderIssueHandoff 需要 lead 会话 id');
   const cmd = (tail) => runCmd({ scriptsDir, ledgerPath, ref: item.ref }, 'checkpoint', tail);
   const auth = plan.authorization_source;
@@ -75,6 +87,7 @@ export function renderIssueHandoff({ plan, item, leadSessionId, ledgerPath = '<�
     '',
     '2. 之后只照 KEEL 返回的 `next` 推进，一直做到第 3 节的验收点。你是无人值守的 owner：KEEL 手册里让你停下的地方按下面做，自己处理，不找 lead，也不找用户。',
     `   - \`next\` 让你调 \`pr_open\`：加 \`draft: true\`，\`authorization_source\` 填「${auth}」。任何车道都先开 Draft。`,
+    ...retitleLine(retitle),
     '   - `next` 是等待（`keel_wait` 等）：等完照新的 `next` 接着做。在等 CI 不是结束本轮的理由。',
     '   - `next.kind` 是 `decide`：自己答。done 门缺项只剩 `pr_status 是 mark_ready` 就是验收点，不答这个门，按第 3 节写 checkpoint；缺项是在等 CI（如 `pr_status 是 wait_for_ci`）答 `wait`；缺 SC 证据选 `revise`；验证没过选 `retry_verify`；不选 `waive`：豁免要用户原话，你没有。其他门拿不准先问 KEEL 的 `jev`；低于执行线时取改动最小、可撤回的选项（KEEL 手册第 9 条）。',
     '   - PR 已经不是 Draft（例如 `next` 让你调 `pr_ready`）：不调。`pr_status` 显示已交接（`stopped_after_handoff`）就不要动这个 PR，写 `blocked_user`；没交接过的，先 `gh pr ready <PR 号> --undo` 转回 Draft，再接着做。',

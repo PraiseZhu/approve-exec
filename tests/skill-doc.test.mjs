@@ -49,10 +49,19 @@ test('四段 marker 齐全且顺序固定；旧入口第①–⑲段不再出现
   assert.equal(skillDoc.includes('以下为旧入口'), false);
 });
 
-test('issue 入口：出计划、建台账、列可派；派会话只传四个键，不带模型参数', () => {
+test('issue 入口：出计划、建台账、列可派；派会话只传五个键，进目标仓项目分栏，不带模型参数', () => {
   const s = section('## ⓪ issue 入口');
   for (const must of ['**出计划。**', 'scripts/issue-plan.mjs', '**建台账。**', '**列可派。**', '**派会话，每个子 issue 一次。**',
-    '只传 `request` 里的四个键', '不传 agent_kind、model、effort、provider_id']) {
+    '只传 `request` 里的五个键', '`project_path`', '`list_projects`', '`create_project`', '`#<PR号>-<人话任务名>丨<MMDD>`', '--name',
+    '不传 agent_kind、model、effort、provider_id']) {
+    assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
+  }
+});
+
+test('收尾：归档 owner 连带 worker，complete 时都已归档，遗留由两台扫地僧每天清（用户 2026-11-04）', () => {
+  const s = section('## ⓪ issue 入口');
+  for (const must of ['连带归档它的 worker 会话', '`complete` 时本 run 派出的 owner 会话都已归档', 'Pro、Mini 两台扫地僧每天清',
+    '未提交内容也清', '本台账没收尾的 owner 会话由 lead 归档，扫地僧不碰', 'capabilities/source/scripts/dispatched-sessions.mjs', 'merged-cleanup.mjs']) {
     assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
   }
 });

@@ -31,6 +31,7 @@ closed：计划时子 issue 已关闭
 owner 是无人值守的：KEEL 手册里让主控停下问人的地方，owner 按下面自己处理。
 
 - `next` 让调 `pr_open`：加 `draft: true`。任何车道都先开 Draft；KEEL 的 personal 车道允许请求 Draft（Project Keel `src/shared/lanes.ts` `draftFor`）。
+- 开出 PR、拿到 PR 号后，马上用 cindy_helper 的 `set_current_session_title` 在会话标题前补上 `#<PR号>-`，改成 `#<PR号>-<人话任务名>丨<MMDD>`（例 `#1789-动画跑道与守护丨1104`，用户 2026-11-04 定）。接手已有 PR 的会话，派发时标题已带 PR 号，不用改。
 - `next` 是等待：等完照新的 `next` 接着做，不因为在等 CI 结束本轮。
 - `next.kind` 是 `decide`：自己答。done 门缺项只剩 `pr_status 是 mark_ready` 是验收点（见下节）；缺项是在等 CI 答 `wait`；缺 SC 证据选 `revise`；验证没过选 `retry_verify`；不选 `waive`（要用户原话）。其他门拿不准先问 KEEL 的 `jev`；低于执行线取改动最小、可撤回的选项（KEEL 手册第 9 条）。
 - PR 已经不是 Draft：不调 `pr_ready`。`pr_status` 显示已交接（`stopped_after_handoff`）就不要动它，写 `blocked_user`：交接车道有完成的交接记录时，转回 Draft 也解不开 `LANE_HANDED_OFF`（Project Keel `src/main/handoff.ts`），而且会让盯梢作废手上那一轮。没交接过的，先 `gh pr ready <PR 号> --undo` 转回 Draft。

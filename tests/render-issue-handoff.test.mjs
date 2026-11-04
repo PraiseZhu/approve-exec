@@ -41,6 +41,15 @@ test('开工包写明不合并、不改 issue 验收标准', () => {
   assert.ok(text.includes('不改 issue 的范围和验收标准'));
 });
 
+test('开出 PR 后改会话标题：给了改后标题就照写，dry-run 给通用写法，接手已有 PR（null）不写（用户 2026-11-04 定）', () => {
+  const { plan, item, text } = packet();
+  assert.ok(text.includes('`pr_open` 成功、拿到 PR 号后，马上调 cindy_helper 的 `set_current_session_title`，在本会话标题前补上 `#<PR 号>-`。'), 'dry-run 没有标题时给通用写法');
+  const named = renderIssueHandoff({ plan, item, leadSessionId: 'lead-1', retitle: '#<PR 号>-同步状态读取丨1029' });
+  assert.ok(named.includes('把本会话标题改成 `#<PR 号>-同步状态读取丨1029`（`<PR 号>` 换成真实号码）。'));
+  const takeover = renderIssueHandoff({ plan, item, leadSessionId: 'lead-1', retitle: null });
+  assert.doesNotMatch(takeover, /set_current_session_title/);
+});
+
 test('缺 lead 会话 id 时拒绝渲染', () => {
   const { plan, item } = packet();
   assert.throws(() => renderIssueHandoff({ plan, item }), /需要 lead 会话 id/);

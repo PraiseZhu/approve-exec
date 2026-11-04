@@ -7,7 +7,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { buildPlan, readRoot } from '../scripts/issue-plan.mjs';
-import { init, next, prepare, bind, release, checkpoint, verdict, unblock, freeWorktree, soleOpenPr, add, handoff, rootPending, cleanup, archived, upsertLedgerRow, updateRootLedger, runStatus, status, sessionTitle, projectName, sessionIdFrom, activeClaims, REQUEST_KEYS, RunError } from '../scripts/issue-run.mjs';
+import { init, next, prepare, bind, release, checkpoint, verdict, unblock, freeWorktree, soleOpenPr, add, handoff, rootPending, cleanup, archived, upsertLedgerRow, updateRootLedger, runStatus, status, sessionTitle, toTaskName, TASK_NAME_MAX, sessionIdFrom, activeClaims, REQUEST_KEYS, RunError } from '../scripts/issue-run.mjs';
 import { hashObject } from '../scripts/lib/common.mjs';
 import { REPO, LOGIN, commentsKey, openPullsKey, parentFixture, writeFixture, ghFrom } from './fixtures/issues/build.mjs';
 
@@ -34,15 +34,17 @@ function setup({ lead = 'claude-code', fixture = parentFixture(), source = 'chat
 const COMMENTS = commentsKey(11);
 const ROOT_COMMENTS = commentsKey(10);
 
-test('SC5 派会话请求只有四个键：title / message / working_dir（主目录绝对路径）/ use_worktree=false', () => {
+test('SC5 派会话请求只有五个键：title / message / working_dir 与 project_path（主目录绝对路径）/ use_worktree=false', () => {
   const { ledger, plan, gh, repoDir } = setup();
   const res = prepare({ ledger, plan, ref: A, leadSessionId: 'lead-1', gh, now: NOW });
   assert.equal(res.claimed, true);
   assert.deepEqual(Object.keys(res.request).sort(), [...REQUEST_KEYS].sort());
   assert.equal(res.request.working_dir, repoDir);
+  assert.equal(res.request.project_path, repoDir, '会话进目标仓的项目分栏，不继承 lead 所在项目（用户 2026-11-04 定）');
   assert.equal(res.request.use_worktree, false);
   for (const k of ['agent_kind', 'model', 'effort', 'provider_id']) assert.equal(Object.hasOwn(res.request, k), false, `请求不得含 ${k}`);
-  assert.equal(res.request.title, 'App-同步状态读取丨 1029');
+  assert.equal(res.request.title, '同步状态读取丨1029', '还没有 PR：不带 #PR号-，也不带项目名');
+  assert.ok(res.request.message.includes('`set_current_session_title`，把本会话标题改成 `#<PR 号>-同步状态读取丨1029`'), '开工包写明开出 PR 后怎么改名');
 });
 
 test('SC5 lead 是 Pi 时 CLI 退出码 2，写明准确理由（#74）', () => {
@@ -172,7 +174,7 @@ test('bind 成功：记会话 id，在总 issue 发登记评论；认领号不�
   const res = bind({ ledger, ref: A, claimId: claim_id, result: { target_session_id: 's1', wake_kind: 'created' }, gh, now: NOW });
   assert.equal(res.ok, true);
   assert.equal(ledger.items[A].state, 'dispatched');
-  const reg = `批准执行登记：2026-10-29 acme/app#11 → 会话 s1（App-同步状态读取丨 1029）claim ${claim_id}`;
+  const reg = `批准执行登记：2026-10-29 acme/app#11 → 会话 s1（同步状态读取丨1029）claim ${claim_id}`;
   assert.equal(fixture[COMMENTS].at(-1).body, reg, '子 issue 上的登记是防重依据');
   assert.equal(fixture[ROOT_COMMENTS].at(-1).body, reg, '总 issue 上抄一份方便看全');
   assert.ok(res.comment_url && res.root_comment_url);
@@ -231,7 +233,8 @@ test('CLI 全流程：init → next → prepare → bind，台账落盘', () => 
   const run = (...a) => spawnSync(process.execPath, [CLI, ...a, '--ledger', ledger, '--now', NOW, '--gh-fixture', fx.ghPath], { encoding: 'utf8' });
   assert.equal(run('init', '--plan', plan).status, 0);
   assert.ok(JSON.parse(run('next').stdout).dispatchable.includes(A));
-  const prep = JSON.parse(run('prepare', '--item', A, '--lead-session', 'lead-9').stdout);
+  const prep = JSON.parse(run('prepare', '--item', A, '--lead-session', 'lead-9', '--name', '同步状态').stdout);
+  assert.equal(prep.request.title, '同步状态丨1029', 'CLI 把 --name 传给 prepare');
   const resultPath = join(fx.dir, 'result.json');
   writeFileSync(resultPath, JSON.stringify({ target_session_id: 'sess-9' }));
   const b = run('bind', '--item', A, '--claim', prep.claim_id, '--result', resultPath);
@@ -242,12 +245,35 @@ test('CLI 全流程：init → next → prepare → bind，台账落盘', () => 
   assert.ok(saved.version >= 3);
 });
 
-test('会话标题：已知仓用固定前缀，其余仓名去掉 project- 后转 PascalCase；无汉字时用「任务<号>」', () => {
-  assert.equal(projectName('xindong/mivo-canvas-plugin'), 'MivoPlugin');
-  assert.equal(projectName('PraiseZhu/project-keel'), 'Keel');
-  assert.equal(projectName('PraiseZhu/approve-exec'), 'ApproveExec');
-  assert.equal(sessionTitle({ title: 'Fix sync', number: 7, repo: 'a/b' }, NOW), 'B-任务7丨 1029');
-  assert.equal(sessionTitle({ title: '[子2/4] 批准执行收口：owner 停在验收点', number: 69, repo: 'PraiseZhu/approve-exec' }, '2026-10-29T17:00:00.000Z'), 'ApproveExec-批准执行收口丨 1030');
+test('会话标题 #<PR号>-<人话任务名>丨<MMDD>：不写项目名；没有 PR 不带前缀；日期按上海时区（用户 2026-11-04 定）', () => {
+  const item = (title) => ({ ref: 'xindong/mivo-canvas-plugin#1364', title, number: 1364, repo: 'xindong/mivo-canvas-plugin' });
+  assert.equal(sessionTitle(item('[子2/4] 批准执行收口：owner 停在验收点'), '2026-10-29T17:00:00.000Z'), '批准执行收口丨1030');
+  assert.equal(sessionTitle(item('动画跑道与守护（阶段三）'), '2026-11-04T03:00:00.000Z', { pr: 1789 }), '#1789-动画跑道与守护丨1104');
+  // 侧栏里截断的旧标题：「[回归] 改图、带参考出图改用作品库原图（#15」「打开画布时引导配 Mivo Key（挡住画布，没」。
+  assert.equal(toTaskName('[回归] 改图带参考出图（#1531 回归）'), '改图带参考出图');
+  assert.equal(toTaskName('【紧急】[子1/3] 打开画布时引导配 Key（挡住画布，没有跳过按钮'), '打开画布时引导配 Key');
+  assert.equal(toTaskName('储存压缩，先做缩略图'), '储存压缩');
+});
+
+test('会话标题：提不出人话任务名就拒绝，要 lead 用 --name 给；--name 也要过同一道检查', () => {
+  const item = { ref: 'a/b#7', title: 'Fix sync', number: 7, repo: 'a/b' };
+  assert.throws(() => sessionTitle(item, NOW), (e) => e instanceof RunError && /a\/b#7 的标题「Fix sync」提不出人话任务名（「Fix sync」没有中文）：prepare 加 --name/.test(e.message));
+  assert.equal(sessionTitle(item, NOW, { name: '同步按钮修复' }), '同步按钮修复丨1029');
+  const long = { ...item, title: 'Windows 冒烟整段重试第一次失败时在构建页卡住' };
+  assert.throws(() => sessionTitle(long, NOW), new RegExp(`超过 ${TASK_NAME_MAX} 个`));
+  assert.throws(() => sessionTitle(item, NOW, { name: '同步丨按钮' }), /--name「同步丨按钮」不能当会话标题：含「丨」或换行/);
+});
+
+test('prepare --name 覆盖人话任务名；提不出名字时拒绝且不发认领评论', () => {
+  const s = setup();
+  const named = prepare({ ledger: s.ledger, plan: s.plan, ref: A, leadSessionId: 'lead-1', name: '同步状态', gh: s.gh, now: NOW });
+  assert.equal(named.request.title, '同步状态丨1029');
+  const t = setup();
+  t.plan.items.find((i) => i.ref === A).title = 'Read sync state from cache';
+  const before = (t.fixture[COMMENTS] ?? []).length;
+  assert.throws(() => prepare({ ledger: t.ledger, plan: t.plan, ref: A, leadSessionId: 'lead-1', gh: t.gh, now: NOW }), /提不出人话任务名/);
+  assert.equal((t.fixture[COMMENTS] ?? []).length, before, '拒绝发生在认领之前');
+  assert.equal(t.ledger.items[A].state, 'pending');
 });
 
 // owner 收口、lead 验收与收尾（PraiseZhu/approve-exec#69 SC5、SC7、SC8）
@@ -663,6 +689,8 @@ test('#78 SC4 反例（review-pr81）：开了 PR、还没写验收点就失联 
   const again = prepare({ ledger: s.ledger, plan: s.plan, ref: A, leadSessionId: 'lead-1', gh: s.gh, now: NOW });
   assert.match(again.request.message, /^> 接手：上一个 owner 会话失联，PR #7 已经开着。不要开新 PR/);
   assert.equal(s.ledger.items[A].takeover_pr, 7);
+  assert.equal(again.request.title, '#7-同步状态读取丨1029', '接手已有 PR：派发时标题就带 PR 号');
+  assert.doesNotMatch(again.request.message, /set_current_session_title/, '标题已带 PR 号，不再让 owner 改名');
 
   const r = gitRepoWithWorktree();
   s.fixture[`api repos/${REPO}/pulls/7`] = { head: { ref: 'feat/x', sha: r.head }, state: 'open', draft: true };
