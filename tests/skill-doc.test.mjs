@@ -49,10 +49,11 @@ test('四段 marker 齐全且顺序固定；旧入口第①–⑲段不再出现
   assert.equal(skillDoc.includes('以下为旧入口'), false);
 });
 
-test('issue 入口：出计划、建台账、列可派；派会话只传四个键，不带模型参数', () => {
+test('issue 入口：出计划、建台账、列可派；派会话只传五个键，进目标仓项目分栏，不带模型参数', () => {
   const s = section('## ⓪ issue 入口');
   for (const must of ['**出计划。**', 'scripts/issue-plan.mjs', '**建台账。**', '**列可派。**', '**派会话，每个子 issue 一次。**',
-    '只传 `request` 里的四个键', '不传 agent_kind、model、effort、provider_id']) {
+    '只传 `request` 里的五个键', '`project_path`', '`list_projects`', '`create_project`', '`#<PR号>-<人话任务名>丨<MMDD>`', '--name',
+    '不传 agent_kind、model、effort、provider_id']) {
     assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
   }
 });

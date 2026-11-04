@@ -13,7 +13,8 @@
 // CLI（全部输出一行 JSON；exit 0 成功 / 2 拒绝）：
 //   init       --plan <plan.json> --ledger <ledger.json> [--now ISO]
 //   next       --ledger <f> [--gh-fixture <夹具>]                      可派的子 issue 与 run 状态
-//   prepare    --ledger <f> --item <ref> --lead-session <id> [--now ISO] [--gh-fixture <夹具>]
+//   prepare    --ledger <f> --item <ref> --lead-session <id> [--name <人话任务名>] [--now ISO] [--gh-fixture <夹具>]
+//              （会话标题 #<PR号>-<人话任务名>丨<MMDD>；从 issue 标题提不出 ≤14 字的中文短名时拒绝，要 lead 用 --name 给）
 //   bind       --ledger <f> --item <ref> --claim <id> --result <send_to_session 回执 JSON 文件> [--now ISO] [--gh-fixture <夹具>]
 //   release    --ledger <f> --item <ref> --evidence <已核实旧会话不在 / 没建出来的依据> [--now ISO] [--gh-fixture <夹具>]
 //              （dispatch_unknown / claimed / dispatched / revising / needs_lead 可用：会话失联时放回 pending 重派，#78）
@@ -51,7 +52,7 @@ export const ITEM_STATES = Object.freeze([
   'awaiting_acceptance', 'revising', 'accepted', 'ready', 'cleaned', 'archived',
   'needs_lead', 'blocked_user', 'closed',
 ]);
-export const REQUEST_KEYS = Object.freeze(['title', 'message', 'working_dir', 'use_worktree']);
+export const REQUEST_KEYS = Object.freeze(['title', 'message', 'working_dir', 'project_path', 'use_worktree']);
 /** KEEL 的车道（`pr_status` 返回值）。 */
 export const LANES = ['personal', 'gated-handoff', 'draft-gated-handoff'];
 export const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -70,24 +71,43 @@ const reject = (msg) => { throw new RunError(msg); };
 
 // helpers
 
-const PROJECT_PREFIX = Object.freeze({
-  'xindong/mivo-canvas-plugin': 'MivoPlugin',
-  'xindong/mivo-canvas': 'MivoCanvas',
-  'makecindy/cindy': 'Cindy',
-});
 const HAN_RE = /\p{Script=Han}/u;
+const TAG_RE = /^(\[[^\]]*\]|【[^】]*】)\s*/;
+/** 人话任务名最多几个字：前面还有「#PR号-」、后面还有「丨MMDD」，侧栏一行要放得下。 */
+export const TASK_NAME_MAX = 14;
 
-export function projectName(repo) {
-  if (PROJECT_PREFIX[repo]) return PROJECT_PREFIX[repo];
-  const name = repo.split('/').pop().replace(/^project-/i, '');
-  return name.split(/[-_.]/).filter(Boolean).map((w) => w[0].toUpperCase() + w.slice(1)).join('');
+/** issue 标题 → 人话任务名：去掉开头的 [子1/3]、[回归]、【…】 标签，取冒号前一段，去掉括号补充，截到第一个逗号或分号。 */
+export function toTaskName(title) {
+  let s = String(title ?? '').trim();
+  while (TAG_RE.test(s)) s = s.replace(TAG_RE, '');
+  s = s.split(/[：:]/)[0];
+  s = s.replace(/（[^）]*(）|$)|\([^)]*(\)|$)/g, '');
+  s = s.split(/[，,；;。]/)[0];
+  return s.replace(/\s+/g, ' ').trim();
 }
 
-/** 会话标题 {项目名}-{中文任务名}丨 {MMDD}，日期按 Asia/Shanghai。 */
-export function sessionTitle(item, now) {
-  let task = item.title.replace(/^\[(子\d+\/\d+|总)\]\s*/, '').split(/[：:]/)[0].trim().slice(0, 24);
-  if (!HAN_RE.test(task)) task = `任务${item.number}`;
-  return `${projectName(item.repo)}-${task}丨 ${mmdd(now)}`;
+function taskNameProblem(name) {
+  if (!HAN_RE.test(name)) return '没有中文';
+  if ([...name].length > TASK_NAME_MAX) return `${[...name].length} 个字，超过 ${TASK_NAME_MAX} 个`;
+  if (/[丨\r\n]/.test(name)) return '含「丨」或换行';
+  if (name.startsWith('#')) return '以 # 开头';
+  return null;
+}
+
+/**
+ * 会话标题 #<PR号>-<人话任务名>丨<MMDD>，日期按 Asia/Shanghai（用户 2026-11-04 定）。
+ * 还没有 PR 时不带「#<PR号>-」，owner 开出 PR 后用 set_current_session_title 自己补上。
+ * 不写项目名：会话放进目标仓的项目分栏（request.project_path），分栏就是项目。
+ */
+export function sessionTitle(item, now, { pr = null, name } = {}) {
+  const task = name === undefined ? toTaskName(item.title) : String(name).trim();
+  const problem = taskNameProblem(task);
+  if (problem) {
+    reject(name === undefined
+      ? `从 ${item.ref ?? `#${item.number}`} 的标题「${item.title}」提不出人话任务名（「${task}」${problem}）：prepare 加 --name "<不超过 ${TASK_NAME_MAX} 个字的中文短名>"`
+      : `--name「${task}」不能当会话标题：${problem}`);
+  }
+  return `${pr ? `#${pr}-` : ''}${task}丨${mmdd(now)}`;
 }
 
 function mmdd(now) {
@@ -368,7 +388,7 @@ export function next({ ledger, gh }) {
   return { ok: true, run_status: runStatus(ledger, { dispatchable }), dispatchable, waiting, in_flight: inFlight, unknown };
 }
 
-export function prepare({ ledger, ledgerPath, plan, ref, leadSessionId, gh, now }) {
+export function prepare({ ledger, ledgerPath, plan, ref, leadSessionId, name, gh, now }) {
   if (!leadSessionId) reject('缺 --lead-session <lead 会话 id>');
   if (ledger.lead_agent === 'pi') reject(PI_LEAD_REJECT);
   const item = itemOf(ledger, ref);
@@ -387,13 +407,19 @@ export function prepare({ ledger, ledgerPath, plan, ref, leadSessionId, gh, now 
     reject(`${ref} 已有未释放的批准执行${t.kind}（claim ${t.claim_id}，${t.url ?? '子 issue 评论'}）：同一子 issue 只能有一个会话。确认那个会话已不在后，先发「批准执行释放」再派`);
   }
   const planItem = planItemOf(plan, ref);
-  const title = sessionTitle(planItem, now);
-  const handoff = renderIssueHandoff({ plan, item: planItem, leadSessionId, ...(ledgerPath ? { ledgerPath: resolve(ledgerPath) } : {}), scriptsDir: SCRIPTS_DIR });
   const takeover = wasReleased(item) ? item.checkpoint?.pr ?? soleOpenPr(gh, item.repo, ref) : null;
+  const title = sessionTitle(planItem, now, { pr: takeover, name });
+  const handoff = renderIssueHandoff({
+    plan, item: planItem, leadSessionId, ...(ledgerPath ? { ledgerPath: resolve(ledgerPath) } : {}), scriptsDir: SCRIPTS_DIR,
+    // 接手已有 PR 时标题已带 PR 号，不用再改名。
+    retitle: takeover ? null : `#<PR 号>-${title}`,
+  });
   const request = {
     title,
     message: takeoverNote(takeover) + handoff,
     working_dir: planItem.keel_run.repo_dir,
+    // 会话进目标仓的项目分栏，不继承 lead 所在项目；lead 派发前确认它是 Cindy 里看得见的项目（SKILL.md ⓪ 第 4 步）。
+    project_path: planItem.keel_run.repo_dir,
     use_worktree: false,
   };
   const claimId = randomUUID();
@@ -879,7 +905,7 @@ export function main(argv = process.argv.slice(2)) {
         if (hashObject(plan) !== ledger.plan.sha256) reject('计划文件在 init 之后被改过，重新出计划并新开台账');
         let res;
         if (cmd === 'prepare') {
-          res = prepare({ ledger, ledgerPath, plan, ref, leadSessionId: str(args['lead-session']), gh: gh(), now });
+          res = prepare({ ledger, ledgerPath, plan, ref, leadSessionId: str(args['lead-session']), name: str(args.name), gh: gh(), now });
         } else if (cmd === 'bind') {
           res = bind({ ledger, ref, claimId: String(args.claim), result: JSON.parse(readFileSync(String(args.result), 'utf8')), gh: gh(), now });
         } else if (cmd === 'release') {
