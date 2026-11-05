@@ -148,14 +148,14 @@
       "fingerprint": "merged-after-handoff-head-mismatch",
       "tier": "proposal",
       "title": "交接后盯梢推新提交再合并，台账 cleanup/archived 因 head 不一致拒绝",
-      "detail": "第 3 次：#1462（PR #1663：验收 938a1288b，合并 head 806a8248c，新增只改 docs/pr/1663，2026-11-03）",
+      "detail": "2026-11-05 #1331/PR #1705：验收 head cdb57530f，Ready 后 Mini 盯梢按 review-pr P2 推 5 个提交到 03080a167（2 个代码修复、3 个交接文档），review-pr success 后闸门合并为 77c94dc50；cleanup 因 head 不一致拒绝",
       "proposal": "cleanup / archived 对已合并 PR，接受「验收 head 是合并 head 的祖先」，不再要求两者相等；续跑脚本对已合并且 issue 已关的 ready 项不再反复唤醒。",
       "status": "open",
       "commit": null,
       "note": null,
-      "occurrences": 3,
+      "occurrences": 4,
       "firstSeen": "2026-11-01T09:08:01.974Z",
-      "lastSeen": "2026-11-03T13:18:22.373Z"
+      "lastSeen": "2026-11-04T22:07:58.329Z"
     },
     {
       "fingerprint": "duplicate-lead-after-old-lead-revived",
@@ -338,6 +338,45 @@
       "occurrences": 1,
       "firstSeen": "2026-11-04T00:27:11.650Z",
       "lastSeen": "2026-11-04T00:27:11.650Z"
+    },
+    {
+      "fingerprint": "ui-evidence-not-checked-at-acceptance",
+      "tier": "proposal",
+      "title": "lead 验收与 accept-check 不查 PR「效果展示」：改了界面却没有截图或 HTML 模拟界面也能过",
+      "detail": "2026-11-04 用户指出 #1705 改画布观感却写「暂无截图」，#1478 新增提示却写「不涉及」，违反 Mivo CONTRIBUTING.md 第 14 行；维护者账号作者被前置审查豁免界面证据，所以没有自动拦住",
+      "proposal": "accept-check --stage acceptance 检查：diff 命中 .tsx/.css/i18n locales/render 时，PR「效果展示」必须含图片、html 代码块、.html 文件或预览链接，否则 REJECT；开工包写明这条",
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 2,
+      "firstSeen": "2026-11-04T09:04:56.677Z",
+      "lastSeen": "2026-11-04T09:05:05.822Z"
+    },
+    {
+      "fingerprint": "root-check-rejects-watcher-fixes-after-ready",
+      "tier": "proposal",
+      "title": "Mivo PR 转 Ready 后由 Mini 盯梢修审查意见是仓库规定流程，但 root-check 把 lane=null 当 personal 车道，盯梢推的新提交被判「没验收过」，总验收 handoff 无法交接（mivo#1664/#1675，2026-11-04）",
+      "detail": null,
+      "proposal": null,
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-11-04T11:42:48.736Z",
+      "lastSeen": "2026-11-04T11:42:48.736Z"
+    },
+    {
+      "fingerprint": "post-accept-head-drift",
+      "tier": "proposal",
+      "title": "验收后只改文档的新提交没法在台账里重新验收",
+      "detail": "#1687：#1688 验收（6f57d559）后，作者按 lead 要求补了效果展示（只改 docs/pr/1730/），之后已经转 Ready。ready checkpoint 因 head 不同被拒；verdict --pass 要求 acceptance 阶段 PR 必须是 Draft，Ready 后无法重新判通过；unblock 又回到 accepted。#1671 同样因盯梢在 Ready 后推了提交、合入 head 和验收 head 不一致，cleanup 一直拒绝。台账只能卡在 awaiting_acceptance / ready，收尾要手工处理。",
+      "proposal": "lead 加一个 reaccept 命令：核对新增提交只碰范围内文件后，允许把 accepted/ready 的 head 更新为当前 PR head，并留存 compare 证据；cleanup 可以接受「已合并且合入 head 的祖先包含验收 head」的情况。",
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-11-04T16:39:02.108Z",
+      "lastSeen": "2026-11-04T16:39:02.108Z"
     }
   ]
 }

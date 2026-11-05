@@ -5,12 +5,19 @@
 
 ## 待维护者拍板(扩权类提案,永不自动落地)
 
+- `merged-after-handoff-head-mismatch` **交接后盯梢推新提交再合并，台账 cleanup/archived 因 head 不一致拒绝** — 出现 4 次,首见 2026-11-01,最近 2026-11-04,status: open
+  - 现象:2026-11-05 #1331/PR #1705：验收 head cdb57530f，Ready 后 Mini 盯梢按 review-pr P2 推 5 个提交到 03080a167（2 个代码修复、3 个交接文档），review-pr success 后闸门合并为 77c94dc50；cleanup 因 head 不一致拒绝
+  - 提案:cleanup / archived 对已合并 PR，接受「验收 head 是合并 head 的祖先」，不再要求两者相等；续跑脚本对已合并且 issue 已关的 ready 项不再反复唤醒。
+- `post-accept-head-drift` **验收后只改文档的新提交没法在台账里重新验收** — 出现 1 次,首见 2026-11-04,最近 2026-11-04,status: open
+  - 现象:#1687：#1688 验收（6f57d559）后，作者按 lead 要求补了效果展示（只改 docs/pr/1730/），之后已经转 Ready。ready checkpoint 因 head 不同被拒；verdict --pass 要求 acceptance 阶段 PR 必须是 Draft，Ready 后无法重新判通过；unblock 又回到 accepted。#1671 同样因盯梢在 Ready 后推了提交、合入 head 和验收 head 不一致，cleanup 一直拒绝。台账只能卡在 awaiting_acceptance / ready，收尾要手工处理。
+  - 提案:lead 加一个 reaccept 命令：核对新增提交只碰范围内文件后，允许把 accepted/ready 的 head 更新为当前 PR head，并留存 compare 证据；cleanup 可以接受「已合并且合入 head 的祖先包含验收 head」的情况。
+- `root-check-rejects-watcher-fixes-after-ready` **Mivo PR 转 Ready 后由 Mini 盯梢修审查意见是仓库规定流程，但 root-check 把 lane=null 当 personal 车道，盯梢推的新提交被判「没验收过」，总验收 handoff 无法交接（mivo#1664/#1675，2026-11-04）** — 出现 1 次,首见 2026-11-04,最近 2026-11-04,status: open
+- `ui-evidence-not-checked-at-acceptance` **lead 验收与 accept-check 不查 PR「效果展示」：改了界面却没有截图或 HTML 模拟界面也能过** — 出现 2 次,首见 2026-11-04,最近 2026-11-04,status: open
+  - 现象:2026-11-04 用户指出 #1705 改画布观感却写「暂无截图」，#1478 新增提示却写「不涉及」，违反 Mivo CONTRIBUTING.md 第 14 行；维护者账号作者被前置审查豁免界面证据，所以没有自动拦住
+  - 提案:accept-check --stage acceptance 检查：diff 命中 .tsx/.css/i18n locales/render 时，PR「效果展示」必须含图片、html 代码块、.html 文件或预览链接，否则 REJECT；开工包写明这条
 - `repo-mandated-handoff-scope` **开工包 scope 漏了目标仓强制的 PR 交接目录** — 出现 1 次,首见 2026-11-04,最近 2026-11-04,status: open
   - 现象:mivo-canvas-plugin AGENTS.md 要求每个 PR 附 docs/pr/<PR号>/review.md、qa.md（必需检查 pr-handoff-gate），但 issue-plan 只从子 issue「范围」取 scope；#1687 的 13 个子 issue 都没写，#1671 到 PR 阶段被 KEEL 判 SCOPE_VIOLATION 停成 needs_lead。add 只允许改 needs_lead 项，其余子 issue 只能逐个等它们卡住再补。
   - 提案:issue-plan 按目标仓规则自动给 scope 追加 docs/pr/<PR号>/**（或 accept-check / KEEL 对仓库强制交接目录豁免）；open-issue 模板在 Mivo 仓的范围节默认带这一行。
-- `merged-after-handoff-head-mismatch` **交接后盯梢推新提交再合并，台账 cleanup/archived 因 head 不一致拒绝** — 出现 3 次,首见 2026-11-01,最近 2026-11-03,status: open
-  - 现象:第 3 次：#1462（PR #1663：验收 938a1288b，合并 head 806a8248c，新增只改 docs/pr/1663，2026-11-03）
-  - 提案:cleanup / archived 对已合并 PR，接受「验收 head 是合并 head 的祖先」，不再要求两者相等；续跑脚本对已合并且 issue 已关的 ready 项不再反复唤醒。
 - `owner-brief-virtual-paths` **开工包里的绝对路径是 lead 会话的虚拟路径，owner 会话解析不到台账** — 出现 1 次,首见 2026-11-03,最近 2026-11-03,status: open
   - 现象:2026-11-03 PraiseZhu/Review-PR#167：lead 在 remote-agent 工作区里运行，路径显示成 /home/box/.config/CindyGlobal/remote-agent/.../p/p/... 形式；台账因此建在 ~/AI-Agent/Claude/projects/Project Mivo Canvas-Plugin/.claude/.goal/ 而不是 ~/.claude/.goal/。owner 会话（同一台 Pro）把开工包里的路径解析成 ~/.claude/.goal/...，checkpoint 写不进去，停了 31 分钟才被续跑脚本发现。
   - 提案:出计划/建台账时把台账路径规范到 ~/.claude/.goal/<slug>（用 $HOME 展开后的真实路径），render-issue-handoff 输出用 ~ 开头的路径；issue-plan 校验台账目录不在目标仓或其它项目仓内

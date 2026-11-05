@@ -37,6 +37,7 @@ owner 是无人值守的：KEEL 手册里让主控停下问人的地方，owner 
 - PR 已经不是 Draft：不调 `pr_ready`。`pr_status` 显示已交接（`stopped_after_handoff`）就不要动它，写 `blocked_user`：交接车道有完成的交接记录时，转回 Draft 也解不开 `LANE_HANDED_OFF`（Project Keel `src/main/handoff.ts`），而且会让盯梢作废手上那一轮。没交接过的，先 `gh pr ready <PR 号> --undo` 转回 Draft。
 - `next.kind` 是 `stop`：分支被别的 worktree 占着就跑 `free-worktree` 再调一次；别的原因写 `blocked_user`。
 - 待定问题和方案选择：问 `jev`，结论写回子 issue。
+- 改动会让用户看到不同的东西（界面、画布观感、提示和文案）：到验收点前，PR「效果展示」必须附改后的截图、录屏或自包含 HTML demo（`docs/pr/<PR号>/demo.html` 之类），取值来自代码真实值并注明出处；没有实机就做 HTML demo，不能写「暂无截图」。确实没有可见变化才写「不涉及」并说明理由。lead 验收时缺这一项直接判「要改」（用户 2026-11-04 定）。
 
 结束本轮只有四种情况：写完 `awaiting_acceptance`、`ready`、`needs_lead`、`blocked_user` 之一。
 
