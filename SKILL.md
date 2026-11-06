@@ -17,7 +17,7 @@ trigger: 批准执行
 | `批准执行卡住 …` | 执行会话 | lead | 缺权限、缺环境，或范围、验收标准必须改 |
 | `praise-merge 已合并 …` | 合并伙伴（Mini） | lead | 用户说「合并」交出去的 PR 合入后 |
 
-`send_to_session` 发给已有会话时，对方关着会被唤醒，正在跑就排队，这一轮结束后送到，不会丢。
+`send_to_session` 发给已有会话时，对方关着会被唤醒，正在跑就排队，这一轮结束后送到。对方被归档、删除或 Agent 起不来时送不到：双方都看回执，送不到就在子 issue 上评论「批准执行未送达：…」，不互相干等（见「执行会话的规矩」和第 4 步）。
 
 ## ⓪ issue 入口
 
@@ -25,14 +25,18 @@ trigger: 批准执行
 
 1 个子 issue 只对应 1 个 PR、1 个执行会话（用户 2026-11-07 重申）：`claim` 拦重复派发，开工消息写明不另开 PR，重派前先撤回并归档旧会话。
 
+lead 会话要在完全访问权限下运行：派出的执行会话继承 lead 的权限档，lead 在需要人工确认的权限档时，执行会话会停在第一个授权确认框（`send_to_session` 不能单独设权限档）。不满足就先告诉用户，不派。
+
 先备好 lead 的两个地址：`get_current_session_id` 的 `session_id` 是 lead 会话 id，写进开工消息；`list_machines` 里 isSelf 为 true 那台的 deviceId，加 `::` 再加会话 id，是给合并伙伴用的跨电脑地址。
 
-1. **看现状。** `node scripts/batch.mjs status --issue <ref>`。每个子 issue 只有六种状态：
+1. **看现状。** 先读总 issue 的目标与背景、已定决策和并行/串行原则，核对每个子 issue「依赖」写的先后关系和总 issue 一致；不一致先改子 issue（按任务 issue 范式记一行变更），再派。然后 `node scripts/batch.mjs status --issue <ref>`。每个子 issue 只有七种状态：
    - `dispatchable`：依赖都已合入，可以开工。全部进第 2 步，一次派完，不排队。
    - `waiting`：在等 `waiting_on` 里的 issue 合进去。依赖被关成「不做」时问用户。
    - `needs_decision`：「待定问题」还有没写「已定」的。先问 Jev，把结论写回子 issue（该条加上「已定：…」），拿不准再问用户；定完重跑第 1 步。
    - `invalid`：没按模板写。指路「开 issue」补齐，其他子 issue 照常派。
-   - `in_progress`：已派出、已有 PR，或旧台账的 run 在做。不再派。
+   - `in_progress`：有有效的派发记录（或旧台账的 run 在做）。不再派。
+   - `needs_owner`：PR 开着，但没有有效的派发记录（会话失联后撤回过，或别处开的 PR）。先用 `list_sessions` 按标题里的 PR 号找实际负责的会话：找到就用 `batch.mjs claim` 补登记；确认没人做就走第 2 步派一个会话接手，brief 会让它接着原 PR 做，不开新 PR。
+   - `done` 只在子 issue 已关闭、且没有写着「任务 issue」的开着的 PR 时出现；issue 关了但 PR 还开着会是 `needs_decision`，先核实是合了还是不做了，不放行依赖、不归档会话。
    - `done`：子 issue 已关闭。
    `all_done` 为真时到第 5 步。
    - 每次跑完 status，把输出里 `to_attach` 的每个 PR 用 cindy_helper `manage_session_prs`（`action: attach`，不传 `session_id`）挂到 lead 自己的会话顶上（用户 2026-11-07 定：lead 开出的 PR 都要挂在会话顶上）。重复 attach 没有副作用。
@@ -48,7 +52,8 @@ trigger: 批准执行
 3. **停下。** 派完就结束本轮。不挂定时任务，不轮询。
 4. **被消息叫醒后：**
    - **待验收**：先把这个 PR 挂上：`manage_session_prs`（`action: attach`）挂到 lead 自己的会话，再带 `session_id`=执行会话 id 挂到执行会话（执行会话漏挂时兜底；会话标题仍是 `#<PR号>-<人话任务名>丨<MMDD>`，没补前缀就提醒它补，不替它改名）。然后 `node scripts/check-pr.mjs --item <子 issue> --pr <号> --head <消息里的 sha>`。有不过的项就判要改。全过后，再对照子 issue 的「目标」「原因」「不做」看 diff 是否做对了事；界面有变化却没附截图或 demo 判要改；拿不准问 Jev。判要改只为 SC 没达成、改动越出范围、做的事不对或 CI 不绿；PR 正文的小出入写进回复，照样判通过。用 `send_to_session` 回执行会话，第一行写 `批准执行通过 <子 issue> PR #<号>` 或 `批准执行要改 <子 issue> PR #<号>`，要改的条目从下一行起逐条写。裁决同时写成子 issue 评论。判要改不设轮数上限；同样的条目连续两次没有新提交时，告诉用户。
-   - **已转正式**：`node scripts/check-pr.mjs --item <子 issue> --pr <号> --stage ready`。通过就是这个子 issue 收工；不过就回执行会话让它修。之后的审查意见和 CI 归盯梢。入口授权了加急合并的，走「加急合并」。
+   - **已转正式**：`node scripts/check-pr.mjs --item <子 issue> --pr <号> --stage ready`。通过就是这个子 issue 收工；不过就回执行会话「批准执行要改 … （正式 PR）」并写明哪项没过：非 Mivo 仓它修完 CI 全绿后再发「已转正式」，lead 再跑 `--stage ready`（不回到验收档，验收档要求 Draft）；Mivo 仓转正式后的问题交盯梢。之后的审查意见和 CI 归盯梢。入口授权了加急合并的，走「加急合并」。
+   - **发给执行会话的消息送不到**（回执 `ARCHIVED`、`DELETED`、`AGENT_NOT_READY` 等）：在子 issue 上评论「批准执行未送达：<原消息第一行>（<错误码>）」，并告诉用户；按「会话失联」处理。`DELIVERY_UNKNOWN` 先 `get_chat_history` 核对再决定是否重发。
    - **卡住**：能在范围内换做法，就把结论发回执行会话。范围或验收标准必须改，先告诉用户，按任务 issue 范式先改 issue 再改代码，改完把结论发回。缺权限、缺环境告诉用户。
    - **praise-merge 已合并**，或用户说「继续」：先跑第 1 步的 status，对输出里 `to_archive` 的每一项用 cindy_helper `archive_sessions` 归档那个执行会话，成功后 `node scripts/batch.mjs archived --item <子 issue> --session <会话 id>` 记下来（用户 2026-11-07 定：PR 合入后由 lead 及时归档已完成的会话）；再派新放开的子 issue。
 5. **收工。** `all_done` 为真：告诉用户全部合入。总 issue 由验收机自动验收、关闭，lead 不交接、不关总 issue。执行会话 PR 合并前不归档；PR 合并后由 lead 按 `to_archive` 归档（第 4 步），漏掉的由 Pro、Mini 两台扫地僧每天兜底归档，分支和工作树也由扫地僧存证清理，lead 不手工删分支。

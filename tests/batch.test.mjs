@@ -40,13 +40,31 @@ test('依赖合入后（#11 关闭）下一批放开；被关成「不做」的�
   assert.match(stateOf(dropped, 13).reason, /不做，要用户决定/);
 });
 
-test('已有写着「任务 issue」的开着的 PR：算在做，不再派', () => {
-  const fixture = parentFixture({ extra: { [openPullsKey()]: [{ number: 7, draft: true, body: `任务 issue：${ref(12)}\nCloses ${ref(12)}` }] } });
-  const res = batchStatus({ gh: ghFrom(fixture), issueRef: ref(10) });
+test('只剩开着的 PR、没有派发记录：needs_owner（待接手），不当成有人在做；有派发记录才是 in_progress（astra 审查 #1）', () => {
+  const pr = { number: 7, draft: true, body: `任务 issue：${ref(12)}\nCloses ${ref(12)}` };
+  const orphan = batchStatus({ gh: ghFrom(parentFixture({ extra: { [openPullsKey()]: [pr] } })), issueRef: ref(10) });
+  assert.equal(stateOf(orphan, 12).state, 'needs_owner');
+  assert.deepEqual(orphan.needs_owner, [ref(12)]);
+  assert.match(stateOf(orphan, 12).reason, /PR #7 开着，但没有在做的执行会话/);
+  assert.equal(orphan.dispatchable.includes(ref(12)), false);
+  assert.deepEqual(orphan.to_attach, [{ repo: REPO, number: 7 }], 'lead 要把在做的 PR 挂到自己会话顶上');
+  const owned = parentFixture({ extra: { [openPullsKey()]: [pr], [commentsKey(12)]: [{ id: 1, user: { login: LOGIN }, body: `批准执行派发：2026-11-07 ${ref(12)} → 会话 s12（t丨1107）` }] } });
+  const res = batchStatus({ gh: ghFrom(owned), issueRef: ref(10) });
   assert.equal(stateOf(res, 12).state, 'in_progress');
   assert.deepEqual(stateOf(res, 12).prs, [{ number: 7, draft: true }]);
-  assert.equal(res.dispatchable.includes(ref(12)), false);
-  assert.deepEqual(res.to_attach, [{ repo: REPO, number: 7 }], 'lead 要把在做的 PR 挂到自己会话顶上');
+  assert.equal(stateOf(res, 12).session, 's12');
+});
+
+test('issue 关了但 PR 还开着：不算完成、不归档、不放行依赖（astra 审查 #2）', () => {
+  const fixture = closedA('completed');
+  fixture[openPullsKey()] = [{ number: 5, draft: true, body: `任务 issue：${ref(11)}` }];
+  fixture[commentsKey(11)] = [{ id: 1, user: { login: LOGIN }, body: `批准执行派发：2026-11-07 ${ref(11)} → 会话 s11（t丨1107）` }];
+  const res = batchStatus({ gh: ghFrom(fixture), issueRef: ref(10) });
+  assert.equal(stateOf(res, 11).state, 'needs_decision');
+  assert.match(stateOf(res, 11).reason, /PR #5 还开着/);
+  assert.deepEqual(res.to_archive, []);
+  assert.equal(stateOf(res, 13).state, 'waiting', '#13 等 #11：#11 的 PR 还开着就不放行');
+  assert.equal(res.all_done, false);
 });
 
 test('派发防重：claim 后算在做、再 claim 拒绝；release 后可重派；没有派发记录时 release 拒绝', () => {
@@ -129,7 +147,9 @@ test('brief：标题是人话任务名丨日期，开工消息写明红线、lea
   assert.equal(out.request.use_worktree, true);
   const m = out.request.message;
   for (const must of ['推到正式 PR', '不走 KEEL', 'lead-sess-1', `批准执行待验收 ${ref(11)} PR #<号> head`, `批准执行已转正式 ${ref(11)} PR #<号>`, `批准执行卡住 ${ref(11)}`,
-    'timeout 540 gh pr checks', '不问用户', 'references/owner-protocol.md', `任务 issue：${ref(11)}`, '`manage_session_prs`（action=attach', '其余命名不变']) {
+    'timeout 540 gh pr checks', '不问用户', 'references/owner-protocol.md', `任务 issue：${ref(11)}`, '`manage_session_prs`（action=attach', '其余命名不变',
+    '总 issue：acme/app#10', '不要 git checkout -b 另开分支', 'git push origin HEAD:<PR 分支名>', '不算越界', '全部检查都跑完且通过', `check-pr-body.sh --stage ready <owner/repo#PR号> ${ref(11)}`,
+    '不要再发「待验收」', '批准执行未送达', 'DELIVERY_UNKNOWN']) {
     assert.ok(m.includes(must), `开工消息应写「${must}」`);
   }
   assert.equal(m.includes('加急'), false);
@@ -140,6 +160,7 @@ test('brief：已有开着的 PR 时标题带 #PR号，消息写明接着那个 
   const out = brief({ gh: ghFrom(fixture), itemRef: ref(11), lead: 'L1', repoDir: '/repos/app', project: '/repos/app', urgent: true, now: NOW });
   assert.equal(out.request.title, '#5-同步状态读取丨1107');
   assert.match(out.request.message, /已经有开着的 PR #5.*不开新 PR/s);
+  assert.match(out.request.message, /git reset --hard origin\/<PR #5 的分支>/);
   assert.match(out.request.message, /加急任务/);
 });
 

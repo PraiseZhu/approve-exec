@@ -17,9 +17,9 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isMain, nowIso, parseArgs } from './lib/common.mjs';
 import {
-  assertChildTemplate, ghRunner, parseDeps, parseIssueRef, pendingQuestions, readIssue, readRoot, sectionText, splitSections, toKeelSc, toScope,
+  assertChildTemplate, ghRunner, parseDeps, parseHeader, parseIssueRef, pendingQuestions, readIssue, readRoot, sectionText, splitSections, toKeelSc, toScope,
 } from './issue-plan.mjs';
-import { activeClaims, depStatus, ghLogin, readComments, sessionTitle } from './issue-run.mjs';
+import { activeClaims, ghLogin, readComments, sessionTitle } from './issue-run.mjs';
 
 export class BatchError extends Error {}
 const reject = (msg) => { throw new BatchError(msg); };
@@ -97,15 +97,35 @@ export function selectOpenTaskPrs(gh, repo) {
 
 // status
 
-/** 单个子 issue 的现状。state 只有六种：done / in_progress / dispatchable / needs_decision / waiting / invalid。 */
-export function childStatus({ gh, ref, issue, login, openPrs }) {
+/**
+ * 依赖满足 = 依赖 issue 已关闭、不是「不做」，并且没有写着「任务 issue：<依赖>」的开着的 PR（astra 审查 #2：
+ * 只关 issue、PR 还开着不算合入）。
+ */
+export function selectDepStatus(gh, depRef, openPrsFor) {
+  const { repo, number, ref } = parseIssueRef(depRef);
+  const issue = readIssue(gh, repo, number);
+  if (issue.state !== 'closed') return { ref, ok: false, reason: 'open' };
+  if (issue.state_reason === 'not_planned') return { ref, ok: false, reason: 'not_planned' };
+  if ((openPrsFor(repo)[ref] ?? []).length) return { ref, ok: false, reason: 'open_pr' };
+  return { ref, ok: true };
+}
+
+export const STATES = ['done', 'in_progress', 'needs_owner', 'dispatchable', 'needs_decision', 'waiting', 'invalid'];
+
+/** 单个子 issue 的现状。state 只有七种，见 STATES。openPrsFor(repo) 返回那个仓「任务 issue」→ 开着的 PR。 */
+export function childStatus({ gh, ref, issue, login, openPrsFor }) {
   const base = { ref, title: issue.title, url: issue.html_url ?? null };
+  const { repo } = parseIssueRef(ref);
+  const prs = openPrsFor(repo)[ref] ?? [];
   if (issue.state === 'closed') {
+    // issue 关了但 PR 还开着：不算合入，不放行依赖、不归档会话（astra 审查 #2）。
+    if (prs.length) {
+      return { ...base, state: 'needs_decision', prs, reason: `issue 已关闭，但 PR ${prs.map((p) => `#${p.number}`).join('、')} 还开着：先核实是合了还是不做了，再重开 issue 或关掉 PR` };
+    }
     // PR 合入、子 issue 关闭后，lead 要归档派出过的执行会话（用户 2026-11-07 定）。
     const toArchive = unarchivedSessions(readComments(gh, commentsPath(ref)), ref, login);
     return { ...base, state: 'done', reason: issue.state_reason === 'not_planned' ? '关成不做' : '已关闭', ...(toArchive.length ? { sessions_to_archive: toArchive } : {}) };
   }
-  const { repo } = parseIssueRef(ref);
   let deps;
   let questions;
   try {
@@ -119,17 +139,23 @@ export function childStatus({ gh, ref, issue, login, openPrs }) {
   } catch (err) {
     return { ...base, state: 'invalid', reason: err.message };
   }
-  const prs = openPrs[ref] ?? [];
   const comments = readComments(gh, commentsPath(ref));
   const dispatch = activeDispatch(comments, ref, login);
   const legacy = activeClaims(comments, ref, login);
-  if (prs.length || dispatch || legacy.length) {
+  if (dispatch || legacy.length) {
     return {
       ...base, state: 'in_progress', prs, session: dispatch?.session ?? null,
       reason: legacy.length && !dispatch ? '旧台账的 run 在做（按 references/legacy-ledger-flow.md 收尾）' : prs.length > 1 ? `有 ${prs.length} 个开着的 PR，一个子 issue 只能有一个` : '已派出',
     };
   }
-  const blockers = deps.hard.map((d) => depStatus(gh, d)).filter((s) => !s.ok);
+  // 只剩 PR、没有有效的派发记录（会话失联后撤回过，或别处开的 PR）：要人接手，不能当成有人在做（astra 审查 #1）。
+  if (prs.length) {
+    return {
+      ...base, state: 'needs_owner', prs, session: null,
+      reason: prs.length > 1 ? `有 ${prs.length} 个开着的 PR、没有执行会话：先关掉多余的 PR` : `PR #${prs[0].number} 开着，但没有在做的执行会话：核实实际负责人，确认没人就用 brief 接手这个 PR`,
+    };
+  }
+  const blockers = deps.hard.map((d) => selectDepStatus(gh, d, openPrsFor)).filter((d) => !d.ok);
   if (blockers.length) {
     const dropped = blockers.filter((b) => b.reason === 'not_planned').map((b) => b.ref);
     return {
@@ -146,11 +172,13 @@ export function batchStatus({ gh, issueRef }) {
   if (!children.length && /^\[总\]/.test(root.issue.title ?? '')) reject(`${root.ref} 是总 issue 却没有挂子 issue：先「开 issue」把子 issue 挂上`);
   const sources = children.length ? children : [{ repo: root.repo, issue: root.issue }];
   const login = ghLogin(gh);
-  const openByRepo = {};
-  const items = sources.map(({ repo, issue }) => {
-    openByRepo[repo] ??= selectOpenTaskPrs(gh, repo);
-    return childStatus({ gh, ref: `${repo}#${issue.number}`, issue, login, openPrs: openByRepo[repo] });
-  });
+  const openByRepo = new Map();
+  const openPrsFor = (repo) => {
+    const key = repo.toLowerCase();
+    if (!openByRepo.has(key)) openByRepo.set(key, selectOpenTaskPrs(gh, repo));
+    return openByRepo.get(key);
+  };
+  const items = sources.map(({ repo, issue }) => childStatus({ gh, ref: `${repo}#${issue.number}`, issue, login, openPrsFor }));
   const count = (s) => items.filter((i) => i.state === s).length;
   return {
     ok: true,
@@ -158,38 +186,42 @@ export function batchStatus({ gh, issueRef }) {
     kind: children.length ? 'parent' : 'single',
     items,
     dispatchable: items.filter((i) => i.state === 'dispatchable').map((i) => i.ref),
+    needs_owner: items.filter((i) => i.state === 'needs_owner').map((i) => i.ref),
     to_archive: items.flatMap((i) => (i.sessions_to_archive ?? []).map((session) => ({ ref: i.ref, session }))),
     // lead 把自己派出的会话开的 PR 都挂到自己会话顶上（用户 2026-11-07 定）；重复 attach 无副作用。
-    to_attach: items.filter((i) => i.state === 'in_progress').flatMap((i) => (i.prs ?? []).map((pr) => ({ repo: parseIssueRef(i.ref).repo, number: pr.number }))),
+    to_attach: items.filter((i) => ['in_progress', 'needs_owner'].includes(i.state))
+      .flatMap((i) => (i.prs ?? []).map((pr) => ({ repo: parseIssueRef(i.ref).repo, number: pr.number }))),
     all_done: items.every((i) => i.state === 'done'),
-    summary: Object.fromEntries(['done', 'in_progress', 'dispatchable', 'needs_decision', 'waiting', 'invalid'].map((s) => [s, count(s)])),
+    summary: Object.fromEntries(STATES.map((s) => [s, count(s)])),
   };
 }
 
 // brief
 
 /** 开工消息正文：执行会话只靠这条消息开工，要写全红线、做法和给 lead 发消息的三种格式。 */
-export function toOwnerMessage({ ref, title, url, lead, openPr = null, urgent = false }) {
+export function toOwnerMessage({ ref, title, url, lead, parent = null, openPr = null, urgent = false }) {
   return [
     `批准执行开工：${ref}「${title}」`,
     ...(url ? [url] : []),
     '',
     '你负责把这个子 issue 做成一个 PR，并推到正式 PR（Ready for review）。这是红线：PR 还是 Draft 就不算做完；CI 红了就修到绿。一个子 issue 只对应这一个 PR、这一个会话：不另开第二个 PR。',
-    ...(openPr ? ['', `接手：这个子 issue 已经有开着的 PR #${openPr}（上一个会话没做完）。在它的分支上接着做，不开新 PR。`] : []),
+    ...(parent ? ['', `总 issue：${parent}。开工前先读它的目标与背景、已定决策、并行/串行原则和相邻子 issue，弄清这个子 issue 在整体里要达成什么；总 issue 和子 issue 说法冲突时按子 issue 做，并发「卡住」说明。`] : []),
+    ...(openPr ? ['', `接手：这个子 issue 已经有开着的 PR #${openPr}（上一个会话没做完）。接着这个 PR 做，不开新 PR。`] : []),
     '',
     '做法：不走 KEEL，直接用 git + gh。完整步骤读 `~/.claude/skills/approve-exec/references/owner-protocol.md`，要点：',
     '1. 先读子 issue 全文、「参考」里的文件、目标仓的 AGENTS.md / CLAUDE.md 和 PR 模板。只改「范围」里的文件，不做「不做」里的事。',
-    `2. 从最新的目标分支开分支，尽早开 Draft PR（正文按任务 issue 范式，写一行「任务 issue：${ref}」）。开出后马上做两件事：用 cindy_helper 的 \`manage_session_prs\`（action=attach，pr 填 {repo, number}，不传 session_id）把这个 PR 挂到本会话顶上；用 \`set_current_session_title\` 在标题前补 \`#<PR号>-\`，其余命名不变（\`#<PR号>-<人话任务名>丨<MMDD>\`）。`,
-    '3. 写代码，按目标仓规则测试，分批提交、推送。界面有变化就在 PR 里附截图或 HTML demo。',
-    '4. 等 CI 时不结束本轮：反复跑 `timeout 540 gh pr checks <PR号> --watch --fail-fast`，直到出结果；红了就修，修完再等。',
-    '5. Draft PR 当前 head 的 CI 全绿后，给 lead 发「待验收」，然后结束本轮，等 lead 回复。',
-    '6. lead 回「要改」：改完回到第 4 步。lead 回「通过」：跑 PR 正文的 ready 检查，`gh pr ready <PR号>` 转正式，确认 CI 仍全绿，给 lead 发「已转正式」。到这里任务完成。',
+    `2. 分支：Cindy 已经给你建好工作树和托管分支（cindy/<名>），就在这个分支上工作，不要 git checkout -b 另开分支（换分支会让工作树回收不了）。没有提交前先对齐最新目标分支：git fetch origin 后 git reset --hard origin/<目标分支>（子 issue 首行写了「PR 指向」就用它，否则 main）。${openPr ? `接手时改成对齐 PR 分支：git reset --hard origin/<PR #${openPr} 的分支>。` : ''}推送一律 git push origin HEAD:<PR 分支名>。尽早开 Draft PR（正文按任务 issue 范式，写一行「任务 issue：${ref}」）。开出后马上做两件事：用 cindy_helper 的 \`manage_session_prs\`（action=attach，pr 填 {repo, number}，不传 session_id）把这个 PR 挂到本会话顶上；用 \`set_current_session_title\` 在标题前补 \`#<PR号>-\`，其余命名不变（\`#<PR号>-<人话任务名>丨<MMDD>\`）。`,
+    '3. 写代码，按目标仓规则测试，分批提交、推送。界面有变化就在 PR 里附截图或 HTML demo。目标仓规定每个 PR 必须附的交接文件（如 Mivo 的 docs/pr/<PR号>/review.md、qa.md）按仓库要求写，不算越界。',
+    '4. 等 CI 时不结束本轮：反复跑 `timeout 540 gh pr checks <PR号> --watch --fail-fast`，直到全部检查跑完；红了就修，修完再等。「CI 全绿」指当前 head 的全部检查都跑完且通过（skipping 算通过），不只是必需检查。',
+    `5. CI 全绿后，先把 PR 正文「验收对照」每条 SC 的状态和证据填好，跑 \`check-pr-body.sh --stage ready <owner/repo#PR号> ${ref}\` 通过（人工手测项在「未执行的验证」写清谁验、何时验），再给 lead 发「待验收」，然后结束本轮，等 lead 回复。`,
+    '6. lead 回「要改」：改完回到第 4 步。lead 回「通过」：`gh pr ready <PR号>` 转正式，确认 CI 仍全绿，给 lead 发「已转正式」。到这里任务完成。转正式后 lead 又回「要改」（正式档复核没过）：修完、CI 全绿后再发「已转正式」，不要再发「待验收」；Mivo 仓转正式后的 CI 和审查问题归盯梢，不由你改。',
     '',
     `给 lead 发消息：用 cindy_helper 的 \`send_to_session\`，\`target_session_id\` 填 \`${lead}\`。只在三种时候发，消息第一行固定写：`,
     `- \`批准执行待验收 ${ref} PR #<号> head <40 位 sha>\``,
     `- \`批准执行已转正式 ${ref} PR #<号>\``,
     `- \`批准执行卡住 ${ref}\`：缺权限、缺环境，或范围、验收标准必须改才能做完。下一行写原因和需要谁做什么。`,
     '',
+    '发完看回执：ok 才算送到（wake_kind 是 queued 也算）。DELIVERY_UNKNOWN 先用 get_chat_history 查对方收到没有，没收到再发一次；ARCHIVED、DELETED、NOT_FOUND、AGENT_NOT_READY、HOST_NOT_READY 等送不到的，用 gh 在子 issue 上评论「批准执行未送达：<原消息第一行>（<错误码>）」，再结束本轮。',
     '其他时候不发消息，也不问用户。拿不准的选择问 Jev（`ghost_call` 的 `ghost_id=keel`、`tool=jev`），把结论写回子 issue。',
     '不合并 PR，不 force push 主分支，不改子 issue 的范围和验收标准。',
     ...(urgent ? ['', '这是加急任务：你转正式、发完「已转正式」就收工，之后由 lead 安排单审和 e2e，通过后直接合并。'] : []),
@@ -213,13 +245,14 @@ export function brief({ gh, itemRef, lead, repoDir, project, name, urgent = fals
     deviceId = hit.agent_device_id;
   }
   const title = sessionTitle({ ref, title: issue.title }, now, { pr: openPr, ...(name ? { name } : {}) });
+  const parent = parseHeader(splitSections(issue.body ?? '')).parent;
   return {
     ok: true,
     ref,
     open_pr: openPr,
     request: {
       title,
-      message: toOwnerMessage({ ref, title: issue.title, url: issue.html_url ?? null, lead, openPr, urgent }),
+      message: toOwnerMessage({ ref, title: issue.title, url: issue.html_url ?? null, lead, parent, openPr, urgent }),
       working_dir: repoDir,
       project_path: project,
       use_worktree: true,

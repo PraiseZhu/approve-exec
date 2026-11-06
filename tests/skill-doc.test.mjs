@@ -47,9 +47,9 @@ test('七段 marker 齐全且顺序固定；旧入口第①–⑲段不再出现
   assert.doesNotMatch(skillDoc, /^## [①-⑲]/m, '旧入口第①–⑲段已删除');
 });
 
-test('issue 入口：batch status 六种状态，dispatchable 一次派完；派会话原样传 request、进目标仓项目分栏、claim 防重', () => {
+test('issue 入口：batch status 七种状态，dispatchable 一次派完；派会话原样传 request、进目标仓项目分栏、claim 防重', () => {
   const s = section('## ⓪ issue 入口');
-  for (const must of ['scripts/batch.mjs status', '`dispatchable`', '`waiting`', '`needs_decision`', '`invalid`', '`in_progress`', '`done`', '一次派完',
+  for (const must of ['scripts/batch.mjs status', '七种状态', '`dispatchable`', '`waiting`', '`needs_decision`', '`invalid`', '`in_progress`', '`needs_owner`', '`done`', '一次派完',
     'scripts/batch.mjs brief', '参数原样传 `request` 里的键', '`project_path`', '`list_projects`', '`create_project`', '`#<PR号>-<人话任务名>丨<MMDD>`', '--name',
     '不自己改模型和推理强度，不传 provider_id', 'scripts/batch.mjs claim', '1 个子 issue 只对应 1 个 PR、1 个执行会话']) {
     assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
@@ -79,6 +79,21 @@ test('PR 挂到会话顶上（用户 2026-11-07）：执行会话开出 PR 就�
   }
   const protocol = readFileSync(join(root, 'references/owner-protocol.md'), 'utf8');
   assert.ok(protocol.includes('`manage_session_prs`（`action: attach`') && protocol.includes('命名方式不变'), 'owner-protocol.md 应写执行会话自己挂 PR、命名不变');
+});
+
+test('astra 审查修复（2026-11-07）：待接手、issue 关了 PR 还开着、正式 PR 返修、总 issue 意图、权限档、未送达都写进流程', () => {
+  const s = section('## ⓪ issue 入口');
+  for (const must of ['确认没人做就走第 2 步派一个会话接手', 'issue 关了但 PR 还开着会是 `needs_decision`', '先读总 issue 的目标与背景、已定决策和并行/串行原则',
+    '不回到验收档，验收档要求 Draft', '**发给执行会话的消息送不到**', '批准执行未送达']) {
+    assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
+  }
+  assert.ok(skillDoc.includes('lead 会话要在完全访问权限下运行'), 'SKILL.md 应写 lead 的权限档要求');
+  assert.equal(skillDoc.includes('不会丢。'), false, '不再写「不会丢」这种过强保证');
+  const protocol = readFileSync(join(root, 'references/owner-protocol.md'), 'utf8');
+  for (const must of ['先读总 issue 的目标与背景', '用 Cindy 的托管分支，不另开分支', '`git push origin HEAD:<PR 分支名>`', '不算越出子 issue 范围',
+    '全部检查跑完且通过（skipping 算通过）', '`check-pr-body.sh --stage ready', '不要再发「待验收」', '批准执行未送达', '`DELIVERY_UNKNOWN`']) {
+    assert.ok(protocol.includes(must), `owner-protocol.md 应写「${must}」`);
+  }
 });
 
 test('网关（用户 2026-11-07）：默认 Claude 网关 Opus 5.5 high，备用 Personal、Personal 2；不支持指定网关时只在 Claude 网关上派', () => {
