@@ -159,6 +159,8 @@ export function batchStatus({ gh, issueRef }) {
     items,
     dispatchable: items.filter((i) => i.state === 'dispatchable').map((i) => i.ref),
     to_archive: items.flatMap((i) => (i.sessions_to_archive ?? []).map((session) => ({ ref: i.ref, session }))),
+    // lead 把自己派出的会话开的 PR 都挂到自己会话顶上（用户 2026-11-07 定）；重复 attach 无副作用。
+    to_attach: items.filter((i) => i.state === 'in_progress').flatMap((i) => (i.prs ?? []).map((pr) => ({ repo: parseIssueRef(i.ref).repo, number: pr.number }))),
     all_done: items.every((i) => i.state === 'done'),
     summary: Object.fromEntries(['done', 'in_progress', 'dispatchable', 'needs_decision', 'waiting', 'invalid'].map((s) => [s, count(s)])),
   };
@@ -177,7 +179,7 @@ export function toOwnerMessage({ ref, title, url, lead, openPr = null, urgent = 
     '',
     '做法：不走 KEEL，直接用 git + gh。完整步骤读 `~/.claude/skills/approve-exec/references/owner-protocol.md`，要点：',
     '1. 先读子 issue 全文、「参考」里的文件、目标仓的 AGENTS.md / CLAUDE.md 和 PR 模板。只改「范围」里的文件，不做「不做」里的事。',
-    `2. 从最新的目标分支开分支，尽早开 Draft PR（正文按任务 issue 范式，写一行「任务 issue：${ref}」）。开出后用 cindy_helper 的 \`set_current_session_title\` 在标题前补 \`#<PR号>-\`。`,
+    `2. 从最新的目标分支开分支，尽早开 Draft PR（正文按任务 issue 范式，写一行「任务 issue：${ref}」）。开出后马上做两件事：用 cindy_helper 的 \`manage_session_prs\`（action=attach，pr 填 {repo, number}，不传 session_id）把这个 PR 挂到本会话顶上；用 \`set_current_session_title\` 在标题前补 \`#<PR号>-\`，其余命名不变（\`#<PR号>-<人话任务名>丨<MMDD>\`）。`,
     '3. 写代码，按目标仓规则测试，分批提交、推送。界面有变化就在 PR 里附截图或 HTML demo。',
     '4. 等 CI 时不结束本轮：反复跑 `timeout 540 gh pr checks <PR号> --watch --fail-fast`，直到出结果；红了就修，修完再等。',
     '5. Draft PR 当前 head 的 CI 全绿后，给 lead 发「待验收」，然后结束本轮，等 lead 回复。',

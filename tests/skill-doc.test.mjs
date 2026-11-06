@@ -72,6 +72,15 @@ test('被消息叫醒：待验收跑 check-pr，已转正式跑 --stage ready，
   }
 });
 
+test('PR 挂到会话顶上（用户 2026-11-07）：执行会话开出 PR 就挂自己；lead 把 to_attach 和待验收的 PR 都挂到自己会话，执行会话漏挂时兜底；命名不变', () => {
+  const s = section('## ⓪ issue 入口');
+  for (const must of ['`to_attach`', '`manage_session_prs`（`action: attach`', '挂到 lead 自己的会话', '带 `session_id`=执行会话 id 挂到执行会话', '不替它改名']) {
+    assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
+  }
+  const protocol = readFileSync(join(root, 'references/owner-protocol.md'), 'utf8');
+  assert.ok(protocol.includes('`manage_session_prs`（`action: attach`') && protocol.includes('命名方式不变'), 'owner-protocol.md 应写执行会话自己挂 PR、命名不变');
+});
+
 test('网关（用户 2026-11-07）：默认 Claude 网关 Opus 5.5 high，备用 Personal、Personal 2；不支持指定网关时只在 Claude 网关上派', () => {
   const s = section('## ⓪ issue 入口');
   for (const must of ['Claude 网关的 `claude-opus-5-5`、effort high', '备用依次 Personal、Personal 2 网关', 'makecindy/cindy#9195', '`--gateway Claude`',

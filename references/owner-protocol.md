@@ -23,7 +23,8 @@ PR 必须推到正式（Ready for review）才算做完。还是 Draft、CI 还�
    - `bash ~/AI-Agent/Claude/capabilities/source/scripts/make-pr-body.sh <子 issue>` 生成正文骨架（目标仓有自己的 PR 模板时加 `--repo-template <模板文件>`），补上实际内容
    - `bash ~/AI-Agent/Claude/capabilities/source/scripts/check-pr-body.sh --stage open <正文文件> <子 issue>`
    - `gh pr create --draft`。正文第一行写 `任务 issue：<子 issue>`。
-   - 开出后马上用 cindy_helper 的 `set_current_session_title` 在标题前补 `#<PR号>-`，改成 `#<PR号>-<人话任务名>丨<MMDD>`。
+   - 开出后马上用 cindy_helper 的 `manage_session_prs`（`action: attach`，`pr: {repo, number}`，不传 `session_id`）把 PR 挂到本会话顶上，侧栏和会话顶部会显示 PR 号（用户 2026-11-07 定）。
+   - 再用 `set_current_session_title` 在标题前补 `#<PR号>-`，改成 `#<PR号>-<人话任务名>丨<MMDD>`。命名方式不变，只加这个前缀。
    PR 本身就是进度存档：会话断了，接手的会话从这个 PR 接着做。
 4. **写代码、测试、提交。** 按目标仓规则跑测试。分批提交、推送，不攒到最后。上下文快满时先提交推送。界面有变化（界面、画布观感、提示和文案、面板与设置页），PR「效果展示」必须附改后的截图、录屏或自包含 HTML demo；没有可见变化才写「不涉及」并说明为什么。PR 正文「验收对照」要覆盖子 issue 的每一条 SC。
 5. **等 CI，不结束本轮。** 反复运行 `timeout 540 gh pr checks <PR号> --watch --fail-fast`，直到全部出结果。单条命令最多约 9 分钟，没跑完就再跑一次。红了就修、推送，再等。

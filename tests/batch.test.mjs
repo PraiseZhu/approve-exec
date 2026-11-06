@@ -46,6 +46,7 @@ test('已有写着「任务 issue」的开着的 PR：算在做，不再派', ()
   assert.equal(stateOf(res, 12).state, 'in_progress');
   assert.deepEqual(stateOf(res, 12).prs, [{ number: 7, draft: true }]);
   assert.equal(res.dispatchable.includes(ref(12)), false);
+  assert.deepEqual(res.to_attach, [{ repo: REPO, number: 7 }], 'lead 要把在做的 PR 挂到自己会话顶上');
 });
 
 test('派发防重：claim 后算在做、再 claim 拒绝；release 后可重派；没有派发记录时 release 拒绝', () => {
@@ -128,7 +129,7 @@ test('brief：标题是人话任务名丨日期，开工消息写明红线、lea
   assert.equal(out.request.use_worktree, true);
   const m = out.request.message;
   for (const must of ['推到正式 PR', '不走 KEEL', 'lead-sess-1', `批准执行待验收 ${ref(11)} PR #<号> head`, `批准执行已转正式 ${ref(11)} PR #<号>`, `批准执行卡住 ${ref(11)}`,
-    'timeout 540 gh pr checks', '不问用户', 'references/owner-protocol.md', `任务 issue：${ref(11)}`]) {
+    'timeout 540 gh pr checks', '不问用户', 'references/owner-protocol.md', `任务 issue：${ref(11)}`, '`manage_session_prs`（action=attach', '其余命名不变']) {
     assert.ok(m.includes(must), `开工消息应写「${must}」`);
   }
   assert.equal(m.includes('加急'), false);
