@@ -22,7 +22,7 @@ import { spawnSync } from 'node:child_process';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 // 「批准执行」触发行原文（整行逐字匹配，防描述被改写后入口失效）；2026-10-29 改为 issue 入口（PraiseZhu/approve-exec#69）；2026-10-30 轮数与转 Ready 说法随 #77、#78 更新
-export const TRIGGER_LINE = '| 批准执行 | `approve-exec` | 直接执行不确认。接在「开 issue」之后：吃总 issue（或独立 issue / 单个子 issue），缺模板的子 issue 指路「开 issue」；2026-11-07 起不走 KEEL、不建台账、不挂定时任务：lead 按并行/串行原则把依赖已合入的子 issue 一次全派出去（1 子 issue = 1 PR = 1 会话），派会话不带模型参数，派完就停；执行会话推到 Draft PR CI 全绿后发消息叫醒 lead，lead 跑 check-pr 后判通过或要改（不设轮数上限），通过后执行会话转正式 PR 即收工；合并伙伴合入后通知 lead 派下一批。本 skill 不合入（用户明确授权的加急 admin 合并除外） |';
+export const TRIGGER_LINE = '| 批准执行 | `approve-exec` | 直接执行不确认。接在「开 issue」之后：吃总 issue（或独立 issue / 单个子 issue），缺模板的子 issue 指路「开 issue」；2026-11-07 起不走 KEEL、不建台账、不挂定时任务：lead 按并行/串行原则把依赖已合入的子 issue 一次全派出去（1 子 issue = 1 PR = 1 会话），执行会话默认用 Claude 网关的 Opus 5.5 high，派完就停；执行会话推到 Draft PR CI 全绿后发消息叫醒 lead，lead 跑 check-pr 后判通过或要改（不设轮数上限），通过后执行会话转正式 PR 即收工；合并伙伴合入后通知 lead 归档已完成会话、派下一批。本 skill 不合入（用户明确授权的加急 admin 合并除外） |';
 // LIVE_LINK 推导：从 config.goalSkillRoot 派生 —— dirname(goalSkillRoot) 即 skills/claude-active 目录，
 // approve-exec 与 goal 同处该目录（skills 目录内 symlink）。
 // 禁止按仓库在磁盘上的嵌套深度猜层级（'../..' 相对 root）：主 checkout（approve-exec-src）与 worktree

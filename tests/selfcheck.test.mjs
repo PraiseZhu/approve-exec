@@ -30,6 +30,8 @@ test('批准执行触发行（2026-11-07 改版）：issue 入口、不走 KEEL 
   assert.match(TRIGGER_LINE, /吃总 issue（或独立 issue \/ 单个子 issue）/);
   assert.match(TRIGGER_LINE, /不走 KEEL、不建台账、不挂定时任务/);
   assert.match(TRIGGER_LINE, /一次全派出去/);
+  assert.match(TRIGGER_LINE, /执行会话默认用 Claude 网关的 Opus 5.5 high/);
+  assert.match(TRIGGER_LINE, /归档已完成会话/);
   assert.match(TRIGGER_LINE, /lead 跑 check-pr 后判通过或要改（不设轮数上限）/);
   assert.match(TRIGGER_LINE, /执行会话转正式 PR 即收工/);
   assert.match(TRIGGER_LINE, /本 skill 不合入（用户明确授权的加急 admin 合并除外） \|$/);

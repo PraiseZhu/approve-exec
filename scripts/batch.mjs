@@ -6,12 +6,15 @@
 // CLI:
 //   node scripts/batch.mjs status  --issue <owner/repo#号>
 //   node scripts/batch.mjs brief   --item <子 issue> --lead <lead 会话 id> --repo-dir <目标仓主目录> --project <Cindy 项目路径>
-//                                  [--name <人话任务名>] [--urgent]
+//                                  [--name <人话任务名>] [--urgent] [--gateway <网关名>]
+//   node scripts/batch.mjs archived --item <子 issue> --session <已归档的执行会话 id>
 //   node scripts/batch.mjs claim   --item <子 issue> --session <派出的会话 id> --title <会话标题>
 //   node scripts/batch.mjs release --item <子 issue> --reason <原因>
 //   公共：[--now <ISO>] [--gh-fixture <夹具.json>（测试用，代替 gh）]
 // 输出：stdout 一行 JSON；exit 0 成功 / 2 拒绝（stderr 写原因）。
-import { isAbsolute } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { dirname, isAbsolute, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { isMain, nowIso, parseArgs } from './lib/common.mjs';
 import {
   assertChildTemplate, ghRunner, parseDeps, parseIssueRef, pendingQuestions, readIssue, readRoot, sectionText, splitSections, toKeelSc, toScope,
@@ -24,6 +27,8 @@ const reject = (msg) => { throw new BatchError(msg); };
 // 新派发记录的评论首行。不用「批准执行登记：」开头：验收机看到总 issue 上有登记评论会等 lead 交接（vigil#140），新流程没有这一步。
 const DISPATCH_RE = /^批准执行派发：\S+ (\S+#\d+) → 会话 ([\w-]+)/;
 const WITHDRAW_RE = /^批准执行撤回：\S+ (\S+#\d+)/;
+const ARCHIVED_RE = /^批准执行归档：\S+ (\S+#\d+) 会话 ([\w-]+)/;
+const DEFAULTS_PATH = join(dirname(fileURLToPath(import.meta.url)), '../config/defaults.json');
 const SESSION_RE = /^[\w-]+$/;
 const OPEN_PR_PAGES = 10;
 
@@ -45,6 +50,32 @@ export function activeDispatch(comments, ref, login) {
     if (w && w[1] === ref) current = null;
   }
   return current;
+}
+
+/** 评论 → 这个子 issue 派出过、还没记「批准执行归档」的会话（含已撤回的），按派发先后。lead 收工时据此归档。 */
+export function unarchivedSessions(comments, ref, login) {
+  const sessions = [];
+  const archived = new Set();
+  const sorted = (Array.isArray(comments) ? comments : []).slice().sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+  for (const c of sorted) {
+    if (c.user?.login !== login) continue;
+    const body = String(c.body ?? '');
+    const d = DISPATCH_RE.exec(body);
+    if (d && d[1] === ref && !sessions.includes(d[2])) sessions.push(d[2]);
+    const a = ARCHIVED_RE.exec(body);
+    if (a && a[1] === ref) archived.add(a[2]);
+  }
+  return sessions.filter((s) => !archived.has(s));
+}
+
+/** config/defaults.json 的 dispatchRoute：执行会话默认用什么跑、备用网关顺序（用户 2026-11-07 定）。 */
+export function selectDispatchRoute(path = DEFAULTS_PATH) {
+  const route = JSON.parse(readFileSync(path, 'utf8')).dispatchRoute;
+  const ok = route && ['agent_kind', 'model', 'effort'].every((k) => typeof route[k] === 'string' && route[k])
+    && Array.isArray(route.gateways) && route.gateways.length > 0
+    && route.gateways.every((g) => typeof g?.name === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(String(g?.agent_device_id ?? '')));
+  if (!ok) reject(`config/defaults.json 的 dispatchRoute 不完整（要有 agent_kind、model、effort 和至少一个带 agent_device_id 的网关）`);
+  return route;
 }
 
 /** 某仓开着的 PR → { "<ref>": [{number, draft}] }，按正文里「任务 issue：<ref>」一行归到子 issue。 */
@@ -69,7 +100,11 @@ export function selectOpenTaskPrs(gh, repo) {
 /** 单个子 issue 的现状。state 只有六种：done / in_progress / dispatchable / needs_decision / waiting / invalid。 */
 export function childStatus({ gh, ref, issue, login, openPrs }) {
   const base = { ref, title: issue.title, url: issue.html_url ?? null };
-  if (issue.state === 'closed') return { ...base, state: 'done', reason: issue.state_reason === 'not_planned' ? '关成不做' : '已关闭' };
+  if (issue.state === 'closed') {
+    // PR 合入、子 issue 关闭后，lead 要归档派出过的执行会话（用户 2026-11-07 定）。
+    const toArchive = unarchivedSessions(readComments(gh, commentsPath(ref)), ref, login);
+    return { ...base, state: 'done', reason: issue.state_reason === 'not_planned' ? '关成不做' : '已关闭', ...(toArchive.length ? { sessions_to_archive: toArchive } : {}) };
+  }
   const { repo } = parseIssueRef(ref);
   let deps;
   let questions;
@@ -123,6 +158,7 @@ export function batchStatus({ gh, issueRef }) {
     kind: children.length ? 'parent' : 'single',
     items,
     dispatchable: items.filter((i) => i.state === 'dispatchable').map((i) => i.ref),
+    to_archive: items.flatMap((i) => (i.sessions_to_archive ?? []).map((session) => ({ ref: i.ref, session }))),
     all_done: items.every((i) => i.state === 'done'),
     summary: Object.fromEntries(['done', 'in_progress', 'dispatchable', 'needs_decision', 'waiting', 'invalid'].map((s) => [s, count(s)])),
   };
@@ -136,7 +172,7 @@ export function toOwnerMessage({ ref, title, url, lead, openPr = null, urgent = 
     `批准执行开工：${ref}「${title}」`,
     ...(url ? [url] : []),
     '',
-    '你负责把这个子 issue 做成一个 PR，并推到正式 PR（Ready for review）。这是红线：PR 还是 Draft 就不算做完；CI 红了就修到绿。',
+    '你负责把这个子 issue 做成一个 PR，并推到正式 PR（Ready for review）。这是红线：PR 还是 Draft 就不算做完；CI 红了就修到绿。一个子 issue 只对应这一个 PR、这一个会话：不另开第二个 PR。',
     ...(openPr ? ['', `接手：这个子 issue 已经有开着的 PR #${openPr}（上一个会话没做完）。在它的分支上接着做，不开新 PR。`] : []),
     '',
     '做法：不走 KEEL，直接用 git + gh。完整步骤读 `~/.claude/skills/approve-exec/references/owner-protocol.md`，要点：',
@@ -158,7 +194,7 @@ export function toOwnerMessage({ ref, title, url, lead, openPr = null, urgent = 
   ].join('\n');
 }
 
-export function brief({ gh, itemRef, lead, repoDir, project, name, urgent = false, now = nowIso() }) {
+export function brief({ gh, itemRef, lead, repoDir, project, name, urgent = false, gateway, route = selectDispatchRoute(), now = nowIso() }) {
   if (!SESSION_RE.test(String(lead ?? ''))) reject(`--lead 要填 lead 会话 id（get_current_session_id 的 session_id），当前：${lead}`);
   if (!isAbsolute(String(repoDir ?? ''))) reject(`--repo-dir 要填目标仓主目录的绝对路径，当前：${repoDir}`);
   if (!project) reject('--project 要填目标仓对应的 Cindy 项目路径（先 list_projects 查，没有就 create_project）');
@@ -168,6 +204,12 @@ export function brief({ gh, itemRef, lead, repoDir, project, name, urgent = fals
   const prs = selectOpenTaskPrs(gh, repo)[ref] ?? [];
   if (prs.length > 1) reject(`${ref} 有 ${prs.length} 个开着的 PR（${prs.map((p) => `#${p.number}`).join('、')}）：一个子 issue 只能有一个 PR，先关掉多余的再派`);
   const openPr = prs[0]?.number ?? null;
+  let deviceId = null;
+  if (gateway !== undefined) {
+    const hit = route.gateways.find((g) => g.name === gateway);
+    if (!hit) reject(`--gateway 只能是 ${route.gateways.map((g) => g.name).join(' / ')}（当前：${gateway}）`);
+    deviceId = hit.agent_device_id;
+  }
   const title = sessionTitle({ ref, title: issue.title }, now, { pr: openPr, ...(name ? { name } : {}) });
   return {
     ok: true,
@@ -179,7 +221,12 @@ export function brief({ gh, itemRef, lead, repoDir, project, name, urgent = fals
       working_dir: repoDir,
       project_path: project,
       use_worktree: true,
+      agent_kind: route.agent_kind,
+      model: route.model,
+      effort: route.effort,
+      ...(deviceId ? { agent_device_id: deviceId } : {}),
     },
+    gateways: route.gateways.map((g) => g.name),
   };
 }
 
@@ -208,6 +255,17 @@ export function release({ gh, itemRef, reason, now = nowIso() }) {
   return { ok: true, ref, released_session: current.session, comment_url: posted?.html_url ?? null };
 }
 
+export function archived({ gh, itemRef, session, now = nowIso() }) {
+  const { ref } = parseIssueRef(itemRef);
+  if (!SESSION_RE.test(String(session ?? ''))) reject(`--session 要填已归档的执行会话 id，当前：${session}`);
+  const login = ghLogin(gh);
+  if (!unarchivedSessions(readComments(gh, commentsPath(ref)), ref, login).includes(session)) {
+    reject(`${ref} 没有待归档的会话 ${session}（没派过，或已经记过归档）`);
+  }
+  const posted = gh(['api', '-X', 'POST', commentsPath(ref), '-f', `body=批准执行归档：${dateOf(now)} ${ref} 会话 ${session}`]);
+  return { ok: true, ref, session, comment_url: posted?.html_url ?? null };
+}
+
 // cli
 
 export function main(argv = process.argv.slice(2)) {
@@ -218,10 +276,11 @@ export function main(argv = process.argv.slice(2)) {
   try {
     let out;
     if (cmd === 'status') out = batchStatus({ gh, issueRef: args.issue });
-    else if (cmd === 'brief') out = brief({ gh, itemRef: args.item, lead: args.lead, repoDir: args['repo-dir'], project: args.project, name: args.name, urgent: args.urgent === true, now });
+    else if (cmd === 'brief') out = brief({ gh, itemRef: args.item, lead: args.lead, repoDir: args['repo-dir'], project: args.project, name: args.name, urgent: args.urgent === true, ...(typeof args.gateway === 'string' ? { gateway: args.gateway } : {}), now });
     else if (cmd === 'claim') out = claim({ gh, itemRef: args.item, session: args.session, title: args.title, now });
     else if (cmd === 'release') out = release({ gh, itemRef: args.item, reason: args.reason, now });
-    else reject(`子命令只能是 status / brief / claim / release（当前：${cmd ?? '空'}）`);
+    else if (cmd === 'archived') out = archived({ gh, itemRef: args.item, session: args.session, now });
+    else reject(`子命令只能是 status / brief / claim / release / archived（当前：${cmd ?? '空'}）`);
     process.stdout.write(`${JSON.stringify(out)}\n`);
     return 0;
   } catch (err) {

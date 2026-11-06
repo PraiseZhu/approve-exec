@@ -1,8 +1,28 @@
 {
   "_comments": {
     "goalSkillRoot": "goal skill 目录绝对路径（skill live 源在 capabilities/source/skills/claude-active/goal）；selfcheck 用它推导 skills/claude-active/approve-exec 的 live 链接位置",
-    "skillTriggerScanPath": "selfcheck --live 校验「批准执行」触发词行的文件路径（~ 前缀，消费脚本内展开 HOME，不写死用户主目录）；真源在 ~/.claude/rules-lib/skill-trigger-detail.md（2026-09-23 触发表拆成入口 + detail，完整行在 detail；入口表只留「见 detail」短行）"
+    "skillTriggerScanPath": "selfcheck --live 校验「批准执行」触发词行的文件路径（~ 前缀，消费脚本内展开 HOME，不写死用户主目录）；真源在 ~/.claude/rules-lib/skill-trigger-detail.md（2026-09-23 触发表拆成入口 + detail，完整行在 detail；入口表只留「见 detail」短行）",
+    "dispatchRoute": "批准执行派出的执行会话用什么跑（用户 2026-11-07 定）：默认 Claude 网关的 claude-opus-5-5 high，一路做到正式 PR；备用依次 Personal、Personal 2 网关。网关是同账号另一台 Cindy 电脑的远程供应商，agent_device_id 取 list_available_models 的 locations。send_to_session 支持 agent_device_id（makecindy/cindy#9195）之前只能继承 lead 所在网关"
   },
   "goalSkillRoot": "/Users/praise/AI-Agent/Claude/capabilities/source/skills/claude-active/goal",
-  "skillTriggerScanPath": "~/.claude/rules-lib/skill-trigger-detail.md"
+  "skillTriggerScanPath": "~/.claude/rules-lib/skill-trigger-detail.md",
+  "dispatchRoute": {
+    "agent_kind": "claude-code",
+    "model": "claude-opus-5-5",
+    "effort": "high",
+    "gateways": [
+      {
+        "name": "Claude",
+        "agent_device_id": "6c2d712118196434b26659a137106a597805bcd38a6f75f9d434363f566a01d0"
+      },
+      {
+        "name": "Personal",
+        "agent_device_id": "8620a24bb37ab0fff5f06fe54601a7747583995243a3086ccc1b769facd8fcec"
+      },
+      {
+        "name": "Personal 2",
+        "agent_device_id": "e41ff4d26db3e7d31be3699fd88ef48525d7e96c7262a58f2e954556d4cbdc0a"
+      }
+    ]
+  }
 }

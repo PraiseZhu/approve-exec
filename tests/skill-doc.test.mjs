@@ -32,7 +32,7 @@ test('frontmatter：name / trigger；description 写 2026-11-07 新流程，不�
   assert.match(frontmatter, /^name: approve-exec$/m);
   assert.match(frontmatter, /^trigger: 批准执行$/m);
   const description = /^description: (.*)$/m.exec(frontmatter)?.[1] ?? '';
-  for (const must of ['开 issue', '吃总 issue', '并行/串行原则', '独立会话', '不带模型参数', '不走 KEEL', '不建台账', '不挂定时任务', '转正式', '不合并']) {
+  for (const must of ['开 issue', '吃总 issue', '并行/串行原则', '独立会话', 'Claude 网关的 Opus 5.5 high', '不走 KEEL', '不建台账', '不挂定时任务', '转正式', '归档已完成的会话', '不合并']) {
     assert.ok(description.includes(must), `description 应写「${must}」`);
   }
   for (const old of ['keel_run', '最多 2 轮', 'manifest', 'checkpoint', '续跑脚本']) {
@@ -47,11 +47,11 @@ test('七段 marker 齐全且顺序固定；旧入口第①–⑲段不再出现
   assert.doesNotMatch(skillDoc, /^## [①-⑲]/m, '旧入口第①–⑲段已删除');
 });
 
-test('issue 入口：batch status 六种状态，dispatchable 一次派完；派会话只传五个键、进目标仓项目分栏、不带模型参数、claim 防重', () => {
+test('issue 入口：batch status 六种状态，dispatchable 一次派完；派会话原样传 request、进目标仓项目分栏、claim 防重', () => {
   const s = section('## ⓪ issue 入口');
   for (const must of ['scripts/batch.mjs status', '`dispatchable`', '`waiting`', '`needs_decision`', '`invalid`', '`in_progress`', '`done`', '一次派完',
-    'scripts/batch.mjs brief', '只传 `request` 里的五个键', '`project_path`', '`list_projects`', '`create_project`', '`#<PR号>-<人话任务名>丨<MMDD>`', '--name',
-    '不传 agent_kind、model、effort、provider_id', 'scripts/batch.mjs claim']) {
+    'scripts/batch.mjs brief', '参数原样传 `request` 里的键', '`project_path`', '`list_projects`', '`create_project`', '`#<PR号>-<人话任务名>丨<MMDD>`', '--name',
+    '不自己改模型和推理强度，不传 provider_id', 'scripts/batch.mjs claim', '1 个子 issue 只对应 1 个 PR、1 个执行会话']) {
     assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
   }
 });
@@ -72,9 +72,17 @@ test('被消息叫醒：待验收跑 check-pr，已转正式跑 --stage ready，
   }
 });
 
-test('收工：PR 合并前不归档执行会话，合并后扫地僧清；lead 不交接、不关总 issue（用户 2026-11-07）', () => {
+test('网关（用户 2026-11-07）：默认 Claude 网关 Opus 5.5 high，备用 Personal、Personal 2；不支持指定网关时只在 Claude 网关上派', () => {
   const s = section('## ⓪ issue 入口');
-  for (const must of ['**收工。**', '`all_done`', '执行会话 PR 合并前不归档', 'Pro、Mini 两台扫地僧每天归档', 'lead 不交接、不关总 issue', '不合并任何 PR']) {
+  for (const must of ['Claude 网关的 `claude-opus-5-5`、effort high', '备用依次 Personal、Personal 2 网关', 'makecindy/cindy#9195', '`--gateway Claude`',
+    '`--gateway Personal`', '`--gateway "Personal 2"`', '请在 Claude 网关上开 lead 会话', '**派发失败的会话马上归档**']) {
+    assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
+  }
+});
+
+test('收工：PR 合并前不归档执行会话；合入后 lead 按 to_archive 归档并记录，扫地僧兜底；lead 不交接、不关总 issue（用户 2026-11-07）', () => {
+  const s = section('## ⓪ issue 入口');
+  for (const must of ['**收工。**', '`all_done`', '执行会话 PR 合并前不归档', '`to_archive`', 'scripts/batch.mjs archived', '扫地僧每天兜底归档', 'lead 不交接、不关总 issue', '不合并任何 PR']) {
     assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
   }
 });

@@ -3,7 +3,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { activeDispatch, batchStatus, brief, claim, release, toOwnerMessage } from '../scripts/batch.mjs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { activeDispatch, archived, batchStatus, brief, claim, release, selectDispatchRoute, toOwnerMessage, unarchivedSessions } from '../scripts/batch.mjs';
 import { REPO, LOGIN, childBody, commentsKey, ghFrom, openPullsKey, parentFixture, standaloneFixture, writeFixture } from './fixtures/issues/build.mjs';
 
 const CLI = fileURLToPath(new URL('../scripts/batch.mjs', import.meta.url));
@@ -115,9 +118,12 @@ test('独立 issue 入口：只有它自己一项', () => {
   assert.deepEqual(res.dispatchable, [ref(20)]);
 });
 
-test('brief：标题是人话任务名丨日期，开工消息写明红线、lead 会话和三种消息格式，只传五个键', () => {
+test('brief：标题是人话任务名丨日期，开工消息写明红线、lead 会话和三种消息格式；请求带默认路线 Opus 5.5 high，不带网关时靠继承', () => {
   const out = brief({ gh: ghFrom(parentFixture()), itemRef: ref(11), lead: 'lead-sess-1', repoDir: '/repos/app', project: '/repos/app', now: NOW });
-  assert.deepEqual(Object.keys(out.request).sort(), ['message', 'project_path', 'title', 'use_worktree', 'working_dir']);
+  assert.deepEqual(Object.keys(out.request).sort(), ['agent_kind', 'effort', 'message', 'model', 'project_path', 'title', 'use_worktree', 'working_dir']);
+  assert.deepEqual([out.request.agent_kind, out.request.model, out.request.effort], ['claude-code', 'claude-opus-5-5', 'high']);
+  assert.deepEqual(out.gateways, ['Claude', 'Personal', 'Personal 2']);
+  assert.match(out.request.message, /一个子 issue 只对应这一个 PR、这一个会话/);
   assert.equal(out.request.title, '同步状态读取丨1107');
   assert.equal(out.request.use_worktree, true);
   const m = out.request.message;
@@ -134,6 +140,38 @@ test('brief：已有开着的 PR 时标题带 #PR号，消息写明接着那个 
   assert.equal(out.request.title, '#5-同步状态读取丨1107');
   assert.match(out.request.message, /已经有开着的 PR #5.*不开新 PR/s);
   assert.match(out.request.message, /加急任务/);
+});
+
+test('brief --gateway：按配置顺序取网关的 agent_device_id；不认识的网关名拒绝', () => {
+  const gh = ghFrom(parentFixture());
+  const out = brief({ gh, itemRef: ref(11), lead: 'L', repoDir: '/r', project: '/r', gateway: 'Personal', now: NOW });
+  assert.equal(out.request.agent_device_id, '8620a24bb37ab0fff5f06fe54601a7747583995243a3086ccc1b769facd8fcec');
+  assert.throws(() => brief({ gh, itemRef: ref(11), lead: 'L', repoDir: '/r', project: '/r', gateway: 'Nope', now: NOW }), /--gateway 只能是 Claude \/ Personal \/ Personal 2/);
+});
+
+test('dispatchRoute 缺项时 fail-closed，不悄悄换模型', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'route-'));
+  const bad = join(dir, 'defaults.json');
+  writeFileSync(bad, JSON.stringify({ dispatchRoute: { agent_kind: 'claude-code', model: 'claude-opus-5-5', gateways: [] } }));
+  assert.throws(() => selectDispatchRoute(bad), /dispatchRoute 不完整/);
+});
+
+test('PR 合入、子 issue 关闭后：status 列出该归档的执行会话（含撤回过的）；记过「批准执行归档」就不再列', () => {
+  const fixture = closedA('completed');
+  fixture[commentsKey(11)] = [
+    { id: 1, user: { login: LOGIN }, body: `批准执行派发：2026-11-07 ${ref(11)} → 会话 sess-old（t丨1107）` },
+    { id: 2, user: { login: LOGIN }, body: `批准执行撤回：2026-11-07 ${ref(11)}：会话崩了` },
+    { id: 3, user: { login: LOGIN }, body: `批准执行派发：2026-11-07 ${ref(11)} → 会话 sess-new（t丨1107）` },
+  ];
+  const gh = ghFrom(fixture);
+  const res = batchStatus({ gh, issueRef: ref(10) });
+  assert.deepEqual(stateOf(res, 11).sessions_to_archive, ['sess-old', 'sess-new']);
+  assert.deepEqual(res.to_archive, [{ ref: ref(11), session: 'sess-old' }, { ref: ref(11), session: 'sess-new' }]);
+  archived({ gh, itemRef: ref(11), session: 'sess-old', now: NOW });
+  assert.match(fixture[commentsKey(11)].at(-1).body, /^批准执行归档：2026-11-07 acme\/app#11 会话 sess-old/);
+  assert.deepEqual(batchStatus({ gh, issueRef: ref(10) }).to_archive, [{ ref: ref(11), session: 'sess-new' }]);
+  assert.throws(() => archived({ gh, itemRef: ref(11), session: 'sess-old', now: NOW }), /没有待归档的会话 sess-old/);
+  assert.deepEqual(unarchivedSessions(fixture[commentsKey(11)], ref(11), 'someone-else'), []);
 });
 
 test('brief 拒绝：lead 不是会话 id、主目录不是绝对路径、没给项目', () => {
