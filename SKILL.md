@@ -1,57 +1,80 @@
 ---
 name: approve-exec
-description: 批准执行——接在「开 issue」之后：吃总 issue（或独立 issue / 单个子 issue），lead 按总 issue 的并行/串行原则给每个子 issue 开一个独立会话（1 子 issue = 1 PR = 1 会话），派会话不带模型参数；owner 会话用 KEEL 的 keel_run 推进到验收点，零 token 续跑脚本叫醒 lead 验收（通过 / 要改，不设轮数上限、没有进展才找用户），通过后转 Ready、清本地、归档会话，依赖合入后开下一批；lead 不写产品代码、不合并。触发词：批准执行。
+description: 批准执行——接在「开 issue」之后：吃总 issue（或独立 issue / 单个子 issue），lead 按总 issue 的并行/串行原则，把依赖已合入的子 issue 一次全派出去，每个子 issue 开一个独立会话（1 子 issue = 1 PR = 1 会话），派会话不带模型参数；不走 KEEL、不建台账、不挂定时任务。执行会话自己推到 Draft PR CI 全绿后发消息叫醒 lead 验收，lead 判通过后执行会话转正式 PR 即收工；PR 合入后合并伙伴通知 lead 派下一批。lead 不写产品代码、不合并（用户在提示词里明确授权加急 admin 合并的除外）。触发词：批准执行。
 trigger: 批准执行
 ---
 
 # approve-exec — 批准执行
 
+2026-11-07 改版（用户定）：不走 KEEL，不建台账，不挂定时任务。lead 派完就停，只在收到消息时醒来；执行会话自己推进到正式 PR，这是红线。谁叫醒谁：
+
+| 消息第一行 | 谁发 | 发给谁 | 什么时候 |
+|---|---|---|---|
+| `批准执行开工：…` | lead | 新建的执行会话 | 派发时 |
+| `批准执行待验收 …` | 执行会话 | lead | Draft PR 当前 head CI 全绿 |
+| `批准执行通过 …` / `批准执行要改 …` | lead | 执行会话 | 验收后 |
+| `批准执行已转正式 …` | 执行会话 | lead | 转正式后 CI 仍全绿 |
+| `批准执行卡住 …` | 执行会话 | lead | 缺权限、缺环境，或范围、验收标准必须改 |
+| `praise-merge 已合并 …` | 合并伙伴（Mini） | lead | 用户说「合并」交出去的 PR 合入后 |
+
+`send_to_session` 发给已有会话时，对方关着会被唤醒，正在跑就排队，这一轮结束后送到，不会丢。
+
 ## ⓪ issue 入口
 
-用法：`批准执行 owner/repo#号`。号可以是总 issue（标题以 `[总]` 开头、挂了子 issue）、独立 issue，或单个子 issue。可以带一句「授权：…」；没带时用入口消息原文作授权原话。
+用法：`批准执行 owner/repo#号`。号可以是总 issue（标题以 `[总]` 开头、挂了子 issue）、独立 issue，或单个子 issue。入口消息原文就是授权原话；里面明确授权加急 admin 合并时，见「加急合并」。
 
-lead 的执行框架只能是 claude-code 或 codex：KEEL 只给这两种配了默认主控方案，Pi 当 KEEL 主控要先手动选方案、查资料步骤还会停在人工门，跑不了无人值守。owner 会话继承 lead 的执行框架与模型，各环节用什么模型由 KEEL 的主控方案决定；本 skill 不写任何模型、档位或派工路由。
+先备好 lead 的两个地址：`get_current_session_id` 的 `session_id` 是 lead 会话 id，写进开工消息；`list_machines` 里 isSelf 为 true 那台的 deviceId，加 `::` 再加会话 id，是给合并伙伴用的跨电脑地址。
 
-1. **出计划。** `node scripts/issue-plan.mjs --issue <ref> --lead-agent <claude-code|codex> --repo-dir <owner/repo>=<目标仓主目录绝对路径>（每个涉及的仓一条） --entry "<用户原话>" [--authorization "<授权原话>"] --out ~/.claude/.goal/<slug>/plan.json`。exit 2 时把 stderr 原文告诉用户，指路「开 issue」补齐对应子 issue；不手改计划，不替用户补 issue。
-2. **建台账。** `node scripts/issue-run.mjs init --plan <plan.json> --ledger <同目录>/ledger.json`。同一份计划重复 init 不新建。
-3. **列可派。** `node scripts/issue-run.mjs next --ledger <ledger.json>`。只派 `dispatchable` 里的子 issue；`waiting` 里的要等依赖 issue 关闭（对应 PR 合入）后再派；依赖被关成「不做」时交给用户决定。
-4. **派会话，每个子 issue 一次。**
-   - `node scripts/issue-run.mjs prepare --ledger <f> --item <ref> --lead-session <当前会话 id> [--name "<人话任务名>"]`，拿到 `request`。会话标题是 `#<PR号>-<人话任务名>丨<MMDD>`（例 `#1789-动画跑道与守护丨1104`，用户 2026-11-04 定），不写项目名；还没有 PR 时先不带 `#<PR号>-`，owner 开出 PR 后自己补上。人话任务名默认从子 issue 标题提（去掉 `[子1/3]`、`[回归]` 这类标签和括号补充，取冒号前一段）；提不出不超过 14 个字的中文短名时 prepare 退出码 2，用 `--name` 给一个说清做什么的短名再跑。返回 `claimed:false` 表示本台账已派过，不再派。prepare 先读该子 issue 自己的评论（分页读完）：有当前 gh 账号发的、未释放的「批准执行认领 / 登记」就退出码 2，不管它来自哪份台账、哪台电脑、从总 issue 还是子 issue 入口；通过后脚本发「批准执行认领」并复查，两个 lead 同时认领时评论 id 小的胜出，后到的一方自动发释放让位并退出码 2。
-   - 用 cindy_helper 的 `send_to_session` 新建会话，参数只传 `request` 里的五个键：`title`、`message`、`working_dir`、`project_path`、`use_worktree`。不传 agent_kind、model、effort、provider_id。`project_path` 是目标仓主目录，让会话进这个项目的分栏，不继承 lead 所在的项目：派发前先用 `list_projects` 查它是不是 Cindy 里看得见的项目，没有或 `hidden:true` 就先 `create_project` 登记或恢复。项目置顶由用户在侧栏项目菜单点「Pin project」，工具不能置顶。
-   - 把工具回执原样存成文件，`node scripts/issue-run.mjs bind --ledger <f> --item <ref> --claim <claim_id> --result <回执文件>`。成功时脚本在子 issue 上发「批准执行登记」，总 issue 上抄一份；输出带 `comment_error` / `root_comment_error` 时，用 `gh issue comment` 把对应正文补发到输出写的位置。bind 和第 7 步的 cleanup 还会在总 issue 正文的「分支与工作树」一节登记或更新这个子 issue 的一行；输出带 `root_ledger_error` 时，把 `root_ledger_row` 手工补进那一节。回执不是明确成功时状态停在 `dispatch_unknown`：先核对会话列表，确认没有建出会话，才 `release --evidence "<依据>"` 放回（脚本发「批准执行释放」评论），不盲目重派。
-5. **挂续跑脚本（每个 run 一条，第一次派发后马上做）。** 在台账同目录写 `issue-watch.json`：`{"schema":"issue-watch-v1","lead_session_id":"<当前会话 id>","ledger_paths":["<台账绝对路径>"],"stalled_after_sec":1800}`。先用 `schedule_list` 按总 issue 号查重，已有就复用；没有才 `schedule_create`：`executionMode:"script"`，`scriptConfig.command` 为 `python3 <本 skill>/scripts/issue-watch.py --config <issue-watch.json 绝对路径>`，`capabilities:["sessions.dispatch"]`，`cronExpr:"*/5 * * * *"`，`timezone:"Asia/Shanghai"`，`bindToCurrentSession:true`，`workingDir:<台账目录>`，`silentWhenIdle:true`。之后 lead 结束本轮；owner 不给 lead 发消息，脚本发现情况才叫醒 lead。
-6. **被叫醒后按信号处理**（脚本消息里逐条写了是哪个子 issue、哪种信号）：
-   - **待验收**：`node scripts/accept-check.mjs --ledger <f> --item <ref> --stage acceptance --out <同目录>/check-<号>.json`。有不过的项：`issue-run.mjs verdict --item <ref> --revise "<不过的项与要改的内容>"`。全部通过后，再对照子 issue 的「目标」「原因」「不做」看 diff 是否做对了事，拿不准问 KEEL 的 `jev`。判「要改」只为 SC 没达成、改动越出范围、做的事不对或 CI 不绿；交接文件、PR 正文之间的小出入写进裁决评论，照样判通过，交给审查机定（多一轮修改要再跑约 20–30 分钟 pre-push 和 CI）。判通过：`verdict --item <ref> --pass`（脚本自己再跑一遍 accept-check，不过就拒收）。把输出里的 `owner_message` 用 `send_to_session` 发给输出里的 `target_session_id`。裁决写成子 issue 评论；看板的「验收」「裁决」字段属于验收机，lead 不写。
-   - 判「要改」不设轮数上限，会话一直修到通过。只有没有进展时脚本才把状态转成 `blocked_user` 并给出 `root_comment`：这次要改的条目原文和上一次相同，或 owner 回到验收点时的 head 和上一次判要改时一样（没有新提交）。把 `root_comment` 发到总 issue，告诉用户，不再发回 owner。用户定了以后 `issue-run.mjs unblock --item <ref> --note "<用户怎么定的>"`，再通知 owner。
-   - **需要用户**：把台账里的原因汇总告诉用户；用户处理完后 `unblock`，再通知 owner 继续。
-   - **需要 lead**（owner 写了 `needs_lead`：范围或验收标准必须改才能做完）：按原因定。能在范围内换做法就 `issue-run.mjs unblock --item <ref> --note "<结论>"`，把结论用 `send_to_session` 发给 owner 会话。确实要改范围或验收标准时告诉用户：台账锁定了计划，改范围要重新出计划。owner 的其他选择由它自己问 `jev` 定，不回来找 lead。
-   - **可派**：回到第 3 步。
-   - **停滞**：查 owner 会话还在不在、卡在哪。还在就 `send_to_session` 催一次；已经不在（崩了、被删了）就 `issue-run.mjs release --item <ref> --evidence "<怎么核实的>"` 放回 `pending`，回到第 4 步重派。台账里记着 PR、或 GitHub 上有正文写着「任务 issue：<ref>」的开着的 PR 时，重派的开工包开头会写明接着那个 PR 做，不开新 PR（有多个这样的 PR 时 `prepare` 拒绝，先关掉多余的）。停在 `accepted` 的不 release：按消息做（重发通过消息；先跑 `accept-check --stage ready`，通过了才由 lead 写 `checkpoint --state ready`；不过（含 PR 关了没合）就告诉用户）。
-   - **待收尾**：owner 写了 `ready`，做第 7 步。
-   - **lead 未处理**：停在 `claimed`（prepare 后没 bind）、`awaiting_acceptance`（没裁决）或 `cleaned`（没归档）超过阈值，消息里写了该做哪一步，照做。
-   - 要等某个 PR 的某项检查（如 Ready 后的 `review-pr`）出结论时，用 `node scripts/pr-watch/wait-check.mjs --repo <owner/name> --pr <号> --check <检查名> [--after <上一轮开始时间>]`，放后台跑，不手写轮询循环：退出码 0 成功、1 完成但不是成功、3 超时、2 参数或 gh 错误；head 中途变了会跟着新 head 查。
-7. **Ready 后收尾。** owner 写了 `ready` checkpoint 后：`accept-check.mjs --stage ready` 复核（非 Draft、当前 head 必需 CI 全绿）→ `issue-run.mjs cleanup --item <ref>`（删本地 KEEL worktree 与本地分支，不删远端；PR 关了没合（已合并的照常清理）、PR 还是 Draft、PR head 不是验收通过的那个、当前 CI 不是全绿、有未提交改动、本地比 PR 新、分支在主目录检出时都拒绝）→ cindy_helper 的 `archive_sessions` 归档 owner 会话 → 把工具回执存成文件后 `issue-run.mjs archived --item <ref> --result <回执文件>`。Cindy 归档 owner 会话时连带归档它的 worker 会话。`cleanup` 不清的东西（有未提交改动的 KEEL worktree、会话树、worker 与子代理留下的分支和工作树），以及不在台账里的临时派发会话，lead 不手工删，交给 Pro、Mini 两台扫地僧每天清（用户 2026-11-04 定）：PR 已合并的会话归档，分支和工作树存证后全部清掉，未提交内容也清；PR 还开着、正在运行、置顶的不动；本台账没收尾的 owner 会话由 lead 归档，扫地僧不碰。所用脚本：`~/AI-Agent/Claude/capabilities/source/scripts/dispatched-sessions.mjs`（`scan` 列出该归档的派发会话，`branches --apply` 删没有本地独有提交的空分支）和 `capabilities/source/tools/worktree-patrol/scripts/merged-cleanup.mjs`（PR 已合并的分支和工作树）。
-8. **总 issue 验收与交接。** 全部子 issue 收工后 `run_status` 是 `root_pending`，续跑脚本叫醒 lead（「待总验收」）。以单个子 issue 为入口、它首行写着总 issue 时没有这一步。
-   - `node scripts/root-check.mjs --ledger <f> --preview --out <同目录>/root-check.json`：逐个子 PR 查非 Draft、当前 CI 全绿、还开着或已合并，personal 车道 head 没变（交接车道 head 变了只记下来）；再在每个涉及的仓从 `origin/<目标分支>` 开预览 worktree（`<仓>/.worktrees/approve-exec-preview-<run>`），按批次依次合入各子 PR。有冲突就报 PR 号和文件。
-   - 在预览目录里按目标仓规则跑测试，对照总 issue「整体验收」逐条验：`static` / `unit` 层在预览目录里跑，`github-live` 等层写亲眼看到的情况；再核对所有 PR 合起来只碰总 issue 范围内的文件、没违反「不做」。
-   - **不通过**：当场补。在总 issue 下按「开 issue」的模板补一个子 issue（挂上去、在总 issue 变更记录记一行），重新出计划存成新文件，`node scripts/issue-run.mjs add --ledger <f> --plan <新计划>`（只追加；已有子 issue 改了范围、SC 或依赖会被拒，`needs_lead` 的除外），回到第 3 步派会话。
-   - **通过**：写 lead 结果文件 `{"conclusion":"…","sc":[{"id":"SC1","result":"通过|人工手测","evidence":"…","hint":"…"}],"focus":["请验收机重点查的地方"],"not_verified":[…],"post_launch":[…],"scope":[…]}`，`sc` 覆盖总 issue 的全部 SC。`node scripts/issue-run.mjs handoff --ledger <f> --result <结果文件>`：脚本自己再跑一遍 `root-check`，校验结果（缺 SC、有「未通过」、带本机绝对路径都拒），在总 issue 发首行为 `[批准执行] 交接验收 · 第 <n> 次` 的评论。验收机读它、等它之后才开轮，「请重点查」每条都会给结论。
-   - 最后 `node scripts/root-check.mjs --ledger <f> --cleanup` 删预览 worktree。lead 不合并、不关总 issue：总 issue 由验收机验收后关闭。
-9. **收工标准。** 子 issue 收工 = PR 非 Draft + 当前 head 必需 CI 全绿 + lead 判通过，并已清理、归档。`issue-run.mjs status` 的 `run_status`：`complete` 才算整个 run 收工（全部子 issue 收工，并已交接总 issue 验收），这时删掉第 5 步的续跑调度并告诉用户。`complete` 时本 run 派出的 owner 会话都已归档：`complete` 要求每个子 issue 都是 `archived` 或 `closed`，第 7 步逐个归档并凭回执记账；`root_pending` 表示该做第 8 步；`waiting_merge` 表示剩下的子 issue 在等依赖 PR 合入（合并由用户做），告诉用户先合哪个，续跑脚本发现合入后会叫醒 lead；`blocked_user` 表示在等用户。集成分支（`integration/*`）上的子 PR 也是 Ready 即收工，审查机兜底后由用户指派 agent 合入。
+1. **看现状。** `node scripts/batch.mjs status --issue <ref>`。每个子 issue 只有六种状态：
+   - `dispatchable`：依赖都已合入，可以开工。全部进第 2 步，一次派完，不排队。
+   - `waiting`：在等 `waiting_on` 里的 issue 合进去。依赖被关成「不做」时问用户。
+   - `needs_decision`：「待定问题」还有没写「已定」的。先问 Jev，把结论写回子 issue（该条加上「已定：…」），拿不准再问用户；定完重跑第 1 步。
+   - `invalid`：没按模板写。指路「开 issue」补齐，其他子 issue 照常派。
+   - `in_progress`：已派出、已有 PR，或旧台账的 run 在做。不再派。
+   - `done`：子 issue 已关闭。
+   `all_done` 为真时到第 5 步。
+2. **派会话，每个 `dispatchable` 子 issue 一次。**
+   - 项目：目标仓主目录对应的 Cindy 项目。先 `list_projects` 查，没有或 `hidden:true` 就 `create_project` 登记或恢复。项目置顶由用户在侧栏项目菜单点「Pin project」，工具不能置顶。
+   - `node scripts/batch.mjs brief --item <子 issue> --lead <lead 会话 id> --repo-dir <目标仓主目录> --project <项目路径> [--name "<人话任务名>"] [--urgent]`，拿到 `request`。会话标题是 `#<PR号>-<人话任务名>丨<MMDD>`（还没有 PR 时不带 `#<PR号>-`，执行会话开出 PR 后自己补）。人话任务名从子 issue 标题提，提不出不超过 14 个字的中文短名时退出码 2，用 --name 给一个。已有开着的 PR 时，开工消息写明接着那个 PR 做。
+   - 用 cindy_helper 的 `send_to_session` 新建会话，参数只传 `request` 里的五个键：`title`、`message`、`working_dir`、`project_path`、`use_worktree`。不传 agent_kind、model、effort、provider_id。
+   - 成功后 `node scripts/batch.mjs claim --item <子 issue> --session <返回的 target_session_id> --title <标题>`，在子 issue 上记「批准执行派发」，防止别的 lead 或别的电脑重复派。回执不明确时先用 `list_sessions` 查有没有建出会话，不盲目重派。
+3. **停下。** 派完就结束本轮。不挂定时任务，不轮询。
+4. **被消息叫醒后：**
+   - **待验收**：`node scripts/check-pr.mjs --item <子 issue> --pr <号> --head <消息里的 sha>`。有不过的项就判要改。全过后，再对照子 issue 的「目标」「原因」「不做」看 diff 是否做对了事；界面有变化却没附截图或 demo 判要改；拿不准问 Jev。判要改只为 SC 没达成、改动越出范围、做的事不对或 CI 不绿；PR 正文的小出入写进回复，照样判通过。用 `send_to_session` 回执行会话，第一行写 `批准执行通过 <子 issue> PR #<号>` 或 `批准执行要改 <子 issue> PR #<号>`，要改的条目从下一行起逐条写。裁决同时写成子 issue 评论。判要改不设轮数上限；同样的条目连续两次没有新提交时，告诉用户。
+   - **已转正式**：`node scripts/check-pr.mjs --item <子 issue> --pr <号> --stage ready`。通过就是这个子 issue 收工；不过就回执行会话让它修。之后的审查意见和 CI 归盯梢。入口授权了加急合并的，走「加急合并」。
+   - **卡住**：能在范围内换做法，就把结论发回执行会话。范围或验收标准必须改，先告诉用户，按任务 issue 范式先改 issue 再改代码，改完把结论发回。缺权限、缺环境告诉用户。
+   - **praise-merge 已合并**，或用户说「继续」：回到第 1 步，派新放开的子 issue。
+5. **收工。** `all_done` 为真：告诉用户全部合入。总 issue 由验收机自动验收、关闭，lead 不交接、不关总 issue。执行会话 PR 合并前不归档（用户 2026-11-07 定）；PR 合并后由 Pro、Mini 两台扫地僧每天归档，分支和工作树一并存证清理，lead 不手工归档、不手工删分支。
 
-owner 一侧的协议（验收点、checkpoint 命令、裁决之后怎么做）写在开工包第 3 节，完整说明见 `references/issue-owner-protocol.md`。
+**合并通知。** 用户在 lead 会话里说「合并」时按 `pr-merge` 交给合并伙伴，输入里带 `notify_session`（lead 的跨电脑地址）；伙伴合入后给 lead 发 `praise-merge 已合并 <owner/repo>#<号>`。用户用别的方式合并时没有通知，用户说「继续」即可。
 
-`批准执行 --dry-run <ref>`：只做第 1 步，并用 `node scripts/render-issue-handoff.mjs --plan <plan.json> --item <ref> --lead-session <id>` 打印每个子 issue 的开工包，不建台账、不派会话。
+**会话失联。** 没有定时检查。用户问进度（「进展」）或看到某个子 issue 很久没动时，先用 `list_sessions` / `get_chat_history` 查执行会话：还在就 `send_to_session` 催一次；已经没了（删除、崩溃）就 `node scripts/batch.mjs release --item <子 issue> --reason "<怎么核实的>"`，再回第 2 步重派。新会话的开工消息会写明接着已开的 PR 做。
 
-边界：lead 不写产品代码、不代 owner 推进、不合并任何 PR（合并红线见下文）。由脚本起的 lead 会话（看板推进）走同一入口，出计划时传 `--source script`，授权原话随入口消息传入。
+边界：lead 不写产品代码，不替执行会话推进，不合并任何 PR（「加急合并」除外）。
+
+## 执行会话的规矩
+
+开工消息就是执行会话的全部指令，完整说明在 `references/owner-protocol.md`。红线：PR 不转正式不算完。Draft PR CI 全绿才叫 lead 验收，lead 判通过后执行会话自己转正式。不走 KEEL；不问用户，拿不准问 Jev；等 CI 时不结束本轮；不合并。
+
+## 加急合并
+
+只有入口消息（或之后用户的当次消息）明确授权对哪些 PR（或本次全部子 issue）做 admin 合并时才走这里。没写就不走，只报告可合并。
+
+1. 执行会话发来「已转正式」、`check-pr.mjs --stage ready` 通过后，按 `orca-fanout` 的派工规则派两个 Orca Worker：review 档对当前 head 单审，e2e 档跑 e2e。
+2. 单审没有确认成立的 P0/P1/P2、e2e 通过，才合并：`gh pr merge <号> --repo <owner/repo> --admin --match-head-commit <审过的 head> --squash`（仓库不允许 squash 时用它允许的方式）。有问题就发给执行会话修，修完重新单审和 e2e。
+3. 合入后回到第 1 步派下一批。
 
 ## 合并红线（最高优先级）
 
-任何 lead、owner、reviewer、tester、Mini session、watcher、worker 或本 skill 都不得合并、自动合并、启用 auto-merge、点击合并或调用 gh pr merge。只有用户本人对指定 PR 的明确、当次授权才允许合并；PR Ready、cloud_ready、required checks 通过、管理员权限或开工包中的提交/推送授权，均不构成合并授权。后续由用户手动合并插件承接该动作；插件上线前只能报告“可合并”，不得代替用户合并。
+除下面两种用户当次授权的情况外，任何 lead、owner、reviewer、tester、Mini session、watcher、worker 或本 skill 都不得合并、自动合并、启用 auto-merge、点击合并或调用 gh pr merge。只有用户本人对指定 PR 的明确、当次授权才允许合并：用户在提示词里明确授权加急 admin 合并的 PR，由 lead 按「加急合并」执行；用户说「合并」的 PR，由合并伙伴按各仓标准合并。PR Ready、required checks 通过、管理员权限或开工消息里的提交/推送授权，都不构成合并授权。
+
+## 旧 run
+
+2026-11-07 之前用台账开工的 run（`~/.claude/.goal/<run>/ledger.json`，续跑脚本 `scripts/issue-watch.py` 还在叫醒 lead）照旧按 `references/legacy-ledger-flow.md` 收尾，旧脚本保留到这些 run 全部收工。`batch.mjs` 认得旧台账的认领和登记评论，不会把在做的子 issue 再派一次。
 
 ## 保证等级
 
-保证等级是 T1：skill 纪律加脚本校验，不是宿主强制隔离。脚本校验包括：`issue-plan.mjs` 缺模板或依赖写不清就 fail-closed；`issue-run.mjs` 用子 issue 评论认领防止重复派会话，checkpoint 要覆盖子 issue 全部 SC 并带 KEEL run_id，`verdict --pass` 自己再跑一遍 accept-check，`cleanup` 只在 PR 非 Draft、head 是验收通过的那个、当前 CI 全绿时清理；`accept-check.mjs` 只读检查 PR head、必需 CI、改动范围、PR 正文与待定问题。Cindy 没有按会话限制工具的白名单，owner 会话可以直接改台账文件：这些校验防疏忽和漂移，不防有意绕过。本机接线（goal skill、`skills/claude-active/approve-exec` 链接、触发表「批准执行」行）用 `node scripts/selfcheck.mjs --live` 检查。本文结构由 `tests/skill-doc.test.mjs` 断言，测试集由 `scripts/run-tests.mjs` 冻结枚举。
+T1：skill 纪律加脚本校验，不是宿主强制隔离。`batch.mjs` 只读 GitHub 算状态，派发防重靠子 issue 评论（只认当前 gh 账号，两个 lead 同一时刻派同一个子 issue 时拦不住）；`check-pr.mjs` 只读检查 PR head、Draft、必需 CI、改动范围、PR 正文与待定问题。没有定时检查，执行会话崩了不会被自动发现，靠「进展」和用户兜底。本机接线用 `node scripts/selfcheck.mjs --live` 检查，本文结构由 `tests/skill-doc.test.mjs` 断言，测试集由 `scripts/run-tests.mjs` 冻结枚举。
 
 ## 自进化
 

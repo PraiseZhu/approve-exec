@@ -68,7 +68,7 @@ export function splitSections(body) {
   return sections;
 }
 
-function sectionText(sections, prefix) {
+export function sectionText(sections, prefix) {
   const hit = sections.find((s) => s.heading.startsWith(prefix));
   return hit ? hit.lines.join('\n').trim() : null;
 }

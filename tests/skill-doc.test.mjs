@@ -1,4 +1,4 @@
-// SKILL.md 结构断言（PraiseZhu/approve-exec#70 SC1、SC3、SC4）：只留 issue 入口各段、合并红线、保证等级、自进化。
+// SKILL.md 结构断言（PraiseZhu/approve-exec#70 SC1、SC3、SC4；2026-11-07 改版：不走 KEEL、不建台账、不挂定时任务）。
 // 目标：lead 换会话后不漂回旧入口（manifest / brief / 钉死模型），也不丢合并红线。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,7 +12,7 @@ const skillDoc = readFileSync(join(root, 'SKILL.md'), 'utf8');
 const defaultsKeys = Object.keys(JSON.parse(readFileSync(join(root, 'config/defaults.json'), 'utf8')));
 const frontmatter = /^---\n([\s\S]*?)\n---\n/.exec(skillDoc)?.[1] ?? '';
 
-const MARKERS = ['## ⓪ issue 入口', '## 合并红线（最高优先级）', '## 保证等级', '## 自进化'];
+const MARKERS = ['## ⓪ issue 入口', '## 执行会话的规矩', '## 加急合并', '## 合并红线（最高优先级）', '## 旧 run', '## 保证等级', '## 自进化'];
 // #70 SC1：旧入口与钉死模型路由的词，不得出现在 SKILL.md、scripts/、config/。
 const BANNED = ['grok-4.6', 'claude-fable', 'routing.json', 'task-priority', 'context-intake', 'gate_goal', 'gate_routing', 'budgetPauseUsd', '800 行', '1600 行'];
 
@@ -28,86 +28,95 @@ function filesUnder(dir) {
     e.isDirectory() ? filesUnder(join(dir, e.name)) : [join(dir, e.name)]);
 }
 
-test('frontmatter：name / trigger，description 只描述 issue 入口', () => {
+test('frontmatter：name / trigger；description 写 2026-11-07 新流程，不再提 keel_run', () => {
   assert.match(frontmatter, /^name: approve-exec$/m);
   assert.match(frontmatter, /^trigger: 批准执行$/m);
   const description = /^description: (.*)$/m.exec(frontmatter)?.[1] ?? '';
-  for (const must of ['开 issue', '吃总 issue', '独立会话', '不带模型参数', 'keel_run', '不合并']) {
+  for (const must of ['开 issue', '吃总 issue', '并行/串行原则', '独立会话', '不带模型参数', '不走 KEEL', '不建台账', '不挂定时任务', '转正式', '不合并']) {
     assert.ok(description.includes(must), `description 应写「${must}」`);
   }
-  assert.equal(description.includes('最多 2 轮'), false, '#78：description 不再写最多 2 轮');
-  for (const old of ['manifest', 'brief', '旧']) {
+  for (const old of ['keel_run', '最多 2 轮', 'manifest', 'checkpoint', '续跑脚本']) {
     assert.equal(description.includes(old), false, `description 不得再提「${old}」`);
   }
 });
 
-test('四段 marker 齐全且顺序固定；旧入口第①–⑲段不再出现', () => {
+test('七段 marker 齐全且顺序固定；旧入口第①–⑲段不再出现', () => {
   const idx = MARKERS.map((m) => skillDoc.indexOf(m));
   idx.forEach((i, k) => assert.ok(i >= 0, `marker 缺失: ${MARKERS[k]}`));
   assert.deepEqual([...idx].sort((a, b) => a - b), idx, 'marker 顺序必须固定');
   assert.doesNotMatch(skillDoc, /^## [①-⑲]/m, '旧入口第①–⑲段已删除');
-  assert.equal(skillDoc.includes('以下为旧入口'), false);
 });
 
-test('issue 入口：出计划、建台账、列可派；派会话只传五个键，进目标仓项目分栏，不带模型参数', () => {
+test('issue 入口：batch status 六种状态，dispatchable 一次派完；派会话只传五个键、进目标仓项目分栏、不带模型参数、claim 防重', () => {
   const s = section('## ⓪ issue 入口');
-  for (const must of ['**出计划。**', 'scripts/issue-plan.mjs', '**建台账。**', '**列可派。**', '**派会话，每个子 issue 一次。**',
-    '只传 `request` 里的五个键', '`project_path`', '`list_projects`', '`create_project`', '`#<PR号>-<人话任务名>丨<MMDD>`', '--name',
-    '不传 agent_kind、model、effort、provider_id']) {
+  for (const must of ['scripts/batch.mjs status', '`dispatchable`', '`waiting`', '`needs_decision`', '`invalid`', '`in_progress`', '`done`', '一次派完',
+    'scripts/batch.mjs brief', '只传 `request` 里的五个键', '`project_path`', '`list_projects`', '`create_project`', '`#<PR号>-<人话任务名>丨<MMDD>`', '--name',
+    '不传 agent_kind、model、effort、provider_id', 'scripts/batch.mjs claim']) {
     assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
   }
 });
 
-test('收尾：归档 owner 连带 worker，complete 时都已归档，遗留由两台扫地僧每天清（用户 2026-11-04）', () => {
+test('2026-11-07 改版：lead 派完就停，不挂定时任务、不建台账、不走 KEEL（用户定）', () => {
   const s = section('## ⓪ issue 入口');
-  for (const must of ['连带归档它的 worker 会话', '`complete` 时本 run 派出的 owner 会话都已归档', 'Pro、Mini 两台扫地僧每天清',
-    '未提交内容也清', '本台账没收尾的 owner 会话由 lead 归档，扫地僧不碰', 'capabilities/source/scripts/dispatched-sessions.mjs', 'merged-cleanup.mjs']) {
+  assert.ok(s.includes('**停下。**') && s.includes('不挂定时任务，不轮询'));
+  for (const banned of ['keel_run', 'schedule_create', 'issue-watch', 'issue-run.mjs', 'ledger']) {
+    assert.equal(s.includes(banned), false, `⓪ 段不得再写「${banned}」`);
+  }
+});
+
+test('被消息叫醒：待验收跑 check-pr，已转正式跑 --stage ready，卡住、合并通知回第 1 步；要改不设轮数上限', () => {
+  const s = section('## ⓪ issue 入口');
+  for (const must of ['**被消息叫醒后：**', 'scripts/check-pr.mjs --item <子 issue> --pr <号> --head', '--stage ready', '批准执行通过', '批准执行要改',
+    '判要改不设轮数上限', '**卡住**', 'praise-merge 已合并', '用户说「继续」', '`notify_session`', 'scripts/batch.mjs release']) {
     assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
   }
 });
 
-test('owner 收口：开工包第 3 节 + references/issue-owner-protocol.md；续跑脚本叫醒 lead', () => {
+test('收工：PR 合并前不归档执行会话，合并后扫地僧清；lead 不交接、不关总 issue（用户 2026-11-07）', () => {
   const s = section('## ⓪ issue 入口');
-  for (const must of ['**挂续跑脚本', 'scripts/issue-watch.py', '开工包第 3 节', 'references/issue-owner-protocol.md']) {
-    assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
-  }
-  assert.ok(existsSync(join(root, 'references/issue-owner-protocol.md')), 'owner 协议文件必须存在');
-});
-
-test('lead 验收：accept-check 后判通过或要改，不设轮数上限、没有进展才停下等用户（#78）', () => {
-  const s = section('## ⓪ issue 入口');
-  for (const must of ['**被叫醒后按信号处理**', 'scripts/accept-check.mjs', 'verdict --item <ref> --pass', '判「要改」不设轮数上限', '只有没有进展时', 'blocked_user', '**需要 lead**', '`needs_lead`',
-    '**待收尾**', '**lead 未处理**', 'issue-run.mjs release --item <ref> --evidence']) {
+  for (const must of ['**收工。**', '`all_done`', '执行会话 PR 合并前不归档', 'Pro、Mini 两台扫地僧每天归档', 'lead 不交接、不关总 issue', '不合并任何 PR']) {
     assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
   }
 });
 
-test('#79 总 issue 验收与交接：root-check 预览、不过就补子 issue 再 add、过了 handoff 给验收机；root_pending 写进收工标准', () => {
-  const s = section('## ⓪ issue 入口');
-  for (const must of ['**总 issue 验收与交接。**', 'scripts/root-check.mjs --ledger <f> --preview', 'issue-run.mjs add --ledger <f> --plan <新计划>',
-    'issue-run.mjs handoff --ledger <f> --result <结果文件>', '[批准执行] 交接验收 · 第 <n> 次', 'root-check.mjs --ledger <f> --cleanup', '`root_pending`', 'lead 不合并、不关总 issue']) {
-    assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
+test('执行会话的规矩：红线是推到正式 PR；完整做法在 references/owner-protocol.md', () => {
+  const s = section('## 执行会话的规矩');
+  for (const must of ['PR 不转正式不算完', '不走 KEEL', '问 Jev', '等 CI 时不结束本轮', 'references/owner-protocol.md']) {
+    assert.ok(s.includes(must), `执行会话段应写「${must}」`);
+  }
+  const protocol = readFileSync(join(root, 'references/owner-protocol.md'), 'utf8');
+  for (const must of ['## 红线', '不走 KEEL', '不问用户', 'gh pr create --draft', 'timeout 540 gh pr checks', 'gh pr ready', '批准执行待验收', '批准执行已转正式', '批准执行卡住']) {
+    assert.ok(protocol.includes(must), `owner-protocol.md 应写「${must}」`);
   }
 });
 
-test('Ready 后收尾与收工标准：清本地、归档会话，run_status complete 才收工', () => {
-  const s = section('## ⓪ issue 入口');
-  for (const must of ['**Ready 后收尾。**', 'issue-run.mjs cleanup', 'archive_sessions', '**收工标准。**', 'run_status', '`complete`', '`waiting_merge`']) {
-    assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
+test('加急合并：只在用户明确授权时走，单审 + e2e 通过才 admin 合并且钉住 head', () => {
+  const s = section('## 加急合并');
+  for (const must of ['明确授权', '没写就不走', 'review 档', 'e2e 档', '--admin', '--match-head-commit']) {
+    assert.ok(s.includes(must), `加急合并段应写「${must}」`);
   }
 });
 
-test('#70 SC4 合并红线：任何 agent 不合并、不开 auto-merge，只有用户对指定 PR 的当次授权才合并', () => {
+test('合并红线：除两种用户当次授权外任何 agent 不合并、不开 auto-merge', () => {
   const s = section('## 合并红线（最高优先级）');
-  assert.ok(s.includes('都不得合并'), '合并红线应写明不得合并');
-  assert.ok(s.includes('都不得合并、自动合并、启用 auto-merge、点击合并或调用 gh pr merge'), '合并红线应写明不得合并、不开 auto-merge、不调 gh pr merge');
-  assert.ok(s.includes('只有用户本人对指定 PR 的明确、当次授权才允许合并'), '合并红线应写明只有用户当次授权才合并');
-  assert.ok(section('## ⓪ issue 入口').includes('不合并任何 PR'), '⓪ 段边界应写明 lead 不合并');
+  assert.ok(s.includes('都不得合并、自动合并、启用 auto-merge、点击合并或调用 gh pr merge'));
+  assert.ok(s.includes('只有用户本人对指定 PR 的明确、当次授权才允许合并'));
+  assert.ok(s.includes('加急合并') && s.includes('合并伙伴'));
+});
+
+test('旧 run：改版前开工的 run 按 legacy-ledger-flow.md 收尾，旧步骤原样保留', () => {
+  const s = section('## 旧 run');
+  assert.ok(s.includes('references/legacy-ledger-flow.md'));
+  const legacy = readFileSync(join(root, 'references/legacy-ledger-flow.md'), 'utf8');
+  for (const must of ['scripts/issue-run.mjs', 'scripts/issue-watch.py', 'scripts/accept-check.mjs', 'references/issue-owner-protocol.md']) {
+    assert.ok(legacy.includes(must), `legacy-ledger-flow.md 应保留「${must}」`);
+  }
+  assert.ok(existsSync(join(root, 'references/issue-owner-protocol.md')), '旧 owner 协议文件必须保留到旧 run 收工');
 });
 
 test('保证等级 T1，不夸大成宿主强制隔离；接线用 selfcheck --live 检查', () => {
   const s = section('## 保证等级');
-  for (const must of ['T1', '不是宿主强制隔离', 'scripts/selfcheck.mjs --live', 'tests/skill-doc.test.mjs']) {
+  for (const must of ['T1', '不是宿主强制隔离', 'scripts/selfcheck.mjs --live', 'tests/skill-doc.test.mjs', '没有定时检查']) {
     assert.ok(s.includes(must), `保证等级段应写「${must}」`);
   }
 });

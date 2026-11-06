@@ -26,20 +26,16 @@ import { buildChildEnv } from '../scripts/run-tests.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const scriptPath = join(root, 'scripts/selfcheck.mjs');
 
-test('#69 SC9 批准执行触发行：issue 入口、owner 用 KEEL、lead 最终验收、不合并；不再提 manifest', () => {
+test('批准执行触发行（2026-11-07 改版）：issue 入口、不走 KEEL / 不建台账 / 不挂定时任务、执行会话推到正式 PR、不合并', () => {
   assert.match(TRIGGER_LINE, /吃总 issue（或独立 issue \/ 单个子 issue）/);
-  assert.match(TRIGGER_LINE, /owner 用 KEEL 的 keel_run/);
-  assert.match(TRIGGER_LINE, /lead 跑 accept-check 后判通过或要改/);
-  assert.match(TRIGGER_LINE, /本 skill 不合入 \|$/);
-  for (const old of ['task-priority', 'manifest', 'context-intake', 'grok', 'routing.json']) {
+  assert.match(TRIGGER_LINE, /不走 KEEL、不建台账、不挂定时任务/);
+  assert.match(TRIGGER_LINE, /一次全派出去/);
+  assert.match(TRIGGER_LINE, /lead 跑 check-pr 后判通过或要改（不设轮数上限）/);
+  assert.match(TRIGGER_LINE, /执行会话转正式 PR 即收工/);
+  assert.match(TRIGGER_LINE, /本 skill 不合入（用户明确授权的加急 admin 合并除外） \|$/);
+  for (const old of ['task-priority', 'manifest', 'context-intake', 'grok', 'routing.json', 'keel_run', '续跑脚本', '最多 2 轮', 'checkpoint']) {
     assert.equal(TRIGGER_LINE.includes(old), false, `触发行不得再出现 ${old}`);
   }
-});
-
-test('#78 SC5 触发行不再写「最多 2 轮」「交接车道才转 Ready」：不设轮数上限、没有进展才找用户，任何车道通过后才转 Ready', () => {
-  for (const old of ['最多 2 轮', '交接车道才转 Ready']) assert.equal(TRIGGER_LINE.includes(old), false, `触发行不得再出现 ${old}`);
-  assert.match(TRIGGER_LINE, /不设轮数上限，没有进展才找用户/);
-  assert.match(TRIGGER_LINE, /通过后才转 Ready/);
 });
 
 function runSelfcheck(args) {

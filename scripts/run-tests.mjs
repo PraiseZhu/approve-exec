@@ -19,6 +19,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // 新增测试文件必须同步写入本数组字母序；裸增文件会被方向 B 拦成 exit 2。
 export const TEST_FILES = [
   'accept-check.test.mjs',
+  'batch.test.mjs',
+  'check-pr.test.mjs',
   'config.test.mjs',
   'evolution-note.test.mjs',
   'issue-plan.test.mjs',
