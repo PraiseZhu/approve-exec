@@ -221,13 +221,16 @@ function main() {
 // import.meta.url 已被 ESM loader 规范化（symlink/逻辑路径解析后的真实路径），而 process.argv[1] 是调用方原样
 // 路径——macOS 上 /var → /private/var 这类 symlink 会让两者恒不相等，main 静默不执行（exit 0 + 零输出，
 // 与全 PASS 长得一模一样，自检直接变假）。必须先用 realpathSync 归一 argv[1] 再比较；realpath 失败 fail-closed。
-let entryReal;
-try {
-  entryReal = realpathSync(process.argv[1]);
-} catch (e) {
-  console.error(`selfcheck: 无法解析脚本真实路径 ${process.argv[1]}（${e.message}）`);
-  process.exit(2);
+// argv[1] 为空（`node -e` / `--input-type=module` 里 import 本文件读常量）时不是入口：静默返回，不报错退出（#89）。
+let entryReal = null;
+if (process.argv[1]) {
+  try {
+    entryReal = realpathSync(process.argv[1]);
+  } catch (e) {
+    console.error(`selfcheck: 无法解析脚本真实路径 ${process.argv[1]}（${e.message}）`);
+    process.exit(2);
+  }
 }
-if (import.meta.url === pathToFileURL(entryReal).href) {
+if (entryReal && import.meta.url === pathToFileURL(entryReal).href) {
   main();
 }

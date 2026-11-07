@@ -149,7 +149,7 @@ test('brief：标题是人话任务名丨日期，开工消息写明红线、lea
   for (const must of ['推到正式 PR', '不走 KEEL', 'lead-sess-1', `批准执行待验收 ${ref(11)} PR #<号> head`, `批准执行已转正式 ${ref(11)} PR #<号>`, `批准执行卡住 ${ref(11)}`,
     'timeout 540 gh pr checks', '不问用户', 'references/owner-protocol.md', `任务 issue：${ref(11)}`, '`manage_session_prs`（action=attach', '其余命名不变',
     '总 issue：acme/app#10', '不要 git checkout -b 另开分支', 'git push origin HEAD:<PR 分支名>', '不算越界', '全部检查都跑完且通过', `check-pr-body.sh --stage ready <owner/repo#PR号> ${ref(11)}`,
-    '不要再发「待验收」', '批准执行未送达', 'DELIVERY_UNKNOWN']) {
+    '不要再发「待验收」', '批准执行未送达', 'DELIVERY_UNKNOWN', '指向的 PR 门禁规则（如 docs/dev-rules/ 下的文件）', '都写实际跑的命令和退出码', '只写「通过」不算']) {
     assert.ok(m.includes(must), `开工消息应写「${must}」`);
   }
   assert.equal(m.includes('加急'), false);
