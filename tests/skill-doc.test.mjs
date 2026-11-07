@@ -173,3 +173,13 @@ test('config 键名比对：SKILL.md 反引号里的 camelCase 键都真实存�
   const unknown = camelCaseTokens.filter((t) => !defaultsKeys.includes(t));
   assert.deepEqual(unknown, [], `SKILL.md 引用了 defaults.json 中不存在的键: ${unknown.join(', ')}`);
 });
+
+test('开工先查网关（2026-11-07 复盘，#87）：⓪ 在第 1 步之前查 lead 网关，第 2 步引用结果', () => {
+  const s = section('## ⓪ issue 入口');
+  const gate = s.indexOf('**开工先查网关**');
+  assert.ok(gate >= 0, '⓪ 段应写「开工先查网关」');
+  assert.ok(gate < s.indexOf('1. **看现状。**'), '「开工先查网关」应在第 1 步之前');
+  for (const must of ['顶层 `agent_device_id`', '不派发的准备', '按开头「开工先查网关」的结果派', '不在别的网关上派']) {
+    assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
+  }
+});
