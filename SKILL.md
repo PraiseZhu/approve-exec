@@ -27,6 +27,8 @@ trigger: 批准执行
 
 lead 会话要在完全访问权限下运行：派出的执行会话继承 lead 的权限档，lead 在需要人工确认的权限档时，执行会话会停在第一个授权确认框（`send_to_session` 不能单独设权限档）。不满足就先告诉用户，不派。
 
+**开工先查网关**（在第 1 步之前，用户 2026-11-07 复盘定）：用 cindy_helper `list_tools` 读 `send_to_session` 的参数。没有 `agent_device_id` 时新会话只能继承 lead 所在的网关：用 cindy_orca `list_available_models` 看顶层 `agent_device_id`，不是 `config/defaults.json` 里 Claude 网关的 id，就马上告诉用户「请在 Claude 网关上开 lead 会话」（或把当前会话切过去），同时继续做第 1 步里不派发的准备（核对、改 issue、问 Jev），用户切好后直接派。
+
 先备好 lead 的两个地址：`get_current_session_id` 的 `session_id` 是 lead 会话 id，写进开工消息；`list_machines` 里 isSelf 为 true 那台的 deviceId，加 `::` 再加会话 id，是给合并伙伴用的跨电脑地址。
 
 1. **看现状。** 先读总 issue 的目标与背景、已定决策和并行/串行原则，核对每个子 issue「依赖」写的先后关系和总 issue 一致；不一致先改子 issue（按任务 issue 范式记一行变更），再派。然后 `node scripts/batch.mjs status --issue <ref>`。每个子 issue 只有七种状态：
@@ -44,7 +46,7 @@ lead 会话要在完全访问权限下运行：派出的执行会话继承 lead 
    - 项目：目标仓主目录对应的 Cindy 项目。先 `list_projects` 查，没有或 `hidden:true` 就 `create_project` 登记或恢复。项目置顶由用户在侧栏项目菜单点「Pin project」，工具不能置顶。
    - 网关（用户 2026-11-07 定）：执行会话默认用 Claude 网关的 `claude-opus-5-5`、effort high，一路做到正式 PR；备用依次 Personal、Personal 2 网关。路线和网关 id 写在 `config/defaults.json` 的 dispatchRoute 里。先用 cindy_helper `list_tools` 读 `send_to_session` 的参数：
      - 有 `agent_device_id`（makecindy/cindy#9195 上线后）：brief 加 `--gateway Claude`；派发失败（`AGENT_NOT_READY`、`PROVIDER_ROUTE_UNAVAILABLE`、撞用量上限）就按顺序换 `--gateway Personal`、`--gateway "Personal 2"` 重派，派发说明写明换网关的原因。三个都不行就停下告诉用户。
-     - 没有：新会话只能继承 lead 所在的网关。先用 cindy_orca `list_available_models` 看顶层 agent_device_id：是 Claude 网关就照常派（brief 不加 `--gateway`）；不是就停下告诉用户「请在 Claude 网关上开 lead 会话」，不在别的网关上派。
+     - 没有：按开头「开工先查网关」的结果派。lead 在 Claude 网关就照常派（brief 不加 `--gateway`）；不在就等用户切到 Claude 网关再派，不在别的网关上派。
    - `node scripts/batch.mjs brief --item <子 issue> --lead <lead 会话 id> --repo-dir <目标仓主目录> --project <项目路径> [--name "<人话任务名>"] [--urgent] [--gateway <网关名>]`，拿到 `request`。会话标题是 `#<PR号>-<人话任务名>丨<MMDD>`（还没有 PR 时不带 `#<PR号>-`，执行会话开出 PR 后自己补）。人话任务名从子 issue 标题提，提不出不超过 14 个字的中文短名时退出码 2，用 --name 给一个。已有开着的 PR 时，开工消息写明接着那个 PR 做。
    - 用 cindy_helper 的 `send_to_session` 新建会话，参数原样传 `request` 里的键：`title`、`message`、`working_dir`、`project_path`、`use_worktree`、`agent_kind`、`model`、`effort`（带了 `--gateway` 时还有 `agent_device_id`）。不自己改模型和推理强度，不传 provider_id。
    - 成功后 `node scripts/batch.mjs claim --item <子 issue> --session <返回的 target_session_id> --title <标题>`，在子 issue 上记「批准执行派发」，防止别的 lead 或别的电脑重复派。回执不明确时先用 `list_sessions` 查有没有建出会话，不盲目重派。
