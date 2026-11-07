@@ -49,7 +49,7 @@ LABELS = {"accept": "待验收", "ready": "待收尾", "lead": "需要 lead", "b
           "lead_stalled": "lead 未处理", "root": "待总验收"}
 NEXT_STEP = {
     "accept": "跑 accept-check --stage acceptance，再 issue-run verdict，把 owner_message 发回 owner 会话",
-    "lead": "按原因定：能在范围内换做法就 issue-run unblock --note 写明结论，再用 send_to_session 发给 owner 会话；确实要改范围或验收标准就告诉用户（台账锁定了计划）",
+    "lead": "按原因定：能在范围内换做法就 issue-run unblock --note 写明结论，再用 send_to_session 发给 owner 会话；确实要改范围或验收标准，先告诉用户，定了以后改 issue → 重新出计划 → issue-run add → unblock（见 legacy-ledger-flow.md「需要 lead」）",
     "blocked": "把原因汇总告诉用户；用户处理完后 issue-run unblock，再通知 owner 会话",
     "unlock": "跑 issue-run next，对可派的子 issue 走 prepare → send_to_session → bind",
     "ready": "跑 accept-check --stage ready，再 issue-run cleanup，用 archive_sessions 归档 owner 会话，回执存成文件后 issue-run archived",

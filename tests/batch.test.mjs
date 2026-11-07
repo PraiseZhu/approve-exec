@@ -138,7 +138,7 @@ test('独立 issue 入口：只有它自己一项', () => {
 });
 
 test('brief：标题是人话任务名丨日期，开工消息写明红线、lead 会话和三种消息格式；请求带默认路线 Opus 5.5 high，不带网关时靠继承', () => {
-  const out = brief({ gh: ghFrom(parentFixture()), itemRef: ref(11), lead: 'lead-sess-1', repoDir: '/repos/app', project: '/repos/app', now: NOW });
+  const out = brief({ gh: ghFrom(parentFixture()), itemRef: ref(11), root: ref(10), lead: 'lead-sess-1', repoDir: '/repos/app', project: '/repos/app', now: NOW });
   assert.deepEqual(Object.keys(out.request).sort(), ['agent_kind', 'effort', 'message', 'model', 'project_path', 'title', 'use_worktree', 'working_dir']);
   assert.deepEqual([out.request.agent_kind, out.request.model, out.request.effort], ['claude-code', 'claude-opus-5-5', 'high']);
   assert.deepEqual(out.gateways, ['Claude', 'Personal', 'Personal 2']);
@@ -157,7 +157,7 @@ test('brief：标题是人话任务名丨日期，开工消息写明红线、lea
 
 test('brief：已有开着的 PR 时标题带 #PR号，消息写明接着那个 PR 做；加急写明转正式后由 lead 合并', () => {
   const fixture = parentFixture({ extra: { [openPullsKey()]: [{ number: 5, draft: true, body: `任务 issue：${ref(11)}` }] } });
-  const out = brief({ gh: ghFrom(fixture), itemRef: ref(11), lead: 'L1', repoDir: '/repos/app', project: '/repos/app', urgent: true, now: NOW });
+  const out = brief({ gh: ghFrom(fixture), itemRef: ref(11), root: ref(10), lead: 'L1', repoDir: '/repos/app', project: '/repos/app', urgent: true, now: NOW });
   assert.equal(out.request.title, '#5-同步状态读取丨1107');
   assert.match(out.request.message, /已经有开着的 PR #5.*不开新 PR/s);
   assert.match(out.request.message, /git reset --hard origin\/<PR #5 的分支>/);
@@ -166,9 +166,9 @@ test('brief：已有开着的 PR 时标题带 #PR号，消息写明接着那个 
 
 test('brief --gateway：按配置顺序取网关的 agent_device_id；不认识的网关名拒绝', () => {
   const gh = ghFrom(parentFixture());
-  const out = brief({ gh, itemRef: ref(11), lead: 'L', repoDir: '/r', project: '/r', gateway: 'Personal', now: NOW });
+  const out = brief({ gh, itemRef: ref(11), root: ref(10), lead: 'L', repoDir: '/r', project: '/r', gateway: 'Personal', now: NOW });
   assert.equal(out.request.agent_device_id, '8620a24bb37ab0fff5f06fe54601a7747583995243a3086ccc1b769facd8fcec');
-  assert.throws(() => brief({ gh, itemRef: ref(11), lead: 'L', repoDir: '/r', project: '/r', gateway: 'Nope', now: NOW }), /--gateway 只能是 Claude \/ Personal \/ Personal 2/);
+  assert.throws(() => brief({ gh, itemRef: ref(11), root: ref(10), lead: 'L', repoDir: '/r', project: '/r', gateway: 'Nope', now: NOW }), /--gateway 只能是 Claude \/ Personal \/ Personal 2/);
 });
 
 test('dispatchRoute 缺项时 fail-closed，不悄悄换模型', () => {
@@ -198,9 +198,17 @@ test('PR 合入、子 issue 关闭后：status 列出该归档的执行会话（
 
 test('brief 拒绝：lead 不是会话 id、主目录不是绝对路径、没给项目', () => {
   const gh = ghFrom(parentFixture());
-  assert.throws(() => brief({ gh, itemRef: ref(11), lead: 'a b', repoDir: '/r', project: '/r', now: NOW }), /--lead/);
-  assert.throws(() => brief({ gh, itemRef: ref(11), lead: 'L', repoDir: 'r', project: '/r', now: NOW }), /--repo-dir/);
-  assert.throws(() => brief({ gh, itemRef: ref(11), lead: 'L', repoDir: '/r', project: '', now: NOW }), /--project/);
+  assert.throws(() => brief({ gh, itemRef: ref(11), root: ref(10), lead: 'a b', repoDir: '/r', project: '/r', now: NOW }), /--lead/);
+  assert.throws(() => brief({ gh, itemRef: ref(11), root: ref(10), lead: 'L', repoDir: 'r', project: '/r', now: NOW }), /--repo-dir/);
+  assert.throws(() => brief({ gh, itemRef: ref(11), root: ref(10), lead: 'L', repoDir: '/r', project: '', now: NOW }), /--project/);
+});
+
+test('brief --root：只派入口 issue 范围内的子 issue；别的 issue、缺 --root 都拒绝（2026-11-07 复盘：#1839 越界派发）', () => {
+  const fixture = { ...parentFixture(), ...standaloneFixture() };
+  const gh = ghFrom(fixture);
+  assert.throws(() => brief({ gh, itemRef: ref(20), root: ref(10), lead: 'L', repoDir: '/r', project: '/r', now: NOW }), /acme\/app#20 不是 acme\/app#10 的子 issue/);
+  assert.throws(() => brief({ gh, itemRef: ref(11), lead: 'L', repoDir: '/r', project: '/r', now: NOW }), /--root/);
+  assert.equal(brief({ gh, itemRef: ref(20), root: ref(20), lead: 'L', repoDir: '/r', project: '/r', now: NOW }).ref, ref(20), '入口就是这个独立 issue 时照常派');
 });
 
 test('toOwnerMessage 不带 url 也能生成', () => {
