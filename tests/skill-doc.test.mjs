@@ -96,6 +96,17 @@ test('astra 审查修复（2026-11-07）：待接手、issue 关了 PR 还开着
   }
 });
 
+test('#89 验证证据：lead 核对每条「已验证」附命令和退出码，能复跑的挑一条复跑；执行会话先读目标仓 PR 门禁', () => {
+  const s = section('## ⓪ issue 入口');
+  for (const must of ['每条「已验证」都附了命令和退出码，缺了判要改', '挑一条类型检查或测试命令在 PR head 的临时工作树里复跑', '复跑不了就在裁决评论写「未复跑」']) {
+    assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
+  }
+  const protocol = readFileSync(join(root, 'references/owner-protocol.md'), 'utf8');
+  for (const must of ['指向的 PR 门禁规则（如 `docs/dev-rules/` 下的文件）', '每条「已验证」都写实际跑的命令和退出码', '只写「通过」不算']) {
+    assert.ok(protocol.includes(must), `owner-protocol.md 应写「${must}」`);
+  }
+});
+
 test('网关（用户 2026-11-07）：默认 Claude 网关 Opus 5.5 high，备用 Personal、Personal 2；不支持指定网关时只在 Claude 网关上派', () => {
   const s = section('## ⓪ issue 入口');
   for (const must of ['Claude 网关的 `claude-opus-5-5`、effort high', '备用依次 Personal、Personal 2 网关', 'makecindy/cindy#9195', '`--gateway Claude`',

@@ -16,7 +16,7 @@ import { readFileSync, writeFileSync, mkdtempSync, rmSync, cpSync, mkdirSync, re
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname, basename } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { deriveLiveLink, checkLiveSymlink, checkTriggerLine, TRIGGER_LINE, normalizeGitHubOrigin } from '../scripts/selfcheck.mjs';
 // buildChildEnv：变异子套件自起子进程，git 隔离必须同一份实现（run-tests.mjs 是唯一权威）。
 // 子套件在复制树里跑，缺隔离会继承机器全局 commit.gpgsign=true，负载下 gpg 失败让夹具
@@ -38,6 +38,14 @@ test('批准执行触发行（2026-11-07 改版）：issue 入口、不走 KEEL 
   for (const old of ['task-priority', 'manifest', 'context-intake', 'grok', 'routing.json', 'keel_run', '续跑脚本', '最多 2 轮', 'checkpoint']) {
     assert.equal(TRIGGER_LINE.includes(old), false, `触发行不得再出现 ${old}`);
   }
+});
+
+test('#89 被 import 时不执行也不退出：node --input-type=module -e 里能读到 TRIGGER_LINE', () => {
+  const code = `import(${JSON.stringify(pathToFileURL(scriptPath).href)}).then((m) => process.stdout.write(typeof m.TRIGGER_LINE))`;
+  const res = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8' });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(res.stdout, 'string');
+  assert.equal(res.stderr.includes('selfcheck:'), false, res.stderr);
 });
 
 function runSelfcheck(args) {
@@ -285,8 +293,8 @@ const SELFCHECK_MUTATIONS = [
   { id: '变异F-B', label: 'live-symlink show-toplevel 仓根校验', from: 'if (!top || top !== target) {',
     to: 'if (false) {',
     red: ['组B-4(F-B): live link 指向仓内嵌套子目录（仅含 SKILL.md）→ FAIL 点名非仓根'] },
-  { id: '变异F-K', label: 'main guard realpath 归一', from: 'if (import.meta.url === pathToFileURL(entryReal).href) {',
-    to: 'if (import.meta.url === pathToFileURL(process.argv[1]).href) {',
+  { id: '变异F-K', label: 'main guard realpath 归一', from: 'if (entryReal && import.meta.url === pathToFileURL(entryReal).href) {',
+    to: 'if (entryReal && import.meta.url === pathToFileURL(process.argv[1]).href) {',
     red: ['组F-1: 非规范化路径调用必须实际执行检查并输出 PASS 行（main guard realpath 归一）'] },
 ];
 
