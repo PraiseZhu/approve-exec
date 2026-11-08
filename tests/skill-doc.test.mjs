@@ -40,6 +40,14 @@ test('frontmatter：name / trigger；description 写 2026-11-07 新流程，不�
   }
 });
 
+test('#93 SC3：description 按仓分两路写合并，不再写不分仓的「PR 合入后合并伙伴通知 lead」（用户 2026-11-08）', () => {
+  const description = /^description: (.*)$/m.exec(frontmatter)?.[1] ?? '';
+  for (const must of ['Mivo 仓 PR 交合并伙伴、合入后伙伴通知 lead', '其他仓 PR 由 lead 按 pr-merge 自己合', '用户说「合并」的非 Mivo PR 外，lead 不合并']) {
+    assert.ok(description.includes(must), `description 应写「${must}」`);
+  }
+  assert.equal(description.includes('PR 合入后合并伙伴通知 lead'), false, 'description 不得再写不分仓的「PR 合入后合并伙伴通知 lead」');
+});
+
 test('七段 marker 齐全且顺序固定；旧入口第①–⑲段不再出现', () => {
   const idx = MARKERS.map((m) => skillDoc.indexOf(m));
   idx.forEach((i, k) => assert.ok(i >= 0, `marker 缺失: ${MARKERS[k]}`));
@@ -145,6 +153,33 @@ test('合并红线：除两种用户当次授权外任何 agent 不合并、不�
   assert.ok(s.includes('都不得合并、自动合并、启用 auto-merge、点击合并或调用 gh pr merge'));
   assert.ok(s.includes('只有用户本人对指定 PR 的明确、当次授权才允许合并'));
   assert.ok(s.includes('加急合并') && s.includes('合并伙伴'));
+});
+
+test('#93 SC1：合并红线第二种授权按仓分两路，其余禁止条款原样保留（用户 2026-11-08）', () => {
+  const s = section('## 合并红线（最高优先级）');
+  assert.ok(s.includes('用户说「合并」的 PR：Mivo 仓由合并伙伴按其标准合并；其他仓由收到这句话的会话按 `pr-merge` 的标准自己合并。'), '第二种授权应写两路分工');
+  assert.equal(s.includes('由合并伙伴按各仓标准合并'), false, '不得再写所有仓都由合并伙伴合');
+  // 其余条款逐句原样保留
+  for (const kept of [
+    '除下面两种用户当次授权的情况外，任何 lead、owner、reviewer、tester、Mini session、watcher、worker 或本 skill 都不得合并、自动合并、启用 auto-merge、点击合并或调用 gh pr merge。',
+    '只有用户本人对指定 PR 的明确、当次授权才允许合并：用户在提示词里明确授权加急 admin 合并的 PR，由 lead 按「加急合并」执行；',
+    'PR Ready、required checks 通过、管理员权限或开工消息里的提交/推送授权，都不构成合并授权。',
+  ]) {
+    assert.ok(s.includes(kept), `合并红线应原样保留「${kept}」`);
+  }
+});
+
+test('#93 SC2：只有 Mivo PR 有伙伴通知；非 Mivo PR 由 lead 按 pr-merge 自己合完后直接归档、派下一批', () => {
+  const s = section('## ⓪ issue 入口');
+  const row = skillDoc.split('\n').find((l) => l.startsWith('| `praise-merge 已合并 …`'));
+  assert.ok(row && row.includes('Mivo PR 合入后') && row.includes('其他仓 PR 由 lead 自己合，没有这条消息'), '消息表 praise-merge 一行应限定为 Mivo PR');
+  const notice = s.slice(s.indexOf('**合并通知。**'), s.indexOf('**会话失联。**'));
+  for (const must of ['按 `pr-merge` 分两路', 'Mivo 仓（`xindong/mivo-canvas-plugin`）的 PR 交给合并伙伴', '`notify_session`', '只有 Mivo PR 有这条伙伴通知',
+    '其他仓的 PR 不交伙伴，由 lead 按 `pr-merge` 的标准自己合', '没有伙伴通知；lead 合进去后直接按第 4 步归档会话、派下一批']) {
+    assert.ok(notice.includes(must), `合并通知应写「${must}」`);
+  }
+  assert.ok(s.includes('**praise-merge 已合并**（只有 Mivo PR 有）、lead 按 `pr-merge` 自己合完非 Mivo PR 后，或用户说「继续」'), '第 4 步应让 lead 自己合完非 Mivo PR 后也走归档、派下一批');
+  assert.ok(s.includes('不合并任何 PR（「加急合并」和用户说「合并」的非 Mivo PR 除外）'), '边界应写明 lead 可合的两种例外');
 });
 
 test('旧 run：改版前开工的 run 按 legacy-ledger-flow.md 收尾，旧步骤原样保留', () => {
