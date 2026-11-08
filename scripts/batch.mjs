@@ -5,7 +5,7 @@
 //
 // CLI:
 //   node scripts/batch.mjs status  --issue <owner/repo#号>
-//   node scripts/batch.mjs brief   --item <子 issue> --lead <lead 会话 id> --repo-dir <目标仓主目录> --project <Cindy 项目路径>
+//   node scripts/batch.mjs brief   --item <子 issue> --root <入口 issue> --lead <lead 会话 id> --repo-dir <目标仓主目录> --project <Cindy 项目路径>
 //                                  [--name <人话任务名>] [--urgent] [--gateway <网关名>]
 //   node scripts/batch.mjs archived --item <子 issue> --session <已归档的执行会话 id>
 //   node scripts/batch.mjs claim   --item <子 issue> --session <派出的会话 id> --title <会话标题>
@@ -228,11 +228,20 @@ export function toOwnerMessage({ ref, title, url, lead, parent = null, openPr = 
   ].join('\n');
 }
 
-export function brief({ gh, itemRef, lead, repoDir, project, name, urgent = false, gateway, route = selectDispatchRoute(), now = nowIso() }) {
+export function brief({ gh, itemRef, root, lead, repoDir, project, name, urgent = false, gateway, route = selectDispatchRoute(), now = nowIso() }) {
   if (!SESSION_RE.test(String(lead ?? ''))) reject(`--lead 要填 lead 会话 id（get_current_session_id 的 session_id），当前：${lead}`);
   if (!isAbsolute(String(repoDir ?? ''))) reject(`--repo-dir 要填目标仓主目录的绝对路径，当前：${repoDir}`);
   if (!project) reject('--project 要填目标仓对应的 Cindy 项目路径（先 list_projects 查，没有就 create_project）');
+  if (!root) reject('--root 要填本次「批准执行」入口的 issue（总 issue、独立 issue 或单个子 issue）');
   const { repo, number, ref } = parseIssueRef(itemRef);
+  // 只派入口 issue 范围内的子 issue（2026-11-07 复盘：lead 把别的 issue 当成「接下来的」派了出去）
+  const rootRef = parseIssueRef(root).ref;
+  if (rootRef.toLowerCase() !== ref.toLowerCase()) {
+    const { children } = readRoot(gh, rootRef);
+    if (!children.some((c) => `${c.repo}#${c.issue.number}`.toLowerCase() === ref.toLowerCase())) {
+      reject(`${ref} 不是 ${rootRef} 的子 issue：只派本次入口 issue 范围内的子 issue，别的 issue 即使也在你名下也不派`);
+    }
+  }
   const issue = readIssue(gh, repo, number);
   if (issue.state === 'closed') reject(`${ref} 已关闭，不用再派`);
   const prs = selectOpenTaskPrs(gh, repo)[ref] ?? [];
@@ -311,7 +320,7 @@ export function main(argv = process.argv.slice(2)) {
   try {
     let out;
     if (cmd === 'status') out = batchStatus({ gh, issueRef: args.issue });
-    else if (cmd === 'brief') out = brief({ gh, itemRef: args.item, lead: args.lead, repoDir: args['repo-dir'], project: args.project, name: args.name, urgent: args.urgent === true, ...(typeof args.gateway === 'string' ? { gateway: args.gateway } : {}), now });
+    else if (cmd === 'brief') out = brief({ gh, itemRef: args.item, root: args.root, lead: args.lead, repoDir: args['repo-dir'], project: args.project, name: args.name, urgent: args.urgent === true, ...(typeof args.gateway === 'string' ? { gateway: args.gateway } : {}), now });
     else if (cmd === 'claim') out = claim({ gh, itemRef: args.item, session: args.session, title: args.title, now });
     else if (cmd === 'release') out = release({ gh, itemRef: args.item, reason: args.reason, now });
     else if (cmd === 'archived') out = archived({ gh, itemRef: args.item, session: args.session, now });

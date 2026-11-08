@@ -23,6 +23,8 @@ trigger: 批准执行
 
 用法：`批准执行 owner/repo#号`。号可以是总 issue（标题以 `[总]` 开头、挂了子 issue）、独立 issue，或单个子 issue。入口消息原文就是授权原话；里面明确授权加急 admin 合并时，见「加急合并」。
 
+派发范围只有入口这个 issue（总 issue 时是它挂的子 issue）。用户之后说「继续」「并行接下来的」这类不带号的话，范围仍是本会话入口里的 issue；别的 issue 即使也在 PraiseZhu 名下、也没人做，也不派（2026-11-07 复盘：越界派了 #1839）。brief 的 `--root` 填入口 issue，脚本会拒绝范围外的子 issue。
+
 1 个子 issue 只对应 1 个 PR、1 个执行会话（用户 2026-11-07 重申）：`claim` 拦重复派发，开工消息写明不另开 PR，重派前先撤回并归档旧会话。
 
 lead 会话要在完全访问权限下运行：派出的执行会话继承 lead 的权限档，lead 在需要人工确认的权限档时，执行会话会停在第一个授权确认框（`send_to_session` 不能单独设权限档）。不满足就先告诉用户，不派。
@@ -34,20 +36,20 @@ lead 会话要在完全访问权限下运行：派出的执行会话继承 lead 
 1. **看现状。** 先读总 issue 的目标与背景、已定决策和并行/串行原则，核对每个子 issue「依赖」写的先后关系和总 issue 一致；不一致先改子 issue（按任务 issue 范式记一行变更），再派。然后 `node scripts/batch.mjs status --issue <ref>`。每个子 issue 只有七种状态：
    - `dispatchable`：依赖都已合入，可以开工。全部进第 2 步，一次派完，不排队。
    - `waiting`：在等 `waiting_on` 里的 issue 合进去。依赖被关成「不做」时问用户。
-   - `needs_decision`：「待定问题」还有没写「已定」的。先问 Jev，把结论写回子 issue（该条加上「已定：…」），拿不准再问用户；定完重跑第 1 步。
+   - `needs_decision`：「待定问题」还有没写「已定」的。先问 Jev（`ghost_call`，`ghost_id=keel`、`tool=jev`，参数最少写 `{"question":"…","kind":"choice","options":["A","B"],"context":"…"}`；`kind` 必填，还可以是 `yesno`、`score`），把结论写回子 issue（该条加上「已定：…」），拿不准再问用户；定完重跑第 1 步。
    - `invalid`：没按模板写。指路「开 issue」补齐，其他子 issue 照常派。
    - `in_progress`：有有效的派发记录（或旧台账的 run 在做）。不再派。
    - `needs_owner`：PR 开着，但没有有效的派发记录（会话失联后撤回过，或别处开的 PR）。先用 `list_sessions` 按标题里的 PR 号找实际负责的会话：找到就用 `batch.mjs claim` 补登记；确认没人做就走第 2 步派一个会话接手，brief 会让它接着原 PR 做，不开新 PR。
    - `done` 只在子 issue 已关闭、且没有写着「任务 issue」的开着的 PR 时出现；issue 关了但 PR 还开着会是 `needs_decision`，先核实是合了还是不做了，不放行依赖、不归档会话。
    - `done`：子 issue 已关闭。
    `all_done` 为真时到第 5 步。
-   - 每次跑完 status，把输出里 `to_attach` 的每个 PR 用 cindy_helper `manage_session_prs`（`action: attach`，不传 `session_id`）挂到 lead 自己的会话顶上（用户 2026-11-07 定：lead 开出的 PR 都要挂在会话顶上）。重复 attach 没有副作用。
+   - 每次跑完 status，把输出里 `to_attach` 的每个 PR 用 cindy_helper `manage_session_prs` 挂到 lead 自己的会话顶上（用户 2026-11-07 定：lead 开出的 PR 都要挂在会话顶上）。参数：`{"action":"attach","pr":{"repo":"owner/repo","number":123}}`，不传 `session_id`；PR 要写成 `pr` 对象，不收 `pr_url`。重复 attach 没有副作用。
 2. **派会话，每个 `dispatchable` 子 issue 一次。**
    - 项目：目标仓主目录对应的 Cindy 项目。先 `list_projects` 查，没有或 `hidden:true` 就 `create_project` 登记或恢复。项目置顶由用户在侧栏项目菜单点「Pin project」，工具不能置顶。
    - 网关（用户 2026-11-07 定）：执行会话默认用 Claude 网关的 `claude-opus-5-5`、effort high，一路做到正式 PR；备用依次 Personal、Personal 2 网关。路线和网关 id 写在 `config/defaults.json` 的 dispatchRoute 里。先用 cindy_helper `list_tools` 读 `send_to_session` 的参数：
      - 有 `agent_device_id`（makecindy/cindy#9195 上线后）：brief 加 `--gateway Claude`；派发失败（`AGENT_NOT_READY`、`PROVIDER_ROUTE_UNAVAILABLE`、撞用量上限）就按顺序换 `--gateway Personal`、`--gateway "Personal 2"` 重派，派发说明写明换网关的原因。三个都不行就停下告诉用户。
      - 没有：按开头「开工先查网关」的结果派。lead 在 Claude 网关就照常派（brief 不加 `--gateway`）；不在就等用户切到 Claude 网关再派，不在别的网关上派。
-   - `node scripts/batch.mjs brief --item <子 issue> --lead <lead 会话 id> --repo-dir <目标仓主目录> --project <项目路径> [--name "<人话任务名>"] [--urgent] [--gateway <网关名>]`，拿到 `request`。会话标题是 `#<PR号>-<人话任务名>丨<MMDD>`（还没有 PR 时不带 `#<PR号>-`，执行会话开出 PR 后自己补）。人话任务名从子 issue 标题提，提不出不超过 14 个字的中文短名时退出码 2，用 --name 给一个。已有开着的 PR 时，开工消息写明接着那个 PR 做。
+   - `node scripts/batch.mjs brief --item <子 issue> --root <入口 issue> --lead <lead 会话 id> --repo-dir <目标仓主目录> --project <项目路径> [--name "<人话任务名>"] [--urgent] [--gateway <网关名>]`，拿到 `request`。会话标题是 `#<PR号>-<人话任务名>丨<MMDD>`（还没有 PR 时不带 `#<PR号>-`，执行会话开出 PR 后自己补）。人话任务名从子 issue 标题提，提不出不超过 14 个字的中文短名时退出码 2，用 --name 给一个。已有开着的 PR 时，开工消息写明接着那个 PR 做。
    - 用 cindy_helper 的 `send_to_session` 新建会话，参数原样传 `request` 里的键：`title`、`message`、`working_dir`、`project_path`、`use_worktree`、`agent_kind`、`model`、`effort`（带了 `--gateway` 时还有 `agent_device_id`）。不自己改模型和推理强度，不传 provider_id。
    - 成功后 `node scripts/batch.mjs claim --item <子 issue> --session <返回的 target_session_id> --title <标题>`，在子 issue 上记「批准执行派发」，防止别的 lead 或别的电脑重复派。回执不明确时先用 `list_sessions` 查有没有建出会话，不盲目重派。
    - **派发失败的会话马上归档**（用户 2026-11-07 定）：`send_to_session` 报错但回执里有 `target_session_id`、`claim` 被拒、或新会话一开工就报错（用量上限、Agent 起不来），先 `archive_sessions` 归档那个会话；已经 claim 过的再 `batch.mjs release --reason "<原因>"`，然后按上面的网关顺序重派。
@@ -55,7 +57,7 @@ lead 会话要在完全访问权限下运行：派出的执行会话继承 lead 
 4. **被消息叫醒后：**
    - **待验收**：先把这个 PR 挂上：`manage_session_prs`（`action: attach`）挂到 lead 自己的会话，再带 `session_id`=执行会话 id 挂到执行会话（执行会话漏挂时兜底；会话标题仍是 `#<PR号>-<人话任务名>丨<MMDD>`，没补前缀就提醒它补，不替它改名）。然后 `node scripts/check-pr.mjs --item <子 issue> --pr <号> --head <消息里的 sha>`。再核对 PR 正文里每条「已验证」都附了命令和退出码，缺了判要改；能在本机复跑的（仓库在本机、依赖已装），挑一条类型检查或测试命令在 PR head 的临时工作树里复跑，复跑不了就在裁决评论写「未复跑」（2026-11-07 复盘：cindy#9200 正文写 tsc 通过、实际 TS2339，CI 没覆盖）。有不过的项就判要改。全过后，再对照子 issue 的「目标」「原因」「不做」看 diff 是否做对了事；界面有变化却没附截图或 demo 判要改；拿不准问 Jev。判要改只为 SC 没达成、改动越出范围、做的事不对或 CI 不绿；PR 正文的小出入写进回复，照样判通过。用 `send_to_session` 回执行会话，第一行写 `批准执行通过 <子 issue> PR #<号>` 或 `批准执行要改 <子 issue> PR #<号>`，要改的条目从下一行起逐条写。裁决同时写成子 issue 评论。判要改不设轮数上限；同样的条目连续两次没有新提交时，告诉用户。
    - **已转正式**：`node scripts/check-pr.mjs --item <子 issue> --pr <号> --stage ready`。通过就是这个子 issue 收工；不过就回执行会话「批准执行要改 … （正式 PR）」并写明哪项没过：非 Mivo 仓它修完 CI 全绿后再发「已转正式」，lead 再跑 `--stage ready`（不回到验收档，验收档要求 Draft）；Mivo 仓转正式后的问题交盯梢。之后的审查意见和 CI 归盯梢。入口授权了加急合并的，走「加急合并」。
-   - **发给执行会话的消息送不到**（回执 `ARCHIVED`、`DELETED`、`AGENT_NOT_READY` 等）：在子 issue 上评论「批准执行未送达：<原消息第一行>（<错误码>）」，并告诉用户；按「会话失联」处理。`DELIVERY_UNKNOWN` 先 `get_chat_history` 核对再决定是否重发。
+   - **发给执行会话的消息送不到**（回执 `ARCHIVED`、`DELETED`、`AGENT_NOT_READY` 等）：在子 issue 上评论「批准执行未送达：<原消息第一行>（<错误码>）」，并告诉用户；按「会话失联」处理。`DELIVERY_UNKNOWN` 先 `get_chat_history` 核对再决定是否重发（参数 `{"session_ids":["<会话 id>"],"roles":["user","assistant"],"limit":5}`；键是复数的 `session_ids`）。
    - **卡住**：能在范围内换做法，就把结论发回执行会话。范围或验收标准必须改，先告诉用户，按任务 issue 范式先改 issue 再改代码，改完把结论发回。缺权限、缺环境告诉用户。
    - **praise-merge 已合并**，或用户说「继续」：先跑第 1 步的 status，对输出里 `to_archive` 的每一项用 cindy_helper `archive_sessions` 归档那个执行会话，成功后 `node scripts/batch.mjs archived --item <子 issue> --session <会话 id>` 记下来（用户 2026-11-07 定：PR 合入后由 lead 及时归档已完成的会话）；再派新放开的子 issue。
 5. **收工。** `all_done` 为真：告诉用户全部合入。总 issue 由验收机自动验收、关闭，lead 不交接、不关总 issue。执行会话 PR 合并前不归档；PR 合并后由 lead 按 `to_archive` 归档（第 4 步），漏掉的由 Pro、Mini 两台扫地僧每天兜底归档，分支和工作树也由扫地僧存证清理，lead 不手工删分支。
