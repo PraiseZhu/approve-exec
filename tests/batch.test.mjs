@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { activeDispatch, archived, batchStatus, brief, claim, release, selectDispatchRoute, toOwnerMessage, unarchivedSessions } from '../scripts/batch.mjs';
+import { activeDispatch, archived, batchStatus, brief, claim, notify, release, selectDispatchRoute, toOwnerMessage, unarchivedSessions } from '../scripts/batch.mjs';
 import { REPO, LOGIN, childBody, commentsKey, ghFrom, openPullsKey, parentFixture, standaloneFixture, writeFixture } from './fixtures/issues/build.mjs';
 
 const CLI = fileURLToPath(new URL('../scripts/batch.mjs', import.meta.url));
@@ -223,4 +223,50 @@ test('CLI：status 走夹具 exit 0，未知子命令 exit 2', () => {
   const bad = spawnSync(process.execPath, [CLI, 'nope', '--gh-fixture', ghPath], { encoding: 'utf8' });
   assert.equal(bad.status, 2);
   assert.match(bad.stderr, /子命令只能是/);
+});
+
+// notify：Mivo PR 转正式后 lead 把地址登记给合并伙伴（#97）
+
+const MIVO = 'xindong/mivo-canvas-plugin';
+const DEV = 'a'.repeat(64);
+const LEAD = `${DEV}::lead-1`;
+const PARTNER = `${'b'.repeat(64)}::partner-1`;
+const pullKey = (n) => `api repos/${MIVO}/pulls/${n}`;
+function partnerFile(content = { session: PARTNER }) {
+  const path = join(mkdtempSync(join(tmpdir(), 'partner-')), 'partner.json');
+  writeFileSync(path, typeof content === 'string' ? content : JSON.stringify(content));
+  return path;
+}
+
+test('#97 SC1 notify：开着的 Mivo PR → 发给伙伴的登记消息，首行固定、JSON 带 lead 地址和这个 PR', () => {
+  const gh = ghFrom({ [pullKey(2017)]: { state: 'open', merged_at: null } });
+  const out = notify({ gh, prRef: `${MIVO}#2017`, leadAddress: LEAD, partnerPath: partnerFile(), now: NOW });
+  assert.equal(out.already_merged, false);
+  assert.equal(out.target_session_id, PARTNER);
+  const [first, ...rest] = out.message.split('\n');
+  assert.equal(first, 'praise-merge 通知登记');
+  const json = JSON.parse(rest.join('\n').replace(/^```json\n/, '').replace(/\n```$/, ''));
+  assert.deepEqual(json, { schema: 'praise-merge/notify@1', notify_session: LEAD, prs: [{ repo: MIVO, number: 2017 }], registered_at: NOW });
+});
+
+test('#97 SC2 notify：PR 已合入 → already_merged，不生成消息；其余情况都拒绝并说明原因', () => {
+  const gh = ghFrom({ [pullKey(1)]: { state: 'closed', merged_at: '2026-11-08T00:00:00Z' }, [pullKey(2)]: { state: 'closed', merged_at: null }, [pullKey(3)]: { state: 'open', merged_at: null } });
+  const merged = notify({ gh, prRef: `${MIVO}#1`, leadAddress: LEAD, partnerPath: partnerFile(), now: NOW });
+  assert.deepEqual(merged, { ok: true, ref: `${MIVO}#1`, already_merged: true });
+  assert.throws(() => notify({ gh, prRef: `${MIVO}#2`, leadAddress: LEAD, partnerPath: partnerFile(), now: NOW }), /已关闭且没合入（state=closed）/);
+  assert.throws(() => notify({ gh, prRef: 'PraiseZhu/approve-exec#3', leadAddress: LEAD, partnerPath: partnerFile(), now: NOW }), /只有 Mivo（xindong\/mivo-canvas-plugin）的 PR 要登记合入通知，当前：PraiseZhu\/approve-exec#3/);
+  assert.throws(() => notify({ gh, prRef: `${MIVO}#3`, leadAddress: 'lead-1', partnerPath: partnerFile(), now: NOW }), /--lead-address 要填 <deviceId>::<lead 会话 id>.*当前：lead-1/);
+  assert.throws(() => notify({ gh, prRef: `${MIVO}#3`, leadAddress: LEAD, partnerPath: join(tmpdir(), 'no-such-dir-97', 'partner.json'), now: NOW }), /读不到合并伙伴地址 .*（ENOENT）：伙伴没部署，不登记/);
+  assert.throws(() => notify({ gh, prRef: `${MIVO}#3`, leadAddress: LEAD, partnerPath: partnerFile({ session: 'partner-1' }), now: NOW }), /里的 session 应是 <deviceId>::<会话 id>，当前：partner-1/);
+});
+
+test('#97 notify CLI：走夹具 exit 0 输出一行 JSON；缺 --lead-address exit 2', () => {
+  const { ghPath } = writeFixture({ [pullKey(2017)]: { state: 'open', merged_at: null } });
+  const partner = partnerFile();
+  const ok = spawnSync(process.execPath, [CLI, 'notify', '--pr', `${MIVO}#2017`, '--lead-address', LEAD, '--partner', partner, '--gh-fixture', ghPath, '--now', NOW], { encoding: 'utf8' });
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(JSON.parse(ok.stdout).target_session_id, PARTNER);
+  const bad = spawnSync(process.execPath, [CLI, 'notify', '--pr', `${MIVO}#2017`, '--partner', partner, '--gh-fixture', ghPath], { encoding: 'utf8' });
+  assert.equal(bad.status, 2);
+  assert.match(bad.stderr, /--lead-address/);
 });
