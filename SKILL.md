@@ -1,6 +1,6 @@
 ---
 name: approve-exec
-description: 批准执行——接在「开 issue」之后：吃总 issue（或独立 issue / 单个子 issue），lead 按总 issue 的并行/串行原则，把依赖已合入的子 issue 一次全派出去，每个子 issue 开一个独立会话（1 子 issue = 1 PR = 1 会话），执行会话默认用 Claude 网关的 Opus 5.5 high；不走 KEEL、不建台账、不挂定时任务。执行会话自己推到 Draft PR CI 全绿后发消息叫醒 lead 验收，lead 判通过后执行会话转正式 PR 即收工；PR 合入后合并伙伴通知 lead，lead 归档已完成的会话、派下一批。lead 不写产品代码、不合并（用户在提示词里明确授权加急 admin 合并的除外）。触发词：批准执行。
+description: 批准执行——接在「开 issue」之后：吃总 issue（或独立 issue / 单个子 issue），lead 按总 issue 的并行/串行原则，把依赖已合入的子 issue 一次全派出去，每个子 issue 开一个独立会话（1 子 issue = 1 PR = 1 会话），执行会话默认用 Claude 网关的 Opus 5.5 high；不走 KEEL、不建台账、不挂定时任务。执行会话自己推到 Draft PR CI 全绿后发消息叫醒 lead 验收，lead 判通过后执行会话转正式 PR 即收工；用户在 lead 会话说「合并」后，Mivo 仓 PR 交合并伙伴、合入后伙伴通知 lead，其他仓 PR 由 lead 按 pr-merge 自己合；PR 合入后 lead 归档已完成的会话、派下一批。lead 不写产品代码；除用户在提示词里明确授权的加急 admin 合并和用户说「合并」的非 Mivo PR 外，lead 不合并。触发词：批准执行。
 trigger: 批准执行
 ---
 
@@ -15,7 +15,7 @@ trigger: 批准执行
 | `批准执行通过 …` / `批准执行要改 …` | lead | 执行会话 | 验收后 |
 | `批准执行已转正式 …` | 执行会话 | lead | 转正式后 CI 仍全绿 |
 | `批准执行卡住 …` | 执行会话 | lead | 缺权限、缺环境，或范围、验收标准必须改 |
-| `praise-merge 已合并 …` | 合并伙伴（Mini） | lead | 用户说「合并」交出去的 PR 合入后 |
+| `praise-merge 已合并 …` | 合并伙伴（Mini） | lead | 用户说「合并」交出去的 Mivo PR 合入后（其他仓 PR 由 lead 自己合，没有这条消息） |
 
 `send_to_session` 发给已有会话时，对方关着会被唤醒，正在跑就排队，这一轮结束后送到。对方被归档、删除或 Agent 起不来时送不到：双方都看回执，送不到就在子 issue 上评论「批准执行未送达：…」，不互相干等（见「执行会话的规矩」和第 4 步）。
 
@@ -59,14 +59,18 @@ lead 会话要在完全访问权限下运行：派出的执行会话继承 lead 
    - **已转正式**：`node scripts/check-pr.mjs --item <子 issue> --pr <号> --stage ready`。通过就是这个子 issue 收工；不过就回执行会话「批准执行要改 … （正式 PR）」并写明哪项没过：非 Mivo 仓它修完 CI 全绿后再发「已转正式」，lead 再跑 `--stage ready`（不回到验收档，验收档要求 Draft）；Mivo 仓转正式后的问题交盯梢。之后的审查意见和 CI 归盯梢。入口授权了加急合并的，走「加急合并」。
    - **发给执行会话的消息送不到**（回执 `ARCHIVED`、`DELETED`、`AGENT_NOT_READY` 等）：在子 issue 上评论「批准执行未送达：<原消息第一行>（<错误码>）」，并告诉用户；按「会话失联」处理。`DELIVERY_UNKNOWN` 先 `get_chat_history` 核对再决定是否重发（参数 `{"session_ids":["<会话 id>"],"roles":["user","assistant"],"limit":5}`；键是复数的 `session_ids`）。
    - **卡住**：能在范围内换做法，就把结论发回执行会话。范围或验收标准必须改，先告诉用户，按任务 issue 范式先改 issue 再改代码，改完把结论发回。缺权限、缺环境告诉用户。
-   - **praise-merge 已合并**，或用户说「继续」：先跑第 1 步的 status，对输出里 `to_archive` 的每一项用 cindy_helper `archive_sessions` 归档那个执行会话，成功后 `node scripts/batch.mjs archived --item <子 issue> --session <会话 id>` 记下来（用户 2026-11-07 定：PR 合入后由 lead 及时归档已完成的会话）；再派新放开的子 issue。
+   - **praise-merge 已合并**（只有 Mivo PR 有）、lead 按 `pr-merge` 自己合完非 Mivo PR 后，或用户说「继续」：先跑第 1 步的 status，对输出里 `to_archive` 的每一项用 cindy_helper `archive_sessions` 归档那个执行会话，成功后 `node scripts/batch.mjs archived --item <子 issue> --session <会话 id>` 记下来（用户 2026-11-07 定：PR 合入后由 lead 及时归档已完成的会话）；再派新放开的子 issue。
 5. **收工。** `all_done` 为真：告诉用户全部合入。总 issue 由验收机自动验收、关闭，lead 不交接、不关总 issue。执行会话 PR 合并前不归档；PR 合并后由 lead 按 `to_archive` 归档（第 4 步），漏掉的由 Pro、Mini 两台扫地僧每天兜底归档，分支和工作树也由扫地僧存证清理，lead 不手工删分支。
 
-**合并通知。** 用户在 lead 会话里说「合并」时按 `pr-merge` 交给合并伙伴，输入里带 `notify_session`（lead 的跨电脑地址）；伙伴合入后给 lead 发 `praise-merge 已合并 <owner/repo>#<号>`。用户用别的方式合并时没有通知，用户说「继续」即可。
+**合并通知。** 用户在 lead 会话里说「合并」时，按 `pr-merge` 分两路（用户 2026-11-08 定）：
+- Mivo 仓（`xindong/mivo-canvas-plugin`）的 PR 交给合并伙伴，输入里带 `notify_session`（lead 的跨电脑地址）；伙伴合入后给 lead 发 `praise-merge 已合并 <owner/repo>#<号>`，lead 按第 4 步处理。只有 Mivo PR 有这条伙伴通知。
+- 其他仓的 PR 不交伙伴，由 lead 按 `pr-merge` 的标准自己合（以 `pr-merge` 为准：required checks 全绿、CLEAN、当前 head 的 GPT 单审和 e2e 通过，缺一样就不合并、报缺项）。没有伙伴通知；lead 合进去后直接按第 4 步归档会话、派下一批。
+
+用户用别的方式合并时没有通知，用户说「继续」即可。
 
 **会话失联。** 没有定时检查。用户问进度（「进展」）或看到某个子 issue 很久没动时，先用 `list_sessions` / `get_chat_history` 查执行会话：还在就 `send_to_session` 催一次；已经没了（删除、崩溃）就 `node scripts/batch.mjs release --item <子 issue> --reason "<怎么核实的>"`，再回第 2 步重派。新会话的开工消息会写明接着已开的 PR 做。
 
-边界：lead 不写产品代码，不替执行会话推进，不合并任何 PR（「加急合并」除外）。
+边界：lead 不写产品代码，不替执行会话推进，不合并任何 PR（「加急合并」和用户说「合并」的非 Mivo PR 除外）。
 
 ## 执行会话的规矩
 
@@ -82,7 +86,7 @@ lead 会话要在完全访问权限下运行：派出的执行会话继承 lead 
 
 ## 合并红线（最高优先级）
 
-除下面两种用户当次授权的情况外，任何 lead、owner、reviewer、tester、Mini session、watcher、worker 或本 skill 都不得合并、自动合并、启用 auto-merge、点击合并或调用 gh pr merge。只有用户本人对指定 PR 的明确、当次授权才允许合并：用户在提示词里明确授权加急 admin 合并的 PR，由 lead 按「加急合并」执行；用户说「合并」的 PR，由合并伙伴按各仓标准合并。PR Ready、required checks 通过、管理员权限或开工消息里的提交/推送授权，都不构成合并授权。
+除下面两种用户当次授权的情况外，任何 lead、owner、reviewer、tester、Mini session、watcher、worker 或本 skill 都不得合并、自动合并、启用 auto-merge、点击合并或调用 gh pr merge。只有用户本人对指定 PR 的明确、当次授权才允许合并：用户在提示词里明确授权加急 admin 合并的 PR，由 lead 按「加急合并」执行；用户说「合并」的 PR：Mivo 仓由合并伙伴按其标准合并；其他仓由收到这句话的会话按 `pr-merge` 的标准自己合并。PR Ready、required checks 通过、管理员权限或开工消息里的提交/推送授权，都不构成合并授权。
 
 ## 旧 run
 
