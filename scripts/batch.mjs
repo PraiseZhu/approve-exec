@@ -10,9 +10,11 @@
 //   node scripts/batch.mjs archived --item <子 issue> --session <已归档的执行会话 id>
 //   node scripts/batch.mjs claim   --item <子 issue> --session <派出的会话 id> --title <会话标题>
 //   node scripts/batch.mjs release --item <子 issue> --reason <原因>
+//   node scripts/batch.mjs notify  --pr <Mivo PR> --lead-address <deviceId>::<lead 会话 id> [--partner <partner.json>]
 //   公共：[--now <ISO>] [--gh-fixture <夹具.json>（测试用，代替 gh）]
 // 输出：stdout 一行 JSON；exit 0 成功 / 2 拒绝（stderr 写原因）。
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isMain, nowIso, parseArgs } from './lib/common.mjs';
@@ -31,6 +33,9 @@ const ARCHIVED_RE = /^批准执行归档：\S+ (\S+#\d+) 会话 ([\w-]+)/;
 const DEFAULTS_PATH = join(dirname(fileURLToPath(import.meta.url)), '../config/defaults.json');
 const SESSION_RE = /^[\w-]+$/;
 const OPEN_PR_PAGES = 10;
+const MIVO_REPO = 'xindong/mivo-canvas-plugin';
+const ADDRESS_RE = /^[0-9a-f]{64}::[\w-]+$/;
+const PARTNER_PATH = join(homedir(), '.claude/skills/pr-merge/partner.json');
 
 // helpers
 
@@ -310,6 +315,37 @@ export function archived({ gh, itemRef, session, now = nowIso() }) {
   return { ok: true, ref, session, comment_url: posted?.html_url ?? null };
 }
 
+// notify
+
+/**
+ * Mivo PR 转正式后，lead 把自己的跨电脑地址登记给合并伙伴（PraiseZhu/approve-exec#97）。
+ * 本人 Mivo PR 正文写了「合并顺序」就由伙伴自动合入，没有「合并」请求带 notify_session；不登记，伙伴合入后不知道叫醒谁。
+ * 只读 GitHub 和 partner.json，不发消息：lead 把 message 用 send_to_session 发给 target_session_id。
+ */
+export function notify({ gh, prRef, leadAddress, partnerPath = PARTNER_PATH, now = nowIso() }) {
+  const { repo, number, ref } = parseIssueRef(prRef);
+  if (repo.toLowerCase() !== MIVO_REPO) reject(`只有 Mivo（${MIVO_REPO}）的 PR 要登记合入通知，当前：${ref}`);
+  if (!ADDRESS_RE.test(String(leadAddress ?? ''))) reject(`--lead-address 要填 <deviceId>::<lead 会话 id>（deviceId 取 list_machines 里 isSelf 那台），当前：${leadAddress}`);
+  const pr = gh(['api', `repos/${repo}/pulls/${number}`]);
+  if (pr?.merged_at) return { ok: true, ref, already_merged: true };
+  if (pr?.state !== 'open') reject(`${ref} 已关闭且没合入（state=${pr?.state}），不登记`);
+  let partner;
+  try {
+    partner = JSON.parse(readFileSync(partnerPath, 'utf8'));
+  } catch (err) {
+    reject(`读不到合并伙伴地址 ${partnerPath}（${err.code ?? err.message}）：伙伴没部署，不登记`);
+  }
+  if (!ADDRESS_RE.test(String(partner?.session ?? ''))) reject(`${partnerPath} 里的 session 应是 <deviceId>::<会话 id>，当前：${partner?.session}`);
+  const registration = { schema: 'praise-merge/notify@1', notify_session: leadAddress, prs: [{ repo: MIVO_REPO, number }], registered_at: now };
+  return {
+    ok: true,
+    ref,
+    already_merged: false,
+    target_session_id: partner.session,
+    message: `praise-merge 通知登记\n\`\`\`json\n${JSON.stringify(registration)}\n\`\`\``,
+  };
+}
+
 // cli
 
 export function main(argv = process.argv.slice(2)) {
@@ -324,7 +360,8 @@ export function main(argv = process.argv.slice(2)) {
     else if (cmd === 'claim') out = claim({ gh, itemRef: args.item, session: args.session, title: args.title, now });
     else if (cmd === 'release') out = release({ gh, itemRef: args.item, reason: args.reason, now });
     else if (cmd === 'archived') out = archived({ gh, itemRef: args.item, session: args.session, now });
-    else reject(`子命令只能是 status / brief / claim / release / archived（当前：${cmd ?? '空'}）`);
+    else if (cmd === 'notify') out = notify({ gh, prRef: args.pr, leadAddress: args['lead-address'], ...(typeof args.partner === 'string' ? { partnerPath: args.partner } : {}), now });
+    else reject(`子命令只能是 status / brief / claim / release / archived / notify（当前：${cmd ?? '空'}）`);
     process.stdout.write(`${JSON.stringify(out)}\n`);
     return 0;
   } catch (err) {
