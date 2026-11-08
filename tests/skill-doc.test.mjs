@@ -169,9 +169,9 @@ test('#93 SC1：合并红线第二种授权按仓分两路，其余禁止条款�
   const s = section('## 合并红线（最高优先级）');
   assert.ok(s.includes('用户说「合并」的 PR：Mivo 仓由合并伙伴按其标准合并；其他仓由收到这句话的会话按 `pr-merge` 的标准自己合并。'), '第二种授权应写两路分工');
   assert.equal(s.includes('由合并伙伴按各仓标准合并'), false, '不得再写所有仓都由合并伙伴合');
-  // 其余条款逐句原样保留
+  // 其余条款逐句原样保留（#97 起开头的「两种用户当次授权」改成「三种用户授权」，见下一条测试）
   for (const kept of [
-    '除下面两种用户当次授权的情况外，任何 lead、owner、reviewer、tester、Mini session、watcher、worker 或本 skill 都不得合并、自动合并、启用 auto-merge、点击合并或调用 gh pr merge。',
+    '除下面三种用户授权的情况外，任何 lead、owner、reviewer、tester、Mini session、watcher、worker 或本 skill 都不得合并、自动合并、启用 auto-merge、点击合并或调用 gh pr merge。',
     '只有用户本人对指定 PR 的明确、当次授权才允许合并：用户在提示词里明确授权加急 admin 合并的 PR，由 lead 按「加急合并」执行；',
     'PR Ready、required checks 通过、管理员权限或开工消息里的提交/推送授权，都不构成合并授权。',
   ]) {
@@ -190,6 +190,23 @@ test('#93 SC2：只有 Mivo PR 有伙伴通知；非 Mivo PR 由 lead 按 pr-mer
   }
   assert.ok(s.includes('**praise-merge 已合并**（只有 Mivo PR 有）、lead 按 `pr-merge` 自己合完非 Mivo PR 后，或用户说「继续」'), '第 4 步应让 lead 自己合完非 Mivo PR 后也走归档、派下一批');
   assert.ok(s.includes('不合并任何 PR（「加急合并」和用户说「合并」的非 Mivo PR 除外）'), '边界应写明 lead 可合的两种例外');
+});
+
+test('#97 SC3：Mivo PR 转正式后 lead 登记合入通知；合并红线写明第三种（伙伴自动合并）', () => {
+  const s = section('## ⓪ issue 入口');
+  assert.ok(skillDoc.split('\n').some((l) => l.startsWith('| `praise-merge 通知登记` | lead | 合并伙伴（Mini） |')), '消息表应有「praise-merge 通知登记」一行');
+  const row = skillDoc.split('\n').find((l) => l.startsWith('| `praise-merge 已合并 …`'));
+  assert.ok(row.includes('自动合入的（lead 登记过地址）'), '「praise-merge 已合并」一行应写明自动合入也有');
+  const ready = s.slice(s.indexOf('**已转正式**'), s.indexOf('**发给执行会话的消息送不到**'));
+  for (const must of ['`node scripts/batch.mjs notify --pr <owner/repo#号> --lead-address <lead 的跨电脑地址>`', '把输出的 `message` 原样用 `send_to_session` 发给 `target_session_id`', '`already_merged` 为真时', '用户说「继续」']) {
+    assert.ok(ready.includes(must), `已转正式应写「${must}」`);
+  }
+  const notice = s.slice(s.indexOf('**合并通知。**'), s.indexOf('**会话失联。**'));
+  assert.ok(notice.includes('正文写了「合并顺序」的本人 Mivo PR 不用用户说「合并」'), '合并通知应写自动合');
+  const red = section('## 合并红线（最高优先级）');
+  assert.ok(red.includes('第三种是用户的长期授权（2026-11-08，PraiseZhu/praise-merge#38）'), '合并红线应写第三种授权');
+  assert.ok(red.includes('lead 和执行会话不替 PR 挂这个标签'), '合并红线应禁止 lead 和执行会话代挂标签');
+  assert.equal(red.includes('两种用户当次授权'), false, '不得再写只有两种授权');
 });
 
 test('旧 run：改版前开工的 run 按 legacy-ledger-flow.md 收尾，旧步骤原样保留', () => {
