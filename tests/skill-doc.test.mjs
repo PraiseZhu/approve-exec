@@ -48,6 +48,16 @@ test('#93 SC3：description 按仓分两路写合并，不再写不分仓的「P
   assert.equal(description.includes('PR 合入后合并伙伴通知 lead'), false, 'description 不得再写不分仓的「PR 合入后合并伙伴通知 lead」');
 });
 
+test('#93 README 同步两路分工（2026-11-08 lead 追加范围）', () => {
+  const readme = readFileSync(join(root, 'README.md'), 'utf8');
+  for (const must of ['Mivo 仓 PR 交合并伙伴、合入后伙伴通知 lead', '其他仓 PR 由 lead 按 pr-merge 自己合', 'Mivo 仓由合并伙伴合，其他仓由收到这句话的会话按 pr-merge 的标准自己合']) {
+    assert.ok(readme.includes(must), `README.md 应写「${must}」`);
+  }
+  for (const old of ['PR 合入后合并伙伴通知 lead', '本 skill 不合入；']) {
+    assert.equal(readme.includes(old), false, `README.md 不得再写「${old}」`);
+  }
+});
+
 test('七段 marker 齐全且顺序固定；旧入口第①–⑲段不再出现', () => {
   const idx = MARKERS.map((m) => skillDoc.indexOf(m));
   idx.forEach((i, k) => assert.ok(i >= 0, `marker 缺失: ${MARKERS[k]}`));
