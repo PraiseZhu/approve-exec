@@ -264,3 +264,17 @@ test('开工先查网关（2026-11-07 复盘，#87）：⓪ 在第 1 步之前�
     assert.ok(dispatch.includes(must), `第 2 步应写「${must}」`);
   }
 });
+
+test('#95 README 写执行会话默认路线；invalid 由 lead 直接补格式，不再指路「开 issue」', () => {
+  const readme = readFileSync(join(root, 'README.md'), 'utf8');
+  for (const must of ['Claude 网关的 Opus 5.5 high', 'dispatchRoute']) {
+    assert.ok(readme.includes(must), `README.md 应写「${must}」`);
+  }
+  assert.equal(readme.includes('派会话不带模型参数'), false, 'README.md 不得再写「派会话不带模型参数」');
+  const invalid = skillDoc.split('\n').find((l) => l.includes('`invalid`：'));
+  assert.ok(invalid, 'SKILL.md 第 1 步应有 `invalid` 一条');
+  for (const must of ['lead 直接补齐格式', '不改目标、范围和验收内容', '记一行']) {
+    assert.ok(invalid.includes(must), `invalid 一条应写「${must}」，实际：${invalid}`);
+  }
+  assert.equal(skillDoc.includes('指路「开 issue」补齐'), false, 'SKILL.md 不得再写「指路「开 issue」补齐」');
+});

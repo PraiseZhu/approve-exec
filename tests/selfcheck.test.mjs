@@ -40,6 +40,11 @@ test('批准执行触发行（2026-11-07 改版）：issue 入口、不走 KEEL 
   }
 });
 
+test('#95 触发行：缺模板的子 issue 由 lead 补格式，不再指路「开 issue」', () => {
+  assert.match(TRIGGER_LINE, /缺模板的子 issue 由 lead 补齐格式再派/);
+  assert.equal(TRIGGER_LINE.includes('指路「开 issue」'), false, '触发行不得再出现「指路「开 issue」」');
+});
+
 test('#89 被 import 时不执行也不退出：node --input-type=module -e 里能读到 TRIGGER_LINE', () => {
   const code = `import(${JSON.stringify(pathToFileURL(scriptPath).href)}).then((m) => process.stdout.write(typeof m.TRIGGER_LINE))`;
   const res = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8' });

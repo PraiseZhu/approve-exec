@@ -38,7 +38,7 @@ lead 会话要在完全访问权限下运行：派出的执行会话继承 lead 
    - `dispatchable`：依赖都已合入，可以开工。全部进第 2 步，一次派完，不排队。
    - `waiting`：在等 `waiting_on` 里的 issue 合进去。依赖被关成「不做」时问用户。
    - `needs_decision`：「待定问题」还有没写「已定」的。先问 Jev（`ghost_call`，`ghost_id=keel`、`tool=jev`，参数最少写 `{"question":"…","kind":"choice","options":["A","B"],"context":"…"}`；`kind` 必填，还可以是 `yesno`、`score`），把结论写回子 issue（该条加上「已定：…」），拿不准再问用户；定完重跑第 1 步。
-   - `invalid`：没按模板写。指路「开 issue」补齐，其他子 issue 照常派。
+   - `invalid`：没按模板写。lead 直接补齐格式（只补模板要求的段落和 SC 编号，不改目标、范围和验收内容），在该 issue 记一行（日期、谁补、补了什么），补完重跑 status 照常派；其他子 issue 照常派。
    - `in_progress`：有有效的派发记录（或旧台账的 run 在做）。不再派。
    - `needs_owner`：PR 开着，但没有有效的派发记录（会话失联后撤回过，或别处开的 PR）。先用 `list_sessions` 按标题里的 PR 号找实际负责的会话：找到就用 `batch.mjs claim` 补登记；确认没人做就走第 2 步派一个会话接手，brief 会让它接着原 PR 做，不开新 PR。
    - `done` 只在子 issue 已关闭、且没有写着「任务 issue」的开着的 PR 时出现；issue 关了但 PR 还开着会是 `needs_decision`，先核实是合了还是不做了，不放行依赖、不归档会话。
