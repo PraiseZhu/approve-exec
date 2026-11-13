@@ -377,6 +377,45 @@
       "occurrences": 1,
       "firstSeen": "2026-11-04T16:39:02.108Z",
       "lastSeen": "2026-11-04T16:39:02.108Z"
+    },
+    {
+      "fingerprint": "integration-pr-no-auto-intake",
+      "tier": "proposal",
+      "title": "集成分支 PR 转正式后只登记通知，没交合并请求，PR 一直不合",
+      "detail": "2026-11-12 xindong/mivo-canvas-plugin#2089：PR #2141、#2184 指向 integration/canvas-bounds-s1，审查机 11-11 15:38Z / 16:55Z 已挂 review:merge-ready、CLEAN，但 10 小时没合。原因：第 4 步「已转正式」只要求发 praise-merge 通知登记，依赖伙伴按「合并顺序」自动接单；伙伴 auto_intake 的 base 只认 main（PraiseMerge docs/operations.md「bot PR 自动接单」、config/policy.example.json），集成分支 PR 不会被自动接单。#2142 当时是 lead 另交了合并请求才合入。",
+      "proposal": "第 4 步「已转正式」按 PR base 分路：base 是 main 照旧只登记通知；base 是 integration/* 时，入口或用户已授权合并（如「所有 PR 都用合并 skill」）就走 pr-merge 交合并请求（带 notify_session），没有授权就告诉用户要说「合并」。batch.mjs notify 读到 base 不是 main 时输出提示。",
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-11-12T02:25:50.851Z",
+      "lastSeen": "2026-11-12T02:25:50.851Z"
+    },
+    {
+      "fingerprint": "child-scope-misses-necessary-files",
+      "tier": "proposal",
+      "title": "子 issue 范围清单反复漏列必要文件，每个 PR 验收都要 lead 补范围",
+      "detail": "2026-11-12 xindong/mivo-canvas-plugin#2089：#2100 漏 3 个（pendingWriteDrain.ts、useCanvasInteractionController.ts、首屏体积基线），#2092 漏 2 个（新文件 canvasBoundsEdits.ts 因 nodeMutationSlice.ts 到 1200 行结构守卫上限、首屏体积基线），#2094 漏 4 个（canvasStore.ts 注入读取器、图片格用户入口 3 个文件）。每次都是 check-pr.mjs 判范围不过、lead 核实后改 issue 再判通过。",
+      "proposal": "开 issue 时对每个子 issue 预查：会加首屏 JS 的改动预列 scripts/ci/first-screen-size.baseline.json；要改的文件离结构守卫行数上限不足 50 行时预留新文件；新增能力被别的模块调用时列出调用方。属于 open-issue 拆分质量，批准执行这边只记录。",
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-11-12T13:17:33.716Z",
+      "lastSeen": "2026-11-12T13:17:33.716Z"
+    },
+    {
+      "fingerprint": "post-ready-fix-breaks-child-sc",
+      "tier": "proposal",
+      "title": "转正式后盯梢的修复可能破坏子 issue 验收项，lead 没有合并前复核",
+      "detail": "2026-11-12 PR #2204（#2094）：转正式后 Mini 盯梢为修 Greptile P2 改了存量测试 aliasWrap.contract.test.ts 一行，违反 #2094 SC10（存量测试只增不改）。lead 是因为用户问「完成了么」才去查到，留 P2 行内评论后盯梢撤回。若没发现，合并后验收机会判 SC10 不通过、开修正 issue。",
+      "proposal": "合并伙伴合入前（或 lead 收到 praise-merge 已合并前）对 head 相对验收时有变化的子 PR 跑一次 check-pr.mjs 的 SC 静态项（至少测试 numstat 删除列）；或在子 issue 的 SC 里写明盯梢修复轮也受约束，让盯梢修复轮自查。需要改 praise-merge 或盯梢，批准执行这边只记录。",
+      "status": "open",
+      "commit": null,
+      "note": null,
+      "occurrences": 1,
+      "firstSeen": "2026-11-12T13:17:33.887Z",
+      "lastSeen": "2026-11-12T13:17:33.887Z"
     }
   ]
 }
