@@ -2,7 +2,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { checkPr, ciAllVerdict } from '../scripts/check-pr.mjs';
-import { REPO, ghFrom, parentFixture } from './fixtures/issues/build.mjs';
+import { REPO, LOGIN, childBody, commentsKey, ghFrom, issue, parentFixture } from './fixtures/issues/build.mjs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const A = `${REPO}#11`;
 const HEAD = 'a'.repeat(40);
@@ -65,4 +68,85 @@ test('收工档：已转正式且 CI 全绿才过；还是 Draft 不过；已合
 test('参数错：stage 不认识、PR 号不是整数都直接报错', () => {
   assert.throws(() => checkPr({ ...setup(), ref: A, pr: 5, stage: 'x' }), /--stage/);
   assert.throws(() => checkPr({ ...setup(), ref: A, pr: Number('abc') }), /--pr/);
+});
+
+// v3：范围三档（#106）、预审与上游检查（#107）
+
+const scopeNote = (file, why) => `${GOOD_BODY}\n\n## 范围对照\n\n- \`${file}\`：${why}\n\n## 风险与回滚\n\n无`;
+
+function cardsDirWith(card) {
+  const dir = mkdtempSync(join(tmpdir(), 'cards-'));
+  writeFileSync(join(dir, 'acme__app.json'), JSON.stringify(card));
+  return dir;
+}
+const CARD = { schema: 'approve-exec/repo-card@1', repo: REPO, always_allowed: ['docs/pr/{pr}/**', 'scripts/ci/size.baseline.json'], hot_files: [], guards: [], verify: [], review_rules: [], pitfalls: [] };
+
+test('范围三档：范围外文件在「范围对照」写了说明记 needs_judgement（总结果仍过），没写说明不过', () => {
+  const files = ['src/sync/status.ts', 'scripts/ci/first-screen-size.baseline.json'];
+  const explained = checkPr({ ...setup({ files, pr: { body: scopeNote('scripts/ci/first-screen-size.baseline.json', '首屏 JS 增加 4675 字节，按仓库规则上调基线') } }), ref: A, pr: 5 });
+  assert.equal(explained.ok, true, JSON.stringify(explained.checks));
+  assert.deepEqual(explained.judgement.map((j) => j.file), ['scripts/ci/first-screen-size.baseline.json']);
+  assert.match(explained.checks.find((c) => c.name === 'scope').detail, /needs_judgement/);
+  const silent = checkPr({ ...setup({ files }), ref: A, pr: 5 });
+  assert.deepEqual(failed(silent), ['scope']);
+  assert.equal(silent.judgement, undefined);
+  // 只列路径、没有说明的不算
+  const bare = checkPr({ ...setup({ files, pr: { body: `${GOOD_BODY}\n\n## 范围对照\n\n- \`scripts/ci/first-screen-size.baseline.json\`` } }), ref: A, pr: 5 });
+  assert.deepEqual(failed(bare), ['scope']);
+});
+
+test('范围三档：仓库卡 always_allowed 放行（{pr} 换成 PR 号）；没有仓库卡的仓仍放行 docs/pr/<PR号>/', () => {
+  const files = ['src/sync/status.ts', 'docs/pr/5/review.md', 'scripts/ci/size.baseline.json'];
+  assert.equal(checkPr({ ...setup({ files }), ref: A, pr: 5, cardsDir: cardsDirWith(CARD) }).ok, true);
+  assert.deepEqual(failed(checkPr({ ...setup({ files }), ref: A, pr: 5 })), ['scope'], '没有卡时基线文件不放行');
+  assert.equal(checkPr({ ...setup({ files: ['src/sync/status.ts', 'docs/pr/5/review.md'] }), ref: A, pr: 5 }).ok, true);
+});
+
+const CHARTER_MARK = (prereview) => `批准执行章程：2026-11-14\n\n<!-- approve-exec:charter v1 ${JSON.stringify({
+  schema: 'approve-exec/charter@1', merge: { auto_request: false, bases: ['main'] }, conflict: { same_file: 'serial' }, prereview, early_start: false,
+  max_parallel: 4, manual_test: 'x', user_words: 'x', lead_session: `${'a'.repeat(64)}::lead-1`,
+})} -->`;
+
+function withCharter(prereview, { files, events = [] }) {
+  const s = setup({ files });
+  const fixture = parentFixture();
+  fixture[`api repos/${REPO}/pulls/5`] = { head: { sha: HEAD }, state: 'open', draft: true, merged: false, body: GOOD_BODY };
+  fixture[`api repos/${REPO}/pulls/5/files?per_page=100&page=1`] = files.map((filename) => ({ filename }));
+  fixture[commentsKey(10)] = [{ id: 1, user: { login: LOGIN }, body: CHARTER_MARK(prereview) }];
+  fixture[commentsKey(11)] = events.map((e, i) => ({ id: 10 + i, user: { login: LOGIN }, body: `批准执行预审 x\n\n<!-- approve-exec:event v1 ${JSON.stringify(e)} -->` }));
+  return { ...s, gh: ghFrom(fixture) };
+}
+const pre = (head) => ({ type: 'prereview', ref: A, pr: 5, head, at: '2026-11-14T01:00:00Z', id: head.slice(0, 6) });
+
+test('预审：章程是 feature 且改了源码时，要有当前版本的预审记录；旧版本的记录不算', () => {
+  const files = ['src/sync/status.ts', 'tests/sync/status.test.ts'];
+  const none = checkPr({ ...withCharter('feature', { files }), ref: A, pr: 5 });
+  assert.deepEqual(failed(none), ['prereview']);
+  assert.match(none.checks.find((c) => c.name === 'prereview').detail, /当前版本没有预审记录/);
+  assert.deepEqual(failed(checkPr({ ...withCharter('feature', { files, events: [pre('b'.repeat(40))] }), ref: A, pr: 5 })), ['prereview']);
+  assert.equal(checkPr({ ...withCharter('feature', { files, events: [pre(HEAD)] }), ref: A, pr: 5 }).ok, true);
+});
+
+test('预审：只改测试和文档、章程是 off、或没有章程时不要求', () => {
+  const docsOnly = checkPr({ ...withCharter('feature', { files: ['tests/sync/status.test.ts'] }), ref: A, pr: 5 });
+  assert.equal(docsOnly.ok, true, JSON.stringify(docsOnly.checks));
+  assert.match(docsOnly.checks.find((c) => c.name === 'prereview').detail, /章程未要求/);
+  assert.equal(checkPr({ ...withCharter('off', { files: ['src/sync/status.ts'] }), ref: A, pr: 5 }).ok, true);
+  assert.match(checkPr({ ...setup(), ref: A, pr: 5 }).checks.find((c) => c.name === 'prereview').detail, /章程未要求/);
+  assert.deepEqual(failed(checkPr({ ...withCharter('all', { files: ['tests/sync/status.test.ts'] }), ref: A, pr: 5 })), ['prereview'], 'all 时只改测试也要预审');
+});
+
+test('预开工：上游子 issue 还开着时不验收，列出上游；上游关闭后通过', () => {
+  const C = `${REPO}#13`;
+  const make = (aState) => {
+    const fixture = parentFixture({ aState, aReason: aState === 'closed' ? 'completed' : null });
+    const body = GOOD_BODY.replaceAll(A, C).replace('| SC4 CI 全绿 | 通过 | CI |', '| SC4 CI 全绿 | 通过 | CI |');
+    fixture[`api repos/${REPO}/pulls/5`] = { head: { sha: HEAD }, state: 'open', draft: true, merged: false, body };
+    fixture[`api repos/${REPO}/pulls/5/files?per_page=100&page=1`] = [{ filename: 'src/sync/offline.ts' }];
+    return { gh: ghFrom(fixture), checks: () => ({ status: 0, stdout: JSON.stringify([{ name: 'test', bucket: 'pass' }]) }), bodyCheck: () => ({ ok: true, detail: 'ok' }) };
+  };
+  const waiting = checkPr({ ...make('open'), ref: C, pr: 5 });
+  assert.deepEqual(failed(waiting), ['upstream_merged']);
+  assert.match(waiting.checks.find((c) => c.name === 'upstream_merged').detail, /acme\/app#11/);
+  assert.equal(checkPr({ ...make('closed'), ref: C, pr: 5 }).ok, true);
 });

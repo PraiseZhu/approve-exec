@@ -354,3 +354,63 @@ test('#97 notify CLI：走夹具 exit 0 输出一行 JSON；缺 --lead-address e
   assert.equal(bad.status, 2);
   assert.match(bad.stderr, /--lead-address/);
 });
+
+// v3：预开工（#107）与开工消息新增内容（#106）
+
+const CHARTER_COMMENT = (over = {}) => ({ id: 500, user: { login: LOGIN }, body: `批准执行章程：2026-11-14\n\n<!-- approve-exec:charter v1 ${JSON.stringify({
+  schema: 'approve-exec/charter@1', merge: { auto_request: false, bases: ['main'] }, conflict: { same_file: 'parallel' }, prereview: 'feature', early_start: true,
+  max_parallel: 4, manual_test: 'x', user_words: 'x', lead_session: `${'a'.repeat(64)}::lead-1`, ...over,
+})} -->` });
+const passEvent = (n) => ({ id: 600 + n, user: { login: LOGIN }, created_at: '2026-11-14T02:00:00Z', body: `批准执行通过 ${ref(n)} PR #7（head ${'a'.repeat(40)}）\n\n<!-- approve-exec:event v1 ${JSON.stringify({ type: 'verdict_pass', ref: ref(n), pr: 7, head: 'a'.repeat(40), at: '2026-11-14T02:00:00Z', id: 'p' })} -->` });
+const reviseEvent = (n) => ({ id: 700 + n, user: { login: LOGIN }, created_at: '2026-11-14T03:00:00Z', body: `批准执行要改 ${ref(n)} PR #7（head ${'a'.repeat(40)}）\n\n<!-- approve-exec:event v1 ${JSON.stringify({ type: 'verdict_revise', ref: ref(n), pr: 7, head: 'a'.repeat(40), at: '2026-11-14T03:00:00Z', id: 'r' })} -->` });
+const upstreamPr = { number: 7, draft: true, body: `任务 issue：${ref(11)}` };
+
+function earlyFixture({ charter = CHARTER_COMMENT(), aComments = [passEvent(11)], prs = [upstreamPr] } = {}) {
+  return parentFixture({ extra: {
+    [commentsKey(10)]: charter ? [charter] : [],
+    [commentsKey(11)]: [{ id: 1, user: { login: LOGIN }, body: `批准执行派发：2026-11-14 ${ref(11)} → 会话 s11（t丨1114）` }, ...aComments],
+    [openPullsKey()]: prs,
+    [`api repos/${REPO}/pulls/7`]: { number: 7, head: { ref: 'feat/status-read' } },
+  } });
+}
+
+test('预开工：章程允许、上游有唯一开着的 PR 且最新裁决是通过，等上游的 #13 进 early_dispatchable（状态仍是 waiting）', () => {
+  const res = batchStatus({ gh: ghFrom(earlyFixture()), issueRef: ref(10) });
+  assert.deepEqual(res.early_dispatchable, [ref(13)]);
+  assert.equal(stateOf(res, 13).state, 'waiting');
+  assert.equal(res.dispatchable.includes(ref(13)), false);
+});
+
+test('预开工不成立的四种情况：章程不允许、没有章程、上游最新裁决是要改、上游有两个开着的 PR', () => {
+  const none = (fixture) => assert.deepEqual(batchStatus({ gh: ghFrom(fixture), issueRef: ref(10) }).early_dispatchable, []);
+  none(earlyFixture({ charter: CHARTER_COMMENT({ early_start: false }) }));
+  none(earlyFixture({ charter: null }));
+  none(earlyFixture({ aComments: [passEvent(11), reviseEvent(11)] }));
+  none(earlyFixture({ prs: [upstreamPr, { number: 8, draft: true, body: `任务 issue：${ref(11)}` }] }));
+  none(earlyFixture({ aComments: [] }));
+});
+
+test('brief --early：开工消息写明上游 PR 号、分支名、PR 保持 Draft；不在 early_dispatchable 里的拒绝', () => {
+  const { repoDir } = writeFixture({});
+  const args = { root: ref(10), lead: 'lead-1', repoDir, project: repoDir, now: NOW };
+  const out = brief({ gh: ghFrom(earlyFixture()), itemRef: ref(13), early: true, ...args });
+  assert.deepEqual(out.early_upstreams, [{ ref: ref(11), pr: 7, branch: 'feat/status-read' }]);
+  for (const must of ['预开工：', 'PR #7', 'feat/status-read', 'PR 保持 Draft', '上游全部合入前不发「待验收」']) assert.ok(out.request.message.includes(must), must);
+  assert.throws(() => brief({ gh: ghFrom(earlyFixture()), itemRef: ref(12), early: true, ...args }), /不在 early_dispatchable 里/);
+  assert.throws(() => brief({ gh: ghFrom(earlyFixture({ charter: null })), itemRef: ref(13), early: true, ...args }), /不在 early_dispatchable 里/);
+});
+
+test('开工消息带用户原话、章程三项、运行笔记读法；没有章程写「无章程」；有仓库卡带热点文件', () => {
+  const { repoDir } = writeFixture({});
+  const args = { root: ref(10), lead: 'lead-1', repoDir, project: repoDir, now: NOW };
+  const withCharter = brief({ gh: ghFrom(earlyFixture()), itemRef: ref(12), userWords: '先做 A 组，基线文件冲突不要串行', ...args }).request.message;
+  for (const must of ['先做 A 组，基线文件冲突不要串行', '同文件冲突 不串行', '预审 feature', '预开工 允许', `note.mjs list --root ${ref(10)}`, 'event.mjs emit --type ready_for_verdict']) {
+    assert.ok(withCharter.includes(must), must);
+  }
+  const plain = brief({ gh: ghFrom(parentFixture()), itemRef: ref(12), ...args }).request.message;
+  assert.ok(plain.includes('运行章程：无章程。'));
+  assert.equal(plain.includes('用户原话'), false);
+  const card = { repo: REPO, hot_files: [{ path: 'scripts/ci/size.baseline.json', why: '每个加首屏 JS 的 PR 都要改' }], guards: [{ name: 'structure guard', rule: '单文件不超过 1200 行' }], pitfalls: ['集成分支 PR 不会被自动接单'] };
+  const msg = toOwnerMessage({ ref: ref(12), title: 't', url: null, lead: 'lead-1', parent: ref(10), charter: null, card });
+  for (const must of ['仓库卡（acme/app）', 'scripts/ci/size.baseline.json', '单文件不超过 1200 行', '集成分支 PR 不会被自动接单']) assert.ok(msg.includes(must), must);
+});

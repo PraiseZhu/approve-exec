@@ -11,6 +11,8 @@
 //   node scripts/batch.mjs claim   --item <子 issue> --session <派出的会话 id> --title <会话标题>
 //   node scripts/batch.mjs release --item <子 issue> --reason <原因>
 //   node scripts/batch.mjs notify  --pr <Mivo PR> --lead-address <deviceId>::<lead 会话 id> [--partner <partner.json>]
+//   node scripts/batch.mjs merge-request --pr <owner/repo#号> --root <总 issue> --lead <lead 会话 id> [--title <lead 会话标题>]
+//   brief 另有：[--user-words <用户原话>] [--early（预开工，只对 status 列在 early_dispatchable 里的子 issue）]
 //   公共：[--now <ISO>] [--gh-fixture <夹具.json>（测试用，代替 gh）]
 // 输出：stdout 一行 JSON；exit 0 成功 / 2 拒绝（stderr 写原因）。
 import { readFileSync } from 'node:fs';
@@ -22,6 +24,10 @@ import {
   assertChildTemplate, ghRunner, parseDeps, parseHeader, parseIssueRef, pendingQuestions, readIssue, readRoot, sectionText, splitSections, toKeelSc, toScope,
 } from './issue-plan.mjs';
 import { activeClaims, ghLogin, readComments, sessionTitle } from './issue-run.mjs';
+import { emit } from './event.mjs';
+import { baseAllowed, selectCharter } from './charter.mjs';
+import { readRepoCard } from './lib/repo-card.mjs';
+import { selectChildEvents } from './lib/reconcile-rules.mjs';
 
 export class BatchError extends Error {}
 const reject = (msg) => { throw new BatchError(msg); };
@@ -113,6 +119,25 @@ export function selectOpenTaskPrs(gh, repo) {
   reject(`${repo} 开着的 PR 超过 ${OPEN_PR_PAGES * 100} 个，无法确认哪些子 issue 已经有 PR`);
 }
 
+// early start
+
+/**
+ * 预开工的上游：item 每个还没合入的硬依赖都要有且只有一个开着的 PR，并且那个子 issue 上最新的裁决是通过。
+ * 满足返回 [{ref, pr}]，任一不满足返回 null。
+ */
+export function selectEarlyUpstreams({ gh, item, login, openPrsFor }) {
+  const ups = [];
+  for (const dep of item.waiting_on ?? []) {
+    const { repo } = parseIssueRef(dep);
+    const prs = openPrsFor(repo)[dep] ?? [];
+    if (prs.length !== 1) return null;
+    const verdict = selectChildEvents(readComments(gh, commentsPath(dep)), dep, login).filter((e) => e.type === 'verdict_pass' || e.type === 'verdict_revise').at(-1);
+    if (verdict?.type !== 'verdict_pass') return null;
+    ups.push({ ref: dep, pr: prs[0].number });
+  }
+  return ups.length ? ups : null;
+}
+
 // status
 
 /**
@@ -177,7 +202,7 @@ export function childStatus({ gh, ref, issue, login, openPrsFor }) {
   if (blockers.length) {
     const dropped = blockers.filter((b) => b.reason === 'not_planned').map((b) => b.ref);
     return {
-      ...base, state: 'waiting', waiting_on: blockers.map((b) => b.ref),
+      ...base, state: 'waiting', waiting_on: blockers.map((b) => b.ref), questions,
       reason: dropped.length ? `依赖 ${dropped.join('、')} 被关成不做，要用户决定` : `等 ${blockers.map((b) => b.ref).join('、')} 合进去`,
     };
   }
@@ -197,6 +222,11 @@ export function batchStatus({ gh, issueRef }) {
     return openByRepo.get(key);
   };
   const items = sources.map(({ repo, issue }) => childStatus({ gh, ref: `${repo}#${issue.number}`, issue, login, openPrsFor }));
+  // 预开工（#107）：章程允许时，等上游的子 issue 只要每个没合入的上游都有唯一一个开着的 PR、且最新裁决是通过，就可以先开工。
+  const charter = children.length ? selectCharter(readComments(gh, commentsPath(root.ref)), login) : null;
+  const early = charter?.early_start === true
+    ? items.filter((i) => i.state === 'waiting' && !/不做/.test(i.reason) && (i.questions ?? []).length === 0 && selectEarlyUpstreams({ gh, item: i, login, openPrsFor }) !== null).map((i) => i.ref)
+    : [];
   const count = (s) => items.filter((i) => i.state === s).length;
   return {
     ok: true,
@@ -204,6 +234,7 @@ export function batchStatus({ gh, issueRef }) {
     kind: children.length ? 'parent' : 'single',
     items,
     dispatchable: items.filter((i) => i.state === 'dispatchable').map((i) => i.ref),
+    early_dispatchable: early,
     needs_owner: items.filter((i) => i.state === 'needs_owner').map((i) => i.ref),
     to_archive: items.flatMap((i) => (i.sessions_to_archive ?? []).map((session) => ({ ref: i.ref, session }))),
     // lead 把自己派出的会话开的 PR 都挂到自己会话顶上（用户 2026-11-07 定）；重复 attach 无副作用。
@@ -217,7 +248,7 @@ export function batchStatus({ gh, issueRef }) {
 // brief
 
 /** 开工消息正文：执行会话只靠这条消息开工，要写全红线、做法和给 lead 发消息的三种格式。 */
-export function toOwnerMessage({ ref, title, url, lead, parent = null, openPr = null, urgent = false }) {
+export function toOwnerMessage({ ref, title, url, lead, parent = null, openPr = null, urgent = false, userWords = null, charter = undefined, card = null, early = null }) {
   return [
     `批准执行开工：${ref}「${title}」`,
     ...(url ? [url] : []),
@@ -225,13 +256,22 @@ export function toOwnerMessage({ ref, title, url, lead, parent = null, openPr = 
     '你负责把这个子 issue 做成一个 PR，并推到正式 PR（Ready for review）。这是红线：PR 还是 Draft 就不算做完；CI 红了就修到绿。一个子 issue 只对应这一个 PR、这一个会话：不另开第二个 PR。',
     ...(parent ? ['', `总 issue：${parent}。开工前先读它的目标与背景、已定决策、并行/串行原则和相邻子 issue，弄清这个子 issue 在整体里要达成什么；总 issue 和子 issue 说法冲突时按子 issue 做，并发「卡住」说明。`] : []),
     ...(openPr ? ['', `接手：这个子 issue 已经有开着的 PR #${openPr}（上一个会话没做完）。接着这个 PR 做，不开新 PR。`] : []),
+    ...(userWords ? ['', '用户原话（lead 原样转来，和子 issue 冲突时按子 issue 做并发「卡住」说明）：', String(userWords)] : []),
+    ...(charter === undefined ? [] : ['', charter ? `运行章程：同文件冲突 ${charter.conflict.same_file === 'parallel' ? '不串行（各自转正式，按 PR 正文「合并顺序」排先后）' : '串行'}；预审 ${charter.prereview}；预开工 ${charter.early_start ? '允许' : '不允许'}。` : '运行章程：无章程。']),
+    ...(card ? ['', `仓库卡（${card.repo}）：`,
+      ...card.hot_files.map((h) => `- 热点文件 \`${h.path}\`：${h.why}`),
+      ...card.guards.map((g) => `- 检查「${g.name}」：${g.rule}`),
+      ...card.pitfalls.map((x) => `- 坑：${x}`)] : []),
+    ...(parent ? ['', `运行笔记：开工前读一遍兄弟会话记的决定和坑 \`node ~/.claude/skills/approve-exec/scripts/note.mjs list --root ${parent}\`；你做了会影响兄弟子 issue 的决定、或踩了别人也会踩的坑，用 \`note.mjs add --root ${parent} --from ${ref} --kind <decision|pitfall> --text "…" [--broadcast]\` 记下来。`] : []),
+    ...(early ? ['', `预开工：上游还没合入，你先基于它们已判通过的代码开发。从目标分支开分支后，把每个上游 PR 的分支合进来：${early.map((u) => `PR #${u.pr}（${u.ref}，分支 ${u.branch ?? '用 gh pr view 查'}）`).join('、')}。PR 的目标分支仍是 main 或子 issue 首行写的分支，不指向上游 PR 的分支；PR 保持 Draft；上游 PR 每有新提交就再合一次。上游全部合入前不发「待验收」；全部合入后把目标分支的最新内容合进来、等 CI 全绿，再走第 5 步。上游 PR 被关掉没合就发「卡住」。`] : []),
     '',
     '做法：不走 KEEL，直接用 git + gh。完整步骤读 `~/.claude/skills/approve-exec/references/owner-protocol.md`，要点：',
     '1. 先读子 issue 全文、「参考」里的文件、目标仓的 AGENTS.md / CLAUDE.md 和 PR 模板，以及它们指向的 PR 门禁规则（如 docs/dev-rules/ 下的文件）；PR 正文要逐项满足这些门禁。只改「范围」里的文件，不做「不做」里的事。',
     `2. 分支：Cindy 已经给你建好工作树和托管分支（cindy/<名>），就在这个分支上工作，不要 git checkout -b 另开分支（换分支会让工作树回收不了）。没有提交前先对齐最新目标分支：git fetch origin 后 git reset --hard origin/<目标分支>（子 issue 首行写了「PR 指向」就用它，否则 main）。${openPr ? `接手时改成对齐 PR 分支：git reset --hard origin/<PR #${openPr} 的分支>。` : ''}推送一律 git push origin HEAD:<PR 分支名>。尽早开 Draft PR（正文按任务 issue 范式，写一行「任务 issue：${ref}」）。开出后马上做两件事：用 cindy_helper 的 \`manage_session_prs\`（action=attach，pr 填 {repo, number}，不传 session_id）把这个 PR 挂到本会话顶上；用 \`set_current_session_title\` 在标题前补 \`#<PR号>-\`，其余命名不变（\`#<PR号>-<人话任务名>丨<MMDD>\`）。`,
     '3. 写代码，按目标仓规则测试，分批提交、推送。PR 正文里每条「已验证」都写实际跑的命令和退出码（例：`pnpm test → exit 0`），只写「通过」不算；没跑过的写进「未执行的验证」。界面有变化就在 PR 里附截图或 HTML demo。目标仓规定每个 PR 必须附的交接文件（如 Mivo 的 docs/pr/<PR号>/review.md、qa.md）按仓库要求写，不算越界。',
     '4. 等 CI 时不结束本轮：反复跑 `timeout 540 gh pr checks <PR号> --watch --fail-fast`，直到全部检查跑完；红了就修，修完再等。「CI 全绿」指当前 head 的全部检查都跑完且通过（skipping 算通过），不只是必需检查。',
-    `5. CI 全绿后，先把 PR 正文「验收对照」每条 SC 的状态和证据填好，跑 \`check-pr-body.sh --stage ready <owner/repo#PR号> ${ref}\` 通过（人工手测项在「未执行的验证」写清谁验、何时验），再给 lead 发「待验收」，然后结束本轮，等 lead 回复。`,
+    '4.5 预审：运行章程要求时（预审是 all；或是 feature 且你改了非测试、非文档的源码文件），CI 全绿后先按 owner-protocol.md「预审」找一个不是作者的审查 worker 审一轮，只修确认成立的问题，再用 `node ~/.claude/skills/approve-exec/scripts/event.mjs emit --type prereview --item <子 issue> --pr <号> --head <当前 sha> --note "<轮数> 轮，修了 <n> 条"` 记一条。没有这条记录 lead 验收不过。',
+    `5. CI 全绿后，先把 PR 正文「验收对照」每条 SC 的状态和证据填好，跑 \`check-pr-body.sh --stage ready <owner/repo#PR号> ${ref}\` 通过（人工手测项在「未执行的验证」写清谁验、何时验），先用 \`event.mjs emit --type ready_for_verdict --item ${ref} --pr <号> --head <当前 sha>\` 把事件记到子 issue 上，再给 lead 发「待验收」，然后结束本轮，等 lead 回复。`,
     '6. lead 回「要改」：改完回到第 4 步。lead 回「通过」：`gh pr ready <PR号>` 转正式，确认 CI 仍全绿，给 lead 发「已转正式」。到这里任务完成。转正式后 lead 又回「要改」（正式档复核没过）：修完、CI 全绿后再发「已转正式」，不要再发「待验收」；Mivo 仓转正式后的 CI 和审查问题归盯梢，不由你改。',
     '',
     `给 lead 发消息：用 cindy_helper 的 \`send_to_session\`，\`target_session_id\` 填 \`${lead}\`。只在三种时候发，消息第一行固定写：`,
@@ -246,7 +286,7 @@ export function toOwnerMessage({ ref, title, url, lead, parent = null, openPr = 
   ].join('\n');
 }
 
-export function brief({ gh, itemRef, root, lead, repoDir, project, name, urgent = false, gateway, kind, route = selectDispatchRoute(), now = nowIso() }) {
+export function brief({ gh, itemRef, root, lead, repoDir, project, name, urgent = false, gateway, kind, userWords = null, early = false, cardsDir, route = selectDispatchRoute(), now = nowIso() }) {
   if (!SESSION_RE.test(String(lead ?? ''))) reject(`--lead 要填 lead 会话 id（get_current_session_id 的 session_id），当前：${lead}`);
   if (!isAbsolute(String(repoDir ?? ''))) reject(`--repo-dir 要填目标仓主目录的绝对路径，当前：${repoDir}`);
   if (!project) reject('--project 要填目标仓对应的 Cindy 项目路径（先 list_projects 查，没有就 create_project）');
@@ -283,14 +323,31 @@ export function brief({ gh, itemRef, root, lead, repoDir, project, name, urgent 
   }
   const title = sessionTitle({ ref, title: issue.title }, now, { pr: openPr, ...(name ? { name } : {}) });
   const parent = header.parent;
+  const login = ghLogin(gh);
+  const charter = rootRef.toLowerCase() === ref.toLowerCase() ? undefined : selectCharter(readComments(gh, commentsPath(rootRef)), login);
+  const card = readRepoCard(repo, cardsDir);
+  let upstreams = null;
+  if (early) {
+    const status = batchStatus({ gh, issueRef: rootRef });
+    if (!status.early_dispatchable.includes(ref)) reject(`${ref} 不在 early_dispatchable 里：--early 只用于章程允许预开工、且每个上游都已判通过的子 issue`);
+    const item = status.items.find((i) => i.ref === ref);
+    upstreams = item.waiting_on.map((dep) => {
+      const d = parseIssueRef(dep);
+      const pr = selectOpenTaskPrs(gh, d.repo)[dep][0].number;
+      let branch = null;
+      try { branch = gh(['api', `repos/${d.repo}/pulls/${pr}`])?.head?.ref ?? null; } catch { branch = null; }
+      return { ref: dep, pr, branch };
+    });
+  }
   return {
     ok: true,
     ref,
     open_pr: openPr,
     exec_kind: execKind,
+    ...(upstreams ? { early_upstreams: upstreams } : {}),
     request: {
       title,
-      message: toOwnerMessage({ ref, title: issue.title, url: issue.html_url ?? null, lead, parent, openPr, urgent }),
+      message: toOwnerMessage({ ref, title: issue.title, url: issue.html_url ?? null, lead, parent, openPr, urgent, userWords, charter, card, early: upstreams }),
       working_dir: repoDir,
       project_path: project,
       use_worktree: true,
@@ -314,8 +371,8 @@ export function claim({ gh, itemRef, session, title, now = nowIso() }) {
   const current = activeDispatch(comments, ref, login);
   if (current) reject(`${ref} 已派给会话 ${current.session}（${current.url ?? '子 issue 评论'}）：同一子 issue 只能有一个会话。确认那个会话已不在后，先 release 再派`);
   if (activeClaims(comments, ref, login).length) reject(`${ref} 还在旧台账的 run 里：按 references/legacy-ledger-flow.md 处理，不重复派`);
-  const posted = gh(['api', '-X', 'POST', commentsPath(ref), '-f', `body=批准执行派发：${dateOf(now)} ${ref} → 会话 ${session}（${title}）`]);
-  return { ok: true, ref, session, comment_url: posted?.html_url ?? null };
+  const posted = emit({ gh, type: 'dispatch', itemRef: ref, session, title, now });
+  return { ok: true, ref, session, comment_url: posted.comment_url };
 }
 
 export function release({ gh, itemRef, reason, now = nowIso() }) {
@@ -324,8 +381,8 @@ export function release({ gh, itemRef, reason, now = nowIso() }) {
   const login = ghLogin(gh);
   const current = activeDispatch(readComments(gh, commentsPath(ref)), ref, login);
   if (!current) reject(`${ref} 没有有效的派发记录，不用撤回`);
-  const posted = gh(['api', '-X', 'POST', commentsPath(ref), '-f', `body=批准执行撤回：${dateOf(now)} ${ref}：${String(reason).trim()}`]);
-  return { ok: true, ref, released_session: current.session, comment_url: posted?.html_url ?? null };
+  const posted = emit({ gh, type: 'withdraw', itemRef: ref, session: current.session, note: String(reason).trim(), now });
+  return { ok: true, ref, released_session: current.session, comment_url: posted.comment_url };
 }
 
 export function archived({ gh, itemRef, session, now = nowIso() }) {
@@ -335,8 +392,8 @@ export function archived({ gh, itemRef, session, now = nowIso() }) {
   if (!unarchivedSessions(readComments(gh, commentsPath(ref)), ref, login).includes(session)) {
     reject(`${ref} 没有待归档的会话 ${session}（没派过，或已经记过归档）`);
   }
-  const posted = gh(['api', '-X', 'POST', commentsPath(ref), '-f', `body=批准执行归档：${dateOf(now)} ${ref} 会话 ${session}`]);
-  return { ok: true, ref, session, comment_url: posted?.html_url ?? null };
+  const posted = emit({ gh, type: 'archived', itemRef: ref, session, now });
+  return { ok: true, ref, session, comment_url: posted.comment_url };
 }
 
 // notify
@@ -370,6 +427,40 @@ export function notify({ gh, prRef, leadAddress, partnerPath = PARTNER_PATH, now
   };
 }
 
+// merge-request
+
+/**
+ * 审查放行后按章程交合并请求（#105）。只核对授权并生成 pr-merge 的输入，不发消息、不合并：
+ * lead 把 pr_merge_input 写进文件，交给 pr-merge skill 的 build-request.mjs，按它的输出分路（Mivo 交合并伙伴，其他仓按 pr-merge 标准自己合）。
+ * 章程没写明授权时拒绝：那种情况照旧等用户说「合并」。
+ */
+export function mergeRequest({ gh, prRef, rootRef, lead, title = null }) {
+  const { repo, number, ref } = parseIssueRef(prRef);
+  const root = parseIssueRef(rootRef).ref;
+  if (!SESSION_RE.test(String(lead ?? ''))) reject(`--lead 要填 lead 会话 id，当前：${lead}`);
+  const charter = selectCharter(readComments(gh, commentsPath(root)), ghLogin(gh));
+  if (!charter) reject(`${root} 没有运行章程：没有章程授权就不自动交合并请求，等用户说「合并」`);
+  if (!charter.merge.auto_request) reject(`${root} 的章程没有授权自动交合并请求（merge.auto_request 为 false）：等用户说「合并」`);
+  const pr = gh(['api', `repos/${repo}/pulls/${number}`]);
+  if (pr?.merged_at) return { ok: true, pr: ref, already_merged: true };
+  if (pr?.state !== 'open' || pr?.draft === true) reject(`${ref} 不是开着的正式 PR（state=${pr?.state}，draft=${pr?.draft}），不交合并请求`);
+  const base = pr?.base?.ref ?? null;
+  if (!baseAllowed(charter, base)) reject(`${root} 的章程 merge.bases 是 ${JSON.stringify(charter.merge.bases)}，不含 ${ref} 的目标分支 ${base}：等用户说「合并」`);
+  return {
+    ok: true,
+    pr: ref,
+    already_merged: false,
+    route: repo.toLowerCase() === MIVO_REPO ? 'partner' : 'self',
+    pr_merge_input: {
+      session_id: lead,
+      ...(title ? { session_title: title } : {}),
+      notify_session: charter.lead_session,
+      authorization_text: charter.user_words,
+      prs: [{ repo, number }],
+    },
+  };
+}
+
 // cli
 
 export function main(argv = process.argv.slice(2)) {
@@ -380,12 +471,13 @@ export function main(argv = process.argv.slice(2)) {
   try {
     let out;
     if (cmd === 'status') out = batchStatus({ gh, issueRef: args.issue });
-    else if (cmd === 'brief') out = brief({ gh, itemRef: args.item, root: args.root, lead: args.lead, repoDir: args['repo-dir'], project: args.project, name: args.name, urgent: args.urgent === true, ...(typeof args.gateway === 'string' ? { gateway: args.gateway } : {}), ...(args.kind !== undefined ? { kind: String(args.kind) } : {}), now });
+    else if (cmd === 'brief') out = brief({ gh, itemRef: args.item, root: args.root, lead: args.lead, repoDir: args['repo-dir'], project: args.project, name: args.name, urgent: args.urgent === true, ...(typeof args.gateway === 'string' ? { gateway: args.gateway } : {}), ...(args.kind !== undefined ? { kind: String(args.kind) } : {}), ...(typeof args['user-words'] === 'string' ? { userWords: args['user-words'] } : {}), early: args.early === true, now });
     else if (cmd === 'claim') out = claim({ gh, itemRef: args.item, session: args.session, title: args.title, now });
     else if (cmd === 'release') out = release({ gh, itemRef: args.item, reason: args.reason, now });
     else if (cmd === 'archived') out = archived({ gh, itemRef: args.item, session: args.session, now });
     else if (cmd === 'notify') out = notify({ gh, prRef: args.pr, leadAddress: args['lead-address'], ...(typeof args.partner === 'string' ? { partnerPath: args.partner } : {}), now });
-    else reject(`子命令只能是 status / brief / claim / release / archived / notify（当前：${cmd ?? '空'}）`);
+    else if (cmd === 'merge-request') out = mergeRequest({ gh, prRef: args.pr, rootRef: args.root, lead: args.lead, title: typeof args.title === 'string' ? args.title : null });
+    else reject(`子命令只能是 status / brief / claim / release / archived / notify / merge-request（当前：${cmd ?? '空'}）`);
     process.stdout.write(`${JSON.stringify(out)}\n`);
     return 0;
   } catch (err) {

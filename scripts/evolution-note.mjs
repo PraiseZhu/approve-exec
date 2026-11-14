@@ -22,7 +22,8 @@ const MD_FILE = join(SKILL_ROOT, 'EVOLUTION.md');
 
 const FINGERPRINT_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
 const TIERS = ['by-design', 'proposal', 'auto'];
-const STATUSES = ['open', 'landed', 'adopted', 'rejected', 'tracked'];
+// obsolete：问题所在的流程已经退役（如 2026-11-07 前的台账流程），不再需要处理（#108）。
+const STATUSES = ['open', 'landed', 'adopted', 'rejected', 'tracked', 'obsolete'];
 
 const print = (obj) => console.log(JSON.stringify(obj, null, 2));
 const fail = (e) => {
@@ -76,7 +77,7 @@ const fmtDate = (iso) => (iso ?? '').slice(0, 10);
 
 function renderMd(ledger) {
   const groups = [
-    ['proposal', '## 待维护者拍板(扩权类提案,永不自动落地)', (e) => e.status !== 'rejected'],
+    ['proposal', '## 待维护者拍板(扩权类提案,永不自动落地)', (e) => e.status === 'open'],
     ['auto', '## 已自动落地(拆错/补救工具缺口,不放宽口径)', () => true],
     ['by-design', '## 无法自动化(by-design,只计数观察)', () => true],
   ];
@@ -94,6 +95,11 @@ function renderMd(ledger) {
       if (e.proposal) md += `  - 提案:${e.proposal}\n`;
       if (e.note) md += `  - 备注:${e.note}\n`;
     }
+  }
+  const closed = ledger.entries.filter((e) => e.tier === 'proposal' && ['landed', 'adopted', 'obsolete', 'tracked'].includes(e.status));
+  if (closed.length) {
+    md += '\n## 已处理的提案(已落地 / 已失效)\n\n';
+    for (const e of closed) md += `- \`${e.fingerprint}\` ${e.title} — status: ${e.status}${e.note ? `，${e.note}` : ''}\n`;
   }
   if (rejected.length) {
     md += '\n## 已否决的提案(留档防止重复提出)\n\n';

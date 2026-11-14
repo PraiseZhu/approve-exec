@@ -1,12 +1,12 @@
 ---
 name: approve-exec
-description: 批准执行——接在「开 issue」之后：吃总 issue（或独立 issue / 单个子 issue），lead 按总 issue 的并行/串行原则，把依赖已合入的子 issue 一次全派出去，每个子 issue 开一个独立会话（1 子 issue = 1 PR = 1 会话），执行会话默认用 Claude 网关的 Opus 5.5 high；不走 KEEL、不建台账、不挂定时任务。执行会话自己推到 Draft PR CI 全绿后发消息叫醒 lead 验收，lead 判通过后执行会话转正式 PR 即收工；Mivo 仓 PR 交合并伙伴、合入后伙伴通知 lead（正文写了「合并顺序」的由伙伴自动合，lead 在转正式时把通知地址登记给伙伴；没写的等用户在 lead 会话说「合并」），用户说「合并」后其他仓 PR 由 lead 按 pr-merge 自己合；PR 合入后 lead 归档已完成的会话、派下一批。lead 不写产品代码；除用户在提示词里明确授权的加急 admin 合并和用户说「合并」的非 Mivo PR 外，lead 不合并。触发词：批准执行。
+description: 批准执行——接在「开 issue」之后：吃总 issue（或独立 issue / 单个子 issue），lead 按总 issue 的并行/串行原则，把依赖已合入的子 issue 一次全派出去，每个子 issue 开一个独立会话（1 子 issue = 1 PR = 1 会话），执行会话默认用 Claude 网关的 Opus 5.5 high；不走 KEEL、不建台账；每个等待由一条不调用模型的对账任务看着，到期叫醒该做事的会话（v3）。执行会话自己推到 Draft PR CI 全绿后发消息叫醒 lead 验收，lead 判通过后执行会话转正式 PR 即收工；Mivo 仓 PR 交合并伙伴、合入后伙伴通知 lead（正文写了「合并顺序」的由伙伴自动合，lead 在转正式时把通知地址登记给伙伴；没写的等用户在 lead 会话说「合并」），用户说「合并」后其他仓 PR 由 lead 按 pr-merge 自己合；PR 合入后 lead 归档已完成的会话、派下一批。lead 不写产品代码；除用户在提示词里明确授权的加急 admin 合并和用户说「合并」的非 Mivo PR 外，lead 不合并。触发词：批准执行。
 trigger: 批准执行
 ---
 
 # approve-exec — 批准执行
 
-2026-11-07 改版（用户定）：不走 KEEL，不建台账，不挂定时任务。lead 派完就停，只在收到消息时醒来；执行会话自己推进到正式 PR，这是红线。谁叫醒谁：
+2026-11-07 改版（用户定）：不走 KEEL，不建台账。2026-11-14 v3（用户定，PraiseZhu/approve-exec#101）：进度仍然只从 GitHub 现算，不存状态；每个等待由对账任务看着，到期就叫醒该做事的会话；授权和取舍在开工时一次写进运行章程。lead 派完就停，只在收到消息时醒来；执行会话自己推进到正式 PR，这是红线。谁叫醒谁：
 
 | 消息第一行 | 谁发 | 发给谁 | 什么时候 |
 |---|---|---|---|
@@ -15,8 +15,11 @@ trigger: 批准执行
 | `批准执行通过 …` / `批准执行要改 …` | lead | 执行会话 | 验收后 |
 | `批准执行已转正式 …` | 执行会话 | lead | 转正式后 CI 仍全绿 |
 | `批准执行卡住 …` | 执行会话 | lead | 缺权限、缺环境，或范围、验收标准必须改 |
+| `批准执行对账：<子 issue> <动作>` | 对账任务 | lead 或执行会话 | 某个等待超过期限（见「对账任务」）；动作是 `wake_lead`、`wake_owner`、`recheck`、`request_merge` 之一 |
 | `praise-merge 通知登记` | lead | 合并伙伴（Mini） | Mivo PR 转正式、`check-pr.mjs --stage ready` 通过后（第 4 步） |
 | `praise-merge 已合并 …` | 合并伙伴（Mini） | lead | Mivo PR 合入后：自动合入的（lead 登记过地址）和用户说「合并」交出去的都有（其他仓 PR 由 lead 自己合，没有这条消息） |
+
+派发、待验收、通过、要改、已转正式、卡住、撤回、归档、预审这 9 种事件，都先用 `node scripts/event.mjs emit --type <类型> --item <子 issue> …` 写到子 issue 上，再发消息（`batch.mjs` 的 `claim`、`release`、`archived` 已经内含这一步）。不手写这些评论：对账任务、复核和运行报告只认脚本写的标记，消息送丢了事件也还在。
 
 `send_to_session` 发给已有会话时，对方关着会被唤醒，正在跑就排队，这一轮结束后送到。对方被归档、删除或 Agent 起不来时送不到：双方都看回执，送不到就在子 issue 上评论「批准执行未送达：…」，不互相干等（见「执行会话的规矩」和第 4 步）。
 
@@ -34,6 +37,8 @@ lead 会话要在完全访问权限下运行：派出的执行会话继承 lead 
 
 先备好 lead 的两个地址：`get_current_session_id` 的 `session_id` 是 lead 会话 id，写进开工消息；`list_machines` 里 isSelf 为 true 那台的 deviceId，加 `::` 再加会话 id，是给合并伙伴用的跨电脑地址。
 
+**定章程**（v3，#105）：入口是总 issue 时，在第 1 步之前把下面几项一次问清（入口消息里已经说了的不再问），写成章程文件后 `node scripts/charter.mjs write --root <总 issue> --json <文件>`：审查放行后是否由 lead 自动交合并请求、对哪些目标分支生效（`main`、`integration/*`）；两个 PR 改同一个文件时串行还是并行；预审开在哪一档（`feature` / `all` / `off`）；是否允许预开工；同时在跑的执行会话上限；谁做实机手测；用户授权的原话；lead 会话的跨电脑地址（上一段备好的）。字段说明见 README「运行章程」。没有章程也能派，但对账任务不管这个 run，合并照旧等用户说「合并」。章程没写的事一律不自动做。lead 换人时发一条新章程。
+
 1. **看现状。** 先读总 issue 的目标与背景、已定决策和并行/串行原则，核对每个子 issue「依赖」写的先后关系和总 issue 一致；不一致先改子 issue（按任务 issue 范式记一行变更），再派。然后 `node scripts/batch.mjs status --issue <ref>`。每个子 issue 只有七种状态：
    - `dispatchable`：依赖都已合入，可以开工。全部进第 2 步，一次派完，不排队。
    - `waiting`：在等 `waiting_on` 里的 issue 合进去。依赖被关成「不做」时问用户。
@@ -43,6 +48,7 @@ lead 会话要在完全访问权限下运行：派出的执行会话继承 lead 
    - `needs_owner`：PR 开着，但没有有效的派发记录（会话失联后撤回过，或别处开的 PR）。先用 `list_sessions` 按标题里的 PR 号找实际负责的会话：找到就用 `batch.mjs claim` 补登记；确认没人做就走第 2 步派一个会话接手，brief 会让它接着原 PR 做，不开新 PR。
    - `done` 只在子 issue 已关闭、且没有写着「任务 issue」的开着的 PR 时出现；issue 关了但 PR 还开着会是 `needs_decision`，先核实是合了还是不做了，不放行依赖、不归档会话。
    - `done`：子 issue 已关闭。
+   - `early_dispatchable` 不是第八种状态：它列出 `waiting` 里可以预开工的子 issue（章程允许预开工，每个没合入的上游都有唯一一个开着的 PR、且最新裁决是通过）。派法见第 2 步「预开工」。
    `all_done` 为真时到第 5 步。
    - 每次跑完 status，把输出里 `to_attach` 的每个 PR 用 cindy_helper `manage_session_prs` 挂到 lead 自己的会话顶上（用户 2026-11-07 定：lead 开出的 PR 都要挂在会话顶上）。参数：`{"action":"attach","pr":{"repo":"owner/repo","number":123}}`，不传 `session_id`；PR 要写成 `pr` 对象，不收 `pr_url`。重复 attach 没有副作用。
 2. **派会话，每个 `dispatchable` 子 issue 一次。**
@@ -54,15 +60,20 @@ lead 会话要在完全访问权限下运行：派出的执行会话继承 lead 
    - `node scripts/batch.mjs brief --item <子 issue> --root <入口 issue> --lead <lead 会话 id> --repo-dir <目标仓主目录> --project <项目路径> [--name "<人话任务名>"] [--urgent] [--gateway <网关名>] [--kind <前端|后端|混合>]`，拿到 `request`。会话标题是 `#<PR号>-<人话任务名>丨<MMDD>`（还没有 PR 时不带 `#<PR号>-`，执行会话开出 PR 后自己补）。人话任务名从子 issue 标题提，提不出不超过 14 个字的中文短名时退出码 2，用 --name 给一个。已有开着的 PR 时，开工消息写明接着那个 PR 做。
    - 用 cindy_helper 的 `send_to_session` 新建会话，参数原样传 `request` 里的键：`title`、`message`、`working_dir`、`project_path`、`use_worktree`、`agent_kind`、`model`、`effort`（带了 `--gateway` 或走后端路线时还有 `agent_device_id`）。不自己改模型和推理强度，不传 provider_id。
    - 成功后 `node scripts/batch.mjs claim --item <子 issue> --session <返回的 target_session_id> --title <标题>`，在子 issue 上记「批准执行派发」，防止别的 lead 或别的电脑重复派。回执不明确时先用 `list_sessions` 查有没有建出会话，不盲目重派。
+   - **带上用户的话**（v3，#106）：用户在入口或中途说的、和这个子 issue 有关的话，派发时加 `--user-words "<原话>"` 原样带进开工消息；派出去之后用户又说的，用 `send_to_session` 原样转给执行会话，不转述。开工消息还会自动带上章程摘要、仓库卡（`repo-cards/` 下这个仓的必改路径、热点文件和常见坑）和运行笔记的读法。
+   - **预开工**（v3，#107，章程允许时）：对 `early_dispatchable` 里的子 issue 用 `brief … --early` 生成开工消息，其余步骤照常。执行会话基于上游已判通过的代码先开发，PR 保持 Draft，上游全部合入前不发「待验收」；同时在跑的会话数不超过章程的上限。
    - **派发失败的会话马上归档**（用户 2026-11-07 定）：`send_to_session` 报错但回执里有 `target_session_id`、`claim` 被拒、或新会话一开工就报错（用量上限、Agent 起不来），先 `archive_sessions` 归档那个会话；已经 claim 过的再 `batch.mjs release --reason "<原因>"`，然后按上面的网关顺序重派。
-3. **停下。** 派完就结束本轮。不挂定时任务，不轮询。
+3. **停下。** 派完就结束本轮，不轮询。等待由对账任务看着（见「对账任务」）。
 4. **被消息叫醒后：**
-   - **待验收**：先把这个 PR 挂上：`manage_session_prs`（`action: attach`）挂到 lead 自己的会话，再带 `session_id`=执行会话 id 挂到执行会话（执行会话漏挂时兜底；会话标题仍是 `#<PR号>-<人话任务名>丨<MMDD>`，没补前缀就提醒它补，不替它改名）。然后 `node scripts/check-pr.mjs --item <子 issue> --pr <号> --head <消息里的 sha>`。再核对 PR 正文里每条「已验证」都附了命令和退出码，缺了判要改；能在本机复跑的（仓库在本机、依赖已装），挑一条类型检查或测试命令在 PR head 的临时工作树里复跑，复跑不了就在裁决评论写「未复跑」（2026-11-07 复盘：cindy#9200 正文写 tsc 通过、实际 TS2339，CI 没覆盖）。有不过的项就判要改。全过后，再对照子 issue 的「目标」「原因」「不做」看 diff 是否做对了事；界面有变化却没附截图或 demo 判要改；拿不准问 Jev。判要改只为 SC 没达成、改动越出范围、做的事不对或 CI 不绿；PR 正文的小出入写进回复，照样判通过。用 `send_to_session` 回执行会话，第一行写 `批准执行通过 <子 issue> PR #<号>` 或 `批准执行要改 <子 issue> PR #<号>`，要改的条目从下一行起逐条写。裁决同时写成子 issue 评论。判要改不设轮数上限；同样的条目连续两次没有新提交时，告诉用户。
+   - **待验收**：先把这个 PR 挂上：`manage_session_prs`（`action: attach`）挂到 lead 自己的会话，再带 `session_id`=执行会话 id 挂到执行会话（执行会话漏挂时兜底；会话标题仍是 `#<PR号>-<人话任务名>丨<MMDD>`，没补前缀就提醒它补，不替它改名）。然后 `node scripts/check-pr.mjs --item <子 issue> --pr <号> --head <消息里的 sha>`。再核对 PR 正文里每条「已验证」都附了命令和退出码，缺了判要改；能在本机复跑的（仓库在本机、依赖已装），挑一条类型检查或测试命令在 PR head 的临时工作树里复跑，复跑不了就在裁决评论写「未复跑」（2026-11-07 复盘：cindy#9200 正文写 tsc 通过、实际 TS2339，CI 没覆盖）。有不过的项就判要改。全过后，再对照子 issue 的「目标」「原因」「不做」看 diff 是否做对了事；界面有变化却没附截图或 demo 判要改；拿不准问 Jev。判要改只为 SC 没达成、改动越出范围、做的事不对或 CI 不绿；PR 正文的小出入写进回复，照样判通过。输出里有 `judgement` 时，是范围外但在 PR 正文「范围对照」写了说明的文件：lead 逐个判断是否必要，认可的补进子 issue「范围」并记一行，不认可的判要改。`prereview` 项不过（章程要求预审、当前版本却没有预审记录）判要改。裁决先用 `node scripts/event.mjs emit --type verdict_pass --item <子 issue> --pr <号> --head <sha> [--note "…"]`（要改用 `verdict_revise`，`--note` 写要改的条目）写到子 issue，再用 `send_to_session` 回执行会话，第一行写 `批准执行通过 <子 issue> PR #<号>` 或 `批准执行要改 <子 issue> PR #<号>`，要改的条目从下一行起逐条写。判通过但要按住不转正式时（章程是同文件串行，且它和另一个 PR 改了同一个文件），`--note` 以「暂缓转正式：<原因>」开头，对账任务就不会催；章程写了同文件并行时不许按住，让它转正式并在 PR 正文「合并顺序」写清先后。判要改不设轮数上限；同样的条目连续两次没有新提交时，告诉用户。
    - **已转正式**：`node scripts/check-pr.mjs --item <子 issue> --pr <号> --stage ready`。通过就是这个子 issue 收工。Mivo 仓 PR 通过后还要登记合入通知（用户 2026-11-08 定，PraiseZhu/approve-exec#97）：`node scripts/batch.mjs notify --pr <owner/repo#号> --lead-address <lead 的跨电脑地址>`，把输出的 `message` 原样用 `send_to_session` 发给 `target_session_id`（合并伙伴）。正文写了「合并顺序」的本人 PR 由伙伴自动合入，没有「合并」请求带 `notify_session`，不登记就收不到「praise-merge 已合并」。输出 `already_merged` 为真时 PR 已经合了，直接按下面「praise-merge 已合并」处理；退出码 2 或送不到伙伴时告诉用户，PR 合入后用户说「继续」即可。不过就回执行会话「批准执行要改 … （正式 PR）」并写明哪项没过：非 Mivo 仓它修完 CI 全绿后再发「已转正式」，lead 再跑 `--stage ready`（不回到验收档，验收档要求 Draft）；Mivo 仓转正式后的问题交盯梢。之后的审查意见和 CI 归盯梢。入口授权了加急合并的，走「加急合并」。
+   - **对账：复核**（消息首行 `批准执行对账：<子 issue> recheck`，v3，#104）：判通过之后 PR 又有新提交。`node scripts/check-pr.mjs --item <子 issue> --pr <号> --stage recheck --accepted-head <最新一次通过裁决里的 sha>`，只查新增改动：范围、存量测试有没有被删行、CI。通过就对当前版本再 `event.mjs emit --type verdict_pass` 一次。不过：非 Mivo 仓发回执行会话修；Mivo 仓转正式后的代码归盯梢，在 PR 上对应行留一条评论，用人话写明违反子 issue 哪条验收项，未解决的讨论会挡住合并。
+   - **对账：交合并请求**（`request_merge`，v3，#105）：章程已授权、PR 审查放行超过 10 分钟还没进合并队列。`node scripts/batch.mjs merge-request --pr <owner/repo#号> --root <总 issue> --lead <lead 会话 id>`，把输出的 `pr_merge_input` 写进文件，交给 `pr-merge` skill 的 `build-request.mjs`，再按 `pr-merge` 分路（Mivo 交合并伙伴，其他仓按它的标准自己合）。脚本拒绝（章程没授权、目标分支不在范围）时告诉用户要说「合并」。
+   - **对账：叫醒 lead**（`wake_lead`）：按消息第二行的原因做：待验收没裁决，做上面的「待验收」；转正式后长时间没有新提交也没有审查结论，查审查机和盯梢是否在处理、按「盯梢兜底」规则决定是否接手；审查放行没进合并队列而章程没授权，告诉用户；执行会话送不到，按「会话失联」处理。
    - **发给执行会话的消息送不到**（回执 `ARCHIVED`、`DELETED`、`AGENT_NOT_READY` 等）：在子 issue 上评论「批准执行未送达：<原消息第一行>（<错误码>）」，并告诉用户；按「会话失联」处理。`DELIVERY_UNKNOWN` 先 `get_chat_history` 核对再决定是否重发（参数 `{"session_ids":["<会话 id>"],"roles":["user","assistant"],"limit":5}`；键是复数的 `session_ids`）。
    - **卡住**：能在范围内换做法，就把结论发回执行会话。范围或验收标准必须改，先告诉用户，按任务 issue 范式先改 issue 再改代码，改完把结论发回。缺权限、缺环境告诉用户。
    - **praise-merge 已合并**（只有 Mivo PR 有）、lead 按 `pr-merge` 自己合完非 Mivo PR 后，或用户说「继续」：先跑第 1 步的 status，对输出里 `to_archive` 的每一项用 cindy_helper `archive_sessions` 归档那个执行会话，成功后 `node scripts/batch.mjs archived --item <子 issue> --session <会话 id>` 记下来（用户 2026-11-07 定：PR 合入后由 lead 及时归档已完成的会话）；再派新放开的子 issue。
-5. **收工。** `all_done` 为真：告诉用户全部合入。总 issue 由验收机自动验收、关闭，lead 不交接、不关总 issue。执行会话 PR 合并前不归档；PR 合并后由 lead 按 `to_archive` 归档（第 4 步），漏掉的由 Pro、Mini 两台扫地僧每天兜底归档，分支和工作树也由扫地僧存证清理，lead 不手工删分支。
+5. **收工。** `all_done` 为真：告诉用户全部合入；跑 `node scripts/reconcile.mjs --root <总 issue> --report`，把输出的运行报告贴到总 issue（各阶段用时、审查轮数、判通过后新增提交数，用来和以前的 run 对比）。总 issue 由验收机自动验收、关闭，lead 不交接、不关总 issue。执行会话 PR 合并前不归档；PR 合并后由 lead 按 `to_archive` 归档（第 4 步），漏掉的由 Pro、Mini 两台扫地僧每天兜底归档，分支和工作树也由扫地僧存证清理，lead 不手工删分支。
 
 **合并通知。** 只有 Mivo PR 有伙伴通知。正文写了「合并顺序」的本人 Mivo PR 不用用户说「合并」：审查机挂上 `review:merge-ready` 后由合并伙伴按正文顺序自动合（PraiseZhu/praise-merge#38），合入后伙伴按 lead 在第 4 步登记的地址发 `praise-merge 已合并 <owner/repo>#<号>`。
 
@@ -72,9 +83,28 @@ lead 会话要在完全访问权限下运行：派出的执行会话继承 lead 
 
 用户用别的方式合并、或 Mivo PR 没登记就自动合入时没有通知，用户说「继续」即可。
 
-**会话失联。** 没有定时检查。用户问进度（「进展」）或看到某个子 issue 很久没动时，先用 `list_sessions` / `get_chat_history` 查执行会话：还在就 `send_to_session` 催一次；已经没了（删除、崩溃）就 `node scripts/batch.mjs release --item <子 issue> --reason "<怎么核实的>"`，再回第 2 步重派。新会话的开工消息会写明接着已开的 PR 做。
+**会话失联。** 对账任务在执行会话 6 小时没有新提交、没有在跑的检查、也没发「卡住」时敲门探活，送不到会改成叫醒 lead。被这样叫醒、用户问进度（「进展」）或看到某个子 issue 很久没动时，先用 `list_sessions` / `get_chat_history` 查执行会话：还在就 `send_to_session` 催一次；已经没了（删除、崩溃）就 `node scripts/batch.mjs release --item <子 issue> --reason "<怎么核实的>"`，再回第 2 步重派。新会话的开工消息会写明接着已开的 PR 做。
 
 边界：lead 不写产品代码，不替执行会话推进，不合并任何 PR（「加急合并」和用户说「合并」的非 Mivo PR 除外）。
+
+## 对账任务
+
+v3（用户 2026-11-14 定；2026-11-07 改版时没有任何定时检查，这一条取代它）。一条不调用模型的 Cindy 定时任务，脚本模式，入口 `scripts/reconcile-tick.py`。每轮对所有带运行章程、还开着的总 issue 跑一次 `scripts/reconcile.mjs`：只读 GitHub，现算每个子 issue 在等谁、等了多久，超过期限就叫醒该做事的会话。期限写在 `scripts/lib/reconcile-rules.mjs` 顶部的表里：
+
+| 等待 | 在等谁 | 期限 | 到期动作 |
+|---|---|---|---|
+| 待验收没有裁决 | lead | 15 分钟 | `wake_lead` |
+| 判通过后 PR 还是 Draft | 执行会话 | 30 分钟 | `wake_owner`（lead 写了「暂缓转正式」且章程不是同文件并行时不催） |
+| 转正式后没有新提交也没有新的审查结论 | 审查机、盯梢 | 2 小时 | `wake_lead` |
+| 审查放行后没进合并队列 | lead | 10 分钟 | 章程授权时 `request_merge`，否则 `wake_lead` |
+| 开发或返工中没有新提交、没有在跑的检查、没发「卡住」 | 执行会话 | 6 小时 | `wake_owner` |
+| 判通过后 PR 的代码版本变了 | lead | 立即 | `recheck` |
+
+它不存进度状态：本机只有一份「已敲过门」的去重缓存和一份动作日志（`~/.claude/state/approve-exec/`），缓存丢了最多多敲一次门。它不向 GitHub 写任何内容，不合并，不改代码。
+
+两种模式：默认只记不敲（到期动作只写进动作日志，用来对照真实进展、确认没有误报），另一种才真的敲门。任务全账号只建一条，建在 lead 所在的 Mac 上，不建在 Linux 网关上；怎么建、怎么切模式、怎么停见 README「对账任务」。没有章程的 run 不归它管。
+
+带广播标志的运行笔记（`node scripts/note.mjs add … --broadcast`）也由它转成敲门，通知还在开发的兄弟会话。
 
 ## 执行会话的规矩
 
@@ -98,7 +128,7 @@ lead 会话要在完全访问权限下运行：派出的执行会话继承 lead 
 
 ## 保证等级
 
-T1：skill 纪律加脚本校验，不是宿主强制隔离。`batch.mjs` 只读 GitHub 算状态，派发防重靠子 issue 评论（只认当前 gh 账号，两个 lead 同一时刻派同一个子 issue 时拦不住）；`check-pr.mjs` 只读检查 PR head、Draft、必需 CI、改动范围、PR 正文与待定问题。没有定时检查，执行会话崩了不会被自动发现，靠「进展」和用户兜底。本机接线用 `node scripts/selfcheck.mjs --live` 检查，本文结构由 `tests/skill-doc.test.mjs` 断言，测试集由 `scripts/run-tests.mjs` 冻结枚举。
+T1：skill 纪律加脚本校验，不是宿主强制隔离。`batch.mjs` 只读 GitHub 算状态，派发防重靠子 issue 评论（只认当前 gh 账号，两个 lead 同一时刻派同一个子 issue 时拦不住）；`check-pr.mjs` 只读检查 PR head、Draft、必需 CI、改动范围、PR 正文与待定问题。对账任务负责发现六种情况：待验收没裁决、判通过没转正式、转正式后审查停滞、审查放行没进合并队列、开发中没动静、判通过后代码变了；它只读 GitHub、不存进度状态，判停滞只看提交、检查、标签和 review，不看多久没有评论。它不负责合并、改代码、判断审查意见对不对。对账任务没建、电脑关机、gh 读不了或 run 没有章程时没有任何提醒，仍靠「进展」和用户兜底。事件由 `scripts/event.mjs` 统一写，判通过后的复核由 `check-pr.mjs --stage recheck` 做。本机接线用 `node scripts/selfcheck.mjs --live` 检查，本文结构由 `tests/skill-doc.test.mjs` 断言，测试集由 `scripts/run-tests.mjs` 冻结枚举。
 
 ## 自进化
 
