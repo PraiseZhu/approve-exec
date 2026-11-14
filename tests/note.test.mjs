@@ -11,7 +11,7 @@ test('add 后 list 读回来源、类型、广播标志和正文', () => {
   const fixture = parentFixture();
   const gh = ghFrom(fixture);
   add({ gh, rootRef: ROOT, fromRef: A, kind: 'pitfall', text: '取整后仍会越界 1px，按写入值算平移量', broadcast: true, now: '2026-11-14T02:00:00.000Z' });
-  add({ gh, rootRef: ROOT, fromRef: A, kind: 'decision', text: '新建 canvasBoundsEdits.ts 避开行数上限', now: '2026-11-14T03:00:00.000Z' });
+  add({ gh, rootRef: ROOT, fromRef: A, kind: 'decision', text: '新建 boundsHelper.ts 避开行数上限', now: '2026-11-14T03:00:00.000Z' });
   assert.match(fixture[commentsKey(10)][0].body, /^批准执行笔记：acme\/app#11 坑/);
   const { notes } = list({ gh, rootRef: ROOT });
   assert.equal(notes.length, 2);

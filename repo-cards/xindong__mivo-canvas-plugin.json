@@ -13,7 +13,7 @@
   "guards": [
     {
       "name": "structure guard",
-      "rule": "单个源码文件不超过 1200 行，超了要拆新文件（Mivo CLAUDE.md「守卫组成」；PR 2141 因此新建 canvasBoundsEdits.ts）"
+      "rule": "单个源码文件不超过 1200 行，超了要拆新文件（Mivo CLAUDE.md「守卫组成」；超限时把新逻辑拆进新文件）"
     },
     {
       "name": "pr-handoff-gate",
