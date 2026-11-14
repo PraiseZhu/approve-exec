@@ -149,4 +149,9 @@ test('预开工：上游子 issue 还开着时不验收，列出上游；上游�
   assert.deepEqual(failed(waiting), ['upstream_merged']);
   assert.match(waiting.checks.find((c) => c.name === 'upstream_merged').detail, /acme\/app#11/);
   assert.equal(checkPr({ ...make('closed'), ref: C, pr: 5 }).ok, true);
+  // 上游被关成「不做」不算合入（和 batch.mjs 的依赖判定同口径，单审 P2）
+  const dropped = make('closed');
+  const inner = dropped.gh;
+  dropped.gh = (args) => { const out = inner(args); return args.join(' ') === `api repos/${REPO}/issues/11` ? { ...out, state_reason: 'not_planned' } : out; };
+  assert.deepEqual(failed(checkPr({ ...dropped, ref: C, pr: 5 })), ['upstream_merged']);
 });

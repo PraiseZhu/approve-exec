@@ -25,6 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 DEDUPE_SEC = 24 * 3600
 UNDELIVERABLE = {"ARCHIVED", "DELETED", "NOT_FOUND", "AGENT_NOT_READY"}
 # 三台 Linux 主机只当网关，不给上面的会话发消息（全局规则「Linux 主机只当网关」）。
+# 只有 lead 地址带设备 id，所以只在叫醒 lead 时检查。执行会话由 lead 在自己这台 Mac 上新建（send_to_session 不传 device），
+# 网关只是它的模型供应商位置；派发事件里记的是本机会话 id（不含设备前缀），叫醒它不会把消息发到 Linux 上。
 LINUX_GATEWAYS = {
     "6c2d712118196434b26659a137106a597805bcd38a6f75f9d434363f566a01d0",
     "8620a24bb37ab0fff5f06fe54601a7747583995243a3086ccc1b769facd8fcec",
@@ -126,7 +128,8 @@ def run_once(*, client: Any, reconcile: Callable[[], dict[str, Any]] = run_recon
         lead_device, lead_session = split_address(run.get("lead_session"))
         for action in run.get("due", []):
             summary["due"] += 1
-            key = f"{run['root']}|{action['key']}"
+            # 两种模式的去重键分开：只记不敲时记过的动作，切到敲门模式后照常敲。
+            key = f"{mode}|{run['root']}|{action['key']}"
             if key in cache:
                 continue
             summary["fresh"] += 1

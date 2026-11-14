@@ -414,3 +414,15 @@ test('开工消息带用户原话、章程三项、运行笔记读法；没有�
   const msg = toOwnerMessage({ ref: ref(12), title: 't', url: null, lead: 'lead-1', parent: ref(10), charter: null, card });
   for (const must of ['仓库卡（acme/app）', 'scripts/ci/size.baseline.json', '单文件不超过 1200 行', '集成分支 PR 不会被自动接单']) assert.ok(msg.includes(must), must);
 });
+
+test('并行上限：章程写了 max_parallel，名额用完时 brief 拒绝；status 给出还能派几个（单审 P2）', () => {
+  const { repoDir } = writeFixture({});
+  const args = { root: ref(10), lead: 'lead-1', repoDir, project: repoDir, now: NOW };
+  const full = () => ghFrom(earlyFixture({ charter: CHARTER_COMMENT({ max_parallel: 1 }) }));
+  const st = batchStatus({ gh: full(), issueRef: ref(10) });
+  assert.deepEqual([st.max_parallel, st.dispatch_budget], [1, 0]);
+  assert.throws(() => brief({ gh: full(), itemRef: ref(12), ...args }), /限制在 1 个，现在已经有 1 个在跑/);
+  const roomy = batchStatus({ gh: ghFrom(earlyFixture()), issueRef: ref(10) });
+  assert.deepEqual([roomy.max_parallel, roomy.dispatch_budget], [4, 3]);
+  assert.equal(batchStatus({ gh: ghFrom(parentFixture()), issueRef: ref(10) }).dispatch_budget, null, '没有章程不限');
+});

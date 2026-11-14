@@ -52,7 +52,7 @@ node scripts/event.mjs list --item <子 issue>
 
 9 种类型：`dispatch`、`ready_for_verdict`、`verdict_pass`、`verdict_revise`、`ready`、`blocked`、`withdraw`、`archived`、`prereview`。每个事件是子 issue 上的一条评论：第一行人话，后面跟机器标记。同一事件重复发不会产生第二条评论。只认当前 gh 账号本人发的。
 
-`check-pr.mjs --stage recheck --accepted-head <sha>`：判通过后 PR 又有新提交时，只查新增改动的范围、存量测试有没有被删行、CI。
+`check-pr.mjs --stage recheck --accepted-head <sha>`：判通过后 PR 又有新提交时，只查新增改动的范围、存量测试有没有被删行或改名、CI。当前版本不是在判通过的版本上往前加提交（被回退或分叉）时不过，要整体重新验收。
 
 ### 运行章程
 
@@ -73,7 +73,7 @@ node scripts/charter.mjs read  --root <总 issue>
 | `user_words` | 用户授权的原话，原样保存 |
 | `lead_session` | lead 会话的跨电脑地址 `<deviceId>::<会话 id>` |
 
-章程没写的事一律不自动做。章程不授权加急 admin 合并。`batch.mjs merge-request` 只核对章程并生成 `pr-merge` 的输入，不发消息、不合并。
+章程没写的事一律不自动做。章程不授权加急 admin 合并。`batch.mjs merge-request` 只核对章程并生成 `pr-merge` 的输入，不发消息、不合并；它只认本次 run 的 PR：正文「任务 issue」是这个总 issue 的子 issue、带审查放行标签 `review:merge-ready`、最新裁决是通过且判通过后代码没变。`max_parallel` 由 `batch.mjs status` 的 `dispatch_budget` 给出还能派几个，名额用完时 `brief` 拒绝。
 
 ### 共享记忆
 

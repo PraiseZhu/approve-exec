@@ -106,7 +106,8 @@ export function toFacts(data, at, { charter } = {}) {
     const closed = Boolean(child.closed_at) && ms(child.closed_at) <= ms(at);
     const prs = (data.prs ?? []).filter((p) => p.task_ref === child.ref).map((p) => toPrAt(p, at)).filter(Boolean);
     // 一个子 issue 应该只有一个 PR；多个时取没被关掉的最新一个。
-    const pr = prs.filter((p) => !p.closed_unmerged).at(-1) ?? prs.at(-1) ?? null;
+    // 关掉没合的 PR 不算数（标签可能还留着）：只剩这种 PR 时当成没有 PR，阶段由事件决定。
+    const pr = prs.filter((p) => !p.closed_unmerged).at(-1) ?? null;
     return { ref: child.ref, closed, closed_at: closed ? child.closed_at : null, events: selectChildEvents(upTo(child.comments), child.ref, login), pr };
   });
   return {
@@ -134,7 +135,7 @@ export function selectStage(child) {
     if (pr.label_at) return { ...base, stage: 'merge_ready', since: pr.label_at };
     return { ...base, stage: 'in_review', since: latest(pr.ready_at, verdict?.at) ?? pr.commits[0]?.at ?? null };
   }
-  if (pass) return { ...base, stage: 'accepted_draft', since: pass.at };
+  if (pass && pr) return { ...base, stage: 'accepted_draft', since: pass.at };
   const asked = of('ready_for_verdict').at(-1);
   if (asked && (!verdict || ms(asked.at) > ms(verdict.at))) return { ...base, stage: 'awaiting_verdict', since: asked.at };
   if (verdict) return { ...base, stage: 'revising', since: verdict.at };
@@ -188,7 +189,8 @@ export function reconcile(facts) {
       const blocked = (child.events ?? []).filter((e) => e.type === 'blocked').at(-1);
       const active = latest(s.since, lastCommit);
       const idle = minutesBetween(active, at);
-      const isBlocked = blocked && ms(blocked.at) >= ms(s.since);
+      // 「卡住」只在它之后没有新提交时算数：恢复提交后再停滞，照常探活。
+      const isBlocked = blocked && ms(blocked.at) >= ms(active);
       if (idle > rule.minutes && !pr?.pending_checks && !isBlocked) add(child.ref, 'wake_owner', 'owner', active, `${idle} 分钟没有新提交、没有在跑的检查、也没有「卡住」（期限 ${rule.minutes}）：确认执行会话还在`);
     }
   }

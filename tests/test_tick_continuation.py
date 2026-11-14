@@ -83,6 +83,12 @@ class TickTest(unittest.TestCase):
         later, client3 = self.run_once(self.two, "ring", now=NOW + tick.DEDUPE_SEC + 1)
         self.assertEqual(len(client3.calls), 2, "24 小时后同一段等待还在，再敲一次")
 
+    def test_record_then_ring_still_rings(self):
+        self.run_once(self.two, "record")
+        summary, client = self.run_once(self.two, "ring", now=NOW + 60)
+        self.assertEqual(len(client.calls), 2, "只记不敲时记过的动作，切到敲门模式后照常敲")
+        self.assertEqual(summary["rung"], 2)
+
     def test_broken_cache_is_treated_as_empty(self):
         self.dir.mkdir(parents=True, exist_ok=True)
         (self.dir / "doorbell.json").write_text("{not json", encoding="utf-8")

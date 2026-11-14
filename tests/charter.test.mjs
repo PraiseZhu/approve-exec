@@ -59,10 +59,13 @@ test('baseAllowed：integration/* 只认一层；没授权时一律不允许', (
   assert.equal(baseAllowed(null, 'main'), false);
 });
 
-function prFixture({ charter, pr = {} } = {}) {
+const HEAD = 'a'.repeat(40);
+const PASS = { type: 'verdict_pass', ref: `${REPO}#11`, pr: 7, head: HEAD, at: '2026-11-14T01:00:00Z', id: 'p' };
+function prFixture({ charter, pr = {}, events = [PASS] } = {}) {
   const fixture = parentFixture();
   if (charter) write({ gh: ghFrom(fixture), rootRef: ROOT, raw: charter });
-  fixture[`api repos/${REPO}/pulls/7`] = { state: 'open', draft: false, merged_at: null, base: { ref: 'main' }, ...pr };
+  fixture[`api repos/${REPO}/pulls/7`] = { state: 'open', draft: false, merged_at: null, base: { ref: 'main' }, head: { sha: HEAD }, body: `任务 issue：${REPO}#11`, labels: [{ name: 'review:merge-ready' }], ...pr };
+  fixture[commentsKey(11)] = events.map((e, i) => ({ id: 50 + i, user: { login: LOGIN }, created_at: e.at, body: `x\n\n<!-- approve-exec:event v1 ${JSON.stringify(e)} -->` }));
   return ghFrom(fixture);
 }
 
@@ -81,4 +84,14 @@ test('merge-request：没有章程、章程没授权、目标分支不在范围�
   assert.throws(call(prFixture({ charter: { ...CHARTER, merge: { auto_request: false, bases: ['main'] } } })), /没有授权自动交合并请求/);
   assert.throws(call(prFixture({ charter: { ...CHARTER, merge: { auto_request: true, bases: ['main'] } }, pr: { base: { ref: 'integration/s1' } } })), /不含 .* 的目标分支 integration\/s1/);
   assert.throws(call(prFixture({ charter: CHARTER, pr: { draft: true } })), /不是开着的正式 PR/);
+});
+
+test('merge-request 只对本次 run 里审查放行、且判通过后没变过的 PR 生成输入（单审 P1）', () => {
+  const call = (opts) => () => mergeRequest({ gh: prFixture({ charter: CHARTER, ...opts }), prRef: `${REPO}#7`, rootRef: ROOT, lead: 'lead-1' });
+  assert.throws(call({ pr: { body: '任务 issue：acme/app#99' } }), /不是 acme\/app#10 的子 issue/);
+  assert.throws(call({ pr: { body: '没有任务 issue 行' } }), /不是 acme\/app#10 的子 issue/);
+  assert.throws(call({ pr: { labels: [] } }), /没有审查放行标签/);
+  assert.throws(call({ events: [] }), /最新的裁决不是通过/);
+  assert.throws(call({ events: [PASS, { ...PASS, type: 'verdict_revise', at: '2026-11-14T02:00:00Z', id: 'r' }] }), /最新的裁决不是通过/);
+  assert.throws(call({ pr: { head: { sha: 'b'.repeat(40) } } }), /判通过后代码变了/);
 });

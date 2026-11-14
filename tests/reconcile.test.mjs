@@ -186,3 +186,24 @@ test('现读：对账器只发读请求，一次写请求都没有；判出阶�
   // 回放路径和现读路径是同一份数据结构
   assert.equal(toFacts(capture({ gh, rootRef: ref(10), light: true, now: T('02:00') }), T('02:00')).children[0].pr.number, 5);
 });
+
+test('发过「卡住」之后又有新提交、再停滞：照常探活（单审 P2）', () => {
+  const c = child({ events: [ev('dispatch', T('00:00'), { session: 's11' }), ev('blocked', T('01:00'))], pr: pr({ commits: [{ sha: H1, at: T('02:00') }] }) });
+  assert.deepEqual(dueOf(facts([c], { at: T('10:00') })), ['wake_owner@11']);
+});
+
+test('唯一的 PR 关掉没合、标签还留着：不当成审查放行，不产生合并类动作（单审 P2）', () => {
+  const data = {
+    login: 'u', root: { ref: ref(10), comments: [] },
+    children: [{ ref: ref(11), closed_at: null, comments: [
+      { id: 1, user: 'u', created_at: T('00:00'), body: `批准执行派发：2026-11-14 ${ref(11)} → 会话 s11（t）` },
+      { id: 2, user: 'u', created_at: T('01:00'), body: `批准执行通过 ${ref(11)} PR #5（head ${H1}）` },
+    ] }],
+    prs: [{ number: 5, task_ref: ref(11), base: 'main', draft: false, created_at: T('00:10'), closed_at: T('03:00'), merged_at: null,
+      events: [{ event: 'ready_for_review', at: T('01:10') }, { event: 'labeled', at: T('02:00'), label: 'review:merge-ready' }], commits: [{ sha: H1, at: T('00:30') }], reviews: [] }],
+  };
+  const out = reconcile(toFacts(data, T('12:00'), { charter: CHARTER }));
+  assert.equal(out.children[0].pr, null);
+  assert.notEqual(out.children[0].stage, 'merge_ready');
+  assert.equal(out.due.some((d) => d.action === 'request_merge'), false);
+});

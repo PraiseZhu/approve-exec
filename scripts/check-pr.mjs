@@ -109,13 +109,20 @@ function recheck({ gh, checks, repo, ref, number, pr, acceptedHead, actualHead, 
     add('compare', false, `验收时的版本已不在分支上，需要整体重新验收（${String(err.message).slice(0, 80)}）`);
     return;
   }
-  const changed = Array.isArray(cmp?.files) ? cmp.files : [];
+  // 只有「当前版本在判通过的版本之后」才能只查新增改动：回退到旧版本（behind）或分叉（diverged）都要整体重新验收。
+  if (cmp?.status !== 'ahead' || !Array.isArray(cmp?.files)) {
+    add('compare', false, `PR 当前版本不是在判通过的版本上往前加提交（compare 状态 ${cmp?.status ?? '未知'}），需要整体重新验收`);
+    return;
+  }
+  const changed = cmp.files;
   const issue = readIssue(gh, repo, number);
   const scope = toScope(sectionText(splitSections(issue.body ?? ''), '范围'), ref);
   const sv = scopeVerdict({ files: changed.map((f) => f.filename), scope, repo, pr, body: prBody, card });
   add('scope', sv.outside.length === 0, sv.outside.length ? `判通过后的新增改动超出范围：${sv.outside.join('、')}` : `判通过后的新增改动（${changed.length} 个文件）都在范围内`);
-  const touched = changed.filter((f) => TEST_FILE_RE.test(f.filename) && f.status !== 'added' && (f.deletions ?? 0) > 0);
-  add('existing_tests', touched.length === 0, touched.length ? `判通过后存量测试被删了行：${touched.map((f) => `${f.filename}（删 ${f.deletions} 行）`).join('、')}` : '判通过后没有删改存量测试');
+  // 改名也算：判通过时已有的测试文件被改名成非测试文件，或改名的同时删了行，都按存量测试被动处理。
+  const wasTest = (f) => TEST_FILE_RE.test(f.previous_filename ?? f.filename);
+  const touched = changed.filter((f) => f.status !== 'added' && wasTest(f) && ((f.deletions ?? 0) > 0 || !TEST_FILE_RE.test(f.filename)));
+  add('existing_tests', touched.length === 0, touched.length ? `判通过后存量测试被删了行或被改名：${touched.map((f) => `${f.previous_filename && f.previous_filename !== f.filename ? `${f.previous_filename} → ` : ''}${f.filename}（删 ${f.deletions ?? 0} 行）`).join('、')}` : '判通过后没有删改存量测试');
   const ci = ciAllVerdict(checks, repo, pr);
   add('ci', ci.ok, ci.detail);
   return sv.judgement;
@@ -181,11 +188,13 @@ export function checkPr({ gh, checks, bodyCheck = runBodyReadyCheck, ref: rawRef
   } else add('prereview', true, '章程未要求预审');
 
   // 预开工（#107）：上游子 issue 全部合入（关闭）之前不验收。
+  // 和 batch.mjs selectDepStatus 同口径：关成「不做」的上游不算合入。
   const upstream = parseDeps(sectionText(sections, '依赖'), repo, ref).hard.filter((d) => {
     const dep = parseIssueRef(d);
-    return readIssue(gh, dep.repo, dep.number).state !== 'closed';
+    const up = readIssue(gh, dep.repo, dep.number);
+    return up.state !== 'closed' || up.state_reason === 'not_planned';
   });
-  add('upstream_merged', upstream.length === 0, upstream.length ? `上游还没合入：${upstream.join('、')}（预开工的 PR 等上游合入、同步目标分支后再发待验收）` : '依赖的子 issue 都已合入');
+  add('upstream_merged', upstream.length === 0, upstream.length ? `上游还没合入或被关成不做：${upstream.join('、')}（预开工的 PR 等上游合入、同步目标分支后再发待验收；上游不做了就发「卡住」）` : '依赖的子 issue 都已合入');
 
   return { ok: out.every((c) => c.ok), stage, ref, pr, head: actualHead, checks: out, ...(sv.judgement.length ? { judgement: sv.judgement } : {}) };
 }

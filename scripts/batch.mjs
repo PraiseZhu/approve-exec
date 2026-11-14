@@ -27,7 +27,7 @@ import { activeClaims, ghLogin, readComments, sessionTitle } from './issue-run.m
 import { emit } from './event.mjs';
 import { baseAllowed, selectCharter } from './charter.mjs';
 import { readRepoCard } from './lib/repo-card.mjs';
-import { selectChildEvents } from './lib/reconcile-rules.mjs';
+import { MERGE_READY_LABEL, selectChildEvents } from './lib/reconcile-rules.mjs';
 
 export class BatchError extends Error {}
 const reject = (msg) => { throw new BatchError(msg); };
@@ -235,6 +235,9 @@ export function batchStatus({ gh, issueRef }) {
     items,
     dispatchable: items.filter((i) => i.state === 'dispatchable').map((i) => i.ref),
     early_dispatchable: early,
+    // 章程的并行上限（#105）：还能再派几个会话。没有章程是 null（不限）。brief 在名额用完时拒绝。
+    max_parallel: charter?.max_parallel ?? null,
+    dispatch_budget: charter ? Math.max(0, charter.max_parallel - items.filter((i) => i.state === 'in_progress').length) : null,
     needs_owner: items.filter((i) => i.state === 'needs_owner').map((i) => i.ref),
     to_archive: items.flatMap((i) => (i.sessions_to_archive ?? []).map((session) => ({ ref: i.ref, session }))),
     // lead 把自己派出的会话开的 PR 都挂到自己会话顶上（用户 2026-11-07 定）；重复 attach 无副作用。
@@ -327,8 +330,9 @@ export function brief({ gh, itemRef, root, lead, repoDir, project, name, urgent 
   const charter = rootRef.toLowerCase() === ref.toLowerCase() ? undefined : selectCharter(readComments(gh, commentsPath(rootRef)), login);
   const card = readRepoCard(repo, cardsDir);
   let upstreams = null;
+  const status = charter || early ? batchStatus({ gh, issueRef: rootRef }) : null;
+  if (status && status.dispatch_budget === 0) reject(`${rootRef} 的章程把同时在跑的执行会话限制在 ${status.max_parallel} 个，现在已经有 ${status.max_parallel} 个在跑：等有会话收工再派 ${ref}`);
   if (early) {
-    const status = batchStatus({ gh, issueRef: rootRef });
     if (!status.early_dispatchable.includes(ref)) reject(`${ref} 不在 early_dispatchable 里：--early 只用于章程允许预开工、且每个上游都已判通过的子 issue`);
     const item = status.items.find((i) => i.ref === ref);
     upstreams = item.waiting_on.map((dep) => {
@@ -438,7 +442,8 @@ export function mergeRequest({ gh, prRef, rootRef, lead, title = null }) {
   const { repo, number, ref } = parseIssueRef(prRef);
   const root = parseIssueRef(rootRef).ref;
   if (!SESSION_RE.test(String(lead ?? ''))) reject(`--lead 要填 lead 会话 id，当前：${lead}`);
-  const charter = selectCharter(readComments(gh, commentsPath(root)), ghLogin(gh));
+  const login = ghLogin(gh);
+  const charter = selectCharter(readComments(gh, commentsPath(root)), login);
   if (!charter) reject(`${root} 没有运行章程：没有章程授权就不自动交合并请求，等用户说「合并」`);
   if (!charter.merge.auto_request) reject(`${root} 的章程没有授权自动交合并请求（merge.auto_request 为 false）：等用户说「合并」`);
   const pr = gh(['api', `repos/${repo}/pulls/${number}`]);
@@ -446,6 +451,15 @@ export function mergeRequest({ gh, prRef, rootRef, lead, title = null }) {
   if (pr?.state !== 'open' || pr?.draft === true) reject(`${ref} 不是开着的正式 PR（state=${pr?.state}，draft=${pr?.draft}），不交合并请求`);
   const base = pr?.base?.ref ?? null;
   if (!baseAllowed(charter, base)) reject(`${root} 的章程 merge.bases 是 ${JSON.stringify(charter.merge.bases)}，不含 ${ref} 的目标分支 ${base}：等用户说「合并」`);
+  // 章程只覆盖本次 run 里审查放行的 PR：PR 要属于这个总 issue 的子 issue、带审查放行标签、判通过后没有未复核的改动。
+  const { children } = readRoot(gh, root);
+  const childRefs = (children.length ? children.map((c) => `${c.repo}#${c.issue.number}`) : [root]).map((r) => r.toLowerCase());
+  const taskRef = String(pr?.body ?? '').split('\n').map((l) => /^任务 issue：(\S+#\d+)$/.exec(l.trim())?.[1]).find(Boolean) ?? null;
+  if (!taskRef || !childRefs.includes(taskRef.toLowerCase())) reject(`${ref} 的正文「任务 issue」是 ${taskRef ?? '空'}，不是 ${root} 的子 issue：章程只授权本次 run 的 PR`);
+  if (!(pr?.labels ?? []).some((l) => l?.name === MERGE_READY_LABEL)) reject(`${ref} 没有审查放行标签 ${MERGE_READY_LABEL}：审查放行后才交合并请求`);
+  const pass = selectChildEvents(readComments(gh, commentsPath(taskRef)), parseIssueRef(taskRef).ref, login).filter((e) => e.type === 'verdict_pass' || e.type === 'verdict_revise').at(-1);
+  if (pass?.type !== 'verdict_pass') reject(`${taskRef} 上最新的裁决不是通过：不交合并请求`);
+  if (!pass.legacy && pass.head && pass.head !== pr?.head?.sha) reject(`${ref} 判通过后代码变了（通过时 ${pass.head.slice(0, 7)}，现在 ${String(pr?.head?.sha).slice(0, 7)}）：先跑 check-pr.mjs --stage recheck，通过后对新版本再记一次通过`);
   return {
     ok: true,
     pr: ref,
