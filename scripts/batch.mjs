@@ -6,7 +6,7 @@
 // CLI:
 //   node scripts/batch.mjs status  --issue <owner/repo#号>
 //   node scripts/batch.mjs brief   --item <子 issue> --root <入口 issue> --lead <lead 会话 id> --repo-dir <目标仓主目录> --project <Cindy 项目路径>
-//                                  [--name <人话任务名>] [--urgent] [--gateway <网关名>]
+//                                  [--name <人话任务名>] [--urgent] [--gateway <网关名>] [--kind <前端|后端|混合>]
 //   node scripts/batch.mjs archived --item <子 issue> --session <已归档的执行会话 id>
 //   node scripts/batch.mjs claim   --item <子 issue> --session <派出的会话 id> --title <会话标题>
 //   node scripts/batch.mjs release --item <子 issue> --reason <原因>
@@ -73,13 +73,26 @@ export function unarchivedSessions(comments, ref, login) {
   return sessions.filter((s) => !archived.has(s));
 }
 
-/** config/defaults.json 的 dispatchRoute：执行会话默认用什么跑、备用网关顺序（用户 2026-11-07 定）。 */
+/** 子 issue 首行「执行类型」的允许值（#99）。 */
+export const EXEC_KINDS = ['前端', '后端', '混合'];
+
+const isCompleteRoute = (route) => Boolean(route) && ['agent_kind', 'model', 'effort'].every((k) => typeof route[k] === 'string' && route[k])
+  && Array.isArray(route.gateways) && route.gateways.length > 0
+  && route.gateways.every((g) => typeof g?.name === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(String(g?.agent_device_id ?? '')));
+
+/**
+ * config/defaults.json 的 dispatchRoute：执行会话默认用什么跑、备用网关顺序（用户 2026-11-07 定）。
+ * byKind 是按执行类型覆盖的整条路线（用户 2026-11-14 定，#99）；写了就必须完整，缺项时拒绝，不退回默认路线。
+ */
 export function selectDispatchRoute(path = DEFAULTS_PATH) {
   const route = JSON.parse(readFileSync(path, 'utf8')).dispatchRoute;
-  const ok = route && ['agent_kind', 'model', 'effort'].every((k) => typeof route[k] === 'string' && route[k])
-    && Array.isArray(route.gateways) && route.gateways.length > 0
-    && route.gateways.every((g) => typeof g?.name === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(String(g?.agent_device_id ?? '')));
-  if (!ok) reject(`config/defaults.json 的 dispatchRoute 不完整（要有 agent_kind、model、effort 和至少一个带 agent_device_id 的网关）`);
+  if (!isCompleteRoute(route)) reject(`config/defaults.json 的 dispatchRoute 不完整（要有 agent_kind、model、effort 和至少一个带 agent_device_id 的网关）`);
+  const byKind = route.byKind ?? {};
+  if (typeof byKind !== 'object' || Array.isArray(byKind)) reject('config/defaults.json 的 dispatchRoute.byKind 要是「执行类型 → 路线」的对象');
+  for (const [kind, kindRoute] of Object.entries(byKind)) {
+    if (!EXEC_KINDS.includes(kind)) reject(`config/defaults.json 的 dispatchRoute.byKind 只能按 ${EXEC_KINDS.join(' / ')} 分（当前：${kind}）`);
+    if (!isCompleteRoute(kindRoute)) reject(`config/defaults.json 的 dispatchRoute.byKind.${kind} 不完整（要有 agent_kind、model、effort 和至少一个带 agent_device_id 的网关）`);
+  }
   return route;
 }
 
@@ -233,7 +246,7 @@ export function toOwnerMessage({ ref, title, url, lead, parent = null, openPr = 
   ].join('\n');
 }
 
-export function brief({ gh, itemRef, root, lead, repoDir, project, name, urgent = false, gateway, route = selectDispatchRoute(), now = nowIso() }) {
+export function brief({ gh, itemRef, root, lead, repoDir, project, name, urgent = false, gateway, kind, route = selectDispatchRoute(), now = nowIso() }) {
   if (!SESSION_RE.test(String(lead ?? ''))) reject(`--lead 要填 lead 会话 id（get_current_session_id 的 session_id），当前：${lead}`);
   if (!isAbsolute(String(repoDir ?? ''))) reject(`--repo-dir 要填目标仓主目录的绝对路径，当前：${repoDir}`);
   if (!project) reject('--project 要填目标仓对应的 Cindy 项目路径（先 list_projects 查，没有就 create_project）');
@@ -252,30 +265,41 @@ export function brief({ gh, itemRef, root, lead, repoDir, project, name, urgent 
   const prs = selectOpenTaskPrs(gh, repo)[ref] ?? [];
   if (prs.length > 1) reject(`${ref} 有 ${prs.length} 个开着的 PR（${prs.map((p) => `#${p.number}`).join('、')}）：一个子 issue 只能有一个 PR，先关掉多余的再派`);
   const openPr = prs[0]?.number ?? null;
-  let deviceId = null;
+  const header = parseHeader(splitSections(issue.body ?? ''));
+  // 执行类型：--kind 优先，否则取子 issue 首行（#99）。命中 byKind 就换整条路线，其余走默认路线。
+  // 两处各自校验：--kind 合法也不放过 issue 首行写错的类型（#100 单审 P2-2）。
+  const allowed = EXEC_KINDS.join(' / ');
+  if (header.exec_kind !== null && !EXEC_KINDS.includes(header.exec_kind)) reject(`${ref} 首行的执行类型 只能是 ${allowed}（当前：${header.exec_kind}）`);
+  if (kind !== undefined && !EXEC_KINDS.includes(kind)) reject(`--kind 只能是 ${allowed}（当前：${kind}）`);
+  const execKind = kind ?? header.exec_kind;
+  const kindRoute = execKind === null ? undefined : route.byKind?.[execKind];
+  const active = kindRoute ?? route;
+  // 按类型覆盖的路线，模型只在它自己的供应商位置有：不加 --gateway 也带上第一个位置，不继承 lead 的网关。
+  let deviceId = kindRoute ? kindRoute.gateways[0].agent_device_id : null;
   if (gateway !== undefined) {
-    const hit = route.gateways.find((g) => g.name === gateway);
-    if (!hit) reject(`--gateway 只能是 ${route.gateways.map((g) => g.name).join(' / ')}（当前：${gateway}）`);
+    const hit = active.gateways.find((g) => g.name === gateway);
+    if (!hit) reject(`--gateway 只能是 ${active.gateways.map((g) => g.name).join(' / ')}（当前：${gateway}）`);
     deviceId = hit.agent_device_id;
   }
   const title = sessionTitle({ ref, title: issue.title }, now, { pr: openPr, ...(name ? { name } : {}) });
-  const parent = parseHeader(splitSections(issue.body ?? '')).parent;
+  const parent = header.parent;
   return {
     ok: true,
     ref,
     open_pr: openPr,
+    exec_kind: execKind,
     request: {
       title,
       message: toOwnerMessage({ ref, title: issue.title, url: issue.html_url ?? null, lead, parent, openPr, urgent }),
       working_dir: repoDir,
       project_path: project,
       use_worktree: true,
-      agent_kind: route.agent_kind,
-      model: route.model,
-      effort: route.effort,
+      agent_kind: active.agent_kind,
+      model: active.model,
+      effort: active.effort,
       ...(deviceId ? { agent_device_id: deviceId } : {}),
     },
-    gateways: route.gateways.map((g) => g.name),
+    gateways: active.gateways.map((g) => g.name),
   };
 }
 
@@ -356,7 +380,7 @@ export function main(argv = process.argv.slice(2)) {
   try {
     let out;
     if (cmd === 'status') out = batchStatus({ gh, issueRef: args.issue });
-    else if (cmd === 'brief') out = brief({ gh, itemRef: args.item, root: args.root, lead: args.lead, repoDir: args['repo-dir'], project: args.project, name: args.name, urgent: args.urgent === true, ...(typeof args.gateway === 'string' ? { gateway: args.gateway } : {}), now });
+    else if (cmd === 'brief') out = brief({ gh, itemRef: args.item, root: args.root, lead: args.lead, repoDir: args['repo-dir'], project: args.project, name: args.name, urgent: args.urgent === true, ...(typeof args.gateway === 'string' ? { gateway: args.gateway } : {}), ...(args.kind !== undefined ? { kind: String(args.kind) } : {}), now });
     else if (cmd === 'claim') out = claim({ gh, itemRef: args.item, session: args.session, title: args.title, now });
     else if (cmd === 'release') out = release({ gh, itemRef: args.item, reason: args.reason, now });
     else if (cmd === 'archived') out = archived({ gh, itemRef: args.item, session: args.session, now });

@@ -249,7 +249,11 @@ export function parseHeader(sections) {
   const parent = /总 issue\s*([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#\d+)/.exec(intro)?.[1] ?? null;
   const group = /并行组\s*([A-Za-z0-9]+)/.exec(intro)?.[1] ?? null;
   const target = /PR 指向\s*`?([A-Za-z0-9._/*-]+)`?/.exec(intro)?.[1] ?? null;
-  return { parent, group, base_ref: target && target !== 'main' ? target : null };
+  // 首行「执行类型 后端」这类写法：批准执行按它选执行会话的路线（#99）。没写是 null。
+  // 只认模板的引用行（`> 子 issue · …` 或 `> 独立 issue · …`），首段里其他行的备注、说明不算（#100 单审 P2-1、第 2 轮 P2）。
+  const headerLine = intro.split('\n').find((l) => /^\s*>\s*(?:子|独立) issue\b/.test(l)) ?? '';
+  const execKind = /执行类型\s*[:：]?\s*([^\s·（(]+)/.exec(headerLine)?.[1] ?? null;
+  return { parent, group, base_ref: target && target !== 'main' ? target : null, exec_kind: execKind };
 }
 
 export function pendingQuestions(text) {

@@ -265,6 +265,18 @@ test('开工先查网关（2026-11-07 复盘，#87）：⓪ 在第 1 步之前�
   }
 });
 
+test('#99 SC5 按执行类型换路线：第 2 步和 README 写明后端路线，派不出去就停下', () => {
+  const s = section('## ⓪ issue 入口');
+  for (const must of ['`执行类型 后端`', 'Codex 的 `gpt-6.1-sol`、effort high，走 Mac mini 上的 Art Cindy', '`--kind 后端`', '`dispatchRoute.byKind`',
+    '后端路线派不出去', '不自动改用默认路线，也不换别的通路', '没写、写「前端」或「混合」的走上面的默认路线']) {
+    assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
+  }
+  const readme = readFileSync(join(root, 'README.md'), 'utf8');
+  for (const must of ['`执行类型 后端`', 'Codex 的 `gpt-6.1-sol` high，走 Mac mini 上的 Art Cindy', '派不出去就停下告诉用户']) {
+    assert.ok(readme.includes(must), `README.md 应写「${must}」`);
+  }
+});
+
 test('#95 README 写执行会话默认路线；invalid 由 lead 直接补格式，不再指路「开 issue」', () => {
   const readme = readFileSync(join(root, 'README.md'), 'utf8');
   for (const must of ['Claude 网关的 Opus 5.5 high', 'dispatchRoute']) {
