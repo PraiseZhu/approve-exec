@@ -50,8 +50,9 @@ lead 会话要在完全访问权限下运行：派出的执行会话继承 lead 
    - 网关（用户 2026-11-07 定）：执行会话默认用 Claude 网关的 `claude-opus-5-5`、effort high，一路做到正式 PR；备用依次 Personal、Personal 2 网关。路线和网关 id 写在 `config/defaults.json` 的 dispatchRoute 里。先用 cindy_helper `list_tools` 读 `send_to_session` 的参数：
      - 有 `agent_device_id`（makecindy/cindy#9195 上线后）：brief 加 `--gateway Claude`；派发失败（`AGENT_NOT_READY`、`PROVIDER_ROUTE_UNAVAILABLE`、撞用量上限）就按顺序换 `--gateway Personal`、`--gateway "Personal 2"` 重派，派发说明写明换网关的原因。三个都不行就停下告诉用户。
      - 没有：按开头「开工先查网关」的结果派。lead 在 Claude 网关就照常派（brief 不加 `--gateway`）；不在就等用户切到 Claude 网关再派，不在别的网关上派。
-   - `node scripts/batch.mjs brief --item <子 issue> --root <入口 issue> --lead <lead 会话 id> --repo-dir <目标仓主目录> --project <项目路径> [--name "<人话任务名>"] [--urgent] [--gateway <网关名>]`，拿到 `request`。会话标题是 `#<PR号>-<人话任务名>丨<MMDD>`（还没有 PR 时不带 `#<PR号>-`，执行会话开出 PR 后自己补）。人话任务名从子 issue 标题提，提不出不超过 14 个字的中文短名时退出码 2，用 --name 给一个。已有开着的 PR 时，开工消息写明接着那个 PR 做。
-   - 用 cindy_helper 的 `send_to_session` 新建会话，参数原样传 `request` 里的键：`title`、`message`、`working_dir`、`project_path`、`use_worktree`、`agent_kind`、`model`、`effort`（带了 `--gateway` 时还有 `agent_device_id`）。不自己改模型和推理强度，不传 provider_id。
+   - 执行类型（用户 2026-11-14 定，#99）：子 issue 首行写了 `执行类型 后端` 的，brief 自动换成 `dispatchRoute.byKind` 的后端路线：Codex 的 `gpt-6.1-sol`、effort high，走 Mac mini 上的 Art Cindy。`request` 自带 Mac mini 的 `agent_device_id`，不加 `--gateway`，也不看 lead 在哪个网关；`send_to_session` 没有 `agent_device_id` 参数时派不了，停下告诉用户。没写、写「前端」或「混合」的走上面的默认路线。用户当次点名换类型时加 `--kind 后端`（或 `前端`、`混合`），优先于 issue 上写的；写了别的类型 brief 退出码 2，先改 issue 首行。后端路线派不出去（`PROVIDER_ROUTE_UNAVAILABLE`、`AGENT_NOT_READY`、Mac mini 离线）就停下告诉用户，不自动改用默认路线，也不换别的通路。派发说明写明每个子 issue 走哪条路线（brief 输出的 `exec_kind` 和 `request` 里的模型）。
+   - `node scripts/batch.mjs brief --item <子 issue> --root <入口 issue> --lead <lead 会话 id> --repo-dir <目标仓主目录> --project <项目路径> [--name "<人话任务名>"] [--urgent] [--gateway <网关名>] [--kind <前端|后端|混合>]`，拿到 `request`。会话标题是 `#<PR号>-<人话任务名>丨<MMDD>`（还没有 PR 时不带 `#<PR号>-`，执行会话开出 PR 后自己补）。人话任务名从子 issue 标题提，提不出不超过 14 个字的中文短名时退出码 2，用 --name 给一个。已有开着的 PR 时，开工消息写明接着那个 PR 做。
+   - 用 cindy_helper 的 `send_to_session` 新建会话，参数原样传 `request` 里的键：`title`、`message`、`working_dir`、`project_path`、`use_worktree`、`agent_kind`、`model`、`effort`（带了 `--gateway` 或走后端路线时还有 `agent_device_id`）。不自己改模型和推理强度，不传 provider_id。
    - 成功后 `node scripts/batch.mjs claim --item <子 issue> --session <返回的 target_session_id> --title <标题>`，在子 issue 上记「批准执行派发」，防止别的 lead 或别的电脑重复派。回执不明确时先用 `list_sessions` 查有没有建出会话，不盲目重派。
    - **派发失败的会话马上归档**（用户 2026-11-07 定）：`send_to_session` 报错但回执里有 `target_session_id`、`claim` 被拒、或新会话一开工就报错（用量上限、Agent 起不来），先 `archive_sessions` 归档那个会话；已经 claim 过的再 `batch.mjs release --reason "<原因>"`，然后按上面的网关顺序重派。
 3. **停下。** 派完就结束本轮。不挂定时任务，不轮询。
@@ -67,7 +68,7 @@ lead 会话要在完全访问权限下运行：派出的执行会话继承 lead 
 
 用户在 lead 会话里说「合并」时，按 `pr-merge` 分两路（用户 2026-11-08 定）：
 - Mivo 仓（`xindong/mivo-canvas-plugin`）的 PR 交给合并伙伴，输入里带 `notify_session`（lead 的跨电脑地址）；伙伴合入后给 lead 发 `praise-merge 已合并 <owner/repo>#<号>`，lead 按第 4 步处理。只有 Mivo PR 有这条伙伴通知。
-- 其他仓的 PR 不交伙伴，由 lead 按 `pr-merge` 的标准自己合（以 `pr-merge` 为准：required checks 全绿、CLEAN、当前 head 的 GPT 单审和 e2e 通过，缺一样就不合并、报缺项）。没有伙伴通知；lead 合进去后直接按第 4 步归档会话、派下一批。
+- 其他仓的 PR 不交伙伴，由 lead 按 `pr-merge` 的标准自己合（以 `pr-merge` 为准：required checks 全绿、CLEAN、当前 head 的单审和 e2e 通过，缺一样就不合并、报缺项；单审用和作者不同厂家的模型，后端路线的 PR 是 GPT 写的，由 Claude 审）。没有伙伴通知；lead 合进去后直接按第 4 步归档会话、派下一批。
 
 用户用别的方式合并、或 Mivo PR 没登记就自动合入时没有通知，用户说「继续」即可。
 
@@ -83,7 +84,7 @@ lead 会话要在完全访问权限下运行：派出的执行会话继承 lead 
 
 只有入口消息（或之后用户的当次消息）明确授权对哪些 PR（或本次全部子 issue）做 admin 合并时才走这里。没写就不走，只报告可合并。
 
-1. 执行会话发来「已转正式」、`check-pr.mjs --stage ready` 通过后，按 `orca-fanout` 的派工规则派两个 Orca Worker：review 档对当前 head 单审，e2e 档跑 e2e。
+1. 执行会话发来「已转正式」、`check-pr.mjs --stage ready` 通过后，按 `orca-fanout` 的派工规则派两个 Orca Worker：review 档对当前 head 单审，e2e 档跑 e2e。后端路线的 PR 是 GPT 写的，单审按 `pr-merge` 第 4 步改用 Claude 模型。
 2. 单审没有确认成立的 P0/P1/P2、e2e 通过，才合并：`gh pr merge <号> --repo <owner/repo> --admin --match-head-commit <审过的 head> --squash`（仓库不允许 squash 时用它允许的方式）。有问题就发给执行会话修，修完重新单审和 e2e。
 3. 合入后回到第 1 步派下一批。
 

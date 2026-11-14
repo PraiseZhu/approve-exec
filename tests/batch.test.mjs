@@ -171,6 +171,68 @@ test('brief --gateway：按配置顺序取网关的 agent_device_id；不认识�
   assert.throws(() => brief({ gh, itemRef: ref(11), root: ref(10), lead: 'L', repoDir: '/r', project: '/r', gateway: 'Nope', now: NOW }), /--gateway 只能是 Claude \/ Personal \/ Personal 2/);
 });
 
+const MINI = '3413b2125731cc24445e82ffa2b91338f8272dbc2df89ff2c92ca7bfc05f5817';
+/** #11 首行加上「执行类型 <类型>」（brief 单读这个 issue）。 */
+function fixtureWithKind(kindText) {
+  const f = parentFixture();
+  const key = `api repos/${REPO}/issues/11`;
+  const body = f[key].body.replace('· 并行组 A ·', `· 并行组 A · 执行类型 ${kindText} ·`);
+  assert.notEqual(body, f[key].body, '夹具首行应含「· 并行组 A ·」');
+  return { ...f, [key]: { ...f[key], body } };
+}
+const briefOf = (fixture, extra = {}) => brief({ gh: ghFrom(fixture), itemRef: ref(11), root: ref(10), lead: 'L', repoDir: '/r', project: '/r', now: NOW, ...extra });
+const routeOf = (out) => [out.request.agent_kind, out.request.model, out.request.effort];
+
+test('#99 SC1 brief：首行写「执行类型 后端」时换成后端路线 Codex gpt-6.1-sol high，自带 Mac mini 的 agent_device_id', () => {
+  const out = briefOf(fixtureWithKind('后端'));
+  assert.deepEqual(routeOf(out), ['codex', 'gpt-6.1-sol', 'high']);
+  assert.equal(out.request.agent_device_id, MINI);
+  assert.equal(out.exec_kind, '后端');
+  assert.deepEqual(out.gateways, ['Mini']);
+  // 后端路线只认自己的供应商位置：默认路线的网关名在这里不合法
+  assert.throws(() => briefOf(fixtureWithKind('后端'), { gateway: 'Claude' }), /--gateway 只能是 Mini（当前：Claude）/);
+});
+
+test('#99 SC2 brief：没写执行类型、写「前端」或「混合」都走默认路线，不带 agent_device_id', () => {
+  for (const fixture of [parentFixture(), fixtureWithKind('前端'), fixtureWithKind('混合')]) {
+    const out = briefOf(fixture);
+    assert.deepEqual(routeOf(out), ['claude-code', 'claude-opus-5-5', 'high']);
+    assert.equal(Object.hasOwn(out.request, 'agent_device_id'), false);
+    assert.deepEqual(out.gateways, ['Claude', 'Personal', 'Personal 2']);
+  }
+  assert.equal(briefOf(parentFixture()).exec_kind, null);
+});
+
+test('#99 SC3 brief：--kind 优先于 issue 上写的类型；不认识的类型拒绝，报错写明允许值和实际值', () => {
+  assert.deepEqual(routeOf(briefOf(parentFixture(), { kind: '后端' })), ['codex', 'gpt-6.1-sol', 'high']);
+  assert.deepEqual(routeOf(briefOf(fixtureWithKind('后端'), { kind: '前端' })), ['claude-code', 'claude-opus-5-5', 'high']);
+  assert.throws(() => briefOf(fixtureWithKind('全栈')), /#11 首行的执行类型 只能是 前端 \/ 后端 \/ 混合（当前：全栈）/);
+  assert.throws(() => briefOf(parentFixture(), { kind: '全栈' }), /--kind 只能是 前端 \/ 后端 \/ 混合（当前：全栈）/);
+  const { ghPath } = writeFixture(parentFixture());
+  const args = [CLI, 'brief', '--item', ref(11), '--root', ref(10), '--lead', 'L', '--repo-dir', '/r', '--project', '/r', '--gh-fixture', ghPath, '--now', NOW];
+  const bad = spawnSync(process.execPath, [...args, '--kind', '全栈'], { encoding: 'utf8' });
+  assert.equal(bad.status, 2);
+  assert.match(bad.stderr, /--kind 只能是/);
+  const ok = spawnSync(process.execPath, [...args, '--kind', '后端'], { encoding: 'utf8' });
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(JSON.parse(ok.stdout).request.model, 'gpt-6.1-sol');
+});
+
+test('#99 SC4 byKind 里的路线缺项或类型名不认识时 fail-closed，不退回默认路线', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'route-kind-'));
+  const base = { agent_kind: 'claude-code', model: 'claude-opus-5-5', effort: 'high', gateways: [{ name: 'Claude', agent_device_id: 'a'.repeat(64) }] };
+  const kindRoute = { agent_kind: 'codex', model: 'gpt-6.1-sol', effort: 'high', gateways: [{ name: 'Mini', agent_device_id: MINI }] };
+  const write = (byKind) => { const p = join(dir, `${Math.random().toString(36).slice(2)}.json`); writeFileSync(p, JSON.stringify({ dispatchRoute: { ...base, byKind } })); return p; };
+  assert.equal(selectDispatchRoute(write({ 后端: kindRoute })).byKind.后端.model, 'gpt-6.1-sol');
+  for (const missing of ['agent_kind', 'model', 'effort', 'gateways']) {
+    const { [missing]: _dropped, ...partial } = kindRoute;
+    assert.throws(() => selectDispatchRoute(write({ 后端: partial })), /byKind\.后端 不完整/, `缺 ${missing} 应拒绝`);
+  }
+  assert.throws(() => selectDispatchRoute(write({ 后端: { ...kindRoute, gateways: [{ name: 'Mini' }] } })), /byKind\.后端 不完整/);
+  assert.throws(() => selectDispatchRoute(write({ 全栈: kindRoute })), /byKind 只能按 前端 \/ 后端 \/ 混合 分（当前：全栈）/);
+  assert.throws(() => selectDispatchRoute(write([kindRoute])), /byKind 要是/);
+});
+
 test('dispatchRoute 缺项时 fail-closed，不悄悄换模型', () => {
   const dir = mkdtempSync(join(tmpdir(), 'route-'));
   const bad = join(dir, 'defaults.json');
