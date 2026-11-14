@@ -250,7 +250,9 @@ export function parseHeader(sections) {
   const group = /并行组\s*([A-Za-z0-9]+)/.exec(intro)?.[1] ?? null;
   const target = /PR 指向\s*`?([A-Za-z0-9._/*-]+)`?/.exec(intro)?.[1] ?? null;
   // 首行「执行类型 后端」这类写法：批准执行按它选执行会话的路线（#99）。没写是 null。
-  const execKind = /执行类型\s*[:：]?\s*([^\s·（(]+)/.exec(intro)?.[1] ?? null;
+  // 只认第一行非空文字（模板的 `> 子 issue · …` 引用行），首段里其他行的备注不算（#100 单审 P2-1）。
+  const firstLine = intro.split('\n').find((l) => l.trim()) ?? '';
+  const execKind = /执行类型\s*[:：]?\s*([^\s·（(]+)/.exec(firstLine)?.[1] ?? null;
   return { parent, group, base_ref: target && target !== 'main' ? target : null, exec_kind: execKind };
 }
 

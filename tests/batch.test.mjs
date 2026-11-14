@@ -193,6 +193,17 @@ test('#99 SC1 brief：首行写「执行类型 后端」时换成后端路线 Co
   assert.throws(() => briefOf(fixtureWithKind('后端'), { gateway: 'Claude' }), /--gateway 只能是 Mini（当前：Claude）/);
 });
 
+test('#100 单审 P2-1：只认首行的执行类型，首段其他行的备注不换路线', () => {
+  const f = parentFixture();
+  const key = `api repos/${REPO}/issues/11`;
+  const body = f[key].body.replace('\n\n## 目标', '\n备注：执行类型 后端\n\n## 目标');
+  assert.notEqual(body, f[key].body, '夹具应有「## 目标」段');
+  const out = briefOf({ ...f, [key]: { ...f[key], body } });
+  assert.equal(out.exec_kind, null);
+  assert.deepEqual(routeOf(out), ['claude-code', 'claude-opus-5-5', 'high']);
+  assert.equal(Object.hasOwn(out.request, 'agent_device_id'), false);
+});
+
 test('#99 SC2 brief：没写执行类型、写「前端」或「混合」都走默认路线，不带 agent_device_id', () => {
   for (const fixture of [parentFixture(), fixtureWithKind('前端'), fixtureWithKind('混合')]) {
     const out = briefOf(fixture);
@@ -208,6 +219,8 @@ test('#99 SC3 brief：--kind 优先于 issue 上写的类型；不认识的类�
   assert.deepEqual(routeOf(briefOf(fixtureWithKind('后端'), { kind: '前端' })), ['claude-code', 'claude-opus-5-5', 'high']);
   assert.throws(() => briefOf(fixtureWithKind('全栈')), /#11 首行的执行类型 只能是 前端 \/ 后端 \/ 混合（当前：全栈）/);
   assert.throws(() => briefOf(parentFixture(), { kind: '全栈' }), /--kind 只能是 前端 \/ 后端 \/ 混合（当前：全栈）/);
+  // --kind 合法也要拒绝首行写错的类型（#100 单审 P2-2）
+  assert.throws(() => briefOf(fixtureWithKind('全栈'), { kind: '后端' }), /#11 首行的执行类型 只能是 前端 \/ 后端 \/ 混合（当前：全栈）/);
   const { ghPath } = writeFixture(parentFixture());
   const args = [CLI, 'brief', '--item', ref(11), '--root', ref(10), '--lead', 'L', '--repo-dir', '/r', '--project', '/r', '--gh-fixture', ghPath, '--now', NOW];
   const bad = spawnSync(process.execPath, [...args, '--kind', '全栈'], { encoding: 'utf8' });

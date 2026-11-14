@@ -267,10 +267,11 @@ export function brief({ gh, itemRef, root, lead, repoDir, project, name, urgent 
   const openPr = prs[0]?.number ?? null;
   const header = parseHeader(splitSections(issue.body ?? ''));
   // 执行类型：--kind 优先，否则取子 issue 首行（#99）。命中 byKind 就换整条路线，其余走默认路线。
+  // 两处各自校验：--kind 合法也不放过 issue 首行写错的类型（#100 单审 P2-2）。
+  const allowed = EXEC_KINDS.join(' / ');
+  if (header.exec_kind !== null && !EXEC_KINDS.includes(header.exec_kind)) reject(`${ref} 首行的执行类型 只能是 ${allowed}（当前：${header.exec_kind}）`);
+  if (kind !== undefined && !EXEC_KINDS.includes(kind)) reject(`--kind 只能是 ${allowed}（当前：${kind}）`);
   const execKind = kind ?? header.exec_kind;
-  if (execKind !== null && !EXEC_KINDS.includes(execKind)) {
-    reject(`${kind === undefined ? `${ref} 首行的执行类型` : '--kind'} 只能是 ${EXEC_KINDS.join(' / ')}（当前：${execKind}）`);
-  }
   const kindRoute = execKind === null ? undefined : route.byKind?.[execKind];
   const active = kindRoute ?? route;
   // 按类型覆盖的路线，模型只在它自己的供应商位置有：不加 --gateway 也带上第一个位置，不继承 lead 的网关。
