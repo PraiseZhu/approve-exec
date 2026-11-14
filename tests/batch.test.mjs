@@ -200,6 +200,15 @@ test('#100 单审 P2-1：只认首行的执行类型，首段其他行的备注�
   assert.notEqual(body, f[key].body, '夹具应有「## 目标」段');
   const out = briefOf({ ...f, [key]: { ...f[key], body } });
   assert.equal(out.exec_kind, null);
+  // 第 2 轮单审：说明行插在引用行前面也不算
+  const before = `说明：执行类型 后端\n${f[key].body}`;
+  const outBefore = briefOf({ ...f, [key]: { ...f[key], body: before } });
+  assert.equal(outBefore.exec_kind, null);
+  assert.deepEqual(routeOf(outBefore), ['claude-code', 'claude-opus-5-5', 'high']);
+  // 独立 issue 的引用行照样认
+  const standalone = f[key].body.replace(/^> 子 issue · 总 issue \S+ · /, '> 独立 issue · 执行类型 后端 · ');
+  assert.notEqual(standalone, f[key].body, '夹具首行应以「> 子 issue · 总 issue」开头');
+  assert.equal(briefOf({ ...f, [key]: { ...f[key], body: standalone } }).exec_kind, '后端');
   assert.deepEqual(routeOf(out), ['claude-code', 'claude-opus-5-5', 'high']);
   assert.equal(Object.hasOwn(out.request, 'agent_device_id'), false);
 });
