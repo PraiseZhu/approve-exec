@@ -426,3 +426,10 @@ test('并行上限：章程写了 max_parallel，名额用完时 brief 拒绝；
   assert.deepEqual([roomy.max_parallel, roomy.dispatch_budget], [4, 3]);
   assert.equal(batchStatus({ gh: ghFrom(parentFixture()), issueRef: ref(10) }).dispatch_budget, null, '没有章程不限');
 });
+
+test('并行上限在登记时再核一次：名额已满时 claim 拒绝，提示归档刚建的会话（单审第 2 轮 P2）', () => {
+  const gh = ghFrom(earlyFixture({ charter: CHARTER_COMMENT({ max_parallel: 1 }) }));
+  assert.throws(() => claim({ gh, itemRef: ref(12), session: 's12', title: 't丨1114', now: NOW }), /已经派满：归档刚建的会话 s12/);
+  const ok = claim({ gh: ghFrom(earlyFixture()), itemRef: ref(12), session: 's12', title: 't丨1114', now: NOW });
+  assert.equal(ok.session, 's12');
+});

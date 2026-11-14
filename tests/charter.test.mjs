@@ -95,3 +95,8 @@ test('merge-request 只对本次 run 里审查放行、且判通过后没变过�
   assert.throws(call({ events: [PASS, { ...PASS, type: 'verdict_revise', at: '2026-11-14T02:00:00Z', id: 'r' }] }), /最新的裁决不是通过/);
   assert.throws(call({ pr: { head: { sha: 'b'.repeat(40) } } }), /判通过后代码变了/);
 });
+
+test('通过事件没记代码版本（手写或损坏的标记）：不采信，merge-request 拒绝（单审第 2 轮 P2）', () => {
+  const noHead = { type: 'verdict_pass', ref: `${REPO}#11`, at: '2026-11-14T01:00:00Z', id: 'p' };
+  assert.throws(() => mergeRequest({ gh: prFixture({ charter: CHARTER, events: [noHead] }), prRef: `${REPO}#7`, rootRef: ROOT, lead: 'lead-1' }), /最新的裁决不是通过/);
+});

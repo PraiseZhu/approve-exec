@@ -60,6 +60,8 @@ export function parseEvents(comments, login) {
     let payload;
     try { payload = JSON.parse(m[1]); } catch { skipped += 1; continue; }
     if (!payload || !EVENT_TYPES.includes(payload.type) || typeof payload.ref !== 'string') { skipped += 1; continue; }
+    // 必填的代码版本缺了或不是 40 位 sha：按坏标记处理，不采信。
+    if (NEEDS_PR_HEAD.includes(payload.type) && !SHA_RE.test(String(payload.head ?? ''))) { skipped += 1; continue; }
     events.push({ ...payload, at: payload.at ?? c.created_at ?? null, comment_id: c.id ?? null, url: c.html_url ?? null });
   }
   return { events, skipped };

@@ -10,7 +10,7 @@ import { REPO, childBody, ghFrom, issue, parentFixture } from './fixtures/issues
 const A = `${REPO}#11`;
 const ACCEPTED = '7b43650a69e2e6aabcfb01efe279f7b28d04b1f1';
 // PR 2204 里盯梢改存量测试的那个真实提交（回放数据里有它，排在判通过的版本之后）。回放数据是瘦身版、不带文件名，
-// 所以改动文件清单仍是按当时情况手写的。
+// 所以改动文件清单是手写的，文件名用合成的（本仓公开，不带出来源仓的真实路径），保留「存量测试被删 1 行」这个情形。
 const NOW_HEAD = '8dc2b808932e00530f75001acd8f3907bf7e7ed9';
 const SCOPE = ['- `src/canvas/**`：边界逻辑', '- `src/canvas/**/*.test.ts`：相关测试'];
 
@@ -27,20 +27,20 @@ const run = (opts) => checkPr({ ...setup(opts), ref: A, pr: 5, stage: 'recheck',
 
 test('判通过后存量测试被删了行：不过，原因写出文件名和删除行数', () => {
   const res = run({ compare: { status: 'ahead', files: [
-    { filename: 'src/canvas/aliasWrap.contract.test.ts', status: 'modified', additions: 1, deletions: 1 },
-    { filename: 'src/canvas/createText.ts', status: 'modified', additions: 8, deletions: 2 },
+    { filename: 'src/canvas/existing.contract.test.ts', status: 'modified', additions: 1, deletions: 1 },
+    { filename: 'src/canvas/feature.ts', status: 'modified', additions: 8, deletions: 2 },
   ] } });
   assert.deepEqual(failed(res), ['existing_tests']);
   const detail = res.checks.find((c) => c.name === 'existing_tests').detail;
-  assert.match(detail, /src\/canvas\/aliasWrap\.contract\.test\.ts（删 1 行）/);
+  assert.match(detail, /src\/canvas\/existing\.contract\.test\.ts（删 1 行）/);
   assert.equal(res.accepted_head, ACCEPTED);
 });
 
 test('只加新测试、改源码：通过；新加的测试文件删行不算存量', () => {
   const res = run({ compare: { status: 'ahead', files: [
-    { filename: 'src/canvas/createText.test.ts', status: 'added', additions: 40, deletions: 0 },
-    { filename: 'src/canvas/aliasWrap.contract.test.ts', status: 'modified', additions: 5, deletions: 0 },
-    { filename: 'src/canvas/createText.ts', status: 'modified', additions: 8, deletions: 2 },
+    { filename: 'src/canvas/feature.test.ts', status: 'added', additions: 40, deletions: 0 },
+    { filename: 'src/canvas/existing.contract.test.ts', status: 'modified', additions: 5, deletions: 0 },
+    { filename: 'src/canvas/feature.ts', status: 'modified', additions: 8, deletions: 2 },
   ] } });
   assert.equal(res.ok, true, JSON.stringify(res.checks));
 });

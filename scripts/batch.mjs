@@ -375,6 +375,12 @@ export function claim({ gh, itemRef, session, title, now = nowIso() }) {
   const current = activeDispatch(comments, ref, login);
   if (current) reject(`${ref} 已派给会话 ${current.session}（${current.url ?? '子 issue 评论'}）：同一子 issue 只能有一个会话。确认那个会话已不在后，先 release 再派`);
   if (activeClaims(comments, ref, login).length) reject(`${ref} 还在旧台账的 run 里：按 references/legacy-ledger-flow.md 处理，不重复派`);
+  // 并行上限在登记时再核一次：brief 只看当时的名额，两个子 issue 同时 brief 会都拿到请求。这里超额就拒绝，lead 按「派发失败的会话马上归档」处理。
+  const parent = parseHeader(splitSections(readIssue(gh, parseIssueRef(ref).repo, parseIssueRef(ref).number).body ?? '')).parent;
+  if (parent) {
+    const status = batchStatus({ gh, issueRef: parent });
+    if (status.dispatch_budget === 0) reject(`${parent} 的章程把同时在跑的执行会话限制在 ${status.max_parallel} 个，已经派满：归档刚建的会话 ${session}，等有会话收工再派 ${ref}`);
+  }
   const posted = emit({ gh, type: 'dispatch', itemRef: ref, session, title, now });
   return { ok: true, ref, session, comment_url: posted.comment_url };
 }
@@ -459,7 +465,8 @@ export function mergeRequest({ gh, prRef, rootRef, lead, title = null }) {
   if (!(pr?.labels ?? []).some((l) => l?.name === MERGE_READY_LABEL)) reject(`${ref} 没有审查放行标签 ${MERGE_READY_LABEL}：审查放行后才交合并请求`);
   const pass = selectChildEvents(readComments(gh, commentsPath(taskRef)), parseIssueRef(taskRef).ref, login).filter((e) => e.type === 'verdict_pass' || e.type === 'verdict_revise').at(-1);
   if (pass?.type !== 'verdict_pass') reject(`${taskRef} 上最新的裁决不是通过：不交合并请求`);
-  if (!pass.legacy && pass.head && pass.head !== pr?.head?.sha) reject(`${ref} 判通过后代码变了（通过时 ${pass.head.slice(0, 7)}，现在 ${String(pr?.head?.sha).slice(0, 7)}）：先跑 check-pr.mjs --stage recheck，通过后对新版本再记一次通过`);
+  // v3 的通过事件必须记着代码版本且等于 PR 当前版本；缺版本的（手写或损坏的标记）一律不放行。
+  if (!pass.legacy && pass.head !== pr?.head?.sha) reject(`${ref} 判通过后代码变了或通过事件没记版本（通过时 ${String(pass.head ?? '无').slice(0, 7)}，现在 ${String(pr?.head?.sha).slice(0, 7)}）：先跑 check-pr.mjs --stage recheck，通过后对新版本再记一次通过`);
   return {
     ok: true,
     pr: ref,

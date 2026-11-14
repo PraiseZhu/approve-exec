@@ -155,3 +155,13 @@ test('预开工：上游子 issue 还开着时不验收，列出上游；上游�
   dropped.gh = (args) => { const out = inner(args); return args.join(' ') === `api repos/${REPO}/issues/11` ? { ...out, state_reason: 'not_planned' } : out; };
   assert.deepEqual(failed(checkPr({ ...dropped, ref: C, pr: 5 })), ['upstream_merged']);
 });
+
+test('预开工：上游 issue 关了但它的任务 PR 还开着，不算合入（单审第 2 轮 P2）', () => {
+  const C = `${REPO}#13`;
+  const fixture = parentFixture({ aState: 'closed', aReason: 'completed' });
+  fixture[`api repos/${REPO}/pulls/5`] = { head: { sha: HEAD }, state: 'open', draft: true, merged: false, body: GOOD_BODY.replaceAll(A, C) };
+  fixture[`api repos/${REPO}/pulls/5/files?per_page=100&page=1`] = [{ filename: 'src/sync/offline.ts' }];
+  fixture[`api repos/${REPO}/pulls?state=open&per_page=100&page=1`] = [{ number: 4, draft: false, body: `任务 issue：${A}` }];
+  const res = checkPr({ gh: ghFrom(fixture), checks: () => ({ status: 0, stdout: JSON.stringify([{ name: 'test', bucket: 'pass' }]) }), bodyCheck: () => ({ ok: true, detail: 'ok' }), ref: C, pr: 5 });
+  assert.deepEqual(failed(res), ['upstream_merged']);
+});

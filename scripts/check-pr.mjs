@@ -22,6 +22,7 @@ import { isMain, parseArgs } from './lib/common.mjs';
 import { ghRunner, parseDeps, parseHeader, parseIssueRef, pendingQuestions, readIssue, sectionText, splitSections, toKeelSc, toScope } from './issue-plan.mjs';
 import { ghLogin, readComments } from './issue-run.mjs';
 import { parseEvents } from './event.mjs';
+import { selectDepStatus, selectOpenTaskPrs } from './batch.mjs';
 import { selectCharter } from './charter.mjs';
 import { readRepoCard, selectAlwaysAllowed } from './lib/repo-card.mjs';
 import { ghChecksRunner, outOfScope, scRowsInBody } from './accept-check.mjs';
@@ -188,12 +189,10 @@ export function checkPr({ gh, checks, bodyCheck = runBodyReadyCheck, ref: rawRef
   } else add('prereview', true, '章程未要求预审');
 
   // 预开工（#107）：上游子 issue 全部合入（关闭）之前不验收。
-  // 和 batch.mjs selectDepStatus 同口径：关成「不做」的上游不算合入。
-  const upstream = parseDeps(sectionText(sections, '依赖'), repo, ref).hard.filter((d) => {
-    const dep = parseIssueRef(d);
-    const up = readIssue(gh, dep.repo, dep.number);
-    return up.state !== 'closed' || up.state_reason === 'not_planned';
-  });
+  // 直接用 batch.mjs 的依赖判定：上游 issue 已关闭、不是「不做」、且没有还开着的任务 PR 才算合入。
+  const openByRepo = new Map();
+  const openPrsFor = (r) => { if (!openByRepo.has(r)) openByRepo.set(r, selectOpenTaskPrs(gh, r)); return openByRepo.get(r); };
+  const upstream = parseDeps(sectionText(sections, '依赖'), repo, ref).hard.filter((d) => !selectDepStatus(gh, d, openPrsFor).ok);
   add('upstream_merged', upstream.length === 0, upstream.length ? `上游还没合入或被关成不做：${upstream.join('、')}（预开工的 PR 等上游合入、同步目标分支后再发待验收；上游不做了就发「卡住」）` : '依赖的子 issue 都已合入');
 
   return { ok: out.every((c) => c.ok), stage, ref, pr, head: actualHead, checks: out, ...(sv.judgement.length ? { judgement: sv.judgement } : {}) };
