@@ -48,3 +48,22 @@ test('evolution-note: 非法 fingerprint / 扩权 proposal 不降档', (t) => {
   const again = JSON.parse(r.stdout);
   assert.equal(again.entry.tier, 'proposal');
 });
+
+test('evolution-note: set-status 支持 obsolete（#108）；指纹不存在时非零退出；已处理的提案不再列在「待维护者拍板」', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ae-evo-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  run(dir, ['add', '--fingerprint', 'old-ledger-drift', '--tier', 'proposal', '--title', '旧台账漂移']);
+  const r = run(dir, ['set-status', '--fingerprint', 'old-ledger-drift', '--status', 'obsolete', '--note', '旧流程已退役']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).entry.status, 'obsolete');
+  assert.notEqual(run(dir, ['set-status', '--fingerprint', 'no-such-entry', '--status', 'obsolete']).status, 0);
+  const md = readFileSync(join(dir, 'EVOLUTION.md'), 'utf8');
+  assert.equal(md.includes('## 待维护者拍板'), false);
+  assert.match(md, /## 已处理的提案[\s\S]*old-ledger-drift[\s\S]*status: obsolete，旧流程已退役/);
+});
+
+test('仓里的自进化台账：仍是 open 的记录每条都写了归属说明（#108 SC7）', () => {
+  const ledger = JSON.parse(readFileSync(join(ROOT, 'evolution/ledger.json'), 'utf8'));
+  const bare = ledger.entries.filter((e) => e.status === 'open' && !String(e.note ?? '').trim()).map((e) => e.fingerprint);
+  assert.deepEqual(bare, []);
+});

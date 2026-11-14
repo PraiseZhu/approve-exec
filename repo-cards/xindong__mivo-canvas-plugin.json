@@ -1,0 +1,42 @@
+{
+  "schema": "approve-exec/repo-card@1",
+  "repo": "xindong/mivo-canvas-plugin",
+  "always_allowed": [
+    "docs/pr/{pr}/**"
+  ],
+  "hot_files": [
+    {
+      "path": "scripts/ci/first-screen-size.baseline.json",
+      "why": "会增加首屏 JS 的改动都要上调它；多个 PR 同时改会冲突（approve-exec evolution/ledger.json 的 child-scope-misses-necessary-files；xindong/mivo-canvas-plugin PR 2141 与 PR 2142）"
+    }
+  ],
+  "guards": [
+    {
+      "name": "structure guard",
+      "rule": "单个源码文件不超过 1200 行，超了要拆新文件（Mivo CLAUDE.md「守卫组成」；超限时把新逻辑拆进新文件）"
+    },
+    {
+      "name": "pr-handoff-gate",
+      "rule": "每个 PR 在 docs/pr/<PR号>/ 附 review.md 和 qa.md（Mivo AGENTS.md「PR 与审查」）"
+    },
+    {
+      "name": "合并顺序",
+      "rule": "PR 正文开头要有一行「合并顺序：」（全局任务 issue 范式第 3 条）"
+    }
+  ],
+  "verify": [
+    { "name": "类型检查", "command": "npx tsc -b" },
+    { "name": "lint", "command": "npm run lint" },
+    { "name": "定向单测", "command": "npm run test:unit -- <测试路径>" },
+    { "name": "交接文件自查", "command": "node scripts/pr-handoff/check.mjs <PR号>" }
+  ],
+  "review_rules": [
+    "docs/review/severity.md",
+    "AGENTS.md"
+  ],
+  "pitfalls": [
+    "合进 integration/* 的 PR 不会被合并伙伴自动接单，要章程授权后由 lead 交合并请求（evolution/ledger.json 的 integration-pr-no-auto-intake）",
+    "转正式后的审查意见和 CI 归 Mini 盯梢处理，执行会话不再推送（Mivo PR 生命周期门禁）",
+    "存量测试只增不改时，盯梢的修复轮也受这条约束（evolution/ledger.json 的 post-ready-fix-breaks-child-sc）"
+  ]
+}

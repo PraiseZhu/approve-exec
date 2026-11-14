@@ -347,3 +347,20 @@ for (const m of SELFCHECK_MUTATIONS) {
       `变异 ${m.id} 的失败集必须恰为预测集（${m.red.length} 条，无多余无遗漏）`);
   });
 }
+
+// v3（#108）：--live 追加对账任务入口检查
+test('对账任务入口：文件都在则 PASS，缺文件则 FAIL 并点名', async (t) => {
+  if (process.env.SC_MUTATION_CHILD === '1') { t.skip('子套件运行跳过本用例（与变异无关，防污染其失败集契约）'); return; }
+  const { checkReconcileTick } = await import('../scripts/selfcheck.mjs');
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join, resolve, dirname } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const ok = [];
+  checkReconcileTick(resolve(dirname(fileURLToPath(import.meta.url)), '..'), ok);
+  assert.deepEqual(ok.map((i) => [i.id, i.ok]), [['live-reconcile-tick', true]]);
+  const bad = [];
+  checkReconcileTick(mkdtempSync(join(tmpdir(), 'no-tick-')), bad);
+  assert.equal(bad[0].ok, false);
+  assert.match(bad[0].detail, /scripts\/reconcile-tick\.py/);
+});

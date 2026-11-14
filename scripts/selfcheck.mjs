@@ -14,7 +14,7 @@
 //
 // CLI: node scripts/selfcheck.mjs [--live]
 // 只依赖 node 内置模块；路径一律来自 config，不写死。
-import { readFileSync, lstatSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, lstatSync, realpathSync, statSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -112,6 +112,14 @@ function checkGoalSkill(config, items) {
   items.push({ id: 'goal-skill-md', ok, detail: ok ? p : `不存在或非文件: ${p}` });
 }
 
+// ---------- ③ --live：对账任务入口（v3，#108） ----------
+// 定时任务的命令指向本仓的 scripts/reconcile-tick.py 和它调用的 reconcile.mjs；缺了任务每轮都会失败。
+export function checkReconcileTick(skillRoot, items) {
+  const missing = ['scripts/reconcile-tick.py', 'scripts/reconcile.mjs', 'scripts/lib/cindy_script.py'].filter((rel) => !existsSync(join(skillRoot, rel)));
+  if (missing.length) items.push({ id: 'live-reconcile-tick', ok: false, detail: `对账任务入口缺文件: ${missing.join(', ')}` });
+  else items.push({ id: 'live-reconcile-tick', ok: true, detail: '对账任务入口 scripts/reconcile-tick.py 及其依赖都在' });
+}
+
 // ---------- ② --live：接线两处 ----------
 // 导出以便测试注入（组B-4 负向/正向夹具）：liveLink 是待验 symlink 路径，mineRoot 是「本仓」一侧。
 // 三段判据（加强不是替换，任一段 FAIL 即拒）：
@@ -204,6 +212,7 @@ function main() {
   if (args.live) {
     checkLiveSymlink(deriveLiveLink(config, root), root, items);
     checkTriggerLine(config, items);
+    checkReconcileTick(root, items);
   }
 
   for (const item of items) {

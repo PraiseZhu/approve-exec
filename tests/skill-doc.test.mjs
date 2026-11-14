@@ -32,7 +32,7 @@ test('frontmatter：name / trigger；description 写 2026-11-07 新流程，不�
   assert.match(frontmatter, /^name: approve-exec$/m);
   assert.match(frontmatter, /^trigger: 批准执行$/m);
   const description = /^description: (.*)$/m.exec(frontmatter)?.[1] ?? '';
-  for (const must of ['开 issue', '吃总 issue', '并行/串行原则', '独立会话', 'Claude 网关的 Opus 5.5 high', '不走 KEEL', '不建台账', '不挂定时任务', '转正式', '归档已完成的会话', '不合并']) {
+  for (const must of ['开 issue', '吃总 issue', '并行/串行原则', '独立会话', 'Claude 网关的 Opus 5.5 high', '不走 KEEL', '不建台账', '对账任务', '转正式', '归档已完成的会话', '不合并']) {
     assert.ok(description.includes(must), `description 应写「${must}」`);
   }
   for (const old of ['keel_run', '最多 2 轮', 'manifest', 'checkpoint', '续跑脚本']) {
@@ -76,7 +76,8 @@ test('issue 入口：batch status 七种状态，dispatchable 一次派完；派
 
 test('2026-11-07 改版：lead 派完就停，不挂定时任务、不建台账、不走 KEEL（用户定）', () => {
   const s = section('## ⓪ issue 入口');
-  assert.ok(s.includes('**停下。**') && s.includes('不挂定时任务，不轮询'));
+  // v3（#108）：仍然派完就停、不轮询，但等待由对账任务看着；建任务的参数写在 README，不写进 ⓪ 段。
+  assert.ok(s.includes('**停下。**') && s.includes('派完就结束本轮，不轮询') && s.includes('等待由对账任务看着'));
   for (const banned of ['keel_run', 'schedule_create', 'issue-watch', 'issue-run.mjs', 'ledger']) {
     assert.equal(s.includes(banned), false, `⓪ 段不得再写「${banned}」`);
   }
@@ -221,7 +222,7 @@ test('旧 run：改版前开工的 run 按 legacy-ledger-flow.md 收尾，旧步
 
 test('保证等级 T1，不夸大成宿主强制隔离；接线用 selfcheck --live 检查', () => {
   const s = section('## 保证等级');
-  for (const must of ['T1', '不是宿主强制隔离', 'scripts/selfcheck.mjs --live', 'tests/skill-doc.test.mjs', '没有定时检查']) {
+  for (const must of ['T1', '不是宿主强制隔离', 'scripts/selfcheck.mjs --live', 'tests/skill-doc.test.mjs', '对账任务负责发现六种情况', '它不负责合并、改代码', '仍靠「进展」和用户兜底']) {
     assert.ok(s.includes(must), `保证等级段应写「${must}」`);
   }
 });
@@ -289,4 +290,46 @@ test('#95 README 写执行会话默认路线；invalid 由 lead 直接补格式�
     assert.ok(invalid.includes(must), `invalid 一条应写「${must}」，实际：${invalid}`);
   }
   assert.equal(skillDoc.includes('指路「开 issue」补齐'), false, 'SKILL.md 不得再写「指路「开 issue」补齐」');
+});
+
+// v3：对账式流水线（PraiseZhu/approve-exec#101）
+
+test('#108 SC8：SKILL.md 不再写「不挂定时任务」；有「对账任务」一节，写清期限表、两种模式、不存进度状态', () => {
+  assert.equal(skillDoc.includes('不挂定时任务'), false);
+  const s = section('## 对账任务');
+  for (const must of ['scripts/reconcile-tick.py', 'scripts/reconcile.mjs', '只读 GitHub', '不存进度状态', '只记不敲', '不建在 Linux 网关上', '`wake_lead`', '`wake_owner`', '`recheck`', '`request_merge`',
+    '15 分钟', '30 分钟', '2 小时', '10 分钟', '6 小时', '没有章程的 run 不归它管']) {
+    assert.ok(s.includes(must), `对账任务一节应写「${must}」`);
+  }
+  assert.ok(skillDoc.indexOf('## 对账任务') > skillDoc.indexOf('## ⓪ issue 入口') && skillDoc.indexOf('## 对账任务') < skillDoc.indexOf('## 执行会话的规矩'));
+  const readme = readFileSync(join(root, 'README.md'), 'utf8');
+  for (const must of ['### 对账任务', 'APPROVE_EXEC_TICK_MODE', '`record`（默认）', '不带 `silentWhenIdle`', 'schedule_list', '### 运行章程', '### 回放数据']) {
+    assert.ok(readme.includes(must), `README.md 应写「${must}」`);
+  }
+});
+
+test('#104、#105：事件由脚本写；被叫醒后的三种对账动作各有做法；定章程在第 1 步之前', () => {
+  const s = section('## ⓪ issue 入口');
+  for (const must of ['scripts/event.mjs emit --type verdict_pass', '`verdict_revise`', '暂缓转正式：', '**对账：复核**', '--stage recheck --accepted-head', '**对账：交合并请求**',
+    'scripts/batch.mjs merge-request', '`pr_merge_input`', '**对账：叫醒 lead**', '`judgement`', '`prereview` 项不过']) {
+    assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
+  }
+  assert.ok(skillDoc.includes('不手写这些评论'), 'SKILL.md 应写事件不手写');
+  const charter = s.indexOf('**定章程**');
+  assert.ok(charter >= 0 && charter < s.indexOf('1. **看现状。**'), '定章程应在第 1 步之前');
+  for (const must of ['scripts/charter.mjs write', '章程没写的事一律不自动做', 'lead 换人时发一条新章程']) assert.ok(s.includes(must), `定章程应写「${must}」`);
+  const red = section('## 合并红线（最高优先级）');
+  assert.ok(red.includes('只有用户本人对指定 PR 的明确、当次授权才允许合并'), '合并红线原文保留，章程不新增合并通道');
+});
+
+test('#106、#107：开工带用户原话和共享记忆；预开工与预审写进 lead 流程和执行会话协议', () => {
+  const s = section('## ⓪ issue 入口');
+  for (const must of ['`--user-words', '原样转给执行会话，不转述', '`repo-cards/`', '`early_dispatchable` 不是第八种状态', '--early', '上游全部合入前不发「待验收」', '--report']) {
+    assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
+  }
+  const protocol = readFileSync(join(root, 'references/owner-protocol.md'), 'utf8');
+  for (const must of ['**预审**', '只修确认成立的 P0、P1、P2', 'event.mjs emit --type prereview', '## 预开工', 'PR 一直保持 Draft', '不指向上游 PR 的分支', '## 收到对账敲门',
+    'note.mjs add --root', '`--broadcast`', '「范围对照」', 'event.mjs emit --type ready_for_verdict', 'event.mjs emit --type ready ']) {
+    assert.ok(protocol.includes(must), `owner-protocol.md 应写「${must}」`);
+  }
 });
