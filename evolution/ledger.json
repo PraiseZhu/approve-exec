@@ -416,6 +416,45 @@
       "occurrences": 1,
       "firstSeen": "2026-11-12T13:17:33.887Z",
       "lastSeen": "2026-11-12T13:17:33.887Z"
+    },
+    {
+      "fingerprint": "routing-entry-without-device",
+      "tier": "proposal",
+      "title": "routing.json 的 Worker 条目没写运行位置，派工方换了电脑就派不出去",
+      "detail": "2026-11-15 PraiseZhu/approve-exec#112：执行会话的 Agent 在 Mac mini，按顶层 review 派预审，pi / deepseek-flash:discount / xd 条目没写 agent_device_id，Worker 落到 Mac mini，那里只有 Art Cindy，create_worker 报 INVALID_PARAMS；会话按 fail-closed 停下发「卡住」。routing.json 里 12 条 Cindy AI 条目都没写位置，以前主控和会话都在 Pro 上，没暴露。",
+      "proposal": "每条派工条目写明 agent_device_id，由 model-route 校验强制（2026-11-15 已在 model-route 落地，不在本仓）。",
+      "status": "landed",
+      "commit": null,
+      "note": "model-route 2026-11-15：每条 Worker 与 session 条目必须有 agent_device_id，set 必须带 --device；routing.json 已全部补齐",
+      "occurrences": 1,
+      "firstSeen": "2026-11-15T11:01:50.910Z",
+      "lastSeen": "2026-11-15T11:01:50.910Z"
+    },
+    {
+      "fingerprint": "lead-test-expectation-off-contract",
+      "tier": "proposal",
+      "title": "lead 写给测试 Worker 的期望和子 issue 契约冲突，测试据此判不通过",
+      "detail": "2026-11-15 PR #113：lead 派 e2e 时写「Mivo 范围只有 docs/** 期望混合」，但 #111 契约要求 Mivo 仓库卡把 docs/design.md 算界面；测试按 lead 的期望判 P2 不通过，lead 核对契约后请测试复核改判，多了一轮。",
+      "proposal": "派 e2e 前把每条期望对回子 issue 的契约和仓库卡；期望从子 issue 的 SC 和契约派生，不由 lead 另编。",
+      "status": "open",
+      "commit": null,
+      "note": "归属：lead 派 e2e 的派工包（pr-merge 第 4 节、orca-fanout 派工包模板）；出现第二次再在派工包模板里加「期望逐条对回子 issue 契约」",
+      "occurrences": 1,
+      "firstSeen": "2026-11-15T11:01:51.291Z",
+      "lastSeen": "2026-11-15T11:01:51.291Z"
+    },
+    {
+      "fingerprint": "masked-path-breaks-session-dispatch",
+      "tier": "proposal",
+      "title": "远程主控看到的路径被改写，照抄进 send_to_session 报项目未登记",
+      "detail": "2026-11-15 #111 首次派发：lead 跑在 Praise-VPS，工具输出里本机的用户目录被显示成另一种路径，lead 照抄 project_path、working_dir 后 send_to_session 报 NOT_FOUND（Project is not registered）；改用 brief 输出的原始值重发成功。",
+      "proposal": "派发参数由程序从 brief 的 request JSON 读出原样传，不从屏幕照抄路径；SKILL 第 2 步可补一句。",
+      "status": "open",
+      "commit": null,
+      "note": "归属：lead 派发时的参数传递（SKILL 第 2 步）；只在主控跑在远程网关、工具输出改写路径时出现，保留观察",
+      "occurrences": 1,
+      "firstSeen": "2026-11-15T11:01:51.524Z",
+      "lastSeen": "2026-11-15T11:01:51.524Z"
     }
   ]
 }

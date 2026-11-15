@@ -5,6 +5,14 @@
 
 ## 待维护者拍板(扩权类提案,永不自动落地)
 
+- `masked-path-breaks-session-dispatch` **远程主控看到的路径被改写，照抄进 send_to_session 报项目未登记** — 出现 1 次,首见 2026-11-15,最近 2026-11-15,status: open
+  - 现象:2026-11-15 #111 首次派发：lead 跑在 Praise-VPS，工具输出里本机的用户目录被显示成另一种路径，lead 照抄 project_path、working_dir 后 send_to_session 报 NOT_FOUND（Project is not registered）；改用 brief 输出的原始值重发成功。
+  - 提案:派发参数由程序从 brief 的 request JSON 读出原样传，不从屏幕照抄路径；SKILL 第 2 步可补一句。
+  - 备注:归属：lead 派发时的参数传递（SKILL 第 2 步）；只在主控跑在远程网关、工具输出改写路径时出现，保留观察
+- `lead-test-expectation-off-contract` **lead 写给测试 Worker 的期望和子 issue 契约冲突，测试据此判不通过** — 出现 1 次,首见 2026-11-15,最近 2026-11-15,status: open
+  - 现象:2026-11-15 PR #113：lead 派 e2e 时写「Mivo 范围只有 docs/** 期望混合」，但 #111 契约要求 Mivo 仓库卡把 docs/design.md 算界面；测试按 lead 的期望判 P2 不通过，lead 核对契约后请测试复核改判，多了一轮。
+  - 提案:派 e2e 前把每条期望对回子 issue 的契约和仓库卡；期望从子 issue 的 SC 和契约派生，不由 lead 另编。
+  - 备注:归属：lead 派 e2e 的派工包（pr-merge 第 4 节、orca-fanout 派工包模板）；出现第二次再在派工包模板里加「期望逐条对回子 issue 契约」
 - `deps-line-related-item-unparseable` **依赖一句提到关联项「互不依赖」时出计划被拒** — 出现 1 次,首见 2026-11-02,最近 2026-11-02,status: open
   - 现象:2026-11-02 mivo#1612：依赖写「无，随时可开工。与关联项 makecindy/cindy#8488 互不依赖，谁先合都行」，parseDeps 判断不了类型而拒收；「互不依赖」「不依赖」这类否定句应按无依赖处理，或模板注明依赖段只写会挡开工的项。
   - 备注:归属：issue-plan.mjs parseDeps；留到 open-issue 体检（下一期）
@@ -61,6 +69,7 @@
 - `integration-pr-no-auto-intake` 集成分支 PR 转正式后只登记通知，没交合并请求，PR 一直不合 — status: landed，#105：章程授权后对账器对审查放行未入队的 PR 产生 request_merge，batch.mjs merge-request 按目标分支核对授权
 - `child-scope-misses-necessary-files` 子 issue 范围清单反复漏列必要文件，每个 PR 验收都要 lead 补范围 — status: landed，#106：范围三档 + 仓库卡 always_allowed/hot_files；开 issue 时预查范围属于 open-issue，留到下一期
 - `post-ready-fix-breaks-child-sc` 转正式后盯梢的修复可能破坏子 issue 验收项，lead 没有合并前复核 — status: landed，#104：对账器发现判通过后代码变了就产生 recheck；recheck 检查存量测试有没有被删行
+- `routing-entry-without-device` routing.json 的 Worker 条目没写运行位置，派工方换了电脑就派不出去 — status: landed，model-route 2026-11-15：每条 Worker 与 session 条目必须有 agent_device_id，set 必须带 --device；routing.json 已全部补齐
 
 ## 已否决的提案(留档防止重复提出)
 
