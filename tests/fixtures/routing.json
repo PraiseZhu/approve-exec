@@ -8,7 +8,7 @@
       "fallbacks": [
         {
           "agent": "claude-code",
-          "model": "claude-opus-5-5",
+          "model": "anthropic/claude-opus-5-5",
           "effort": "high",
           "agent_device_id": "pro-fixture"
         }
@@ -22,7 +22,7 @@
       "fallbacks": [
         {
           "agent": "codex",
-          "model": "gpt-6.1-sol",
+          "model": "openai/gpt-6.1-sol",
           "effort": "high",
           "agent_device_id": "pro-fixture"
         }
@@ -36,7 +36,7 @@
       "fallbacks": [
         {
           "agent": "claude-code",
-          "model": "claude-opus-5-5",
+          "model": "anthropic/claude-opus-5-5",
           "effort": "high",
           "agent_device_id": "pro-fixture"
         }

@@ -59,7 +59,7 @@ lead 会话要在完全访问权限下运行：派出的执行会话继承 lead 
      分类用目标仓 `git ls-files` 展开范围 glob，新文件按路径判断。仓库卡的 `ui_globs` 替换通用界面表；未写时用 `**/*.tsx`、`**/*.jsx`、`**/*.vue`、`**/*.css`、`**/*.scss`、`**/*.html`、`**/locales/**`、`**/i18n/**`。测试/夹具始终不计，普通文档不计；卡片明确列出的设计文档算界面。已识别的代码和配置文件算逻辑；图片、字体等资源及未知扩展名保守不计。裸目录按索引里的子文件展开。界面与逻辑都有→混合；只有界面→界面；只有逻辑且有 browser-fixture/cindy-mac/cindy-windows 验收→混合，否则逻辑；没有代码文件→混合。
      当前约定：界面、混合首选 Praise-VPS 的 Opus 订阅，备选 Pro 的 Cindy AI Opus；逻辑首选 Mac mini 的 Art Cindy GPT-6.1 Sol，备选 Pro 的 Cindy AI GPT-6.1 Sol。运行时以共享 session 配置为准。旧 `执行类型 后端`、`--kind 后端` 照认，新写法用 `执行类型 逻辑`。派发说明写每个子 issue 的 `exec_kind`、实际 `request` 模型和路线序号。
    - `node scripts/batch.mjs brief --item <子 issue> --root <入口 issue> --lead <lead 会话 id> --repo-dir <目标仓主目录> --project <项目路径> [--name "<人话任务名>"] [--urgent] [--route-index <n>] [--kind <界面|逻辑|混合>]`，拿到 `request`。会话标题是 `#<PR号>-<人话任务名>丨<MMDD>`（还没有 PR 时不带 `#<PR号>-`，执行会话开出 PR 后自己补）。人话任务名从子 issue 标题提，提不出不超过 14 个字的中文短名时退出码 2，用 --name 给一个。已有开着的 PR 时，开工消息写明接着那个 PR 做。
-   - 用 cindy_helper 的 `send_to_session` 新建会话，参数原样传 `request` 里的键：`title`、`message`、`working_dir`、`project_path`、`use_worktree`、`agent_kind`、`model`、`effort`（带了 `--gateway` 或走逻辑路线时还有 `agent_device_id`）。不自己改模型和推理强度，不传 provider_id。
+   - 用 cindy_helper 的 `send_to_session` 新建会话，参数原样传 `request` 里的键：`title`、`message`、`working_dir`、`project_path`、`use_worktree`、`agent_kind`、`model`、`effort`、`agent_device_id`。不自己改模型和推理强度，不传 provider_id。
    - 成功后 `node scripts/batch.mjs claim --item <子 issue> --session <返回的 target_session_id> --title <标题> --route-json '<brief 输出的 route JSON>'`，把实际成功请求对应的 `route` 原样记到派发事件（不含供应商凭据），在子 issue 上记「批准执行派发」，防止别的 lead 或别的电脑重复派。回执不明确时先用 `list_sessions` 查有没有建出会话，不盲目重派。
    - **带上用户的话**（v3，#106）：用户在入口或中途说的、和这个子 issue 有关的话，派发时加 `--user-words "<原话>"` 原样带进开工消息；派出去之后用户又说的，用 `send_to_session` 原样转给执行会话，不转述。开工消息还会自动带上章程摘要、仓库卡（`repo-cards/` 下这个仓的必改路径、热点文件和常见坑）和运行笔记的读法。
    - **预开工**（v3，#107，章程允许时）：对 `early_dispatchable` 里的子 issue 用 `brief … --early` 生成开工消息，其余步骤照常。执行会话基于上游已判通过的代码先开发，PR 保持 Draft，上游全部合入前不发「待验收」；同时在跑的会话数不超过章程的上限。
@@ -74,7 +74,7 @@ lead 会话要在完全访问权限下运行：派出的执行会话继承 lead 
    - **发给执行会话的消息送不到**（回执 `ARCHIVED`、`DELETED`、`AGENT_NOT_READY` 等）：在子 issue 上评论「批准执行未送达：<原消息第一行>（<错误码>）」，并告诉用户；按「会话失联」处理。`DELIVERY_UNKNOWN` 先 `get_chat_history` 核对再决定是否重发（参数 `{"session_ids":["<会话 id>"],"roles":["user","assistant"],"limit":5}`；键是复数的 `session_ids`）。
    - **卡住**：能在范围内换做法，就把结论发回执行会话。范围或验收标准必须改，先告诉用户，按任务 issue 范式先改 issue 再改代码，改完把结论发回。缺权限、缺环境告诉用户。
    - **praise-merge 已合并**（只有 Mivo PR 有）、lead 按 `pr-merge` 自己合完非 Mivo PR 后，或用户说「继续」：先跑第 1 步的 status，对输出里 `to_archive` 的每一项用 cindy_helper `archive_sessions` 归档那个执行会话，成功后 `node scripts/batch.mjs archived --item <子 issue> --session <会话 id>` 记下来（用户 2026-11-07 定：PR 合入后由 lead 及时归档已完成的会话）；再派新放开的子 issue。
-5. **收工。** `all_done` 为真：告诉用户全部合入；跑 `node scripts/reconcile.mjs --root <总 issue> --report`，把输出的运行报告贴到总 issue（各阶段用时、审查轮数、判通过后新增提交数，用来和以前的 run 对比）。总 issue 由验收机自动验收、关闭，lead 不交接、不关总 issue。执行会话 PR 合并前不归档；PR 合并后由 lead 按 `to_archive` 归档（第 4 步），漏掉的由 Pro、Mini 两台扫地僧每天兜底归档，分支和工作树也由扫地僧存证清理，lead 不手工删分支。
+5. **收工。** `all_done` 为真：告诉用户全部合入；跑 `node scripts/reconcile.mjs --root <总 issue> --report`，把输出的运行报告贴到总 issue（各阶段用时、审查轮数、判通过后新增提交数，用来和以前的 run 对比）。运行报告的「类型」「模型」取最近一次派发事件的实际 `route`；旧事件没有路线时写「未记录」，不按当前默认路线倒推。总 issue 由验收机自动验收、关闭，lead 不交接、不关总 issue。执行会话 PR 合并前不归档；PR 合并后由 lead 按 `to_archive` 归档（第 4 步），漏掉的由 Pro、Mini 两台扫地僧每天兜底归档，分支和工作树也由扫地僧存证清理，lead 不手工删分支。
 
 **合并通知。** 只有 Mivo PR 有伙伴通知。正文写了「合并顺序」的本人 Mivo PR 不用用户说「合并」：审查机挂上 `review:merge-ready` 后由合并伙伴按正文顺序自动合（PraiseZhu/praise-merge#38），合入后伙伴按 lead 在第 4 步登记的地址发 `praise-merge 已合并 <owner/repo>#<号>`。
 
@@ -134,5 +134,3 @@ T1：skill 纪律加脚本校验，不是宿主强制隔离。`batch.mjs` 只读
 ## 自进化
 
 每个 run 收尾、给用户总结之前，把拆错、依赖写错、验收标准写不清、补救不对这类问题记进 `evolution/ledger.json`（唯一写通道 `scripts/evolution-note.mjs`）。三档 `by-design` / `proposal` / `auto`；扩权与拿不准永不自动落地。默认不 git push。登记进 Cindy「每周自进化 Skills」（`ledger-triage.mjs` `SOURCES`）。
-
-运行报告的「类型」「模型」取最近一次派发事件的实际 `route`；旧事件没有路线时写「未记录」，不按当前默认路线倒推。

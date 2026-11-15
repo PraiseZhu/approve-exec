@@ -184,7 +184,8 @@ test('brief --route-index 选择首个备选，越界拒绝；旧 --gateway 提�
   const args = { gh: ghFrom(parentFixture()), itemRef: ref(11), root: ref(10), lead: 'L', repoDir: '/r', project: '/r', now: NOW };
   const out = brief({ ...args, routeIndex: 1 });
   assert.equal(out.request.agent_device_id, 'pro-fixture');
-  assert.deepEqual(out.route, { agent: 'claude-code', model: 'claude-opus-5-5', kind: '混合', route_index: 1 });
+  assert.equal(out.request.model, 'anthropic/claude-opus-5-5');
+  assert.deepEqual(out.route, { agent: 'claude-code', model: 'anthropic/claude-opus-5-5', kind: '混合', route_index: 1 });
   assert.equal(Object.hasOwn(out.request, 'provider_id'), false);
   for (const routeIndex of [2, -1, 1.5, 'no', true, '']) assert.throws(() => brief({ ...args, routeIndex }), /--route-index/);
   assert.throws(() => brief({ ...args, gateway: 'Personal' }), /--gateway.*--route-index/);
