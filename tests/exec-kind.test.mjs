@@ -64,3 +64,37 @@ test('视觉层只认三种，去重；逻辑声明错误含文件或层，没�
     assert.ok(checked.kind_hint_reasons.length);
   }
 });
+
+test('回归：交接 HTML/CSS 排除，只有明确文档规则能将设计文档计为界面', () => {
+  const repoFiles = ['src/lib/queue.ts', 'docs/pr/1730/demo.html', 'docs/pr/1730/demo.css', 'docs/design.md', 'cindyplugin/DESIGN.md'];
+  const uiGlobs = ['**/*.html', '**/*.css', 'docs/design.md', 'cindyplugin/DESIGN.md'];
+  const out = classify(['src/lib/*.ts', 'docs/pr/**'], [], { repoFiles, uiGlobs });
+  assert.equal(out.kind, '逻辑');
+  assert.deepEqual(out.ui_files, []);
+  assert.equal(checkDeclaredKind('逻辑', out).kind, '逻辑');
+  assert.deepEqual(classify(['docs/design.md', 'cindyplugin/DESIGN.md'], [], { repoFiles, uiGlobs }).ui_files, ['cindyplugin/DESIGN.md', 'docs/design.md']);
+  assert.equal(classify(['docs/pr/1730/demo.html'], [], { repoFiles, uiGlobs: ['docs/pr/**'] }).kind, '界面');
+});
+
+test('回归：图片、字体、未知格式和裸 token 不足以判逻辑；代码与配置仍计入', () => {
+  const out = classify(['assets/icon.png', 'public/icon.svg', 'font.woff2', 'clip.mp4', 'new/unknown.xyz', 'forgetLibraryAck', 'origin/main']);
+  assert.equal(out.kind, '混合');
+  assert.deepEqual(out.logic_files, []);
+  assert.throws(() => checkDeclaredKind('逻辑', out), /未命中/);
+  assert.ok(out.reasons.some((r) => r.includes('7 个文件未识别为代码或配置')));
+  for (const file of ['src/new.ts', 'server/main.go', 'config/settings.toml', 'Makefile', '.gitignore', 'scripts/run', 'src/data.weird']) {
+    const actual = classify([file]);
+    assert.equal(actual.kind, ['scripts/run', 'src/data.weird'].includes(file) ? '混合' : '逻辑', file);
+  }
+});
+
+test('回归：裸目录按索引展开，不冒充新逻辑文件', () => {
+  const repoFiles = ['src/canvas/view.tsx', 'src/canvas/sub/anim.ts'];
+  const rest = { repoFiles, uiGlobs: ['src/canvas/**'] };
+  const plain = classify(['src/canvas'], [], rest);
+  const glob = classify(['src/canvas/**'], [], rest);
+  assert.deepEqual(plain, glob);
+  assert.equal(plain.kind, '界面');
+  assert.throws(() => checkDeclaredKind('逻辑', plain), /src\/canvas\/view.tsx/);
+  assert.equal(classify(['src/canvas']).kind, '混合', '没有索引证据时保守兜底');
+});

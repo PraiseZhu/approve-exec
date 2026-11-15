@@ -96,4 +96,4 @@ node scripts/charter.mjs read  --root <总 issue>
 
 只读查看分类：`node scripts/batch.mjs classify --repo owner/repo --repo-dir /path/to/repo --item owner/repo#123`；本地正文改用 `--body-file /path/to/issue.md`。输出 `{kind, ui_files, logic_files, visual_layers, reasons}`，不写 GitHub、不创建会话。
 
-分类用 `git ls-files` 展开范围 glob，未入库的新文件按路径判断。界面表来自仓库卡的可选 `ui_globs`；未写时用 TSX、JSX、Vue、CSS、SCSS、HTML、locales、i18n 通用表。测试和夹具不计，普通文档不计；卡片明确列出的设计文档算界面。界面与逻辑都有为混合；只有界面为界面；只有逻辑且验收包含 browser-fixture/cindy-mac/cindy-windows 为混合，否则为逻辑；没有代码文件时保守判混合。仓库卡的空 `ui_globs` 表示显式禁用通用表。
+分类用 `git ls-files` 展开范围 glob，未入库的新文件按路径判断。界面表来自仓库卡的可选 `ui_globs`；未写时用 TSX、JSX、Vue、CSS、SCSS、HTML、locales、i18n 通用表。测试和夹具不计，普通文档不计；卡片明确列出的设计文档算界面。界面与逻辑都有为混合；只有界面为界面；只有逻辑且验收包含 browser-fixture/cindy-mac/cindy-windows 为混合，否则为逻辑；没有代码文件时保守判混合。仓库卡的空 `ui_globs` 表示显式禁用通用表。已识别的代码和配置文件算逻辑；图片、字体等资源及未知扩展名保守不计。裸目录按索引里的子文件展开。

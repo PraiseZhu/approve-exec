@@ -508,3 +508,11 @@ test('#111 classify CLI 展开 git ls-files、读取卡片，item/body-file 都�
   assert.match(blocked.stderr, /src\/canvas\/view.tsx/);
   assert.throws(() => classifyBody({ body: f[key].body, repo: REPO, repoDir: join(dir, 'missing') }), /git ls-files/);
 });
+
+test('回归：brief 分类错误带子 issue 引用', () => {
+  const f = parentFixture();
+  const key = `api repos/${REPO}/issues/11`;
+  f[key].body = f[key].body.replace('- `src/sync/status.ts`：读状态', '');
+  f[key].body = f[key].body.replace('- `tests/sync/*.test.ts`：相关测试', '');
+  assert.throws(() => briefOf(f), /acme\/app#11 「范围」段没有任何文件路径列表项/);
+});

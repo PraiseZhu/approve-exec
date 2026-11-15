@@ -258,10 +258,9 @@ function readRepoFiles(repoDir) {
   catch { reject(`无法读取 --repo-dir ${repoDir} 的 git ls-files`); }
 }
 
-export function classifyBody({ body, repo, repoDir, repoFiles, cardsDir }) {
+export function classifyBody({ body, repo, repoDir, repoFiles, cardsDir, ref = `${repo} 的分类输入` }) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(repo ?? ''))) reject('--repo 要填 owner/repo');
   const sections = splitSections(body);
-  const ref = `${repo} 的分类输入`;
   const scopeGlobs = toScope(sectionText(sections, '范围'), ref);
   const { sc, manual } = toKeelSc(sectionText(sections, '验收标准'), ref);
   const scLayers = [...sc, ...manual].map((item) => /验证[：:]\s*([A-Za-z][A-Za-z0-9-]*)/.exec(item.text)[1]);
@@ -272,12 +271,14 @@ export function classifyBody({ body, repo, repoDir, repoFiles, cardsDir }) {
 export function classify({ gh, repo, repoDir, itemRef, bodyFile, ...options }) {
   if (Boolean(itemRef) === Boolean(bodyFile)) reject('classify 要且只能给 --item 或 --body-file 中的一个');
   let body;
+  let ref;
   if (itemRef) {
     const item = parseIssueRef(itemRef);
     if (item.repo.toLowerCase() !== String(repo).toLowerCase()) reject('--item 的仓库与 --repo 不一致');
     body = readIssue(gh, item.repo, item.number).body;
+    ref = item.ref;
   } else body = readFileSync(bodyFile, 'utf8');
-  return classifyBody({ body, repo, repoDir, ...options });
+  return classifyBody({ body, repo, repoDir, ref, ...options });
 }
 
 // brief
@@ -344,7 +345,7 @@ export function brief({ gh, itemRef, root, lead, repoDir, project, name, urgent 
   try { header = parseHeader(splitSections(issue.body ?? '')); }
   catch (err) { reject(`${ref} 首行的${err.message}`); }
   // --kind 优先，但不能用覆盖参数绕过首行的逻辑安全检查。
-  const classified = classifyBody({ body: issue.body, repo, repoDir, repoFiles, cardsDir });
+  const classified = classifyBody({ body: issue.body, repo, repoDir, repoFiles, cardsDir, ref });
   checkDeclaredKind(header.exec_kind, classified);
   let declared = header.exec_kind;
   if (kind !== undefined) {
