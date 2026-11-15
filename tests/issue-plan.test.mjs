@@ -267,6 +267,6 @@ test('回归：未知执行类型是 PlanError，旧计划 CLI 可读拒绝并�
   const f = standaloneFixture(body);
   const out = runCli(f, ['--issue', `${REPO}#20`]);
   assert.equal(out.status, 2, out.stderr);
-  assert.match(out.stderr, /\[REJECT\].*执行类型/);
+  assert.match(out.stderr, /\[REJECT\].*acme\/app#20.*执行类型/);
   assert.doesNotMatch(out.stderr, /at normalizeExecKind/);
 });

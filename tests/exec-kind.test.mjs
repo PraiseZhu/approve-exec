@@ -98,3 +98,13 @@ test('回归：裸目录按索引展开，不冒充新逻辑文件', () => {
   assert.throws(() => checkDeclaredKind('逻辑', plain), /src\/canvas\/view.tsx/);
   assert.equal(classify(['src/canvas']).kind, '混合', '没有索引证据时保守兜底');
 });
+
+test('已知运维配置与标准 hook 文件算逻辑，未知无扩展二进制/资源保持保守', () => {
+  for (const file of ['scripts/job.plist.in', 'ops/job.service', 'ops/job.timer', 'scripts/sha256.pins',
+    'spec/Ledger.tla', '.github/CODEOWNERS', '.env.example', '.githooks/pre-push']) {
+    assert.equal(classify([file]).kind, '逻辑', file);
+  }
+  for (const file of ['scripts/bin/unknown', 'assets/icon.png.example', 'golden/result.txt']) {
+    assert.equal(classify([file]).kind, '混合', file);
+  }
+});

@@ -278,7 +278,9 @@ export function toItem(issue, { repo, repoDirs, lead }) {
   const { sc, manual } = toKeelSc(sectionText(sections, '验收标准'), ref);
   const scope = toScope(sectionText(sections, '范围'), ref);
   const deps = parseDeps(sectionText(sections, '依赖'), repo, ref);
-  const header = parseHeader(sections);
+  let header;
+  try { header = parseHeader(sections); }
+  catch (err) { reject(`${ref} 首行的${err.message}`); }
   const repoDir = repoDirs[repo];
   if (!repoDir) reject(`${ref} 所在仓 ${repo} 没有给 --repo-dir ${repo}=<主目录绝对路径>`);
   const goalText = (sectionText(sections, '目标') ?? '').replace(/\s+/g, ' ').trim();

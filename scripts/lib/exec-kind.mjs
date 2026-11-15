@@ -13,13 +13,21 @@ const CODE_EXTENSIONS = new Set([
   '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.css', '.scss', '.html',
   '.json', '.jsonc', '.json5',
   '.yaml', '.yml', '.toml', '.xml', '.ini', '.cfg', '.conf', '.lock',
+  '.plist', '.service', '.timer', '.in', '.pins', '.tla',
   '.py', '.pyi', '.rb', '.go', '.rs', '.c', '.h', '.cc', '.cpp', '.cxx', '.hpp',
   '.cs', '.java', '.kt', '.kts', '.swift', '.m', '.mm', '.php', '.pl', '.pm',
   '.lua', '.r', '.sh', '.bash', '.zsh', '.fish', '.ps1', '.bat', '.cmd',
   '.sql', '.graphql', '.gql', '.proto', '.dart', '.ex', '.exs', '.erl', '.hrl',
   '.hs', '.clj', '.cljs', '.scala', '.sc', '.groovy', '.gradle', '.cmake', '.tf', '.hcl',
 ]);
-const CODE_NAMES = new Set(['Makefile', 'Dockerfile', 'Containerfile', 'Procfile', 'Gemfile', 'Rakefile', 'Jenkinsfile', 'CMakeLists.txt', '.gitignore', '.gitattributes', '.editorconfig', '.npmrc', '.yarnrc']);
+const CODE_NAMES = new Set([
+  'Makefile', 'Dockerfile', 'Containerfile', 'Procfile', 'Gemfile', 'Rakefile', 'Jenkinsfile', 'CMakeLists.txt',
+  'CODEOWNERS', '.env.example', '.gitignore', '.gitattributes', '.editorconfig', '.npmrc', '.yarnrc',
+  'applypatch-msg', 'pre-applypatch', 'post-applypatch', 'pre-commit', 'pre-merge-commit',
+  'prepare-commit-msg', 'commit-msg', 'post-commit', 'pre-rebase', 'post-checkout', 'post-merge',
+  'pre-push', 'pre-receive', 'update', 'proc-receive', 'post-receive', 'post-update', 'reference-transaction',
+  'push-to-checkout', 'pre-auto-gc', 'post-rewrite', 'sendemail-validate', 'fsmonitor-watchman', 'p4-changelist',
+]);
 const isCode = (file) => CODE_EXTENSIONS.has(extname(file).toLowerCase()) || CODE_NAMES.has(basename(file));
 const VISUAL_LAYERS = ['browser-fixture', 'cindy-mac', 'cindy-windows'];
 // 现有匹配器把结尾 /** 当路径前缀；补 /* 后可展开前面含 ** 的目录规则。
