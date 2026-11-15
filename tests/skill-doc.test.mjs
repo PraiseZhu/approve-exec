@@ -268,12 +268,12 @@ test('开工先查网关（2026-11-07 复盘，#87）：⓪ 在第 1 步之前�
 
 test('#99 SC5 按执行类型换路线：第 2 步和 README 写明后端路线，派不出去就停下', () => {
   const s = section('## ⓪ issue 入口');
-  for (const must of ['`执行类型 后端`', 'Codex 的 `gpt-6.1-sol`、effort high，走 Mac mini 上的 Art Cindy', '`--kind 后端`', '`dispatchRoute.byKind`',
-    '后端路线派不出去', '不自动改用默认路线，也不换别的通路', '没写、写「前端」或「混合」的走上面的默认路线']) {
+  for (const must of ['`执行类型 逻辑`', 'Codex 的 `gpt-6.1-sol`、effort high，走 Mac mini 上的 Art Cindy', '`--kind 后端`', '`dispatchRoute.byKind`',
+    '逻辑路线派不出去', '不自动改用默认路线，也不换别的通路', '没写、写「界面」或「混合」的走上面的默认路线']) {
     assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
   }
   const readme = readFileSync(join(root, 'README.md'), 'utf8');
-  for (const must of ['`执行类型 后端`', 'Codex 的 `gpt-6.1-sol` high，走 Mac mini 上的 Art Cindy', '派不出去就停下告诉用户']) {
+  for (const must of ['`执行类型 逻辑`', 'Codex 的 `gpt-6.1-sol` high，走 Mac mini 上的 Art Cindy', '派不出去就停下告诉用户']) {
     assert.ok(readme.includes(must), `README.md 应写「${must}」`);
   }
 });
@@ -331,5 +331,13 @@ test('#106、#107：开工带用户原话和共享记忆；预开工与预审写
   for (const must of ['**预审**', '只修确认成立的 P0、P1、P2', 'event.mjs emit --type prereview', '## 预开工', 'PR 一直保持 Draft', '不指向上游 PR 的分支', '## 收到对账敲门',
     'note.mjs add --root', '`--broadcast`', '「范围对照」', 'event.mjs emit --type ready_for_verdict', 'event.mjs emit --type ready ']) {
     assert.ok(protocol.includes(must), `owner-protocol.md 应写「${must}」`);
+  }
+});
+
+
+test('#111 文档写明分类命令、兼容、提示与拒绝条件', () => {
+  for (const file of ['SKILL.md', 'README.md']) {
+    const text = readFileSync(join(root, file), 'utf8');
+    for (const token of ['界面 / 逻辑 / 混合', '前端→界面', '后端→逻辑', 'batch.mjs classify', '--body-file', 'git ls-files', 'ui_globs', 'kind_hint', 'browser-fixture', 'cindy-mac', 'cindy-windows']) assert.ok(text.includes(token), `${file} 缺 ${token}`);
   }
 });

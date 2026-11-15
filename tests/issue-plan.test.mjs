@@ -250,3 +250,23 @@ test('范围（mivo#1329）：推导出的夹具 glob 在 accept-check 的匹配
   assert.equal(matchScopeGlob('cindyplugin/src/agent/__tests__/fx/data.json', glob), true);
   assert.equal(matchScopeGlob('cindyplugin/src/agent/deposit.ts', glob), false);
 });
+
+
+test('#111 首行执行类型归一，未声明保留 null，备注不参与', () => {
+  for (const [raw, expected] of [['前端', '界面'], ['后端', '逻辑'], ['界面', '界面'], ['逻辑', '逻辑'], ['混合', '混合']]) {
+    const body = childBody().replace('· 并行组 A ·', `· 并行组 A · 执行类型 ${raw} ·`);
+    assert.equal(parseHeader(splitSections(body)).exec_kind, expected);
+  }
+  assert.equal(parseHeader(splitSections(childBody())).exec_kind, null);
+  assert.throws(() => parseHeader(splitSections(childBody().replace('· 并行组 A ·', '· 并行组 A · 执行类型 全栈 ·'))), /界面 \/ 逻辑 \/ 混合/);
+});
+
+test('回归：未知执行类型是 PlanError，旧计划 CLI 可读拒绝并返回 exit 2', () => {
+  const body = childBody().replace('· 并行组 A ·', '· 并行组 A · 执行类型 全栈 ·');
+  assert.throws(() => parseHeader(splitSections(body)), (err) => err instanceof PlanError && /当前：全栈/.test(err.message));
+  const f = standaloneFixture(body);
+  const out = runCli(f, ['--issue', `${REPO}#20`]);
+  assert.equal(out.status, 2, out.stderr);
+  assert.match(out.stderr, /\[REJECT\].*acme\/app#20.*执行类型/);
+  assert.doesNotMatch(out.stderr, /at normalizeExecKind/);
+});

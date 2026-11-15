@@ -25,6 +25,7 @@ export const TEST_FILES = [
   'config.test.mjs',
   'event.test.mjs',
   'evolution-note.test.mjs',
+  'exec-kind.test.mjs',
   'issue-plan.test.mjs',
   'issue-run.test.mjs',
   'note.test.mjs',

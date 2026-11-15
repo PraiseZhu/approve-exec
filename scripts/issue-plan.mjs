@@ -13,6 +13,8 @@ import { execFileSync } from 'node:child_process';
 import { isAbsolute } from 'node:path';
 import { hashObject, isMain, nowIso, parseArgs, writeJsonAtomic } from './lib/common.mjs';
 
+import { normalizeExecKind } from './lib/exec-kind.mjs';
+
 export const PLAN_SCHEMA = 'issue-plan-v1';
 // 与 ~/AI-Agent/Claude/capabilities/source/scripts/check-pr-issue.sh 同口径：五个二级标题按行首前缀匹配。
 export const CHILD_ANCHORS = ['## 目标', '## 范围', '## 不做', '## 依赖', '## 验收标准'];
@@ -253,7 +255,10 @@ export function parseHeader(sections) {
   // 只认模板的引用行（`> 子 issue · …` 或 `> 独立 issue · …`），首段里其他行的备注、说明不算（#100 单审 P2-1、第 2 轮 P2）。
   const headerLine = intro.split('\n').find((l) => /^\s*>\s*(?:子|独立) issue\b/.test(l)) ?? '';
   const execKind = /执行类型\s*[:：]?\s*([^\s·（(]+)/.exec(headerLine)?.[1] ?? null;
-  return { parent, group, base_ref: target && target !== 'main' ? target : null, exec_kind: execKind };
+  let normalized = null;
+  try { if (execKind !== null) normalized = normalizeExecKind(execKind); }
+  catch (err) { reject(err.message); }
+  return { parent, group, base_ref: target && target !== 'main' ? target : null, exec_kind: normalized };
 }
 
 export function pendingQuestions(text) {
@@ -273,7 +278,9 @@ export function toItem(issue, { repo, repoDirs, lead }) {
   const { sc, manual } = toKeelSc(sectionText(sections, '验收标准'), ref);
   const scope = toScope(sectionText(sections, '范围'), ref);
   const deps = parseDeps(sectionText(sections, '依赖'), repo, ref);
-  const header = parseHeader(sections);
+  let header;
+  try { header = parseHeader(sections); }
+  catch (err) { reject(`${ref} 首行的${err.message}`); }
   const repoDir = repoDirs[repo];
   if (!repoDir) reject(`${ref} 所在仓 ${repo} 没有给 --repo-dir ${repo}=<主目录绝对路径>`);
   const goalText = (sectionText(sections, '目标') ?? '').replace(/\s+/g, ' ').trim();

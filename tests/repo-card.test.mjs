@@ -29,3 +29,12 @@ test('多一个未知字段、always_allowed 写成字符串、schema 不对都�
   assert.throws(() => toRepoCard({ ...good, schema: 'v0' }), /schema/);
   assert.throws(() => toRepoCard({ ...good, hot_files: [{ path: 'a' }] }), /hot_files/);
 });
+
+test('#111 ui_globs 可选，存在时必须为字符串数组，Mivo 卡覆盖通用与自有界面路径', () => {
+  const card = readRepoCard('xindong/mivo-canvas-plugin');
+  for (const glob of ['**/*.tsx', '**/*.jsx', '**/*.vue', '**/*.css', '**/*.scss', '**/*.html', '**/locales/**', '**/i18n/**', 'src/render/**', 'src/canvas/**', 'cindyplugin/DESIGN.md', 'docs/design.md']) assert.ok(card.ui_globs.includes(glob), glob);
+  const { ui_globs, ...oldCard } = card;
+  assert.equal(toRepoCard(oldCard).ui_globs, undefined);
+  assert.deepEqual(toRepoCard({ ...card, ui_globs: [] }).ui_globs, []);
+  for (const invalid of ['src/**', null, [1], ['']]) assert.throws(() => toRepoCard({ ...card, ui_globs: invalid }), /ui_globs/);
+});

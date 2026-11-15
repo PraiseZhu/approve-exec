@@ -1,6 +1,10 @@
 {
   "schema": "approve-exec/repo-card@1",
   "repo": "xindong/mivo-canvas-plugin",
+  "ui_globs": [
+    "**/*.tsx", "**/*.jsx", "**/*.vue", "**/*.css", "**/*.scss", "**/*.html", "**/locales/**", "**/i18n/**",
+    "src/render/**", "src/canvas/**", "cindyplugin/DESIGN.md", "docs/design.md"
+  ],
   "always_allowed": [
     "docs/pr/{pr}/**"
   ],

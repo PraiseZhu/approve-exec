@@ -6,7 +6,8 @@
 // CLI:
 //   node scripts/batch.mjs status  --issue <owner/repo#号>
 //   node scripts/batch.mjs brief   --item <子 issue> --root <入口 issue> --lead <lead 会话 id> --repo-dir <目标仓主目录> --project <Cindy 项目路径>
-//                                  [--name <人话任务名>] [--urgent] [--gateway <网关名>] [--kind <前端|后端|混合>]
+//                                  [--name <人话任务名>] [--urgent] [--gateway <网关名>] [--kind <界面|逻辑|混合>]
+//   node scripts/batch.mjs classify --repo <owner/repo> --repo-dir <目标仓主目录> (--item <子 issue> | --body-file <正文.md>)
 //   node scripts/batch.mjs archived --item <子 issue> --session <已归档的执行会话 id>
 //   node scripts/batch.mjs claim   --item <子 issue> --session <派出的会话 id> --title <会话标题>
 //   node scripts/batch.mjs release --item <子 issue> --reason <原因>
@@ -16,6 +17,7 @@
 //   公共：[--now <ISO>] [--gh-fixture <夹具.json>（测试用，代替 gh）]
 // 输出：stdout 一行 JSON；exit 0 成功 / 2 拒绝（stderr 写原因）。
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +30,7 @@ import { emit } from './event.mjs';
 import { baseAllowed, selectCharter } from './charter.mjs';
 import { readRepoCard } from './lib/repo-card.mjs';
 import { MERGE_READY_LABEL, selectChildEvents } from './lib/reconcile-rules.mjs';
+import { EXEC_KINDS, normalizeExecKind, classifyExecKind, checkDeclaredKind } from './lib/exec-kind.mjs';
 
 export class BatchError extends Error {}
 const reject = (msg) => { throw new BatchError(msg); };
@@ -79,8 +82,8 @@ export function unarchivedSessions(comments, ref, login) {
   return sessions.filter((s) => !archived.has(s));
 }
 
-/** 子 issue 首行「执行类型」的允许值（#99）。 */
-export const EXEC_KINDS = ['前端', '后端', '混合'];
+/** 子 issue 首行「执行类型」的允许值（#111，旧写法由 normalizeExecKind 兼容）。 */
+export { EXEC_KINDS };
 
 const isCompleteRoute = (route) => Boolean(route) && ['agent_kind', 'model', 'effort'].every((k) => typeof route[k] === 'string' && route[k])
   && Array.isArray(route.gateways) && route.gateways.length > 0
@@ -248,6 +251,36 @@ export function batchStatus({ gh, issueRef }) {
   };
 }
 
+// classify：只读 issue、仓库卡及 git 文件清单，不发请求。
+function readRepoFiles(repoDir) {
+  if (!isAbsolute(String(repoDir ?? ''))) reject('--repo-dir 要填目标仓主目录的绝对路径');
+  try { return execFileSync('git', ['ls-files', '-z'], { cwd: repoDir, encoding: 'utf8' }).split('\0').filter(Boolean); }
+  catch { reject(`无法读取 --repo-dir ${repoDir} 的 git ls-files`); }
+}
+
+export function classifyBody({ body, repo, repoDir, repoFiles, cardsDir, ref = `${repo} 的分类输入` }) {
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(repo ?? ''))) reject('--repo 要填 owner/repo');
+  const sections = splitSections(body);
+  const scopeGlobs = toScope(sectionText(sections, '范围'), ref);
+  const { sc, manual } = toKeelSc(sectionText(sections, '验收标准'), ref);
+  const scLayers = [...sc, ...manual].map((item) => /验证[：:]\s*([A-Za-z][A-Za-z0-9-]*)/.exec(item.text)[1]);
+  const card = readRepoCard(repo, cardsDir);
+  return classifyExecKind({ scopeGlobs, scLayers, repoFiles: repoFiles ?? readRepoFiles(repoDir), uiGlobs: card?.ui_globs });
+}
+
+export function classify({ gh, repo, repoDir, itemRef, bodyFile, ...options }) {
+  if (Boolean(itemRef) === Boolean(bodyFile)) reject('classify 要且只能给 --item 或 --body-file 中的一个');
+  let body;
+  let ref;
+  if (itemRef) {
+    const item = parseIssueRef(itemRef);
+    if (item.repo.toLowerCase() !== String(repo).toLowerCase()) reject('--item 的仓库与 --repo 不一致');
+    body = readIssue(gh, item.repo, item.number).body;
+    ref = item.ref;
+  } else body = readFileSync(bodyFile, 'utf8');
+  return classifyBody({ body, repo, repoDir, ref, ...options });
+}
+
 // brief
 
 /** 开工消息正文：执行会话只靠这条消息开工，要写全红线、做法和给 lead 发消息的三种格式。 */
@@ -289,7 +322,7 @@ export function toOwnerMessage({ ref, title, url, lead, parent = null, openPr = 
   ].join('\n');
 }
 
-export function brief({ gh, itemRef, root, lead, repoDir, project, name, urgent = false, gateway, kind, userWords = null, early = false, cardsDir, route = selectDispatchRoute(), now = nowIso() }) {
+export function brief({ gh, itemRef, root, lead, repoDir, project, name, urgent = false, gateway, kind, userWords = null, early = false, cardsDir, repoFiles, route = selectDispatchRoute(), now = nowIso() }) {
   if (!SESSION_RE.test(String(lead ?? ''))) reject(`--lead 要填 lead 会话 id（get_current_session_id 的 session_id），当前：${lead}`);
   if (!isAbsolute(String(repoDir ?? ''))) reject(`--repo-dir 要填目标仓主目录的绝对路径，当前：${repoDir}`);
   if (!project) reject('--project 要填目标仓对应的 Cindy 项目路径（先 list_projects 查，没有就 create_project）');
@@ -308,14 +341,19 @@ export function brief({ gh, itemRef, root, lead, repoDir, project, name, urgent 
   const prs = selectOpenTaskPrs(gh, repo)[ref] ?? [];
   if (prs.length > 1) reject(`${ref} 有 ${prs.length} 个开着的 PR（${prs.map((p) => `#${p.number}`).join('、')}）：一个子 issue 只能有一个 PR，先关掉多余的再派`);
   const openPr = prs[0]?.number ?? null;
-  const header = parseHeader(splitSections(issue.body ?? ''));
-  // 执行类型：--kind 优先，否则取子 issue 首行（#99）。命中 byKind 就换整条路线，其余走默认路线。
-  // 两处各自校验：--kind 合法也不放过 issue 首行写错的类型（#100 单审 P2-2）。
-  const allowed = EXEC_KINDS.join(' / ');
-  if (header.exec_kind !== null && !EXEC_KINDS.includes(header.exec_kind)) reject(`${ref} 首行的执行类型 只能是 ${allowed}（当前：${header.exec_kind}）`);
-  if (kind !== undefined && !EXEC_KINDS.includes(kind)) reject(`--kind 只能是 ${allowed}（当前：${kind}）`);
-  const execKind = kind ?? header.exec_kind;
-  const kindRoute = execKind === null ? undefined : route.byKind?.[execKind];
+  let header;
+  try { header = parseHeader(splitSections(issue.body ?? '')); }
+  catch (err) { reject(`${ref} 首行的${err.message}`); }
+  // --kind 优先，但不能用覆盖参数绕过首行的逻辑安全检查。
+  const classified = classifyBody({ body: issue.body, repo, repoDir, repoFiles, cardsDir, ref });
+  checkDeclaredKind(header.exec_kind, classified);
+  let declared = header.exec_kind;
+  if (kind !== undefined) {
+    try { declared = normalizeExecKind(kind); } catch (err) { reject(`--kind ${err.message.replace(/^执行类型 /, '')}`); }
+  }
+  const checkedKind = checkDeclaredKind(declared, classified);
+  const execKind = checkedKind.kind;
+  const kindRoute = route.byKind?.[execKind];
   const active = kindRoute ?? route;
   // 按类型覆盖的路线，模型只在它自己的供应商位置有：不加 --gateway 也带上第一个位置，不继承 lead 的网关。
   let deviceId = kindRoute ? kindRoute.gateways[0].agent_device_id : null;
@@ -348,6 +386,8 @@ export function brief({ gh, itemRef, root, lead, repoDir, project, name, urgent 
     ref,
     open_pr: openPr,
     exec_kind: execKind,
+    ...(!Object.hasOwn(checkedKind, 'kind_hint') && header.exec_kind === null ? { kind_hint: classified.kind, kind_hint_reasons: classified.reasons } : {}),
+    ...(checkedKind.kind_hint ? { kind_hint: checkedKind.kind_hint, kind_hint_reasons: checkedKind.kind_hint_reasons } : {}),
     ...(upstreams ? { early_upstreams: upstreams } : {}),
     request: {
       title,
@@ -492,13 +532,14 @@ export function main(argv = process.argv.slice(2)) {
   try {
     let out;
     if (cmd === 'status') out = batchStatus({ gh, issueRef: args.issue });
+    else if (cmd === 'classify') out = classify({ gh, repo: args.repo, repoDir: args['repo-dir'], itemRef: args.item, bodyFile: args['body-file'] });
     else if (cmd === 'brief') out = brief({ gh, itemRef: args.item, root: args.root, lead: args.lead, repoDir: args['repo-dir'], project: args.project, name: args.name, urgent: args.urgent === true, ...(typeof args.gateway === 'string' ? { gateway: args.gateway } : {}), ...(args.kind !== undefined ? { kind: String(args.kind) } : {}), ...(typeof args['user-words'] === 'string' ? { userWords: args['user-words'] } : {}), early: args.early === true, now });
     else if (cmd === 'claim') out = claim({ gh, itemRef: args.item, session: args.session, title: args.title, now });
     else if (cmd === 'release') out = release({ gh, itemRef: args.item, reason: args.reason, now });
     else if (cmd === 'archived') out = archived({ gh, itemRef: args.item, session: args.session, now });
     else if (cmd === 'notify') out = notify({ gh, prRef: args.pr, leadAddress: args['lead-address'], ...(typeof args.partner === 'string' ? { partnerPath: args.partner } : {}), now });
     else if (cmd === 'merge-request') out = mergeRequest({ gh, prRef: args.pr, rootRef: args.root, lead: args.lead, title: typeof args.title === 'string' ? args.title : null });
-    else reject(`子命令只能是 status / brief / claim / release / archived / notify / merge-request（当前：${cmd ?? '空'}）`);
+    else reject(`子命令只能是 status / classify / brief / claim / release / archived / notify / merge-request（当前：${cmd ?? '空'}）`);
     process.stdout.write(`${JSON.stringify(out)}\n`);
     return 0;
   } catch (err) {
