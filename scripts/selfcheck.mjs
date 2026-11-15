@@ -18,6 +18,7 @@ import { existsSync, readFileSync, lstatSync, realpathSync, statSync } from 'nod
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { selectDispatchRoute } from './batch.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -188,6 +189,15 @@ export function checkTriggerLine(config, items) {
   }
 }
 
+export function checkSessionRoutes(items) {
+  try {
+    selectDispatchRoute();
+    items.push({ id: 'live-session-routes', ok: true, detail: 'session.ui / logic / mixed 及备选路线完整' });
+  } catch (err) {
+    items.push({ id: 'live-session-routes', ok: false, detail: err.message });
+  }
+}
+
 // ---------- main ----------
 function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -213,6 +223,7 @@ function main() {
     checkLiveSymlink(deriveLiveLink(config, root), root, items);
     checkTriggerLine(config, items);
     checkReconcileTick(root, items);
+    checkSessionRoutes(items);
   }
 
   for (const item of items) {

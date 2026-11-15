@@ -1,0 +1,46 @@
+{
+  "session": {
+    "ui": {
+      "agent": "claude-code",
+      "model": "claude-opus-5-5",
+      "effort": "high",
+      "agent_device_id": "vps-fixture",
+      "fallbacks": [
+        {
+          "agent": "claude-code",
+          "model": "claude-opus-5-5",
+          "effort": "high",
+          "agent_device_id": "pro-fixture"
+        }
+      ]
+    },
+    "logic": {
+      "agent": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "agent_device_id": "mini-fixture",
+      "fallbacks": [
+        {
+          "agent": "codex",
+          "model": "gpt-6.1-sol",
+          "effort": "high",
+          "agent_device_id": "pro-fixture"
+        }
+      ]
+    },
+    "mixed": {
+      "agent": "claude-code",
+      "model": "claude-opus-5-5",
+      "effort": "high",
+      "agent_device_id": "vps-fixture",
+      "fallbacks": [
+        {
+          "agent": "claude-code",
+          "model": "claude-opus-5-5",
+          "effort": "high",
+          "agent_device_id": "pro-fixture"
+        }
+      ]
+    }
+  }
+}

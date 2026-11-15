@@ -69,7 +69,7 @@ export function parseEvents(comments, login) {
 
 // emit
 
-export function emit({ gh, type, itemRef, pr = null, head = null, session = null, title = null, note = null, now = nowIso() }) {
+export function emit({ gh, type, itemRef, pr = null, head = null, session = null, title = null, note = null, route = null, now = nowIso() }) {
   if (!EVENT_TYPES.includes(type)) reject(`--type 只能是 ${EVENT_TYPES.join(' / ')}（当前：${type ?? '空'}）`);
   const { ref } = parseIssueRef(itemRef);
   if (NEEDS_PR_HEAD.includes(type)) {
@@ -80,6 +80,15 @@ export function emit({ gh, type, itemRef, pr = null, head = null, session = null
   if (type === 'withdraw' && !String(note ?? '').trim()) reject('withdraw 事件要用 --note 写撤回原因');
   const text = note == null ? null : String(note).trim();
   if (text && text.includes('-->')) reject('--note 里不能有「-->」');
+  if (route !== null) {
+    if (type !== 'dispatch' || !route || typeof route !== 'object' || Array.isArray(route)
+      || !['agent', 'model', 'kind'].every((key) => typeof route[key] === 'string' && route[key].trim())
+      || !['codex', 'claude-code', 'pi'].includes(route.agent) || !['界面', '逻辑', '混合'].includes(route.kind)
+      || !Number.isSafeInteger(route.route_index) || route.route_index < 0
+      || Object.keys(route).some((key) => !['agent', 'model', 'kind', 'route_index'].includes(key))) {
+      reject('dispatch route 要含 agent、model、kind 和非负整数 route_index');
+    }
+  }
   const login = ghLogin(gh);
   const id = toEventId({ type, ref, head, session, note: text });
   const { events } = parseEvents(readComments(gh, commentsPath(ref)), login);
@@ -88,7 +97,7 @@ export function emit({ gh, type, itemRef, pr = null, head = null, session = null
   if (dup && !(type === 'dispatch' && events.some((e) => e.type === 'withdraw' && (e.comment_id ?? 0) > (dup.comment_id ?? 0)))) {
     return { ok: true, duplicate: true, ref, type, id, comment_url: dup.url ?? null };
   }
-  const payload = { type, ref, pr, head, session, at: now, id, ...(text ? { note: text } : {}) };
+  const payload = { type, ref, pr, head, session, at: now, id, ...(text ? { note: text } : {}), ...(route ? { route } : {}) };
   const headline = toHeadline({ type, ref, pr, head, session, title, note: text, at: now });
   const middle = text && !['withdraw'].includes(type) ? `\n\n${text}` : '';
   const body = `${headline}${middle}\n\n<!-- approve-exec:event v1 ${JSON.stringify(payload)} -->`;

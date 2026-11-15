@@ -216,6 +216,7 @@ export function toReportRow(child) {
   const { events = [], pr } = child;
   const first = (type) => events.find((e) => e.type === type) ?? null;
   const dispatch = first('dispatch');
+  const actualRoute = events.filter((e) => e.type === 'dispatch').at(-1)?.route;
   const pass = events.filter((e) => e.type === 'verdict_pass').at(0) ?? null;
   const idx = pass?.head && pr ? pr.commits.findIndex((c) => c.sha === pass.head) : -1;
   const after = !pass || !pr ? null : idx >= 0 ? pr.commits.length - idx - 1 : pr.commits.filter((c) => ms(c.at) > ms(pass.at)).length;
@@ -225,6 +226,8 @@ export function toReportRow(child) {
   return {
     ref: child.ref,
     pr: pr?.number ?? null,
+    kind: actualRoute?.kind ?? '未记录',
+    model: actualRoute?.model ?? '未记录',
     dev_h: hours(dispatch?.at, pass?.at),
     to_ready_h: hours(pass?.at, pr?.ready_at),
     review_h: hours(pr?.ready_at, pr?.first_label_at),
@@ -249,9 +252,9 @@ export function toReport(facts) {
     `- 从第一次派发到最后一次合入：${cell(hours(start, end), ' 小时')}`,
     `- 运行笔记：${(facts.notes ?? []).length} 条`,
     '',
-    '| 子 issue | PR | 派发到判通过 | 判通过到转正式 | 转正式到审查放行 | 审查放行到合入 | 审查轮数 | 判通过后新增提交 | 范围外文件 | 预审轮数 |',
-    '|---|---|---|---|---|---|---|---|---|---|',
-    ...rows.map((r) => `| ${r.ref} | ${r.pr ? `#${r.pr}` : '无记录'} | ${cell(r.dev_h, ' 小时')} | ${cell(r.to_ready_h, ' 小时')} | ${cell(r.review_h, ' 小时')} | ${cell(r.merge_h, ' 小时')} | ${cell(r.review_rounds)} | ${cell(r.commits_after_pass)} | ${cell(r.out_of_scope)} | ${cell(r.prereview_rounds)} |`),
+    '| 子 issue | PR | 类型 | 模型 | 派发到判通过 | 判通过到转正式 | 转正式到审查放行 | 审查放行到合入 | 审查轮数 | 判通过后新增提交 | 范围外文件 | 预审轮数 |',
+    '|---|---|---|---|---|---|---|---|---|---|---|---|',
+    ...rows.map((r) => `| ${r.ref} | ${r.pr ? `#${r.pr}` : '无记录'} | ${r.kind} | ${r.model} | ${cell(r.dev_h, ' 小时')} | ${cell(r.to_ready_h, ' 小时')} | ${cell(r.review_h, ' 小时')} | ${cell(r.merge_h, ' 小时')} | ${cell(r.review_rounds)} | ${cell(r.commits_after_pass)} | ${cell(r.out_of_scope)} | ${cell(r.prereview_rounds)} |`),
   ];
   return { rows, markdown: lines.join('\n') };
 }
