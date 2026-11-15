@@ -114,7 +114,7 @@ export function selectDispatchRoute(kind = null) {
       }
     }
   }
-  const normalized = normalizeExecKind(kind) ?? '混合';
+  const normalized = kind == null ? '混合' : normalizeExecKind(kind);
   return routes[{ 界面: 'ui', 逻辑: 'logic', 混合: 'mixed' }[normalized]];
 }
 

@@ -10,8 +10,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const defaults = JSON.parse(readFileSync(join(root, 'config/defaults.json'), 'utf8'));
 
 // selfcheck 只读这两个键：goalSkillRoot（goal-skill-md 检查 + 推导 live 链接位置）、skillTriggerScanPath（--live 触发行）。
-const REQUIRED_KEYS = ['goalSkillRoot', 'skillTriggerScanPath'];
-const REMOVED_KEYS = ['routingPath', 'orcaPlatformCap', 'memReserveRatio', 'perWorkerBytes', 'workerTimeoutMinutes',
+const REQUIRED_KEYS = ['goalSkillRoot', 'skillTriggerScanPath', 'routingPath'];
+const REMOVED_KEYS = ['dispatchRoute', 'orcaPlatformCap', 'memReserveRatio', 'perWorkerBytes', 'workerTimeoutMinutes',
   'reviewMaxRounds', 'budgetPauseUsd', 'orcaFanoutScriptsRoot', 'runLedgerDir'];
 
 test('defaults.json 可解析且为对象', () => {
@@ -47,10 +47,9 @@ test('每个必备键都有来源注释', () => {
   }
 });
 
-test('#111 dispatchRoute 仅改后端键为逻辑，执行路线值不变', () => {
-  assert.equal(Object.hasOwn(defaults.dispatchRoute.byKind, '后端'), false);
-  assert.deepEqual(defaults.dispatchRoute.byKind.逻辑, {
-    agent_kind: 'codex', model: 'gpt-6.1-sol', effort: 'high',
-    gateways: [{ name: 'Mini', agent_device_id: '3413b2125731cc24445e82ffa2b91338f8272dbc2df89ff2c92ca7bfc05f5817' }],
-  });
+test('#112 routingPath 指向唯一共享路线，测试夹具通过环境变量隔离', () => {
+  assert.equal(defaults.routingPath, '~/.claude/skills/orca-fanout/routing.json');
+  assert.equal(Object.hasOwn(defaults, 'dispatchRoute'), false);
+  const source = readFileSync(join(root, 'tests/batch.test.mjs'), 'utf8');
+  assert.match(source, /process.env.APPROVE_EXEC_ROUTING = fileURLToPath/);
 });

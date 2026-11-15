@@ -207,3 +207,13 @@ test('唯一的 PR 关掉没合、标签还留着：不当成审查放行，不�
   assert.notEqual(out.children[0].stage, 'merge_ready');
   assert.equal(out.due.some((d) => d.action === 'request_merge'), false);
 });
+
+test('#112 运行报告使用最新一次派发的实际类型模型，旧事件未记录不倒推', () => {
+  const events = [ev('dispatch', T('00:00'), { session: 'failed', route: { agent: 'claude-code', kind: '混合', model: 'old-model', route_index: 0 } }), ev('withdraw', T('00:01')), ev('dispatch', T('00:02'), { session: 'fallback', route: { agent: 'codex', kind: '逻辑', model: 'gpt-6.1-sol', route_index: 1 } })];
+  const { rows, markdown } = toReport(facts([child({ events }), child({ ref: ref(12), events: [ev('dispatch', T('00:00'))] })]));
+  assert.equal(rows[0].kind, '逻辑'); assert.equal(rows[0].model, 'gpt-6.1-sol');
+  assert.equal(rows[1].model, '未记录'); assert.equal(rows[1].kind, '未记录');
+  assert.match(markdown, /类型 \| 模型/); assert.match(markdown, /逻辑 \| gpt-6.1-sol/);
+  const latestOld = toReport(facts([child({ events: [...events, ev('dispatch', T('00:03'))] })]));
+  assert.equal(latestOld.rows[0].model, '未记录');
+});

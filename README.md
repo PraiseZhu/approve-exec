@@ -2,7 +2,7 @@
 
 Mini 常驻盯梢消费者的版本化源码已迁至独立仓 [Vigil](https://github.com/PraiseZhu/vigil)。它独立扫描本人 PR，不要求 PR 由本 skill 创建；该仓不包含运行态，也不修改服务器审查机。
 
-接在「开 issue」之后：用户说「批准执行 owner/repo#号」，lead 读总 issue（或独立 issue / 单个子 issue），按并行/串行原则把依赖已合入的子 issue 一次全派出去，每个子 issue 开一个独立会话（1 子 issue = 1 PR = 1 会话），执行会话默认用 Claude 网关的 Opus 5.5 high（路线见 `config/defaults.json` 的 `dispatchRoute`）；子 issue 首行写了 `执行类型 逻辑`（兼容旧 `执行类型 后端`）的改用 Codex 的 `gpt-6.1-sol` high，走 Mac mini 上的 Art Cindy（`dispatchRoute.byKind`），派不出去就停下告诉用户。2026-11-07 起不走 KEEL、不建台账、不挂定时任务：lead 派完就停；执行会话推到 Draft PR CI 全绿后发消息叫醒 lead 验收，lead 判通过后执行会话转正式 PR 即收工；Mivo 仓 PR 交合并伙伴、合入后伙伴通知 lead（正文写了「合并顺序」的由伙伴自动合，lead 在转正式时用 `batch.mjs notify` 把通知地址登记给伙伴；没写的等用户在 lead 会话说「合并」），用户说「合并」后其他仓 PR 由 lead 按 pr-merge 自己合；PR 合入后 lead 归档已完成的会话、派下一批。
+接在「开 issue」之后：用户说「批准执行 owner/repo#号」，lead 读总 issue（或独立 issue / 单个子 issue），按并行/串行原则把依赖已合入的子 issue 一次全派出去，每个子 issue 开一个独立会话（1 子 issue = 1 PR = 1 会话），执行会话按执行类型读共享 `orca-fanout/routing.json` 的 `session` 路线；派发失败依次用同类型备选重派。2026-11-07 起不走 KEEL、不建台账、不挂定时任务：lead 派完就停；执行会话推到 Draft PR CI 全绿后发消息叫醒 lead 验收，lead 判通过后执行会话转正式 PR 即收工；Mivo 仓 PR 交合并伙伴、合入后伙伴通知 lead（正文写了「合并顺序」的由伙伴自动合，lead 在转正式时用 `batch.mjs notify` 把通知地址登记给伙伴；没写的等用户在 lead 会话说「合并」），用户说「合并」后其他仓 PR 由 lead 按 pr-merge 自己合；PR 合入后 lead 归档已完成的会话、派下一批。
 
 - 看现状、开工消息、派发防重 `scripts/batch.mjs`；验收与收工检查 `scripts/check-pr.mjs`；执行会话的做法 `references/owner-protocol.md`
 - 改版前开工的旧 run 按 `references/legacy-ledger-flow.md` 收尾（旧脚本 `issue-plan.mjs`、`issue-run.mjs`、`accept-check.mjs`、`issue-watch.py` 等保留到旧 run 全部收工）
@@ -97,3 +97,13 @@ node scripts/charter.mjs read  --root <总 issue>
 只读查看分类：`node scripts/batch.mjs classify --repo owner/repo --repo-dir /path/to/repo --item owner/repo#123`；本地正文改用 `--body-file /path/to/issue.md`。输出 `{kind, ui_files, logic_files, visual_layers, reasons}`，不写 GitHub、不创建会话。
 
 分类用 `git ls-files` 展开范围 glob，未入库的新文件按路径判断。界面表来自仓库卡的可选 `ui_globs`；未写时用 TSX、JSX、Vue、CSS、SCSS、HTML、locales、i18n 通用表。测试和夹具不计，普通文档不计；卡片明确列出的设计文档算界面。界面与逻辑都有为混合；只有界面为界面；只有逻辑且验收包含 browser-fixture/cindy-mac/cindy-windows 为混合，否则为逻辑；没有代码文件时保守判混合。仓库卡的空 `ui_globs` 表示显式禁用通用表。已识别的代码和配置文件算逻辑；图片、字体等资源及未知扩展名保守不计。裸目录按索引里的子文件展开。
+
+## 执行会话路线
+
+路线唯一真源是 `orca-fanout/routing.json`：`APPROVE_EXEC_ROUTING` 优先，否则读 defaults 的 `routingPath`（`~/.claude/skills/orca-fanout/routing.json`，脚本展开 `~`）。界面取 `session.ui`、逻辑取 `session.logic`、混合或首行没写取 `session.mixed`。首选和 `fallbacks` 每项都有 `agent`、`model`、`effort`、`agent_device_id`，不得带 `provider_id`。缺文件、缺 session、缺类型或缺字段时拒绝派发，先跑 `model-route check`；`selfcheck --live` 也核对三类配置。
+
+当前约定：界面、混合首选 Praise-VPS 的 Opus 订阅，备选 Pro 的 Cindy AI Opus；逻辑（兼容 `执行类型 后端`，新写法 `执行类型 逻辑`）首选 Mac mini 的 Art Cindy GPT-6.1 Sol，备选 Pro 的 Cindy AI GPT-6.1 Sol。运行时以共享 session 配置为准，不在本仓写第二份模型表。
+
+先跑 `brief --route-index 0`，把 `request` 原样交给 `send_to_session`（必须支持 `agent_device_id`）。遇 `AGENT_NOT_READY`、`PROVIDER_ROUTE_UNAVAILABLE`、明确用量上限或网关离线，先归档回执里创建出的失败会话，已 claim 的先 release，再按 `routes` 顺序以 `--route-index 1`、2…生成新请求，并写明错误码和换路线原因。未知错误、能力缺口、候选耗尽就停；`DELIVERY_UNKNOWN` 先核对是否建出会话。旧 `--gateway` 报错提示改用 `--route-index`。
+
+成功后 `claim --item <子 issue> --session <会话 id> --title <标题> --route-json '<brief.route 的 JSON>'`，记录实际成功路线的 agent、model、kind、route_index。运行报告增加「类型」「模型」，取最近一次派发事件；旧事件没有 route 时模型写「未记录」，旧事件仍可识别在做状态。测试通过 `APPROVE_EXEC_ROUTING` 读 `tests/fixtures/routing.json`，不依赖本机路线。

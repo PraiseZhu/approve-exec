@@ -17,12 +17,13 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { deriveLiveLink, checkLiveSymlink, checkTriggerLine, TRIGGER_LINE, normalizeGitHubOrigin } from '../scripts/selfcheck.mjs';
+import { deriveLiveLink, checkLiveSymlink, checkTriggerLine, TRIGGER_LINE, normalizeGitHubOrigin, checkSessionRoutes } from '../scripts/selfcheck.mjs';
 // buildChildEnv：变异子套件自起子进程，git 隔离必须同一份实现（run-tests.mjs 是唯一权威）。
 // 子套件在复制树里跑，缺隔离会继承机器全局 commit.gpgsign=true，负载下 gpg 失败让夹具
 // git commit 红——失败集比对随之漂移。
 import { buildChildEnv } from '../scripts/run-tests.mjs';
 
+process.env.APPROVE_EXEC_ROUTING = process.env.SC_MUTATION_CHILD === '1' ? process.env.APPROVE_EXEC_ROUTING : fileURLToPath(new URL('./fixtures/routing.json', import.meta.url));
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const scriptPath = join(root, 'scripts/selfcheck.mjs');
 
@@ -265,7 +266,7 @@ test('组F-1: 非规范化路径调用必须实际执行检查并输出 PASS 行
   // 平铺放置会让 root 解析到临时根层（config 读错位，与 guard 无关地失败）
   mkdirSync(join(dir, 'scripts'), { recursive: true });
   mkdirSync(join(dir, 'config'), { recursive: true });
-  cpSync(join(root, 'scripts/selfcheck.mjs'), join(dir, 'scripts/selfcheck.mjs'));
+  cpSync(join(root, 'scripts'), join(dir, 'scripts'), { recursive: true });
   writeFileSync(join(dir, 'config/defaults.json'), readFileSync(join(root, 'config/defaults.json'), 'utf8'));
   let logical = dir;
   if (realpathSync(dir) === dir) {
@@ -308,6 +309,7 @@ function copyTreeForMutation(t, mutateScript) {
   mkdirSync(join(dir, 'scripts'));
   mkdirSync(join(dir, 'tests'));
   mkdirSync(join(dir, 'config'));
+  cpSync(join(root, 'scripts'), join(dir, 'scripts'), { recursive: true });
   const src = readFileSync(join(root, 'scripts/selfcheck.mjs'), 'utf8');
   const mutated = mutateScript(src);
   assert.notEqual(mutated, src, '变异必须实际改变脚本内容（防替换静默空转）');
@@ -363,4 +365,23 @@ test('对账任务入口：文件都在则 PASS，缺文件则 FAIL 并点名', 
   checkReconcileTick(mkdtempSync(join(tmpdir(), 'no-tick-')), bad);
   assert.equal(bad[0].ok, false);
   assert.match(bad[0].detail, /scripts\/reconcile-tick\.py/);
+});
+
+ test('#112 live session：三类齐全为 PASS，缺段或缺类型为 FAIL', () => {
+  const previous = process.env.APPROVE_EXEC_ROUTING;
+  const scratch = join(root, '_tmp'); mkdirSync(scratch, { recursive: true });
+  const dir = mkdtempSync(join(scratch, 'session-check-'));
+  try {
+    const good = JSON.parse(readFileSync(previous, 'utf8'));
+    for (const value of [good, {}, { session: { ui: good.session.ui, mixed: good.session.mixed } }]) {
+      const path = join(dir, 'routing.json'); writeFileSync(path, JSON.stringify(value));
+      process.env.APPROVE_EXEC_ROUTING = path;
+      const items = []; checkSessionRoutes(items);
+      assert.equal(items[0].ok, value === good);
+      if (value !== good) {
+        assert.match(items[0].detail, /model-route check/);
+        const res = runSelfcheck(['--live']); assert.equal(res.status, 2); assert.match(out(res), /FAIL: live-session-routes/);
+      }
+    }
+  } finally { process.env.APPROVE_EXEC_ROUTING = previous; rmSync(dir, { recursive: true, force: true }); }
 });
