@@ -13,6 +13,8 @@ import { execFileSync } from 'node:child_process';
 import { isAbsolute } from 'node:path';
 import { hashObject, isMain, nowIso, parseArgs, writeJsonAtomic } from './lib/common.mjs';
 
+import { normalizeExecKind } from './lib/exec-kind.mjs';
+
 export const PLAN_SCHEMA = 'issue-plan-v1';
 // 与 ~/AI-Agent/Claude/capabilities/source/scripts/check-pr-issue.sh 同口径：五个二级标题按行首前缀匹配。
 export const CHILD_ANCHORS = ['## 目标', '## 范围', '## 不做', '## 依赖', '## 验收标准'];
@@ -253,7 +255,7 @@ export function parseHeader(sections) {
   // 只认模板的引用行（`> 子 issue · …` 或 `> 独立 issue · …`），首段里其他行的备注、说明不算（#100 单审 P2-1、第 2 轮 P2）。
   const headerLine = intro.split('\n').find((l) => /^\s*>\s*(?:子|独立) issue\b/.test(l)) ?? '';
   const execKind = /执行类型\s*[:：]?\s*([^\s·（(]+)/.exec(headerLine)?.[1] ?? null;
-  return { parent, group, base_ref: target && target !== 'main' ? target : null, exec_kind: execKind };
+  return { parent, group, base_ref: target && target !== 'main' ? target : null, exec_kind: execKind === null ? null : normalizeExecKind(execKind) };
 }
 
 export function pendingQuestions(text) {

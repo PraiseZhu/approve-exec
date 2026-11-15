@@ -46,3 +46,11 @@ test('每个必备键都有来源注释', () => {
     assert.ok(defaults._comments[key].length > 0, `${key} 的来源注释不能为空`);
   }
 });
+
+test('#111 dispatchRoute 仅改后端键为逻辑，执行路线值不变', () => {
+  assert.equal(Object.hasOwn(defaults.dispatchRoute.byKind, '后端'), false);
+  assert.deepEqual(defaults.dispatchRoute.byKind.逻辑, {
+    agent_kind: 'codex', model: 'gpt-6.1-sol', effort: 'high',
+    gateways: [{ name: 'Mini', agent_device_id: '3413b2125731cc24445e82ffa2b91338f8272dbc2df89ff2c92ca7bfc05f5817' }],
+  });
+});

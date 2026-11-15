@@ -250,3 +250,13 @@ test('范围（mivo#1329）：推导出的夹具 glob 在 accept-check 的匹配
   assert.equal(matchScopeGlob('cindyplugin/src/agent/__tests__/fx/data.json', glob), true);
   assert.equal(matchScopeGlob('cindyplugin/src/agent/deposit.ts', glob), false);
 });
+
+
+test('#111 首行执行类型归一，未声明保留 null，备注不参与', () => {
+  for (const [raw, expected] of [['前端', '界面'], ['后端', '逻辑'], ['界面', '界面'], ['逻辑', '逻辑'], ['混合', '混合']]) {
+    const body = childBody().replace('· 并行组 A ·', `· 并行组 A · 执行类型 ${raw} ·`);
+    assert.equal(parseHeader(splitSections(body)).exec_kind, expected);
+  }
+  assert.equal(parseHeader(splitSections(childBody())).exec_kind, null);
+  assert.throws(() => parseHeader(splitSections(childBody().replace('· 并行组 A ·', '· 并行组 A · 执行类型 全栈 ·'))), /界面 \/ 逻辑 \/ 混合/);
+});

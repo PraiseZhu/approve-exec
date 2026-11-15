@@ -10,7 +10,7 @@ const reject = (msg) => { throw new RepoCardError(msg); };
 
 export const REPO_CARD_SCHEMA = 'approve-exec/repo-card@1';
 export const CARDS_DIR = join(dirname(fileURLToPath(import.meta.url)), '../../repo-cards');
-const KEYS = ['schema', 'repo', 'always_allowed', 'hot_files', 'guards', 'verify', 'review_rules', 'pitfalls'];
+const KEYS = ['schema', 'repo', 'always_allowed', 'hot_files', 'guards', 'verify', 'review_rules', 'pitfalls', 'ui_globs'];
 
 const isStrings = (v) => Array.isArray(v) && v.every((x) => typeof x === 'string' && x);
 const isPairs = (v, a, b) => Array.isArray(v) && v.every((x) => x && typeof x[a] === 'string' && x[a] && typeof x[b] === 'string' && x[b] && Object.keys(x).every((k) => k === a || k === b));
@@ -28,6 +28,7 @@ export function toRepoCard(raw) {
   if (!isPairs(raw.verify, 'name', 'command')) reject('verify 要是 [{name, command}] 数组');
   if (!isStrings(raw.review_rules)) reject('review_rules 要是文件路径字符串数组');
   if (!isStrings(raw.pitfalls)) reject('pitfalls 要是字符串数组');
+  if (raw.ui_globs !== undefined && !isStrings(raw.ui_globs)) reject('ui_globs 要是 glob 字符串数组');
   return raw;
 }
 

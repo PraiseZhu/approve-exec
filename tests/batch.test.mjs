@@ -1,15 +1,30 @@
 // batch.mjs：批准执行 2026-11-07 改版——按依赖一次列出能并行开工的子 issue、派发防重、开工消息。
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { activeDispatch, archived, batchStatus, brief, claim, notify, release, selectDispatchRoute, toOwnerMessage, unarchivedSessions } from '../scripts/batch.mjs';
-import { REPO, LOGIN, childBody, commentsKey, ghFrom, openPullsKey, parentFixture, standaloneFixture, writeFixture } from './fixtures/issues/build.mjs';
+import { activeDispatch, archived, batchStatus, brief as realBrief, classify, classifyBody, claim, notify, release, selectDispatchRoute, toOwnerMessage, unarchivedSessions } from '../scripts/batch.mjs';
+import { REPO, LOGIN, childBody, commentsKey, ghFrom, openPullsKey, parentFixture, standaloneFixture } from './fixtures/issues/build.mjs';
 
 const CLI = fileURLToPath(new URL('../scripts/batch.mjs', import.meta.url));
+const brief = (args) => realBrief({ repoFiles: [], ...args });
+const scratch = fileURLToPath(new URL('../_tmp/', import.meta.url));
+mkdirSync(scratch, { recursive: true });
+const fixtureDirs = [];
+after(() => { for (const dir of fixtureDirs) rmSync(dir, { recursive: true, force: true }); });
+function writeFixture(fixture) {
+  const dir = mkdtempSync(join(scratch, 'batch-fixture-'));
+  fixtureDirs.push(dir);
+  const repoDir = join(dir, 'repo');
+  mkdirSync(repoDir);
+  const ghPath = join(dir, 'gh.json');
+  writeFileSync(ghPath, JSON.stringify(fixture));
+  assert.equal(spawnSync('git', ['init', '-q', repoDir]).status, 0);
+  return { dir, repoDir, ghPath };
+}
 const NOW = '2026-11-07T02:00:00.000Z';
 const ref = (n) => `${REPO}#${n}`;
 const stateOf = (res, n) => res.items.find((i) => i.ref === ref(n));
@@ -176,7 +191,7 @@ const MINI = '3413b2125731cc24445e82ffa2b91338f8272dbc2df89ff2c92ca7bfc05f5817';
 function fixtureWithKind(kindText) {
   const f = parentFixture();
   const key = `api repos/${REPO}/issues/11`;
-  const body = f[key].body.replace('· 并行组 A ·', `· 并行组 A · 执行类型 ${kindText} ·`);
+  const body = f[key].body.replace('验证：browser-fixture', '验证：unit').replace('· 并行组 A ·', `· 并行组 A · 执行类型 ${kindText} ·`);
   assert.notEqual(body, f[key].body, '夹具首行应含「· 并行组 A ·」');
   return { ...f, [key]: { ...f[key], body } };
 }
@@ -187,7 +202,7 @@ test('#99 SC1 brief：首行写「执行类型 后端」时换成后端路线 Co
   const out = briefOf(fixtureWithKind('后端'));
   assert.deepEqual(routeOf(out), ['codex', 'gpt-6.1-sol', 'high']);
   assert.equal(out.request.agent_device_id, MINI);
-  assert.equal(out.exec_kind, '后端');
+  assert.equal(out.exec_kind, '逻辑');
   assert.deepEqual(out.gateways, ['Mini']);
   // 后端路线只认自己的供应商位置：默认路线的网关名在这里不合法
   assert.throws(() => briefOf(fixtureWithKind('后端'), { gateway: 'Claude' }), /--gateway 只能是 Mini（当前：Claude）/);
@@ -199,16 +214,16 @@ test('#100 单审 P2-1：只认首行的执行类型，首段其他行的备注�
   const body = f[key].body.replace('\n\n## 目标', '\n备注：执行类型 后端\n\n## 目标');
   assert.notEqual(body, f[key].body, '夹具应有「## 目标」段');
   const out = briefOf({ ...f, [key]: { ...f[key], body } });
-  assert.equal(out.exec_kind, null);
+  assert.equal(out.exec_kind, '混合');
   // 第 2 轮单审：说明行插在引用行前面也不算
   const before = `说明：执行类型 后端\n${f[key].body}`;
   const outBefore = briefOf({ ...f, [key]: { ...f[key], body: before } });
-  assert.equal(outBefore.exec_kind, null);
+  assert.equal(outBefore.exec_kind, '混合');
   assert.deepEqual(routeOf(outBefore), ['claude-code', 'claude-opus-5-5', 'high']);
   // 独立 issue 的引用行照样认
-  const standalone = f[key].body.replace(/^> 子 issue · 总 issue \S+ · /, '> 独立 issue · 执行类型 后端 · ');
+  const standalone = f[key].body.replace('验证：browser-fixture', '验证：unit').replace(/^> 子 issue · 总 issue \S+ · /, '> 独立 issue · 执行类型 后端 · ');
   assert.notEqual(standalone, f[key].body, '夹具首行应以「> 子 issue · 总 issue」开头');
-  assert.equal(briefOf({ ...f, [key]: { ...f[key], body: standalone } }).exec_kind, '后端');
+  assert.equal(briefOf({ ...f, [key]: { ...f[key], body: standalone } }).exec_kind, '逻辑');
   assert.deepEqual(routeOf(out), ['claude-code', 'claude-opus-5-5', 'high']);
   assert.equal(Object.hasOwn(out.request, 'agent_device_id'), false);
 });
@@ -220,18 +235,18 @@ test('#99 SC2 brief：没写执行类型、写「前端」或「混合」都走�
     assert.equal(Object.hasOwn(out.request, 'agent_device_id'), false);
     assert.deepEqual(out.gateways, ['Claude', 'Personal', 'Personal 2']);
   }
-  assert.equal(briefOf(parentFixture()).exec_kind, null);
+  assert.equal(briefOf(parentFixture()).exec_kind, '混合');
 });
 
 test('#99 SC3 brief：--kind 优先于 issue 上写的类型；不认识的类型拒绝，报错写明允许值和实际值', () => {
-  assert.deepEqual(routeOf(briefOf(parentFixture(), { kind: '后端' })), ['codex', 'gpt-6.1-sol', 'high']);
+  assert.deepEqual(routeOf(briefOf(fixtureWithKind('混合'), { kind: '后端' })), ['codex', 'gpt-6.1-sol', 'high']);
   assert.deepEqual(routeOf(briefOf(fixtureWithKind('后端'), { kind: '前端' })), ['claude-code', 'claude-opus-5-5', 'high']);
-  assert.throws(() => briefOf(fixtureWithKind('全栈')), /#11 首行的执行类型 只能是 前端 \/ 后端 \/ 混合（当前：全栈）/);
-  assert.throws(() => briefOf(parentFixture(), { kind: '全栈' }), /--kind 只能是 前端 \/ 后端 \/ 混合（当前：全栈）/);
+  assert.throws(() => briefOf(fixtureWithKind('全栈')), /#11 首行的执行类型 只能是 界面 \/ 逻辑 \/ 混合.*当前：全栈/);
+  assert.throws(() => briefOf(parentFixture(), { kind: '全栈' }), /--kind 只能是 界面 \/ 逻辑 \/ 混合.*当前：全栈/);
   // --kind 合法也要拒绝首行写错的类型（#100 单审 P2-2）
-  assert.throws(() => briefOf(fixtureWithKind('全栈'), { kind: '后端' }), /#11 首行的执行类型 只能是 前端 \/ 后端 \/ 混合（当前：全栈）/);
-  const { ghPath } = writeFixture(parentFixture());
-  const args = [CLI, 'brief', '--item', ref(11), '--root', ref(10), '--lead', 'L', '--repo-dir', '/r', '--project', '/r', '--gh-fixture', ghPath, '--now', NOW];
+  assert.throws(() => briefOf(fixtureWithKind('全栈'), { kind: '后端' }), /#11 首行的执行类型 只能是 界面 \/ 逻辑 \/ 混合.*当前：全栈/);
+  const { ghPath, repoDir } = writeFixture(fixtureWithKind('混合'));
+  const args = [CLI, 'brief', '--item', ref(11), '--root', ref(10), '--lead', 'L', '--repo-dir', repoDir, '--project', '/r', '--gh-fixture', ghPath, '--now', NOW];
   const bad = spawnSync(process.execPath, [...args, '--kind', '全栈'], { encoding: 'utf8' });
   assert.equal(bad.status, 2);
   assert.match(bad.stderr, /--kind 只能是/);
@@ -245,13 +260,13 @@ test('#99 SC4 byKind 里的路线缺项或类型名不认识时 fail-closed，�
   const base = { agent_kind: 'claude-code', model: 'claude-opus-5-5', effort: 'high', gateways: [{ name: 'Claude', agent_device_id: 'a'.repeat(64) }] };
   const kindRoute = { agent_kind: 'codex', model: 'gpt-6.1-sol', effort: 'high', gateways: [{ name: 'Mini', agent_device_id: MINI }] };
   const write = (byKind) => { const p = join(dir, `${Math.random().toString(36).slice(2)}.json`); writeFileSync(p, JSON.stringify({ dispatchRoute: { ...base, byKind } })); return p; };
-  assert.equal(selectDispatchRoute(write({ 后端: kindRoute })).byKind.后端.model, 'gpt-6.1-sol');
+  assert.equal(selectDispatchRoute(write({ 逻辑: kindRoute })).byKind.逻辑.model, 'gpt-6.1-sol');
   for (const missing of ['agent_kind', 'model', 'effort', 'gateways']) {
     const { [missing]: _dropped, ...partial } = kindRoute;
-    assert.throws(() => selectDispatchRoute(write({ 后端: partial })), /byKind\.后端 不完整/, `缺 ${missing} 应拒绝`);
+    assert.throws(() => selectDispatchRoute(write({ 逻辑: partial })), /byKind\.逻辑 不完整/, `缺 ${missing} 应拒绝`);
   }
-  assert.throws(() => selectDispatchRoute(write({ 后端: { ...kindRoute, gateways: [{ name: 'Mini' }] } })), /byKind\.后端 不完整/);
-  assert.throws(() => selectDispatchRoute(write({ 全栈: kindRoute })), /byKind 只能按 前端 \/ 后端 \/ 混合 分（当前：全栈）/);
+  assert.throws(() => selectDispatchRoute(write({ 逻辑: { ...kindRoute, gateways: [{ name: 'Mini' }] } })), /byKind\.逻辑 不完整/);
+  assert.throws(() => selectDispatchRoute(write({ 全栈: kindRoute })), /byKind 只能按 界面 \/ 逻辑 \/ 混合 分（当前：全栈）/);
   assert.throws(() => selectDispatchRoute(write([kindRoute])), /byKind 要是/);
 });
 
@@ -432,4 +447,64 @@ test('并行上限在登记时再核一次：名额已满时 claim 拒绝，提�
   assert.throws(() => claim({ gh, itemRef: ref(12), session: 's12', title: 't丨1114', now: NOW }), /已经派满：归档刚建的会话 s12/);
   const ok = claim({ gh: ghFrom(earlyFixture()), itemRef: ref(12), session: 's12', title: 't丨1114', now: NOW });
   assert.equal(ok.session, 's12');
+});
+
+test('#111 brief 拒绝逻辑/旧后端碰界面或视觉层，覆盖参数不能绕过首行', () => {
+  for (const declared of ['逻辑', '后端']) {
+    const f = fixtureWithKind(declared);
+    const key = `api repos/${REPO}/issues/11`;
+    f[key].body = f[key].body.replace('src/sync/status.ts', 'src/canvas/view.tsx');
+    assert.throws(() => briefOf(f), /声明逻辑但判定为界面.*src\/canvas\/view.tsx/);
+    assert.throws(() => briefOf(f, { kind: '混合' }), /src\/canvas\/view.tsx/);
+    f[key].body = fixtureWithKind(declared)[key].body.replace('验证：unit', '验证：cindy-windows');
+    assert.throws(() => briefOf(f), /cindy-windows/);
+  }
+});
+
+test('#111 brief 保留保守声明并输出提示理由；缺声明走混合', () => {
+  for (const declared of ['混合', '界面', '前端']) {
+    const out = briefOf(fixtureWithKind(declared));
+    assert.equal(out.exec_kind, declared === '混合' ? '混合' : '界面');
+    assert.equal(out.kind_hint, '逻辑');
+    assert.ok(out.kind_hint_reasons.some((s) => s.includes('逻辑文件 1 个')));
+    assert.equal(out.request.agent_kind, 'claude-code');
+  }
+  const f = fixtureWithKind('混合');
+  const key = `api repos/${REPO}/issues/11`;
+  f[key].body = f[key].body.replace('执行类型 混合 · ', '');
+  const out = briefOf(f);
+  assert.equal(out.exec_kind, '混合');
+  assert.equal(out.kind_hint, '逻辑');
+});
+
+test('#111 classify CLI 展开 git ls-files、读取卡片，item/body-file 都只读', () => {
+  const f = parentFixture();
+  const key = `api repos/${REPO}/issues/11`;
+  f[key].body = childBody({ scope: ['- `src/canvas/**`：界面', '- `src/new.vue`：新界面'], scs: ['- [ ] SC1 看界面。验证：browser-fixture'] });
+  const { dir, ghPath, repoDir } = writeFixture(f);
+  mkdirSync(join(repoDir, 'src/canvas'), { recursive: true });
+  writeFileSync(join(repoDir, 'src/canvas/view.tsx'), 'export default 1;');
+  assert.equal(spawnSync('git', ['-C', repoDir, 'add', '.']).status, 0);
+  const calls = [];
+  const fake = ghFrom(f);
+  const result = classify({ gh: (args) => { calls.push(args); return fake(args); }, repo: REPO, repoDir, itemRef: ref(11) });
+  assert.deepEqual(Object.keys(result).sort(), ['kind', 'ui_files', 'logic_files', 'visual_layers', 'reasons'].sort());
+  assert.deepEqual(result.ui_files, ['src/canvas/view.tsx', 'src/new.vue']);
+  assert.equal(result.kind, '界面');
+  assert.deepEqual(calls, [['api', `repos/${REPO}/issues/11`]]);
+  const bodyFile = join(dir, 'body.md');
+  writeFileSync(bodyFile, f[key].body);
+  const cli = (...tail) => spawnSync(process.execPath, [CLI, 'classify', '--repo', REPO, '--repo-dir', repoDir, '--gh-fixture', ghPath, ...tail], { encoding: 'utf8' });
+  const fixtureBefore = readFileSync(ghPath, 'utf8');
+  for (const tail of [['--item', ref(11)], ['--body-file', bodyFile]]) {
+    const out = cli(...tail);
+    assert.equal(out.status, 0, out.stderr);
+    assert.deepEqual(JSON.parse(out.stdout), result);
+  }
+  assert.equal(readFileSync(ghPath, 'utf8'), fixtureBefore, '只读分类不写 gh 夹具');
+  for (const tail of [[], ['--item', ref(11), '--body-file', bodyFile], ['--item', 'other/repo#11']]) assert.equal(cli(...tail).status, 2);
+  const blocked = spawnSync(process.execPath, [CLI, 'brief', '--item', ref(11), '--root', ref(10), '--lead', 'L', '--repo-dir', repoDir, '--project', repoDir, '--kind', '逻辑', '--gh-fixture', ghPath], { encoding: 'utf8' });
+  assert.equal(blocked.status, 2);
+  assert.match(blocked.stderr, /src\/canvas\/view.tsx/);
+  assert.throws(() => classifyBody({ body: f[key].body, repo: REPO, repoDir: join(dir, 'missing') }), /git ls-files/);
 });

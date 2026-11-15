@@ -25,7 +25,7 @@
       }
     ],
     "byKind": {
-      "后端": {
+      "逻辑": {
         "agent_kind": "codex",
         "model": "gpt-6.1-sol",
         "effort": "high",
