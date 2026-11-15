@@ -554,5 +554,9 @@ test('#112 claim CLI --route-json 持久化成功路线，不合法 JSON 拒绝'
   assert.equal(bad.status, 2);
   const ok = spawnSync(process.execPath, [...args, '--route-json', JSON.stringify(route)], { encoding: 'utf8' });
   assert.equal(ok.status, 0, ok.stderr);
-  // gh-fixture 的写请求不落盘，emit 的 payload 由上面的共享 gh 用例核对。
+  const persisted = JSON.parse(readFileSync(ghPath, 'utf8'));
+  const comments = persisted[commentsKey(11)];
+  assert.equal(comments.length, 1);
+  const payload = JSON.parse(/<!-- approve-exec:event v1 (.*) -->/.exec(comments[0].body)[1]);
+  assert.deepEqual(payload.route, route);
 });

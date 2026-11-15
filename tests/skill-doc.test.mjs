@@ -247,7 +247,9 @@ test('config 键名比对：SKILL.md 反引号里的 camelCase 键都真实存�
 
 test('#112 开工先查路线；说明和配置一致，旧网关规则已移除', () => {
   const s = section('## ⓪ issue 入口');
-  assert.ok(s.indexOf('**开工先查路线**') < s.indexOf('1. **看现状。**'));
+  const gate = s.indexOf('**开工先查路线**');
+  const step1 = s.indexOf('1. **看现状。**');
+  assert.ok(gate >= 0 && step1 > gate, '开工先查路线必须存在且在第 1 步之前');
   for (const file of ['SKILL.md', 'README.md']) {
     const text = readFileSync(join(root, file), 'utf8');
     for (const token of ['Praise-VPS', 'routing.json', 'APPROVE_EXEC_ROUTING', 'routingPath', 'fallbacks', '--route-index', '--route-json', '未记录']) assert.ok(text.includes(token), `${file} ${token}`);
