@@ -80,7 +80,7 @@ lead 会话要在完全访问权限下运行：派出的执行会话继承 lead 
 
 用户在 lead 会话里说「合并」时，按 `pr-merge` 分两路（用户 2026-11-08 定）：
 - Mivo 仓（`xindong/mivo-canvas-plugin`）的 PR 交给合并伙伴，输入里带 `notify_session`（lead 的跨电脑地址）；伙伴合入后给 lead 发 `praise-merge 已合并 <owner/repo>#<号>`，lead 按第 4 步处理。只有 Mivo PR 有这条伙伴通知。
-- 其他仓的 PR 不交伙伴，由 lead 按 `pr-merge` 的标准自己合（以 `pr-merge` 为准：required checks 全绿、CLEAN、当前 head 的单审和 e2e 通过，缺一样就不合并、报缺项；单审用和作者不同厂家的模型，逻辑路线的 PR 是 GPT 写的，由 Claude 审）。没有伙伴通知；lead 合进去后直接按第 4 步归档会话、派下一批。
+- 其他仓的 PR 不交伙伴，由 lead 按 `pr-merge` 的标准自己合（以 `pr-merge` 为准：required checks 全绿、CLEAN、当前 head 的单审和 e2e 通过，缺一样就不合并、报缺项；单审模型按审查档、按 lead 的 harness 取，不按作者换：换家检查由 lead 验收承担（用户 2026-11-15 定，#110））。没有伙伴通知；lead 合进去后直接按第 4 步归档会话、派下一批。
 
 用户用别的方式合并、或 Mivo PR 没登记就自动合入时没有通知，用户说「继续」即可。
 
@@ -115,7 +115,7 @@ v3（用户 2026-11-14 定；2026-11-07 改版时没有任何定时检查，这�
 
 只有入口消息（或之后用户的当次消息）明确授权对哪些 PR（或本次全部子 issue）做 admin 合并时才走这里。没写就不走，只报告可合并。
 
-1. 执行会话发来「已转正式」、`check-pr.mjs --stage ready` 通过后，按 `orca-fanout` 的派工规则派两个 Orca Worker：review 档对当前 head 单审，e2e 档跑 e2e。逻辑路线的 PR 是 GPT 写的，单审按 `pr-merge` 第 4 步改用 Claude 模型。
+1. 执行会话发来「已转正式」、`check-pr.mjs --stage ready` 通过后，按 `orca-fanout` 的派工规则派两个 Orca Worker：review 档对当前 head 单审，e2e 档跑 e2e。单审模型按 `pr-merge` 第 4 步、按 lead 的 harness 取，不按作者换。
 2. 单审没有确认成立的 P0/P1/P2、e2e 通过，才合并：`gh pr merge <号> --repo <owner/repo> --admin --match-head-commit <审过的 head> --squash`（仓库不允许 squash 时用它允许的方式）。有问题就发给执行会话修，修完重新单审和 e2e。
 3. 合入后回到第 1 步派下一批。
 
