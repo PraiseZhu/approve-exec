@@ -91,3 +91,15 @@ test('派发、撤回、归档经事件通道写出后，旧解析照常认：st
   const old = parentFixture({ extra: { [commentsKey(11)]: [{ id: 1, user: { login: LOGIN }, body: `批准执行派发：2026-11-07 ${A} → 会话 old1（t丨1107）` }] } });
   assert.equal(batchStatus({ gh: ghFrom(old), issueRef: `${REPO}#10` }).items.find((i) => i.ref === A).state, 'in_progress');
 });
+
+test('#112 dispatch 可选 route 原样往返；拒绝坏字段且兼容无 route 的旧事件', () => {
+  const route = { agent: 'codex', model: 'gpt-6.1-sol', kind: '逻辑', route_index: 1 };
+  const fixture = parentFixture(); const gh = ghFrom(fixture);
+  emit({ gh, type: 'dispatch', itemRef: A, session: 's-route', route, now: NOW });
+  assert.deepEqual(list({ gh, itemRef: A }).events.at(-1).route, route);
+  for (const broken of [{ ...route, route_index: -1 }, { ...route, route_index: 0.5 }, { ...route, model: '' }, { ...route, kind: '后端' }, { ...route, provider_id: 'secret' }]) {
+    assert.throws(() => emit({ gh, type: 'dispatch', itemRef: A, session: 'bad', route: broken, now: NOW }), /dispatch route/);
+  }
+  emit({ gh, type: 'dispatch', itemRef: A, session: 'old-route', now: NOW });
+  assert.equal(list({ gh, itemRef: A }).events.at(-1).route, undefined);
+});

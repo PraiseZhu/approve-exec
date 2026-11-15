@@ -14,7 +14,7 @@ const frontmatter = /^---\n([\s\S]*?)\n---\n/.exec(skillDoc)?.[1] ?? '';
 
 const MARKERS = ['## ⓪ issue 入口', '## 执行会话的规矩', '## 加急合并', '## 合并红线（最高优先级）', '## 旧 run', '## 保证等级', '## 自进化'];
 // #70 SC1：旧入口与钉死模型路由的词，不得出现在 SKILL.md、scripts/、config/。
-const BANNED = ['grok-4.6', 'claude-fable', 'routing.json', 'task-priority', 'context-intake', 'gate_goal', 'gate_routing', 'budgetPauseUsd', '800 行', '1600 行'];
+const BANNED = ['grok-4.6', 'claude-fable', 'task-priority', 'context-intake', 'gate_goal', 'gate_routing', 'budgetPauseUsd', '800 行', '1600 行'];
 
 function section(marker) {
   const start = skillDoc.indexOf(marker);
@@ -32,7 +32,7 @@ test('frontmatter：name / trigger；description 写 2026-11-07 新流程，不�
   assert.match(frontmatter, /^name: approve-exec$/m);
   assert.match(frontmatter, /^trigger: 批准执行$/m);
   const description = /^description: (.*)$/m.exec(frontmatter)?.[1] ?? '';
-  for (const must of ['开 issue', '吃总 issue', '并行/串行原则', '独立会话', 'Claude 网关的 Opus 5.5 high', '不走 KEEL', '不建台账', '对账任务', '转正式', '归档已完成的会话', '不合并']) {
+  for (const must of ['开 issue', '吃总 issue', '并行/串行原则', '独立会话', '按执行类型读共享 session 路线', '不走 KEEL', '不建台账', '对账任务', '转正式', '归档已完成的会话', '不合并']) {
     assert.ok(description.includes(must), `description 应写「${must}」`);
   }
   for (const old of ['keel_run', '最多 2 轮', 'manifest', 'checkpoint', '续跑脚本']) {
@@ -126,12 +126,9 @@ test('#89 验证证据：lead 核对每条「已验证」附命令和退出码�
   }
 });
 
-test('网关（用户 2026-11-07）：默认 Claude 网关 Opus 5.5 high，备用 Personal、Personal 2；不支持指定网关时只在 Claude 网关上派', () => {
+test('#112 派发按共享路线备选重派并记录成功路线', () => {
   const s = section('## ⓪ issue 入口');
-  for (const must of ['Claude 网关的 `claude-opus-5-5`、effort high', '备用依次 Personal、Personal 2 网关', 'makecindy/cindy#9195', '`--gateway Claude`',
-    '`--gateway Personal`', '`--gateway "Personal 2"`', '请在 Claude 网关上开 lead 会话', '**派发失败的会话马上归档**']) {
-    assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
-  }
+  for (const must of ['session.ui', 'session.logic', 'session.mixed', 'APPROVE_EXEC_ROUTING', 'model-route check', '--route-index 0', '--route-index 1', 'PROVIDER_ROUTE_UNAVAILABLE', 'DELIVERY_UNKNOWN', '--route-json', '实际成功请求', '**派发失败的会话马上归档**']) assert.ok(s.includes(must), must);
 });
 
 test('收工：PR 合并前不归档执行会话；合入后 lead 按 to_archive 归档并记录，扫地僧兜底；lead 不交接、不关总 issue（用户 2026-11-07）', () => {
@@ -248,48 +245,18 @@ test('config 键名比对：SKILL.md 反引号里的 camelCase 键都真实存�
   assert.deepEqual(unknown, [], `SKILL.md 引用了 defaults.json 中不存在的键: ${unknown.join(', ')}`);
 });
 
-test('开工先查网关（2026-11-07 复盘，#87）：⓪ 在第 1 步之前查 lead 网关，第 2 步引用结果', () => {
+test('#112 开工先查路线；说明和配置一致，旧网关规则已移除', () => {
   const s = section('## ⓪ issue 入口');
-  const gate = s.indexOf('**开工先查网关**');
+  const gate = s.indexOf('**开工先查路线**');
   const step1 = s.indexOf('1. **看现状。**');
-  const step2 = s.indexOf('2. **派会话');
-  const step3 = s.indexOf('3. **停下。**');
-  assert.ok(gate >= 0 && step1 > gate && step2 > step1 && step3 > step2, '「开工先查网关」应在第 1 步之前，第 1、2、3 步依次排列');
-  // 检查内容本身要在第 1 步之前，不能只留标题
-  const before = s.slice(gate, step1);
-  for (const must of ['顶层 `agent_device_id`', '请在 Claude 网关上开 lead 会话', '不派发的准备']) {
-    assert.ok(before.includes(must), `第 1 步之前的「开工先查网关」应写「${must}」`);
+  assert.ok(gate >= 0 && step1 > gate, '开工先查路线必须存在且在第 1 步之前');
+  for (const file of ['SKILL.md', 'README.md']) {
+    const text = readFileSync(join(root, file), 'utf8');
+    for (const token of ['Praise-VPS', 'routing.json', 'APPROVE_EXEC_ROUTING', 'routingPath', 'fallbacks', '--route-index', '--route-json', '未记录']) assert.ok(text.includes(token), `${file} ${token}`);
+    for (const stale of ['dispatchRoute', '--gateway Claude', '备用依次 Personal', '请在 Claude 网关上开 lead 会话']) assert.equal(text.includes(stale), false, `${file} ${stale}`);
   }
-  const dispatch = s.slice(step2, step3);
-  for (const must of ['按开头「开工先查网关」的结果派', '不在别的网关上派']) {
-    assert.ok(dispatch.includes(must), `第 2 步应写「${must}」`);
-  }
-});
-
-test('#99 SC5 按执行类型换路线：第 2 步和 README 写明后端路线，派不出去就停下', () => {
-  const s = section('## ⓪ issue 入口');
-  for (const must of ['`执行类型 逻辑`', 'Codex 的 `gpt-6.1-sol`、effort high，走 Mac mini 上的 Art Cindy', '`--kind 后端`', '`dispatchRoute.byKind`',
-    '逻辑路线派不出去', '不自动改用默认路线，也不换别的通路', '没写、写「界面」或「混合」的走上面的默认路线']) {
-    assert.ok(s.includes(must), `⓪ 段应写「${must}」`);
-  }
-  const readme = readFileSync(join(root, 'README.md'), 'utf8');
-  for (const must of ['`执行类型 逻辑`', 'Codex 的 `gpt-6.1-sol` high，走 Mac mini 上的 Art Cindy', '派不出去就停下告诉用户']) {
-    assert.ok(readme.includes(must), `README.md 应写「${must}」`);
-  }
-});
-
-test('#95 README 写执行会话默认路线；invalid 由 lead 直接补格式，不再指路「开 issue」', () => {
-  const readme = readFileSync(join(root, 'README.md'), 'utf8');
-  for (const must of ['Claude 网关的 Opus 5.5 high', 'dispatchRoute']) {
-    assert.ok(readme.includes(must), `README.md 应写「${must}」`);
-  }
-  assert.equal(readme.includes('派会话不带模型参数'), false, 'README.md 不得再写「派会话不带模型参数」');
   const invalid = skillDoc.split('\n').find((l) => l.includes('`invalid`：'));
-  assert.ok(invalid, 'SKILL.md 第 1 步应有 `invalid` 一条');
-  for (const must of ['lead 直接补齐格式', '不改目标、范围和验收内容', '记一行']) {
-    assert.ok(invalid.includes(must), `invalid 一条应写「${must}」，实际：${invalid}`);
-  }
-  assert.equal(skillDoc.includes('指路「开 issue」补齐'), false, 'SKILL.md 不得再写「指路「开 issue」补齐」');
+  for (const must of ['lead 直接补齐格式', '不改目标、范围和验收内容', '记一行']) assert.ok(invalid.includes(must), must);
 });
 
 // v3：对账式流水线（PraiseZhu/approve-exec#101）

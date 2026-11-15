@@ -6,10 +6,10 @@
 // CLI:
 //   node scripts/batch.mjs status  --issue <owner/repo#号>
 //   node scripts/batch.mjs brief   --item <子 issue> --root <入口 issue> --lead <lead 会话 id> --repo-dir <目标仓主目录> --project <Cindy 项目路径>
-//                                  [--name <人话任务名>] [--urgent] [--gateway <网关名>] [--kind <界面|逻辑|混合>]
+//                                  [--name <人话任务名>] [--urgent] [--route-index <n>] [--kind <界面|逻辑|混合>]
 //   node scripts/batch.mjs classify --repo <owner/repo> --repo-dir <目标仓主目录> (--item <子 issue> | --body-file <正文.md>)
 //   node scripts/batch.mjs archived --item <子 issue> --session <已归档的执行会话 id>
-//   node scripts/batch.mjs claim   --item <子 issue> --session <派出的会话 id> --title <会话标题>
+//   node scripts/batch.mjs claim   --item <子 issue> --session <派出的会话 id> --title <会话标题> [--route-json <brief.route 的 JSON>]
 //   node scripts/batch.mjs release --item <子 issue> --reason <原因>
 //   node scripts/batch.mjs notify  --pr <Mivo PR> --lead-address <deviceId>::<lead 会话 id> [--partner <partner.json>]
 //   node scripts/batch.mjs merge-request --pr <owner/repo#号> --root <总 issue> --lead <lead 会话 id> [--title <lead 会话标题>]
@@ -85,24 +85,37 @@ export function unarchivedSessions(comments, ref, login) {
 /** 子 issue 首行「执行类型」的允许值（#111，旧写法由 normalizeExecKind 兼容）。 */
 export { EXEC_KINDS };
 
-const isCompleteRoute = (route) => Boolean(route) && ['agent_kind', 'model', 'effort'].every((k) => typeof route[k] === 'string' && route[k])
-  && Array.isArray(route.gateways) && route.gateways.length > 0
-  && route.gateways.every((g) => typeof g?.name === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(String(g?.agent_device_id ?? '')));
-
-/**
- * config/defaults.json 的 dispatchRoute：执行会话默认用什么跑、备用网关顺序（用户 2026-11-07 定）。
- * byKind 是按执行类型覆盖的整条路线（用户 2026-11-14 定，#99）；写了就必须完整，缺项时拒绝，不退回默认路线。
- */
-export function selectDispatchRoute(path = DEFAULTS_PATH) {
-  const route = JSON.parse(readFileSync(path, 'utf8')).dispatchRoute;
-  if (!isCompleteRoute(route)) reject(`config/defaults.json 的 dispatchRoute 不完整（要有 agent_kind、model、effort 和至少一个带 agent_device_id 的网关）`);
-  const byKind = route.byKind ?? {};
-  if (typeof byKind !== 'object' || Array.isArray(byKind)) reject('config/defaults.json 的 dispatchRoute.byKind 要是「执行类型 → 路线」的对象');
-  for (const [kind, kindRoute] of Object.entries(byKind)) {
-    if (!EXEC_KINDS.includes(kind)) reject(`config/defaults.json 的 dispatchRoute.byKind 只能按 ${EXEC_KINDS.join(' / ')} 分（当前：${kind}）`);
-    if (!isCompleteRoute(kindRoute)) reject(`config/defaults.json 的 dispatchRoute.byKind.${kind} 不完整（要有 agent_kind、model、effort 和至少一个带 agent_device_id 的网关）`);
+/** 执行会话路线只从共享 routing.json 的 session 段读取；任何类型配置损坏都拒绝派发。 */
+export function selectDispatchRoute(kind = null) {
+  const fail = (message) => reject(`${message}；请先跑 model-route check`);
+  let path;
+  let session;
+  try {
+    path = process.env.APPROVE_EXEC_ROUTING ?? JSON.parse(readFileSync(DEFAULTS_PATH, 'utf8')).routingPath;
+    if (typeof path !== 'string' || !path.trim()) fail('routingPath 必须是非空路径');
+    if (path.startsWith('~/')) path = join(homedir(), path.slice(2));
+    session = JSON.parse(readFileSync(path, 'utf8')).session;
+  } catch (err) { fail(`无法读取执行会话路线 ${path ?? ''}（${err.message}）`); }
+  const object = (value) => value && typeof value === 'object' && !Array.isArray(value);
+  if (!object(session)) fail('routing.json 缺 session 对象');
+  const routes = {};
+  for (const key of ['ui', 'logic', 'mixed']) {
+    const primary = session[key];
+    if (!object(primary)) fail(`session.${key} 缺路线`);
+    if (primary.fallbacks !== undefined && !Array.isArray(primary.fallbacks)) fail(`session.${key}.fallbacks 必须是数组`);
+    const { fallbacks = [], ...first } = primary;
+    routes[key] = [first, ...fallbacks];
+    for (const [index, route] of routes[key].entries()) {
+      if (!object(route) || !['agent', 'model', 'effort', 'agent_device_id'].every((field) => typeof route[field] === 'string' && route[field].trim())
+        || !['codex', 'claude-code', 'pi'].includes(route.agent)
+        || !/^[A-Za-z0-9_.:-]{1,128}$/.test(route.agent_device_id)
+        || Object.hasOwn(route, 'provider_id') || Object.hasOwn(route, 'fallbacks')) {
+        fail(`session.${key} 路线 ${index} 缺字段或含 provider_id / 嵌套 fallbacks`);
+      }
+    }
   }
-  return route;
+  const normalized = kind == null ? '混合' : normalizeExecKind(kind);
+  return routes[{ 界面: 'ui', 逻辑: 'logic', 混合: 'mixed' }[normalized]];
 }
 
 /** 某仓开着的 PR → { "<ref>": [{number, draft}] }，按正文里「任务 issue：<ref>」一行归到子 issue。 */
@@ -322,7 +335,8 @@ export function toOwnerMessage({ ref, title, url, lead, parent = null, openPr = 
   ].join('\n');
 }
 
-export function brief({ gh, itemRef, root, lead, repoDir, project, name, urgent = false, gateway, kind, userWords = null, early = false, cardsDir, repoFiles, route = selectDispatchRoute(), now = nowIso() }) {
+export function brief({ gh, itemRef, root, lead, repoDir, project, name, urgent = false, gateway, routeIndex = 0, kind, userWords = null, early = false, cardsDir, repoFiles, now = nowIso() }) {
+  if (gateway !== undefined) reject('--gateway 已删除，请改用 --route-index <n>');
   if (!SESSION_RE.test(String(lead ?? ''))) reject(`--lead 要填 lead 会话 id（get_current_session_id 的 session_id），当前：${lead}`);
   if (!isAbsolute(String(repoDir ?? ''))) reject(`--repo-dir 要填目标仓主目录的绝对路径，当前：${repoDir}`);
   if (!project) reject('--project 要填目标仓对应的 Cindy 项目路径（先 list_projects 查，没有就 create_project）');
@@ -353,15 +367,12 @@ export function brief({ gh, itemRef, root, lead, repoDir, project, name, urgent 
   }
   const checkedKind = checkDeclaredKind(declared, classified);
   const execKind = checkedKind.kind;
-  const kindRoute = route.byKind?.[execKind];
-  const active = kindRoute ?? route;
-  // 按类型覆盖的路线，模型只在它自己的供应商位置有：不加 --gateway 也带上第一个位置，不继承 lead 的网关。
-  let deviceId = kindRoute ? kindRoute.gateways[0].agent_device_id : null;
-  if (gateway !== undefined) {
-    const hit = active.gateways.find((g) => g.name === gateway);
-    if (!hit) reject(`--gateway 只能是 ${active.gateways.map((g) => g.name).join(' / ')}（当前：${gateway}）`);
-    deviceId = hit.agent_device_id;
+  const routes = selectDispatchRoute(execKind);
+  if (!/^(0|[1-9]\d*)$/.test(String(routeIndex)) || !Number.isSafeInteger(Number(routeIndex)) || Number(routeIndex) >= routes.length) {
+    reject(`--route-index 超出范围：应为 0 到 ${routes.length - 1} 的整数（当前：${routeIndex}）`);
   }
+  const route_index = Number(routeIndex);
+  const active = routes[route_index];
   const title = sessionTitle({ ref, title: issue.title }, now, { pr: openPr, ...(name ? { name } : {}) });
   const parent = header.parent;
   const login = ghLogin(gh);
@@ -395,18 +406,19 @@ export function brief({ gh, itemRef, root, lead, repoDir, project, name, urgent 
       working_dir: repoDir,
       project_path: project,
       use_worktree: true,
-      agent_kind: active.agent_kind,
+      agent_kind: active.agent,
       model: active.model,
       effort: active.effort,
-      ...(deviceId ? { agent_device_id: deviceId } : {}),
+      agent_device_id: active.agent_device_id,
     },
-    gateways: active.gateways.map((g) => g.name),
+    routes,
+    route: { agent: active.agent, model: active.model, kind: execKind, route_index },
   };
 }
 
 // claim / release
 
-export function claim({ gh, itemRef, session, title, now = nowIso() }) {
+export function claim({ gh, itemRef, session, title, route = null, now = nowIso() }) {
   const { ref } = parseIssueRef(itemRef);
   if (!SESSION_RE.test(String(session ?? ''))) reject(`--session 要填 send_to_session 返回的 target_session_id，当前：${session}`);
   if (!title) reject('--title 要填派出会话的标题');
@@ -421,7 +433,7 @@ export function claim({ gh, itemRef, session, title, now = nowIso() }) {
     const status = batchStatus({ gh, issueRef: parent });
     if (status.dispatch_budget === 0) reject(`${parent} 的章程把同时在跑的执行会话限制在 ${status.max_parallel} 个，已经派满：归档刚建的会话 ${session}，等有会话收工再派 ${ref}`);
   }
-  const posted = emit({ gh, type: 'dispatch', itemRef: ref, session, title, now });
+  const posted = emit({ gh, type: 'dispatch', itemRef: ref, session, title, route, now });
   return { ok: true, ref, session, comment_url: posted.comment_url };
 }
 
@@ -533,8 +545,8 @@ export function main(argv = process.argv.slice(2)) {
     let out;
     if (cmd === 'status') out = batchStatus({ gh, issueRef: args.issue });
     else if (cmd === 'classify') out = classify({ gh, repo: args.repo, repoDir: args['repo-dir'], itemRef: args.item, bodyFile: args['body-file'] });
-    else if (cmd === 'brief') out = brief({ gh, itemRef: args.item, root: args.root, lead: args.lead, repoDir: args['repo-dir'], project: args.project, name: args.name, urgent: args.urgent === true, ...(typeof args.gateway === 'string' ? { gateway: args.gateway } : {}), ...(args.kind !== undefined ? { kind: String(args.kind) } : {}), ...(typeof args['user-words'] === 'string' ? { userWords: args['user-words'] } : {}), early: args.early === true, now });
-    else if (cmd === 'claim') out = claim({ gh, itemRef: args.item, session: args.session, title: args.title, now });
+    else if (cmd === 'brief') out = brief({ gh, itemRef: args.item, root: args.root, lead: args.lead, repoDir: args['repo-dir'], project: args.project, name: args.name, urgent: args.urgent === true, ...(args.gateway !== undefined ? { gateway: args.gateway } : {}), routeIndex: args['route-index'] ?? 0, ...(args.kind !== undefined ? { kind: String(args.kind) } : {}), ...(typeof args['user-words'] === 'string' ? { userWords: args['user-words'] } : {}), early: args.early === true, now });
+    else if (cmd === 'claim') out = claim({ gh, itemRef: args.item, session: args.session, title: args.title, route: args['route-json'] === undefined ? null : JSON.parse(args['route-json']), now });
     else if (cmd === 'release') out = release({ gh, itemRef: args.item, reason: args.reason, now });
     else if (cmd === 'archived') out = archived({ gh, itemRef: args.item, session: args.session, now });
     else if (cmd === 'notify') out = notify({ gh, prRef: args.pr, leadAddress: args['lead-address'], ...(typeof args.partner === 'string' ? { partnerPath: args.partner } : {}), now });

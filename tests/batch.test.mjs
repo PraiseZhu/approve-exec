@@ -10,6 +10,7 @@ import { activeDispatch, archived, batchStatus, brief as realBrief, classify, cl
 import { REPO, LOGIN, childBody, commentsKey, ghFrom, openPullsKey, parentFixture, standaloneFixture } from './fixtures/issues/build.mjs';
 
 const CLI = fileURLToPath(new URL('../scripts/batch.mjs', import.meta.url));
+process.env.APPROVE_EXEC_ROUTING = fileURLToPath(new URL('./fixtures/routing.json', import.meta.url));
 const brief = (args) => realBrief({ repoFiles: [], ...args });
 const scratch = fileURLToPath(new URL('../_tmp/', import.meta.url));
 mkdirSync(scratch, { recursive: true });
@@ -152,11 +153,11 @@ test('独立 issue 入口：只有它自己一项', () => {
   assert.deepEqual(res.dispatchable, [ref(20)]);
 });
 
-test('brief：标题是人话任务名丨日期，开工消息写明红线、lead 会话和三种消息格式；请求带默认路线 Opus 5.5 high，不带网关时靠继承', () => {
+test('brief：标题是人话任务名丨日期，开工消息写明红线、lead 会话和三种消息格式；请求带默认路线 Opus 5.5 high，自带供应商位置', () => {
   const out = brief({ gh: ghFrom(parentFixture()), itemRef: ref(11), root: ref(10), lead: 'lead-sess-1', repoDir: '/repos/app', project: '/repos/app', now: NOW });
-  assert.deepEqual(Object.keys(out.request).sort(), ['agent_kind', 'effort', 'message', 'model', 'project_path', 'title', 'use_worktree', 'working_dir']);
+  assert.deepEqual(Object.keys(out.request).sort(), ['agent_device_id', 'agent_kind', 'effort', 'message', 'model', 'project_path', 'title', 'use_worktree', 'working_dir']);
   assert.deepEqual([out.request.agent_kind, out.request.model, out.request.effort], ['claude-code', 'claude-opus-5-5', 'high']);
-  assert.deepEqual(out.gateways, ['Claude', 'Personal', 'Personal 2']);
+  assert.equal(out.request.agent_device_id, 'vps-fixture');
   assert.match(out.request.message, /一个子 issue 只对应这一个 PR、这一个会话/);
   assert.equal(out.request.title, '同步状态读取丨1107');
   assert.equal(out.request.use_worktree, true);
@@ -179,14 +180,18 @@ test('brief：已有开着的 PR 时标题带 #PR号，消息写明接着那个 
   assert.match(out.request.message, /加急任务/);
 });
 
-test('brief --gateway：按配置顺序取网关的 agent_device_id；不认识的网关名拒绝', () => {
-  const gh = ghFrom(parentFixture());
-  const out = brief({ gh, itemRef: ref(11), root: ref(10), lead: 'L', repoDir: '/r', project: '/r', gateway: 'Personal', now: NOW });
-  assert.equal(out.request.agent_device_id, '8620a24bb37ab0fff5f06fe54601a7747583995243a3086ccc1b769facd8fcec');
-  assert.throws(() => brief({ gh, itemRef: ref(11), root: ref(10), lead: 'L', repoDir: '/r', project: '/r', gateway: 'Nope', now: NOW }), /--gateway 只能是 Claude \/ Personal \/ Personal 2/);
+test('brief --route-index 选择首个备选，越界拒绝；旧 --gateway 提示迁移', () => {
+  const args = { gh: ghFrom(parentFixture()), itemRef: ref(11), root: ref(10), lead: 'L', repoDir: '/r', project: '/r', now: NOW };
+  const out = brief({ ...args, routeIndex: 1 });
+  assert.equal(out.request.agent_device_id, 'pro-fixture');
+  assert.equal(out.request.model, 'anthropic/claude-opus-5-5');
+  assert.deepEqual(out.route, { agent: 'claude-code', model: 'anthropic/claude-opus-5-5', kind: '混合', route_index: 1 });
+  assert.equal(Object.hasOwn(out.request, 'provider_id'), false);
+  for (const routeIndex of [2, -1, 1.5, 'no', true, '']) assert.throws(() => brief({ ...args, routeIndex }), /--route-index/);
+  assert.throws(() => brief({ ...args, gateway: 'Personal' }), /--gateway.*--route-index/);
 });
 
-const MINI = '3413b2125731cc24445e82ffa2b91338f8272dbc2df89ff2c92ca7bfc05f5817';
+const MINI = 'mini-fixture';
 /** #11 首行加上「执行类型 <类型>」（brief 单读这个 issue）。 */
 function fixtureWithKind(kindText) {
   const f = parentFixture();
@@ -203,9 +208,9 @@ test('#99 SC1 brief：首行写「执行类型 后端」时换成后端路线 Co
   assert.deepEqual(routeOf(out), ['codex', 'gpt-6.1-sol', 'high']);
   assert.equal(out.request.agent_device_id, MINI);
   assert.equal(out.exec_kind, '逻辑');
-  assert.deepEqual(out.gateways, ['Mini']);
+  assert.equal(out.routes.length, 2);
   // 后端路线只认自己的供应商位置：默认路线的网关名在这里不合法
-  assert.throws(() => briefOf(fixtureWithKind('后端'), { gateway: 'Claude' }), /--gateway 只能是 Mini（当前：Claude）/);
+  assert.throws(() => briefOf(fixtureWithKind('后端'), { gateway: 'Claude' }), /--gateway.*--route-index/);
 });
 
 test('#100 单审 P2-1：只认首行的执行类型，首段其他行的备注不换路线', () => {
@@ -225,15 +230,15 @@ test('#100 单审 P2-1：只认首行的执行类型，首段其他行的备注�
   assert.notEqual(standalone, f[key].body, '夹具首行应以「> 子 issue · 总 issue」开头');
   assert.equal(briefOf({ ...f, [key]: { ...f[key], body: standalone } }).exec_kind, '逻辑');
   assert.deepEqual(routeOf(out), ['claude-code', 'claude-opus-5-5', 'high']);
-  assert.equal(Object.hasOwn(out.request, 'agent_device_id'), false);
+  assert.equal(out.request.agent_device_id, 'vps-fixture');
 });
 
-test('#99 SC2 brief：没写执行类型、写「前端」或「混合」都走默认路线，不带 agent_device_id', () => {
+test('#99 SC2 brief：没写执行类型、写「前端」或「混合」都走默认路线，自带 agent_device_id', () => {
   for (const fixture of [parentFixture(), fixtureWithKind('前端'), fixtureWithKind('混合')]) {
     const out = briefOf(fixture);
     assert.deepEqual(routeOf(out), ['claude-code', 'claude-opus-5-5', 'high']);
-    assert.equal(Object.hasOwn(out.request, 'agent_device_id'), false);
-    assert.deepEqual(out.gateways, ['Claude', 'Personal', 'Personal 2']);
+    assert.equal(out.request.agent_device_id, 'vps-fixture');
+    assert.equal(out.request.agent_device_id, 'vps-fixture');
   }
   assert.equal(briefOf(parentFixture()).exec_kind, '混合');
 });
@@ -255,26 +260,38 @@ test('#99 SC3 brief：--kind 优先于 issue 上写的类型；不认识的类�
   assert.equal(JSON.parse(ok.stdout).request.model, 'gpt-6.1-sol');
 });
 
-test('#99 SC4 byKind 里的路线缺项或类型名不认识时 fail-closed，不退回默认路线', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'route-kind-'));
-  const base = { agent_kind: 'claude-code', model: 'claude-opus-5-5', effort: 'high', gateways: [{ name: 'Claude', agent_device_id: 'a'.repeat(64) }] };
-  const kindRoute = { agent_kind: 'codex', model: 'gpt-6.1-sol', effort: 'high', gateways: [{ name: 'Mini', agent_device_id: MINI }] };
-  const write = (byKind) => { const p = join(dir, `${Math.random().toString(36).slice(2)}.json`); writeFileSync(p, JSON.stringify({ dispatchRoute: { ...base, byKind } })); return p; };
-  assert.equal(selectDispatchRoute(write({ 逻辑: kindRoute })).byKind.逻辑.model, 'gpt-6.1-sol');
-  for (const missing of ['agent_kind', 'model', 'effort', 'gateways']) {
-    const { [missing]: _dropped, ...partial } = kindRoute;
-    assert.throws(() => selectDispatchRoute(write({ 逻辑: partial })), /byKind\.逻辑 不完整/, `缺 ${missing} 应拒绝`);
+test('#112 selectDispatchRoute：三类及旧类型按共享 session 返回首选与全部备选', () => {
+  const fixture = JSON.parse(readFileSync(process.env.APPROVE_EXEC_ROUTING, 'utf8'));
+  for (const [kind, key] of [[null, 'mixed'], ['界面', 'ui'], ['前端', 'ui'], ['逻辑', 'logic'], ['后端', 'logic'], ['混合', 'mixed']]) {
+    const { fallbacks, ...primary } = fixture.session[key];
+    assert.deepEqual(selectDispatchRoute(kind), [primary, ...fallbacks]);
   }
-  assert.throws(() => selectDispatchRoute(write({ 逻辑: { ...kindRoute, gateways: [{ name: 'Mini' }] } })), /byKind\.逻辑 不完整/);
-  assert.throws(() => selectDispatchRoute(write({ 全栈: kindRoute })), /byKind 只能按 界面 \/ 逻辑 \/ 混合 分（当前：全栈）/);
-  assert.throws(() => selectDispatchRoute(write([kindRoute])), /byKind 要是/);
 });
 
-test('dispatchRoute 缺项时 fail-closed，不悄悄换模型', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'route-'));
-  const bad = join(dir, 'defaults.json');
-  writeFileSync(bad, JSON.stringify({ dispatchRoute: { agent_kind: 'claude-code', model: 'claude-opus-5-5', gateways: [] } }));
-  assert.throws(() => selectDispatchRoute(bad), /dispatchRoute 不完整/);
+test('#112 brief CLI 对损坏路线 fail-closed，不读本机 routingPath', () => {
+  const { dir, ghPath, repoDir } = writeFixture(parentFixture());
+  const path = join(dir, 'routing.json');
+  const good = JSON.parse(readFileSync(process.env.APPROVE_EXEC_ROUTING, 'utf8'));
+  const invalid = [{}, { session: {} }, { session: { ...good.session, logic: null } }];
+  for (const key of ['agent', 'model', 'effort', 'agent_device_id']) {
+    const broken = structuredClone(good); delete broken.session.ui[key]; invalid.push(broken);
+  }
+  for (const route of [good.session.ui, good.session.ui.fallbacks[0]]) {
+    const broken = structuredClone(good);
+    if (route === good.session.ui) broken.session.ui.provider_id = 'forbidden';
+    else broken.session.ui.fallbacks[0].provider_id = 'forbidden';
+    invalid.push(broken);
+  }
+  const args = [CLI, 'brief', '--item', ref(11), '--root', ref(10), '--lead', 'L', '--repo-dir', repoDir, '--project', repoDir, '--gh-fixture', ghPath];
+  for (const value of [null, 'bad json', ...invalid]) {
+    if (value !== null) writeFileSync(path, typeof value === 'string' ? value : JSON.stringify(value));
+    const res = spawnSync(process.execPath, args, { encoding: 'utf8', env: { ...process.env, APPROVE_EXEC_ROUTING: value === null ? join(dir, 'missing') : path } });
+    assert.equal(res.status, 2, res.stdout); assert.match(res.stderr, /model-route check/);
+  }
+  const run = (extra) => spawnSync(process.execPath, [...args, ...extra], { encoding: 'utf8' });
+  assert.equal(run(['--route-index', '1']).status, 0);
+  assert.match(run(['--route-index', '2']).stderr, /--route-index/);
+  assert.match(run(['--gateway', 'Claude']).stderr, /--gateway.*--route-index/);
 });
 
 test('PR 合入、子 issue 关闭后：status 列出该归档的执行会话（含撤回过的）；记过「批准执行归档」就不再列', () => {
@@ -515,4 +532,31 @@ test('回归：brief 分类错误带子 issue 引用', () => {
   f[key].body = f[key].body.replace('- `src/sync/status.ts`：读状态', '');
   f[key].body = f[key].body.replace('- `tests/sync/*.test.ts`：相关测试', '');
   assert.throws(() => briefOf(f), /acme\/app#11 「范围」段没有任何文件路径列表项/);
+});
+
+test('#112 claim route 写入事件，status 仍识别旧派发', () => {
+  const fixture = parentFixture(); const gh = ghFrom(fixture);
+  const route = { agent: 'codex', model: 'gpt-6.1-sol', kind: '逻辑', route_index: 1 };
+  claim({ gh, itemRef: ref(11), session: 'routed', title: '路线测试丨1115', route, now: NOW });
+  const body = fixture[commentsKey(11)].at(-1).body;
+  const payload = JSON.parse(/<!-- approve-exec:event v1 (.*) -->/.exec(body)[1]);
+  assert.deepEqual(payload.route, route);
+  assert.equal(stateOf(batchStatus({ gh, issueRef: ref(10) }), 11).state, 'in_progress');
+  const legacy = parentFixture({ extra: { [commentsKey(11)]: [{ id: 1, user: { login: LOGIN }, body: `批准执行派发：2026-11-15 ${ref(11)} → 会话 old（旧）` }] } });
+  assert.equal(stateOf(batchStatus({ gh: ghFrom(legacy), issueRef: ref(10) }), 11).state, 'in_progress');
+});
+
+test('#112 claim CLI --route-json 持久化成功路线，不合法 JSON 拒绝', () => {
+  const { ghPath } = writeFixture(parentFixture());
+  const route = { agent: 'codex', model: 'gpt-6.1-sol', kind: '逻辑', route_index: 1 };
+  const args = [CLI, 'claim', '--item', ref(11), '--session', 'cli-route', '--title', '路线丨1115', '--gh-fixture', ghPath];
+  const bad = spawnSync(process.execPath, [...args, '--route-json', '{'], { encoding: 'utf8' });
+  assert.equal(bad.status, 2);
+  const ok = spawnSync(process.execPath, [...args, '--route-json', JSON.stringify(route)], { encoding: 'utf8' });
+  assert.equal(ok.status, 0, ok.stderr);
+  const persisted = JSON.parse(readFileSync(ghPath, 'utf8'));
+  const comments = persisted[commentsKey(11)];
+  assert.equal(comments.length, 1);
+  const payload = JSON.parse(/<!-- approve-exec:event v1 (.*) -->/.exec(comments[0].body)[1]);
+  assert.deepEqual(payload.route, route);
 });
