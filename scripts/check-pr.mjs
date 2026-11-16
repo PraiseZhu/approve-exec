@@ -5,7 +5,7 @@
 //                       子 issue 待定问题都已写「已定」。
 //   --stage ready：执行会话发来「已转正式」时跑。PR 已不是 Draft（已合并也算过），当前 head 全部检查跑完且通过。
 //   --stage recheck：判通过后 PR 又有新提交时跑（v3，#104）。只看判通过的版本到当前版本之间的新增改动：
-//                    范围、存量测试有没有被删行、CI。
+//                    范围、存量测试有没有被删行（存量只算 base 上已有的测试文件，#117）、CI。
 // 「CI 全绿」两端同一口径：全部检查（不只必需检查）跑完，pass 或 skipping（astra 审查 #7）。
 // 检查全过只是必要条件：lead 还要对照子 issue 的「目标」「原因」「不做」看 diff 是否做对了事。
 //
@@ -101,8 +101,24 @@ export function needsPrereview(charter, files) {
   return files.some((f) => !NON_SOURCE_RES.some((re) => re.test(f)));
 }
 
+/**
+ * PR 自己新加的文件（#117）：base 分支和判通过版本的三点对比里状态是 added 的文件，在 base 上不存在。
+ * 读不到对比、或对比结果不像样时返回 null，调用方按原规则判（不放宽）。
+ * 对比的文件清单可能被 GitHub 截断：漏掉的文件只会被当成存量测试，判得更严，不会放宽。
+ */
+export function selectAddedSinceBase(gh, repo, baseRef, acceptedHead) {
+  if (!baseRef) return null;
+  try {
+    const cmp = gh(['api', `repos/${repo}/compare/${encodeURIComponent(baseRef)}...${acceptedHead}`]);
+    if (!Array.isArray(cmp?.files)) return null;
+    return new Set(cmp.files.filter((f) => f.status === 'added').map((f) => f.filename));
+  } catch {
+    return null;
+  }
+}
+
 /** 判通过后的复核（#104）：只看 accepted..head 之间的新增改动。 */
-function recheck({ gh, checks, repo, ref, number, pr, acceptedHead, actualHead, card, prBody, add }) {
+function recheck({ gh, checks, repo, ref, number, pr, acceptedHead, actualHead, baseRef, card, prBody, add }) {
   if (!SHA_RE.test(String(acceptedHead ?? ''))) throw new Error(`--stage recheck 要带 --accepted-head <40 位 sha>（当前：${acceptedHead}）`);
   if (actualHead === acceptedHead) { add('unchanged', true, `PR 当前版本就是判通过的版本 ${acceptedHead.slice(0, 7)}`); return; }
   let cmp;
@@ -122,8 +138,17 @@ function recheck({ gh, checks, repo, ref, number, pr, acceptedHead, actualHead, 
   add('scope', sv.outside.length === 0, sv.outside.length ? `判通过后的新增改动超出范围：${sv.outside.join('、')}` : `判通过后的新增改动（${changed.length} 个文件）都在范围内`);
   // 改名也算：判通过时已有的测试文件被改名成非测试文件，或改名的同时删了行，都按存量测试被动处理。
   const wasTest = (f) => TEST_FILE_RE.test(f.previous_filename ?? f.filename);
-  const touched = changed.filter((f) => f.status !== 'added' && wasTest(f) && ((f.deletions ?? 0) > 0 || !TEST_FILE_RE.test(f.filename)));
-  add('existing_tests', touched.length === 0, touched.length ? `判通过后存量测试被删了行或被改名：${touched.map((f) => `${f.previous_filename && f.previous_filename !== f.filename ? `${f.previous_filename} → ` : ''}${f.filename}（删 ${f.deletions ?? 0} 行）`).join('、')}` : '判通过后没有删改存量测试');
+  const candidates = changed.filter((f) => f.status !== 'added' && wasTest(f) && ((f.deletions ?? 0) > 0 || !TEST_FILE_RE.test(f.filename)));
+  // 存量只算 base 上已有的测试文件（#117）：PR 自己新加的测试，判通过后按审查意见改断言不算删存量。
+  // 只在真有候选时才去读 base 对比；读不到就全部按存量判。
+  const addedByPr = candidates.length ? selectAddedSinceBase(gh, repo, baseRef, acceptedHead) : null;
+  // 改名前后两个名字都得是 PR 自己新加的才排除：改名落到 base 原有路径上（或任何判不清是否新加的路径），一律按存量判。
+  const isOwn = (f) => addedByPr.has(f.filename) && (!f.previous_filename || addedByPr.has(f.previous_filename));
+  const ownNew = addedByPr ? candidates.filter(isOwn) : [];
+  const touched = candidates.filter((f) => !ownNew.includes(f));
+  const ownNote = ownNew.length ? `；PR 自己新加的测试改动不算存量：${ownNew.map((f) => f.previous_filename ?? f.filename).join('、')}` : '';
+  const baseNote = candidates.length && !addedByPr ? '；读不到和 base 的对比，按存量测试判' : '';
+  add('existing_tests', touched.length === 0, touched.length ? `判通过后存量测试被删了行或被改名：${touched.map((f) => `${f.previous_filename && f.previous_filename !== f.filename ? `${f.previous_filename} → ` : ''}${f.filename}（删 ${f.deletions ?? 0} 行）`).join('、')}${baseNote}${ownNote}` : `判通过后没有删改存量测试${ownNote}`);
   const ci = ciAllVerdict(checks, repo, pr);
   add('ci', ci.ok, ci.detail);
   return sv.judgement;
@@ -142,7 +167,7 @@ export function checkPr({ gh, checks, bodyCheck = runBodyReadyCheck, ref: rawRef
   const card = readRepoCard(repo, cardsDir);
   if (stage === 'recheck') {
     add('pr_open', p?.state === 'open', `PR 状态 ${p?.state ?? '未知'}`);
-    const judgement = recheck({ gh, checks, repo, ref, number, pr, acceptedHead, actualHead, card, prBody: String(p?.body ?? ''), add }) ?? [];
+    const judgement = recheck({ gh, checks, repo, ref, number, pr, acceptedHead, actualHead, baseRef: p?.base?.ref ?? null, card, prBody: String(p?.body ?? ''), add }) ?? [];
     return { ok: out.every((c) => c.ok), stage, ref, pr, head: actualHead, accepted_head: acceptedHead, checks: out, ...(judgement.length ? { judgement } : {}) };
   }
   const merged = stage === 'ready' && p?.merged === true;
