@@ -109,12 +109,25 @@ test('PR 自己新加的测试文件，判通过后删了行：不算存量，ex
   assert.match(res.checks.find((c) => c.name === 'existing_tests').detail, /PR 自己新加的测试改动不算存量：src\/canvas\/fleet-rollback\.test\.ts/);
 });
 
-test('PR 自己新加的测试改名成非测试文件：同样不算存量（SC2）', () => {
+test('PR 自己新加的测试改名到判不清是否新加的路径：按存量判，不放宽（SC3，单审 P2）', () => {
   const res = run({
     compare: { status: 'ahead', files: [{ filename: 'src/canvas/fleet-rollback.helper.ts', previous_filename: OWN_TEST, status: 'renamed', additions: 0, deletions: 0 }] },
     baseCompare: baseAdded(OWN_TEST),
   });
-  assert.equal(res.ok, true, JSON.stringify(res.checks));
+  assert.deepEqual(failed(res), ['existing_tests']);
+});
+
+test('PR 新加的测试改名回 base 原有测试的路径并删行：不过（SC3，PR #118 单审 P2）', () => {
+  // 判通过的版本删掉了 base 上的 OLD_TEST、新加了 OWN_TEST；之后把 OWN_TEST 改名回 OLD_TEST 同时删行。
+  const res = run({
+    compare: { status: 'ahead', files: [{ filename: OLD_TEST, previous_filename: OWN_TEST, status: 'renamed', additions: 0, deletions: 4 }] },
+    baseCompare: { status: 'ahead', files: [
+      { filename: OWN_TEST, status: 'added', additions: 30, deletions: 0 },
+      { filename: OLD_TEST, status: 'removed', additions: 0, deletions: 20 },
+    ] },
+  });
+  assert.deepEqual(failed(res), ['existing_tests']);
+  assert.match(res.checks.find((c) => c.name === 'existing_tests').detail, /fleet-rollback\.test\.ts → src\/canvas\/existing\.contract\.test\.ts（删 4 行）/);
 });
 
 test('base 上已有的测试被删行或改名成非测试文件：仍不过，PR 新加的不连带放行（SC3）', () => {

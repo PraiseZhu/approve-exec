@@ -142,7 +142,9 @@ function recheck({ gh, checks, repo, ref, number, pr, acceptedHead, actualHead, 
   // 存量只算 base 上已有的测试文件（#117）：PR 自己新加的测试，判通过后按审查意见改断言不算删存量。
   // 只在真有候选时才去读 base 对比；读不到就全部按存量判。
   const addedByPr = candidates.length ? selectAddedSinceBase(gh, repo, baseRef, acceptedHead) : null;
-  const ownNew = addedByPr ? candidates.filter((f) => addedByPr.has(f.previous_filename ?? f.filename)) : [];
+  // 改名前后两个名字都得是 PR 自己新加的才排除：改名落到 base 原有路径上（或任何判不清是否新加的路径），一律按存量判。
+  const isOwn = (f) => addedByPr.has(f.filename) && (!f.previous_filename || addedByPr.has(f.previous_filename));
+  const ownNew = addedByPr ? candidates.filter(isOwn) : [];
   const touched = candidates.filter((f) => !ownNew.includes(f));
   const ownNote = ownNew.length ? `；PR 自己新加的测试改动不算存量：${ownNew.map((f) => f.previous_filename ?? f.filename).join('、')}` : '';
   const baseNote = candidates.length && !addedByPr ? '；读不到和 base 的对比，按存量测试判' : '';
