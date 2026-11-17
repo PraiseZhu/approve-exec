@@ -56,6 +56,8 @@ node scripts/event.mjs list --item <子 issue>
 
 ### 运行章程
 
+阶段启动时的一次收口授权见 [SKILL.md「阶段 PR 收口授权」](SKILL.md#⓪-issue-入口)；执行消息未消费的 30 分钟检查见同节「会话失联」。这两项由 lead 按协议处理，现有对账器期限和章程格式保持原样。
+
 ```sh
 node scripts/charter.mjs write --root <总 issue> --json <章程文件>
 node scripts/charter.mjs read  --root <总 issue>

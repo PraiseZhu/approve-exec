@@ -41,6 +41,8 @@ PR 必须推到正式（Ready for review）才算做完。还是 Draft、CI 还�
    - `批准执行通过 …`：跑 `check-pr-body.sh --stage ready <owner/repo#PR号> <子 issue>`，通过后 `gh pr ready <PR号>`，再确认当前 head CI 仍全绿，先 `event.mjs emit --type ready --item <子 issue> --pr <号> --head <当前 sha>`，然后发「已转正式」。lead 的通过消息里写了「暂缓转正式」时先不转，等它的下一条消息。到这里任务完成。
 8. **转正式之后。** 审查意见和后续 CI 问题归盯梢处理（Mivo 仓按其生命周期门禁），执行会话不再改代码、不再推送。例外：lead 对「已转正式」的复核没过、回了「要改」——非 Mivo 仓按回复修，CI 全绿后再发「已转正式」（不要再发「待验收」，验收档要求 Draft，正式 PR 过不了）；Mivo 仓转正式后的问题归盯梢，回复 lead「已交盯梢」即可。
 
+同步 PR 的外部验收写法、冲突处理与事后报告按 [SKILL.md「阶段 PR 收口授权」](../SKILL.md#⓪-issue-入口)，以开工消息带来的本阶段授权为范围。
+
 ## 预开工（开工消息里有「预开工」一段时）
 
 上游子 issue 的 PR 还没合入，你基于它已判通过的代码先开发：

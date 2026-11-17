@@ -289,6 +289,31 @@ test('#104、#105：事件由脚本写；被叫醒后的三种对账动作各有
   assert.ok(red.includes('只有用户本人对指定 PR 的明确、当次授权才允许合并'), '合并红线原文保留，章程不新增合并通道');
 });
 
+test('#120 阶段授权只逐个请求同步 PR，不接通 run 级自动请求', () => {
+  const start = skillDoc.indexOf('**阶段 PR 收口授权。**');
+  const end = skillDoc.indexOf('1. **看现状。**', start);
+  assert.ok(start >= 0 && end > start, '阶段授权应放在开工步骤之前');
+  const stage = skillDoc.slice(start, end);
+  assert.doesNotMatch(stage, /merge\.auto_request|merge\.bases|scripts\/batch\.mjs merge-request/,
+    '阶段授权不得配置 run 级自动请求，也不借用通用 merge-request');
+  for (const must of ['逐个手动发送 `praise-merge/request@1`', '每个请求仅含这一个同步 PR',
+    '`authorization_text`', '阶段收口授权', '完整引用', '用户授权原话', '普通子 PR 继续按原规则合并']) {
+    assert.ok(stage.includes(must), `阶段授权应写「${must}」`);
+  }
+});
+
+test('#120 未消费消息：区分本机与跨机，查询失败先报告而不是接手', () => {
+  const start = skillDoc.indexOf('**会话失联。**');
+  const end = skillDoc.indexOf('\n边界：', start);
+  assert.ok(start >= 0 && end > start);
+  const lost = skillDoc.slice(start, end);
+  for (const must of ['只能查询本机会话', '`get_session_runtime`', '`list_session_queue`',
+    '`get_chat_history`', '`deviceId::sessionId`', '最后活动时间', '历史时间不能证明运行已结束或队列未消费',
+    '`NOT_FOUND`', '`HOST_NOT_READY`', '查不到', '停下并报告用户', '不判定为失联，也不接手', 'consuming=false']) {
+    assert.ok(lost.includes(must), `会话失联应写「${must}」`);
+  }
+});
+
 test('#106、#107：开工带用户原话和共享记忆；预开工与预审写进 lead 流程和执行会话协议', () => {
   const s = section('## ⓪ issue 入口');
   for (const must of ['`--user-words', '原样转给执行会话，不转述', '`repo-cards/`', '`early_dispatchable` 不是第八种状态', '--early', '上游全部合入前不发「待验收」', '--report']) {
