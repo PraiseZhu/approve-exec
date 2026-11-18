@@ -24,7 +24,7 @@ import { ghLogin, readComments } from './issue-run.mjs';
 import { parseEvents } from './event.mjs';
 import { selectDepStatus, selectOpenTaskPrs } from './batch.mjs';
 import { selectCharter } from './charter.mjs';
-import { readRepoCard, selectAlwaysAllowed } from './lib/repo-card.mjs';
+import { readRepoCard, selectAlwaysAllowed, selectReadyPendingAllowed } from './lib/repo-card.mjs';
 import { ghChecksRunner, outOfScope, scRowsInBody } from './accept-check.mjs';
 
 export const STAGES = ['acceptance', 'ready', 'recheck'];
@@ -34,17 +34,29 @@ const NON_SOURCE_RES = [/\.test\.[A-Za-z0-9]+$/, /(^|\/)__tests__\//, /\.md$/, /
 const MAX_FILE_PAGES = 30; // GitHub 的 PR 文件列表最多 3000 条
 const PR_BODY_CHECK = join(homedir(), 'AI-Agent/Claude/capabilities/source/scripts/check-pr-body.sh');
 
-/** 当前 head 的全部检查：一项都没有、还在跑、或有失败都不算绿。skipping 算通过。 */
-export function ciAllVerdict(checks, repo, pr) {
+/**
+ * 当前 head 的全部检查：一项都没有、还在跑、或有失败都不算绿。skipping 算通过。
+ * `pendingAllowed`（只在 ready 档传，来自仓库卡 ready_pending_allowed，#121）：这些检查还在跑不算不过，
+ * 在 detail 里写明归盯梢；它们失败照样不过。
+ */
+export function ciAllVerdict(checks, repo, pr, { pendingAllowed = [] } = {}) {
   const res = checks(['pr', 'checks', String(pr), '--repo', repo, '--json', 'name,bucket']);
   const text = String((Array.isArray(res) ? JSON.stringify(res) : res?.stdout) ?? '').trim();
   const list = text.startsWith('[') ? JSON.parse(text) : [];
   if (list.length === 0) return { ok: false, detail: '这个 PR 上没有任何检查，无法确认 CI 全绿' };
-  const pending = list.filter((c) => c.bucket === 'pending').map((c) => c.name);
+  const allowed = new Set(pendingAllowed);
+  const pendingAll = list.filter((c) => c.bucket === 'pending').map((c) => c.name);
+  const pending = pendingAll.filter((n) => !allowed.has(n));
+  const tolerated = pendingAll.filter((n) => allowed.has(n));
   const bad = list.filter((c) => !['pass', 'skipping', 'pending'].includes(c.bucket)).map((c) => `${c.name}=${c.bucket}`);
   if (bad.length) return { ok: false, detail: `有检查没过：${bad.join('、')}` };
   if (pending.length) return { ok: false, detail: `还有 ${pending.length} 项检查在跑：${pending.join('、')}` };
-  return { ok: true, detail: `全部 ${list.length} 项检查跑完且通过（含 skipping）` };
+  // 只剩名单里的检查、其他检查一项都还没跑完（还没出现或刚开始）时不放行：不能把「什么都没跑完」当成全绿（#122 单审 P2）。
+  if (tolerated.length && list.length === tolerated.length) {
+    return { ok: false, detail: `除了 ${tolerated.join('、')} 之外还没有任何检查跑完，无法确认 CI 全绿` };
+  }
+  const note = tolerated.length ? `；${tolerated.join('、')} 还在跑，转正式后才开始，归盯梢处理` : '';
+  return { ok: true, detail: `全部 ${list.length - tolerated.length} 项检查跑完且通过（含 skipping）${note}` };
 }
 
 /** ready 档 PR 正文检查（与执行会话转正式前跑的同一脚本）：每条 SC 有状态和证据、人工手测写清谁验何时验。 */
@@ -175,7 +187,7 @@ export function checkPr({ gh, checks, bodyCheck = runBodyReadyCheck, ref: rawRef
   if (stage === 'acceptance') add('pr_draft', p?.draft === true, p?.draft === true ? 'PR 还是 Draft' : 'PR 已不是 Draft：lead 判通过之前不该转正式');
   if (stage === 'ready') add('pr_not_draft', p?.draft === false, p?.draft ? 'PR 还是 Draft：还没转正式' : 'PR 已是正式');
   if (!merged) {
-    const ci = ciAllVerdict(checks, repo, pr);
+    const ci = ciAllVerdict(checks, repo, pr, stage === 'ready' ? { pendingAllowed: selectReadyPendingAllowed(card) } : {});
     add('ci', ci.ok, ci.detail);
   }
   if (stage === 'ready') return { ok: out.every((c) => c.ok), stage, ref, pr, head: actualHead, checks: out };

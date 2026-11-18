@@ -12,5 +12,6 @@
 | `verify` | `[{name, command}]`。常用验证命令 |
 | `review_rules` | 仓库审查规则文件的路径 |
 | `pitfalls` | 常见坑，一句一条 |
+| `ready_pending_allowed` | 可选，检查名数组。正式档（`check-pr.mjs --stage ready`）里这些检查还在跑不拦，结果写明归盯梢；失败照样不过。用于转正式后才开始跑的审查（#121） |
 
 新增或修改一张卡：每一条都要有出处（目标仓的规则文件，或本仓 `evolution/ledger.json` 里的记录），写在条目里；没有出处的不写。改动走 PR，`tests/repo-card.test.mjs` 会校验仓里每张卡。运行笔记里的经验只是候选，确认反复出现后再进卡。
