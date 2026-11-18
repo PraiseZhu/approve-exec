@@ -51,6 +51,10 @@ export function ciAllVerdict(checks, repo, pr, { pendingAllowed = [] } = {}) {
   const bad = list.filter((c) => !['pass', 'skipping', 'pending'].includes(c.bucket)).map((c) => `${c.name}=${c.bucket}`);
   if (bad.length) return { ok: false, detail: `有检查没过：${bad.join('、')}` };
   if (pending.length) return { ok: false, detail: `还有 ${pending.length} 项检查在跑：${pending.join('、')}` };
+  // 只剩名单里的检查、其他检查一项都还没跑完（还没出现或刚开始）时不放行：不能把「什么都没跑完」当成全绿（#122 单审 P2）。
+  if (tolerated.length && list.length === tolerated.length) {
+    return { ok: false, detail: `除了 ${tolerated.join('、')} 之外还没有任何检查跑完，无法确认 CI 全绿` };
+  }
   const note = tolerated.length ? `；${tolerated.join('、')} 还在跑，转正式后才开始，归盯梢处理` : '';
   return { ok: true, detail: `全部 ${list.length - tolerated.length} 项检查跑完且通过（含 skipping）${note}` };
 }

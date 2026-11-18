@@ -181,6 +181,9 @@ test('#121 正式档：ready_pending_allowed 里的检查还在跑不拦并写�
   assert.deepEqual(failed(failedReview), ['ci']);
   const noCard = checkPr({ ...setup({ pr: { draft: false }, ci }), ref: A, pr: 5, stage: 'ready' });
   assert.deepEqual(failed(noCard), ['ci'], '没有仓库卡时不放行');
+  const onlyAllowed = checkPr({ ...setup({ pr: { draft: false }, ci: [{ name: 'review-pr', bucket: 'pending' }] }), ref: A, pr: 5, stage: 'ready', cardsDir: dir });
+  assert.deepEqual(failed(onlyAllowed), ['ci'], '只有名单里的检查在跑、其他检查一项都没跑完时不放行');
+  assert.match(onlyAllowed.checks.find((c) => c.name === 'ci').detail, /除了 review-pr 之外还没有任何检查跑完/);
   const acceptance = checkPr({ ...setup({ ci }), ref: A, pr: 5, cardsDir: dir });
   assert.deepEqual(failed(acceptance), ['ci'], '验收档不放行');
 });
