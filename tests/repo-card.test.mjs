@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { CARDS_DIR, readRepoCard, selectAlwaysAllowed, toRepoCard } from '../scripts/lib/repo-card.mjs';
+import { CARDS_DIR, readRepoCard, selectAlwaysAllowed, selectReadyPendingAllowed, toRepoCard } from '../scripts/lib/repo-card.mjs';
 
 test('仓里每张仓库卡都通过校验，文件名和 repo 字段对得上', () => {
   const files = readdirSync(CARDS_DIR).filter((f) => f.endsWith('.json'));
@@ -16,7 +16,7 @@ test('仓里每张仓库卡都通过校验，文件名和 repo 字段对得上',
 
 test('第一张卡：交接目录自动放行，首屏体积基线是热点文件，审查规则有出处', () => {
   const card = readRepoCard('xindong/mivo-canvas-plugin');
-  assert.deepEqual(selectAlwaysAllowed(card, 2141), ['docs/pr/2141/**']);
+  assert.deepEqual(selectAlwaysAllowed(card, 2141), ['docs/pr/2141/**', 'docs/product-rules/**', 'cindyplugin/design-inventory.md', 'scripts/fixtures/canvas-browser/cases/**']);
   assert.ok(card.hot_files.some((h) => h.path === 'scripts/ci/first-screen-size.baseline.json'));
   assert.ok(card.review_rules.includes('docs/review/severity.md'));
   assert.equal(readRepoCard('acme/app'), null, '没有卡的仓返回 null');
@@ -37,4 +37,13 @@ test('#111 ui_globs 可选，存在时必须为字符串数组，Mivo 卡覆盖�
   assert.equal(toRepoCard(oldCard).ui_globs, undefined);
   assert.deepEqual(toRepoCard({ ...card, ui_globs: [] }).ui_globs, []);
   for (const invalid of ['src/**', null, [1], ['']]) assert.throws(() => toRepoCard({ ...card, ui_globs: invalid }), /ui_globs/);
+});
+
+test('#121 ready_pending_allowed 可选：缺省为空数组，存在时必须为字符串数组；Mivo 卡列出 review-pr', () => {
+  const card = readRepoCard('xindong/mivo-canvas-plugin');
+  assert.deepEqual(selectReadyPendingAllowed(card), ['review-pr']);
+  const { ready_pending_allowed, ...oldCard } = card;
+  assert.deepEqual(selectReadyPendingAllowed(toRepoCard(oldCard)), []);
+  assert.deepEqual(selectReadyPendingAllowed(null), []);
+  for (const invalid of ['review-pr', null, [1], ['']]) assert.throws(() => toRepoCard({ ...card, ready_pending_allowed: invalid }), /ready_pending_allowed/);
 });

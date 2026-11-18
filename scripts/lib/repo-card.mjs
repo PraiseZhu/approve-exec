@@ -10,7 +10,7 @@ const reject = (msg) => { throw new RepoCardError(msg); };
 
 export const REPO_CARD_SCHEMA = 'approve-exec/repo-card@1';
 export const CARDS_DIR = join(dirname(fileURLToPath(import.meta.url)), '../../repo-cards');
-const KEYS = ['schema', 'repo', 'always_allowed', 'hot_files', 'guards', 'verify', 'review_rules', 'pitfalls', 'ui_globs'];
+const KEYS = ['schema', 'repo', 'always_allowed', 'hot_files', 'guards', 'verify', 'review_rules', 'pitfalls', 'ui_globs', 'ready_pending_allowed'];
 
 const isStrings = (v) => Array.isArray(v) && v.every((x) => typeof x === 'string' && x);
 const isPairs = (v, a, b) => Array.isArray(v) && v.every((x) => x && typeof x[a] === 'string' && x[a] && typeof x[b] === 'string' && x[b] && Object.keys(x).every((k) => k === a || k === b));
@@ -29,6 +29,7 @@ export function toRepoCard(raw) {
   if (!isStrings(raw.review_rules)) reject('review_rules 要是文件路径字符串数组');
   if (!isStrings(raw.pitfalls)) reject('pitfalls 要是字符串数组');
   if (raw.ui_globs !== undefined && !isStrings(raw.ui_globs)) reject('ui_globs 要是 glob 字符串数组');
+  if (raw.ready_pending_allowed !== undefined && !isStrings(raw.ready_pending_allowed)) reject('ready_pending_allowed 要是检查名字符串数组');
   return raw;
 }
 
@@ -41,6 +42,11 @@ export function readRepoCard(repo, dir = CARDS_DIR) {
   let raw;
   try { raw = JSON.parse(readFileSync(file, 'utf8')); } catch (err) { reject(`仓库卡 ${file} 不是合法 JSON（${err.message}）`); }
   return toRepoCard(raw);
+}
+
+/** 正式档允许「还在跑」的检查名（#121）：转正式后才开始的审查，归盯梢处理，不拦 lead 收工。缺省为空。 */
+export function selectReadyPendingAllowed(card) {
+  return card?.ready_pending_allowed ?? [];
 }
 
 /** always_allowed 里的 {pr} 换成 PR 号。 */

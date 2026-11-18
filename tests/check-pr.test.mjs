@@ -3,7 +3,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { checkPr, ciAllVerdict } from '../scripts/check-pr.mjs';
 import { REPO, LOGIN, childBody, commentsKey, ghFrom, issue, parentFixture } from './fixtures/issues/build.mjs';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { CARDS_DIR } from '../scripts/lib/repo-card.mjs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -164,4 +165,30 @@ test('预开工：上游 issue 关了但它的任务 PR 还开着，不算合入
   fixture[`api repos/${REPO}/pulls?state=open&per_page=100&page=1`] = [{ number: 4, draft: false, body: `任务 issue：${A}` }];
   const res = checkPr({ gh: ghFrom(fixture), checks: () => ({ status: 0, stdout: JSON.stringify([{ name: 'test', bucket: 'pass' }]) }), bodyCheck: () => ({ ok: true, detail: 'ok' }), ref: C, pr: 5 });
   assert.deepEqual(failed(res), ['upstream_merged']);
+});
+
+// #121：正式档放行仓库卡列出的「转正式后才开始」的审查；Mivo 卡默认放行规则强制同步的文件
+
+test('#121 正式档：ready_pending_allowed 里的检查还在跑不拦并写明归盯梢；其他检查在跑、名单里的检查失败、验收档都照样不过', () => {
+  const dir = cardsDirWith({ ...CARD, ready_pending_allowed: ['review-pr'] });
+  const ci = [{ name: 'verify', bucket: 'pass' }, { name: 'review-pr', bucket: 'pending' }];
+  const ready = checkPr({ ...setup({ pr: { draft: false }, ci }), ref: A, pr: 5, stage: 'ready', cardsDir: dir });
+  assert.equal(ready.ok, true, JSON.stringify(ready.checks));
+  assert.match(ready.checks.find((c) => c.name === 'ci').detail, /review-pr 还在跑.*归盯梢/);
+  const other = checkPr({ ...setup({ pr: { draft: false }, ci: [...ci, { name: 'unit', bucket: 'pending' }] }), ref: A, pr: 5, stage: 'ready', cardsDir: dir });
+  assert.deepEqual(failed(other), ['ci']);
+  const failedReview = checkPr({ ...setup({ pr: { draft: false }, ci: [{ name: 'verify', bucket: 'pass' }, { name: 'review-pr', bucket: 'fail' }] }), ref: A, pr: 5, stage: 'ready', cardsDir: dir });
+  assert.deepEqual(failed(failedReview), ['ci']);
+  const noCard = checkPr({ ...setup({ pr: { draft: false }, ci }), ref: A, pr: 5, stage: 'ready' });
+  assert.deepEqual(failed(noCard), ['ci'], '没有仓库卡时不放行');
+  const acceptance = checkPr({ ...setup({ ci }), ref: A, pr: 5, cardsDir: dir });
+  assert.deepEqual(failed(acceptance), ['ci'], '验收档不放行');
+});
+
+test('#121 Mivo 卡的 always_allowed 放行产品规则、设计台账、真浏览器用例', () => {
+  const mivo = JSON.parse(readFileSync(join(CARDS_DIR, 'xindong__mivo-canvas-plugin.json'), 'utf8'));
+  const dir = cardsDirWith({ ...mivo, repo: REPO });
+  const files = ['src/sync/status.ts', 'docs/product-rules/canvas-bounds.md', 'cindyplugin/design-inventory.md', 'scripts/fixtures/canvas-browser/cases/canvas-world-bounds.case.mjs'];
+  const res = checkPr({ ...setup({ files }), ref: A, pr: 5, cardsDir: dir });
+  assert.equal(res.ok, true, JSON.stringify(res.checks));
 });

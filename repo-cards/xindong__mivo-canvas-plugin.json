@@ -6,7 +6,13 @@
     "src/render/**", "src/canvas/**", "cindyplugin/DESIGN.md", "docs/design.md"
   ],
   "always_allowed": [
-    "docs/pr/{pr}/**"
+    "docs/pr/{pr}/**",
+    "docs/product-rules/**",
+    "cindyplugin/design-inventory.md",
+    "scripts/fixtures/canvas-browser/cases/**"
+  ],
+  "ready_pending_allowed": [
+    "review-pr"
   ],
   "hot_files": [
     {
