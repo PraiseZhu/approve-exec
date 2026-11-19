@@ -395,14 +395,14 @@
       "fingerprint": "child-scope-misses-necessary-files",
       "tier": "proposal",
       "title": "子 issue 范围清单反复漏列必要文件，每个 PR 验收都要 lead 补范围",
-      "detail": "2026-11-12 xindong/mivo-canvas-plugin#2089：#2100 漏 3 个（pendingWriteDrain.ts、useCanvasInteractionController.ts、首屏体积基线），#2092 漏 2 个（新文件 canvasBoundsEdits.ts 因 nodeMutationSlice.ts 到 1200 行结构守卫上限、首屏体积基线），#2094 漏 4 个（canvasStore.ts 注入读取器、图片格用户入口 3 个文件）。每次都是 check-pr.mjs 判范围不过、lead 核实后改 issue 再判通过。",
-      "proposal": "开 issue 时对每个子 issue 预查：会加首屏 JS 的改动预列 scripts/ci/first-screen-size.baseline.json；要改的文件离结构守卫行数上限不足 50 行时预留新文件；新增能力被别的模块调用时列出调用方。属于 open-issue 拆分质量，批准执行这边只记录。",
+      "detail": "2026-11-17 xindong/mivo-canvas-plugin#2484（PR #2486）：范围写「及同目录的样式文件」没给反引号路径，check-pr 判 CanvasWorldBoundsLayer.css 越界；另漏了仓库规则强制同步的 docs/product-rules/canvas-bounds.md（AGENTS.md：改行为的 PR 同步改产品规则）、cindyplugin/design-inventory.md（verify:design 登记新 UI 文件）、browser-fixture 验收项需要的 scripts/fixtures/canvas-browser/cases/*.case.mjs；转正式后盯梢修 Greptile P2 又加了 arrowNudgeThrottle.ts。lead 验收和复核各补一次范围。",
+      "proposal": "开 issue 时：范围里每个文件都写反引号完整路径（不写「同目录的样式文件」这类描述）；改变已有产品行为时预列 docs/product-rules/ 对应文件；新增 UI 文件预列 cindyplugin/design-inventory.md；验收层含 browser-fixture 时预列 scripts/fixtures/canvas-browser/cases/。可考虑写进 Mivo 仓库卡 always_allowed。",
       "status": "landed",
       "commit": null,
       "note": "#106：范围三档 + 仓库卡 always_allowed/hot_files；开 issue 时预查范围属于 open-issue，留到下一期",
-      "occurrences": 1,
+      "occurrences": 2,
       "firstSeen": "2026-11-12T13:17:33.716Z",
-      "lastSeen": "2026-11-12T13:17:33.716Z"
+      "lastSeen": "2026-11-17T13:05:17.049Z"
     },
     {
       "fingerprint": "post-ready-fix-breaks-child-sc",
